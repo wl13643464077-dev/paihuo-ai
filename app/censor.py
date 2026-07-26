@@ -211,6 +211,9 @@ async def check(tid: int, title: str, body: str, platform: str = "公众号",
     else:
         summary = "极速扫描(规则词库)完成" if issues else "极速扫描未命中风险词"
     verdict = _verdict(issues)
+    if verdict == "block":
+        from . import obs
+        obs.count("censor_block")
     score = _score(issues)
     report = {"verdict": verdict, "score": score, "platform": platform,
               "issues": issues, "summary": summary,

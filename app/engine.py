@@ -289,6 +289,8 @@ class Engine:
 
     def settle_failure(self, job_id: int, reason: str) -> bool:
         """收口工单与运行工位；无可用正文时按实际扣点金额幂等退款。"""
+        from . import obs
+        obs.count("job_settle_failure")
         job = db.one(
             "SELECT id,tenant_id,status,billing_status,billing_points FROM job WHERE id=?",
             (job_id,),

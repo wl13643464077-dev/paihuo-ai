@@ -395,10 +395,14 @@ async def chat(prompt: str, model: str = DEFAULT_TEXT, timeout: int = 600,
             )
         except _RetryableProviderError as exc:
             last_error = exc
+            from . import obs
+            obs.count("provider_retry")
             if attempt == MAX_CHAT_ATTEMPTS - 1:
                 break
             progress("retry", f"上游繁忙,{exc.wait:.0f}s 后重试…")
             await asyncio.sleep(exc.wait)
+    from . import obs
+    obs.count("provider_exhausted")
     raise ProviderError(str(last_error) if last_error else "云雾模型服务暂时不可用")
 
 

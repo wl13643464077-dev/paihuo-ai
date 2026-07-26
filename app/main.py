@@ -7,6 +7,7 @@ import logging
 import os
 import posixpath
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -23,7 +24,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Str
 from fastapi.staticfiles import StaticFiles
 
 from . import (analyzer, assetfiles, auth, billing, db, departments, employees, expertmatch,
-               export, feishu, funnel, llm, meeting, providers, scheduler,
+               export, feishu, funnel, llm, meeting, obs, providers, scheduler,
                secureconfig, taskcenter, taskrunner)
 from .engine import engine
 from .skills import registry
@@ -100,6 +101,28 @@ def _upload_permission_allowed(module: str) -> bool:
     )
 
 
+@app.middleware("http")
+async def _metrics_mw(request: Request, call_next):
+    """请求级指标:路由模板 + 状态分类 + 耗时。只记聚合,绝不记参数与正文。"""
+    t0 = time.perf_counter()
+    status = 500                      # 抛异常未产生响应时按 5xx 计
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        return response
+    finally:
+        route = request.scope.get("route")
+        template = getattr(route, "path", None)
+        if template is None:
+            # 未匹配到路由:已知静态挂载各占一桶,其余任意路径一律并入
+            # 单一 unmatched 桶——外部扫描器的随机路径不能撑爆聚合表。
+            head = request.url.path.split("/", 2)[1] if "/" in request.url.path else ""
+            template = (f"/{head}/*" if head in ("files", "static", "pub")
+                        else "/_unmatched")
+        obs.observe_request(
+            template, status, (time.perf_counter() - t0) * 1000.0)
+
+
 @app.get("/healthz", include_in_schema=False)
 def healthz():
     """供反向代理/守护进程探活；响应不暴露版本、路径、配置或异常内容。"""
@@ -113,11 +136,103 @@ def healthz():
     return {"status": "ok"}
 
 
+@app.get("/api/ops/health")
+async def ops_health():
+    """深度健康检查(仅平台管理员):逐组件报 ok/degraded/down 与原因。
+
+    /healthz 保持毫秒级浅探活给反向代理;这里才做会花时间的事:
+    数据库写探针、异步写池往返、引擎队列、磁盘余量、最近错误率。
+    """
+    _need_root()
+    checks: dict = {}
+    overall = "ok"
+
+    def _worse(level):
+        nonlocal overall
+        order = {"ok": 0, "degraded": 1, "down": 2}
+        if order[level] > order[overall]:
+            overall = level
+
+    # 数据库读+写探针(经异步门面,同时验证 db 线程池活着)
+    t0 = time.perf_counter()
+    try:
+        await db.aget_setting("_ops_probe")
+        await db.aset_setting("_ops_probe", str(int(time.time())))
+        checks["database"] = {
+            "status": "ok",
+            "roundtrip_ms": round((time.perf_counter() - t0) * 1000, 1),
+        }
+    except Exception as exc:
+        checks["database"] = {"status": "down",
+                              "error_type": type(exc).__name__}
+        _worse("down")
+
+    # 引擎:工作协程是否已启动、队列是否堆积
+    try:
+        depth = engine.queue.qsize()
+        started = engine._loop is not None
+        status = "ok" if started and depth < 50 else (
+            "degraded" if started else "down")
+        checks["engine"] = {"status": status, "queue_depth": depth,
+                            "started": started}
+        _worse(status)
+    except Exception as exc:
+        checks["engine"] = {"status": "down", "error_type": type(exc).__name__}
+        _worse("down")
+
+    # 磁盘余量(数据目录):低于 512MB 降级、低于 128MB 视为事故
+    try:
+        usage = shutil.disk_usage(os.path.join(ROOT, "data"))
+        free_mb = usage.free // (1024 * 1024)
+        status = ("ok" if free_mb >= 512
+                  else "degraded" if free_mb >= 128 else "down")
+        checks["disk"] = {"status": status, "free_mb": free_mb}
+        _worse(status)
+    except OSError as exc:
+        checks["disk"] = {"status": "down", "error_type": type(exc).__name__}
+        _worse("down")
+
+    # 最近 5 分钟错误率:>5% 降级、>20% 视为事故(样本不足 20 不判)
+    recent = obs.recent_window(5)
+    if recent["requests"] >= 20:
+        rate = recent["error_rate"]
+        status = "ok" if rate <= 0.05 else (
+            "degraded" if rate <= 0.20 else "down")
+        _worse(status)
+    else:
+        status = "ok"
+    checks["traffic"] = {"status": status, **recent}
+
+    # 供应商配置在位性(只报布尔,不报值)
+    checks["providers"] = {
+        "status": "ok",
+        "yunwu_configured": bool(secureconfig.get_secret("yunwu_key")),
+    }
+
+    return {"status": overall, "checks": checks,
+            "uptime_seconds": round(time.time() - obs._started_at, 1)}
+
+
+@app.get("/api/ops/metrics")
+def ops_metrics():
+    """指标快照(仅平台管理员):路由延迟/错误、业务计数器、组件量规。"""
+    _need_root()
+    return obs.snapshot()
+
+
 @app.on_event("startup")
 async def _startup():
     db.conn()
     secureconfig.migrate_legacy_secrets()
     auth.bootstrap()
+    # 组件量规:读取时惰性求值,记录侧零开销。
+    obs.register_gauge("engine_queue_depth", lambda: engine.queue.qsize())
+    obs.register_gauge("engine_job_locks", lambda: len(engine.locks))
+    obs.register_gauge("sse_subscribers", lambda: len(engine.subscribers))
+    obs.register_gauge(
+        "db_pool_backlog",
+        lambda: db._pool()._work_queue.qsize(),
+    )
     recovered_asset_transactions = avatar.recover_asset_transactions(
         raise_on_blocked=True,
     )
