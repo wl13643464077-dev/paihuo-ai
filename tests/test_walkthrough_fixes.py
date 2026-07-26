@@ -114,6 +114,49 @@ class ReturningBossContracts(unittest.TestCase):
                      "AND kind='schedule_failed'")
         self.assertEqual(1, len(notes), "连续第 3 次失败必须告警一次")
 
+    def test_billing_monthly_aggregation_by_beijing_month(self):
+        now = time.time()
+        db.insert("billing_log", {"tenant_id": 2, "delta": -18,
+                                  "balance": 12, "reason": "内容工单",
+                                  "created_at": now})
+        db.insert("billing_log", {"tenant_id": 2, "delta": 100,
+                                  "balance": 112, "reason": "充值",
+                                  "created_at": now})
+        db.insert("billing_log", {"tenant_id": 1, "delta": -99,
+                                  "balance": 0, "reason": "别家",
+                                  "created_at": now})
+        data = main.billing_get()
+        months = {m["ym"]: m for m in data["monthly"]}
+        this_month = time.strftime("%Y-%m", time.localtime(now))
+        self.assertIn(this_month, months)
+        self.assertEqual(18, months[this_month]["spent"])
+        self.assertEqual(100, months[this_month]["recharged"])
+
+    def test_records_export_four_kinds_and_permission(self):
+        db.insert("billing_log", {"tenant_id": 2, "delta": -1, "balance": 29,
+                                  "reason": "审查", "created_at": time.time()})
+        pubtrack.add_entry(2, "公众号", "一篇")
+        db.insert("censor_log", {"tenant_id": 2, "kind": "pre",
+                                 "platform": "公众号", "title": "一篇",
+                                 "verdict": "pass", "score": 90,
+                                 "issues_json": "[]", "report": "全文报告",
+                                 "created_at": time.time()})
+        db.insert("account_profile", {"tenant_id": 2, "name": "主理人",
+                                      "persona_json": "{}"})
+        for kind in ("billing", "publog", "censor", "profiles"):
+            response = main.records_export(kind)
+            self.assertEqual(200, response.status_code, kind)
+            self.assertGreater(len(response.body), 500, kind)
+        with self.assertRaises(HTTPException) as bad:
+            main.records_export("nope")
+        self.assertEqual(400, bad.exception.status_code)
+        auth.set_current({"id": 21, "tenant_id": 2, "username": "member",
+                          "role": "member", "modules": ["content"]})
+        for kind in ("billing", "profiles"):
+            with self.assertRaises(HTTPException) as denied:
+                main.records_export(kind)
+            self.assertEqual(403, denied.exception.status_code, kind)
+
     def test_daily_digest_sent_for_expiring_plan_without_activity(self):
         db.execute("UPDATE tenants SET plan='标准版',plan_expires=? WHERE id=2",
                    (time.time() + 3 * 86400,))

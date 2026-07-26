@@ -723,6 +723,14 @@ def billing_get():
         "AND status IN ('charged','succeeded') AND created_at>? "
         "GROUP BY action ORDER BY SUM(points) DESC",
         (TEN(), time.time() - 30 * 86400))
+    # 按月对账(北京时区自然月,近6个月):老板问"这个月花了多少"要有答案
+    monthly = db.q(
+        "SELECT strftime('%Y-%m', created_at, 'unixepoch', '+8 hours') AS ym, "
+        "COALESCE(SUM(CASE WHEN delta>0 THEN delta END),0) AS recharged, "
+        "COALESCE(-SUM(CASE WHEN delta<0 THEN delta END),0) AS spent "
+        "FROM billing_log WHERE tenant_id=? AND created_at>? "
+        "GROUP BY ym ORDER BY ym DESC LIMIT 6",
+        (TEN(), time.time() - 200 * 86400))
     return {"balance": (t or {}).get("balance") or 0,
             "plan": (t or {}).get("plan") or "",
             "plan_expires": (t or {}).get("plan_expires"),
@@ -731,7 +739,96 @@ def billing_get():
             "txn_n": agg.get("n") or 0,
             "prices": price_rows, "plans": billing.PLANS,
             "periods": billing.PERIODS, "log": log_rows,
-            "spend_by_action": spend_by_action}
+            "spend_by_action": spend_by_action,
+            "monthly": monthly}
+
+
+@app.get("/api/records/export.xlsx")
+def records_export(kind: str = "billing"):
+    """租户级数据带走:积分流水/发布台账/审查记录/人设档案。
+
+    此前只有沉淀/资产两类能批量导出,"我的数据我能带走"缺了一大半。
+    财务与人设(含语料心血)归主账号,台账与审查记录随 content 板块。
+    """
+    def ts(v):
+        return (time.strftime("%Y-%m-%d %H:%M", time.localtime(v))
+                if v else "")
+
+    if kind == "billing":
+        _need_admin()
+        rows = db.q("SELECT delta,balance,reason,created_at FROM billing_log "
+                    "WHERE tenant_id=? ORDER BY id DESC", (TEN(),))
+        out = [{"时间": ts(r["created_at"]),
+                "类型": "充值" if r["delta"] > 0 else "消耗",
+                "项目": r.get("reason") or "",
+                "积分变动": r["delta"],
+                "余额": r["balance"]} for r in rows]
+        headers, name = ["时间", "类型", "项目", "积分变动", "余额"], "积分流水"
+    elif kind == "publog":
+        _need_module("content")
+        state_cn = {"pending": "待复盘", "notified": "已提醒",
+                    "done": "已复盘", "processing": "复盘中"}
+        rows = db.q("SELECT * FROM publish_log WHERE tenant_id=? "
+                    "ORDER BY id DESC", (TEN(),))
+        out = []
+        for r in rows:
+            retro = db.jloads(r.get("retro_json"), {}) or {}
+            day = lambda d: state_cn.get(
+                (retro.get(d) or {}).get("state") or "", "—")
+            out.append({"平台": r.get("platform") or "",
+                        "标题": r.get("title") or "",
+                        "链接": r.get("url") or "",
+                        "发布时间": ts(r.get("published_at")),
+                        "登记来源": "草稿箱自动" if r.get("source") == "draft"
+                                    else "手动登记",
+                        "T+1": day("1"), "T+3": day("3"), "T+7": day("7"),
+                        "登记时间": ts(r.get("created_at"))})
+        headers = ["平台", "标题", "链接", "发布时间", "登记来源",
+                   "T+1", "T+3", "T+7", "登记时间"]
+        name = "发布台账"
+    elif kind == "censor":
+        _need_module("content")
+        rows = db.q("SELECT * FROM censor_log WHERE tenant_id=? "
+                    "ORDER BY id DESC", (TEN(),))
+        out = [{"类型": "发前审查" if r.get("kind") == "pre" else "发后复盘",
+                "平台": r.get("platform") or "",
+                "标题": r.get("title") or "",
+                "结论": r.get("verdict") or "",
+                "合规分": r.get("score"),
+                "问题数": len(db.jloads(r.get("issues_json"), []) or []),
+                # Excel 单元格上限 32767 字,报告留足余量
+                "完整报告": (r.get("report") or "")[:30000],
+                "时间": ts(r.get("created_at"))} for r in rows]
+        headers = ["类型", "平台", "标题", "结论", "合规分", "问题数",
+                   "完整报告", "时间"]
+        name = "审查记录"
+    elif kind == "profiles":
+        _need_admin()
+        rows = db.q("SELECT * FROM account_profile WHERE tenant_id=? "
+                    "AND deleted_at IS NULL ORDER BY id", (TEN(),))
+        out = []
+        for r in rows:
+            p = db.jloads(r.get("persona_json"), {}) or {}
+            out.append({"名称": r.get("name") or "",
+                        "定位": p.get("positioning") or "",
+                        "受众": p.get("audience") or "",
+                        "语气": p.get("tone") or "",
+                        "禁忌": p.get("taboo") or "",
+                        "视觉规范": p.get("visual") or "",
+                        "口头禅": p.get("catchphrases") or "",
+                        "文风特征": p.get("style_notes") or "",
+                        "历史语料": (p.get("corpus") or "")[:30000],
+                        "创建时间": ts(r.get("created_at"))})
+        headers = ["名称", "定位", "受众", "语气", "禁忌", "视觉规范",
+                   "口头禅", "文风特征", "历史语料", "创建时间"]
+        name = "人设档案"
+    else:
+        raise HTTPException(400, "kind 支持 billing/publog/censor/profiles")
+    return Response(
+        export.rows_to_xlsx(out, headers, name),
+        media_type=("application/vnd.openxmlformats-officedocument"
+                    ".spreadsheetml.sheet"),
+        headers={"Content-Disposition": f'attachment; filename="{kind}.xlsx"'})
 
 
 @app.post("/api/feedback")
@@ -5632,6 +5729,18 @@ def pack_zip(job_id: int, platform: str = ""):
                 fp = _local(im.get("file"))
                 if fp:
                     z.write(fp, f"{p}/配图{i+1}{os.path.splitext(fp)[1]}")
+        # 成片视频一并入包:此前"全平台发布包"独缺视频,老板只能网页右键另存
+        for tv_row in db.q(
+                "SELECT id,video_file FROM tv_job WHERE job_id=? AND tenant_id=? "
+                "AND status='done' AND video_file IS NOT NULL",
+                (job_id, TEN())):
+            try:
+                clip = assetfiles.resolve_tenant_asset(
+                    tv_row["video_file"], TEN())
+            except assetfiles.AssetAccessError:
+                continue
+            z.write(clip,
+                    f"成片视频/成片{tv_row['id']}{os.path.splitext(clip)[1]}")
         if d.get("publish_plan"):
             z.writestr("发布节奏.txt", d["publish_plan"])
     buf.seek(0)

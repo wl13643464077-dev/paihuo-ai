@@ -2725,7 +2725,8 @@ async function profilesView(){
   const ps = STATE.profiles;
   $("#main").innerHTML = `<div class="card"><h2>🎭 账号人设档案</h2>
     <div class="sub">定义"为谁生产"。人设会注入全流水线:选题偏好、撰稿、文风固定、视觉规范。</div>
-    <div class="actions"><button class="btn pri" onclick="newProfile()">➕ 新建档案</button></div></div>
+    <div class="actions"><button class="btn pri" onclick="newProfile()">➕ 新建档案</button>
+      ${isAdmin()?`<a class="btn" href="/api/records/export.xlsx?kind=profiles">⬇️ 导出全部档案(含语料)</a>`:""}</div></div>
   <div id="plist">${ps.map(profileCard).join("")||`<div class="empty">还没有人设档案</div>`}</div>`;
 }
 function profileCard(p){
@@ -4073,7 +4074,14 @@ async function billingView(){
         <span class="sub">${s.n} 次</span><b style="color:#e5484d">共 ${(s.points||0).toFixed(0)} 点</b></div>
       <div style="height:9px;background:#eadfcd;border:1.5px solid var(--ink);border-radius:999px;overflow:hidden;margin-top:5px">
         <div style="height:100%;width:${spendTotal?Math.max(2,Math.round((s.points||0)/spendTotal*100)):0}%;background:#ffd166"></div></div></div>`).join("")}</div>`:""}
-  <div class="card"><h2>🧾 积分明细(充值 & 消耗记录)</h2>
+  ${(!b.is_platform&&(b.monthly||[]).length)?`<div class="card"><h2>📅 按月对账(近半年)</h2>
+    <div class="dimwrap"><table class="dimtable" style="min-width:min(420px,100%)"><thead><tr>
+      <th>月份</th><th>充值</th><th>消耗</th></tr></thead><tbody>
+      ${b.monthly.map(m=>`<tr><td><b>${esc(m.ym)}</b></td>
+        <td style="color:#2f9e6e">+${(m.recharged||0).toFixed(0)}</td>
+        <td style="color:#e5484d">-${(m.spent||0).toFixed(0)}</td></tr>`).join("")}</tbody></table></div></div>`:""}
+  <div class="card"><h2 style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">🧾 积分明细(充值 & 消耗记录)
+    ${isAdmin()&&!b.is_platform?`<a class="btn sm" style="margin-left:auto" href="/api/records/export.xlsx?kind=billing">⬇️ 导出全部流水</a>`:""}</h2>
     <label style="display:flex;gap:8px;align-items:flex-start;margin:6px 0 4px;cursor:${isAdmin()?"pointer":"default"}">
       <input type="checkbox" style="margin-top:3px" ${digestConf.enabled?"checked":""} ${isAdmin()?"":"disabled"} onchange="digestToggle(this)">
       <span class="sub">📮 每日经营简报(昨日完成/花销/风险,推到站内+企微)${isAdmin()?"":"(仅企业主可改)"}</span></label>
@@ -4570,7 +4578,8 @@ async function censorView(){
       <div style="flex:1;min-width:130px"><label>平台</label><select id="pl-pf">${CEN_PLATFORMS.map(p=>`<option>${p}</option>`).join("")}</select></div>
       <div style="flex:2;min-width:200px"><label>标题</label><input id="pl-title" placeholder="发布的内容标题"></div>
       <div style="flex:1;min-width:110px"><label>发布于</label><select id="pl-days">${[["0","今天"],["1","昨天"],["2","前天"],["3","3天前"],["7","7天前"]].map(([v,l])=>`<option value="${v}">${l}</option>`).join("")}</select></div>
-      <button class="btn pri" onclick="plAdd()">➕ 登记</button></div>
+      <button class="btn pri" onclick="plAdd()">➕ 登记</button>
+      <a class="btn" href="/api/records/export.xlsx?kind=publog">⬇️ Excel</a></div>
     <div style="margin-top:12px">${rows.length?rows.map(r=>{
       const st = d=>({pending:"⏳",notified:"🔔",done:"✅"}[(r.retro[d]||{}).state]||"—");
       return `<div class="topic"><span class="tag">${esc(r.platform||"")}</span> <b>${esc(r.title||"")}</b>
@@ -4594,7 +4603,8 @@ async function censorView(){
       </select>
       <select onchange="setCensorLogFilter('platform',this.value)">
         <option value="">全部平台</option>${CEN_PLATFORMS.map(p=>`<option ${CEN_LOG_FILTER.platform===p?"selected":""}>${esc(p)}</option>`).join("")}
-      </select></div>`+(logs.length? logs.map(l=>`<div class="topic">
+      </select>
+      <a class="btn sm" style="margin-left:auto" href="/api/records/export.xlsx?kind=censor">⬇️ 导出Excel(含完整报告)</a></div>`+(logs.length? logs.map(l=>`<div class="topic">
       <span class="tag">${l.kind==="pre"?"发前审查":"发后复盘"}</span> <span class="tag">${esc(l.platform||"")}</span>
       <b>${esc(l.title||"(无标题)")}</b>
       <span class="sub" style="float:right">${new Date(l.created_at*1000).toLocaleString("zh-CN")}</span>
