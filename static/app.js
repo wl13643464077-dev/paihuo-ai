@@ -3289,7 +3289,8 @@ function xhrUpload(url, fd, input){
     xhr.onload=()=>{ done();
       let body={}; try{ body=JSON.parse(xhr.responseText||"{}"); }catch(_){}
       if(xhr.status>=200&&xhr.status<300) resolve(body);
-      else reject(new Error(body.detail||"上传失败,请重试"));
+      else{ if(xhr.status===402) pay402(body.detail||"点数不足");
+        const err=new Error(body.detail||"上传失败,请重试"); err.status=xhr.status; reject(err); }
     };
     xhr.onerror=()=>{ done(); reject(new Error("网络中断,上传失败;请检查网络后重试")); };
     xhr.ontimeout=()=>{ done(); reject(new Error("上传超时;网络较慢时建议换 WiFi 再试")); };
@@ -5147,7 +5148,14 @@ async function bwSave(){
 }
 async function bwRun(btn){
   btn.disabled=true;
-  try{ const r = await api("/tools/bench/run-now",{method:"POST",body:{}}); invalidateToolJobs(); toast("📰 "+r.note); }
+  // 先把页面上填的对标静默保存再出报:此前老板填了行没点「保存」直接点
+  // 「立即出一期」,会被"先添加并保存"顶回来——两步陷阱。
+  const targets = [...document.querySelectorAll(".bw-row")].map(r=>({name:r.querySelector(".bw-name").value.trim(),
+    platform:r.querySelector(".bw-pf").value.trim(), note:r.querySelector(".bw-note").value.trim()})).filter(t=>t.name);
+  try{
+    if(targets.length) await api("/tools/bench",{method:"PUT",body:{targets, enabled:$("#bw-en")?.checked??false}});
+    const r = await api("/tools/bench/run-now",{method:"POST",body:{}}); invalidateToolJobs(); toast("📰 "+r.note);
+  }
   catch(e){ toast(e.message); }
   render();
 }
@@ -5265,14 +5273,16 @@ async function leadsGo(btn){
 }
 async function factoryGo(btn){
   const f = $("#ps-file").files[0]; if(!f) return toast("先选一张照片");
-  const fd1 = new FormData(); fd1.append("file", f); fd1.append("scene", $("#ps-scene").value);
-  const fd2 = new FormData(); fd2.append("file", f); fd2.append("want", $("#mc-want").value);
+  // 合并端点:同一张照片只上传一次(此前并行两个接口要传两遍,4G 下时间翻倍),
+  // 且带上传进度;两条腿各自计费退款,失败哪条说哪条。
+  const fd = new FormData(); fd.append("file", f);
+  fd.append("scene", $("#ps-scene").value); fd.append("want", $("#mc-want").value);
   await toolRun("shot", btn, async ()=>{
-    const [r1, r2] = await Promise.all([
-      fetch("/api/tools/product-shot",{method:"POST",body:fd1}),
-      fetch("/api/tools/menu-copy",{method:"POST",body:fd2})]);
-    if(r1.ok) TS.shot = (await r1.json()).file; else toast("出图失败:"+((await r1.json().catch(()=>({}))).detail||""));
-    if(r2.ok) TS.menu = await r2.json(); else toast("文案失败:"+((await r2.json().catch(()=>({}))).detail||""));
+    const r = await xhrUpload("/api/tools/photo-factory", fd, $("#ps-file"));
+    if(r.file) TS.shot = r.file;
+    if(r.menu) TS.menu = r.menu;
+    if(r.image_error) toast(r.image_error);
+    if(r.copy_error) toast(r.copy_error);
   });
 }
 async function shotGo(btn){
@@ -5280,9 +5290,8 @@ async function shotGo(btn){
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 美化中(约1分钟)…`;
   const fd = new FormData(); fd.append("file", f); fd.append("scene", $("#ps-scene").value);
   try{
-    const r = await fetch("/api/tools/product-shot",{method:"POST",body:fd});
-    if(!r.ok){ const e=await r.json().catch(()=>({})); throw new Error(e.detail||"失败"); }
-    TS.shot = (await r.json()).file; render();
+    const r = await xhrUpload("/api/tools/product-shot", fd, $("#ps-file"));
+    TS.shot = r.file; render();
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="✨ 开始美化"; }
 }
 function menuHtml(m){
@@ -5297,9 +5306,8 @@ async function menuGo(btn){
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 识图撰写中…`;
   const fd = new FormData(); fd.append("file", f); fd.append("want", $("#mc-want").value);
   try{
-    const r = await fetch("/api/tools/menu-copy",{method:"POST",body:fd});
-    if(!r.ok){ const e=await r.json().catch(()=>({})); throw new Error(e.detail||"失败"); }
-    TS.menu = await r.json(); render();
+    TS.menu = await xhrUpload("/api/tools/menu-copy", fd, $("#mc-file"));
+    render();
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="✍️ 开始写"; }
 }
 function varsHtml(V){

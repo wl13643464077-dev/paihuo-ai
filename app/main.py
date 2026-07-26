@@ -105,6 +105,11 @@ _TRANSIENT_UPLOAD_ROUTES = {
         "content",
         8 * 1024 * 1024 + _UPLOAD_MULTIPART_OVERHEAD_BYTES,
     ),
+    ("POST", "/api/tools/photo-factory"): (
+        "photo-factory",
+        "content",
+        8 * 1024 * 1024 + _UPLOAD_MULTIPART_OVERHEAD_BYTES,
+    ),
 }
 
 
@@ -8021,6 +8026,93 @@ async def product_shot_api(file: _UploadFile = _File(...), scene: str = Form("")
             except OSError:
                 pass
         raise HTTPException(500, "美化失败，点数已退回，请稍后重试")
+
+
+@app.post("/api/tools/photo-factory")
+async def photo_factory_api(file: _UploadFile = _File(...), scene: str = Form(""),
+                            want: str = Form("")):
+    """拍照工厂:一次上传同时出「商业海报图 + 全套文案」。
+
+    此前前端并行调 product-shot 与 menu-copy 两个接口,同一张 8MB 照片要上传
+    两遍(手机 4G 下时间翻倍)。合并为一次上传、服务器侧并发跑两条腿;
+    两条腿各自独立计费与退款,哪条失败退哪条的点,响应里把每条腿的结果
+    与失败原因分开说清,老板不用猜"钱花在哪了"。
+    """
+    _need_module("content")
+    raw = await _read_limited(file, 8 * 1024 * 1024, "图片太大(≤8MB)")
+    import base64 as _b64
+    mime = file.content_type if (file.content_type or "").startswith("image/") else "image/jpeg"
+    b64 = _b64.b64encode(raw).decode()
+
+    # 两条腿的计费操作先后开好:第二条点数不足时退掉第一条,给合并后的
+    # 提示,而不是让老板看到"本次需 1 点"这种只说半截的话。
+    shot_op = _start_billed_operation("product_shot")
+    try:
+        copy_op = _start_billed_operation("menu_copy")
+    except HTTPException as exc:
+        billing.fail_operation(shot_op, "拍照工厂另一半点数不足,整体退回")
+        if exc.status_code == 402:
+            raise HTTPException(
+                402, "拍照工厂一次需 3 点(出图2+文案1),当前余额不足。请充值后再试"
+            ) from exc
+        raise
+
+    async def _shot_leg(op_key):
+        path = ""
+        try:
+            data = await growth.product_shot(TEN(), raw, scene)
+            import uuid as _uuid
+            d = os.path.join(ROOT, "data", "assets", "tools", str(TEN()))
+            os.makedirs(d, exist_ok=True)
+            name = f"shot_{_uuid.uuid4().hex[:10]}.png"
+            path = os.path.join(d, name)
+            with open(path, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            if not billing.complete_operation(op_key):
+                raise RuntimeError("计费操作状态冲突")
+            return {"file": f"/files/tools/{TEN()}/{name}"}
+        except asyncio.CancelledError:
+            billing.fail_operation(op_key, "请求中断自动退回")
+            if path:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            raise
+        except Exception:
+            billing.fail_operation(op_key, "商品图生成或保存失败自动退回")
+            if path:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            return {"error": "美化没成功,这条腿的 2 点已退回;可换张更清晰的图重试"}
+
+    async def _copy_leg(op_key):
+        try:
+            result = await growth.menu_copy(TEN(), b64, mime, want)
+            if not billing.complete_operation(op_key):
+                raise RuntimeError("计费操作状态冲突")
+            return {"menu": result}
+        except asyncio.CancelledError:
+            billing.fail_operation(op_key, "请求中断自动退回")
+            raise
+        except Exception:
+            billing.fail_operation(op_key, "识图失败自动退回")
+            return {"error": "文案没写成,这条腿的 1 点已退回;可换张更清晰的图重试"}
+
+    shot_result, copy_result = await asyncio.gather(
+        _shot_leg(shot_op), _copy_leg(copy_op))
+    if shot_result.get("error") and copy_result.get("error"):
+        raise HTTPException(500, "图和文案都没成功,3 点已全部退回;换张清晰的图再试")
+    return {
+        "file": shot_result.get("file") or "",
+        "image_error": shot_result.get("error") or "",
+        "menu": copy_result.get("menu"),
+        "copy_error": copy_result.get("error") or "",
+    }
 
 
 @app.post("/api/tools/variants")
