@@ -157,6 +157,29 @@ class ReturningBossContracts(unittest.TestCase):
                 main.records_export(kind)
             self.assertEqual(403, denied.exception.status_code, kind)
 
+    def test_task_center_server_side_search_filters_and_counts(self):
+        import json as _json
+        from app import taskcenter
+        db.insert("job", {"tenant_id": 2, "status": "done",
+                          "brief_json": _json.dumps(
+                              {"direction": "给经销商的开业稿"},
+                              ensure_ascii=False)})
+        db.insert("job", {"tenant_id": 2, "status": "done",
+                          "brief_json": _json.dumps(
+                              {"direction": "小红书日常种草"},
+                              ensure_ascii=False)})
+        hit = taskcenter.list_items(2, {"content"}, q="经销商")
+        self.assertEqual(1, hit["counts"]["all"],
+                         "计数必须与搜索同源,不再是假全局搜索")
+        self.assertEqual(1, len(hit["items"]))
+        self.assertIn("经销商", hit["items"][0]["title"])
+        wildcard = taskcenter.list_items(2, {"content"}, q="%")
+        self.assertEqual(0, wildcard["counts"]["all"],
+                         "LIKE 元字符必须被转义,不能当通配符")
+        self.assertEqual(
+            2, taskcenter.list_items(2, {"content"})["counts"]["all"],
+            "不带 q 行为不变")
+
     def test_billing_notes_carry_record_ids_and_frontend_linkifies(self):
         src = _read("app/main.py")
         for anchor in ('note=f"工单#{job_id}·{note}"',

@@ -1333,7 +1333,7 @@ async function tasksView(tid){
     return taskDetailView(+ref);
   }
   TC_LOADING_MORE = false;
-  TC_DATA = await api("/task-center?limit=500&offset=0");
+  TC_DATA = await api(`/task-center?limit=500&offset=0&q=${encodeURIComponent((TC_QUERY||"").trim())}`);
   if(TC_STATUS==="open" && !(TC_DATA.counts?.open)) TC_STATUS="all";
   taskCenterDraw();
 }
@@ -1383,7 +1383,7 @@ function taskCenterDraw(){
       <b style="font-size:16px">${{open:"当前任务",waiting:"等我处理",done:"已完成",failed:"失败",all:"全部任务"}[TC_STATUS]||"任务"}</b>
       <span class="tag" id="tc-count">${rows.length} 条</span>${hasMore?`<span class="sub">已加载 ${d.items.length} / ${c.all||d.items.length} 条</span><button class="btn sm" onclick="tcLoadMore(this)">加载更早任务</button>`:""}
       <button class="btn sm" style="margin-left:auto" onclick="tasksView()">↻ 刷新</button></div>
-    ${TC_QUERY.trim()&&hasMore?`<div class="notice" style="margin:0 0 9px">🔍 搜索只在<b>已加载的 ${d.items.length} 条</b>里进行(共 ${c.all||d.items.length} 条)。没搜到想找的?点上面「加载更早任务」把更早的记录拉进来再搜。</div>`:""}
+    ${TC_QUERY.trim()?`<div class="notice" style="margin:0 0 9px">🔍 已按「${esc(TC_QUERY.trim())}」<b>全局搜索</b>全部历史记录,命中 ${c.all||0} 条${hasMore?",下方还有更多可加载":""}。</div>`:""}
     <div id="tc-list">${rows.length?rows.map(tcRow).join(""):`<div class="empty">${(c.all||0)===0?`还没有任务。<div class="actions" style="margin-top:10px;justify-content:center"><a class="btn sm pri" href="#/new">✍️ 发第一单内容</a><a class="btn sm" href="#/">🧑‍🔧 找行业专家派活</a></div>`:"这个筛选下没有任务。换个状态或关键词看看。"}</div>`}</div>
   </div>`;
 }
@@ -1405,7 +1405,22 @@ function tcRow(x){
 }
 function tcSetStatus(s){ TC_STATUS=s; taskCenterDraw(); }
 function tcSetKind(k){ TC_KIND=k; taskCenterDraw(); }
-function tcSearch(q){ TC_QUERY=q; const box=$("#tc-list"), rows=tcVisibleItems(); if(box) box.innerHTML=rows.length?rows.map(tcRow).join(""):`<div class="empty">没有搜到相关任务</div>`; if($("#tc-count")) $("#tc-count").textContent=rows.length+" 条"; }
+let TC_SEARCH_TIMER=null;
+function tcSearch(q){
+  TC_QUERY=q;
+  // 先在已加载数据里即时过滤(零延迟反馈)……
+  const box=$("#tc-list"), rows=tcVisibleItems();
+  if(box) box.innerHTML=rows.length?rows.map(tcRow).join(""):`<div class="empty">没有搜到相关任务</div>`;
+  if($("#tc-count")) $("#tc-count").textContent=rows.length+" 条";
+  // ……400ms 后真正去服务端全局搜(计数与分页同源,不再只搜已加载)
+  clearTimeout(TC_SEARCH_TIMER);
+  TC_SEARCH_TIMER=setTimeout(async()=>{
+    try{
+      const data=await api(`/task-center?limit=500&offset=0&q=${encodeURIComponent(TC_QUERY.trim())}`);
+      if(location.hash.startsWith("#/tasks")&&TC_QUERY===q){ TC_DATA=data; taskCenterDraw(); }
+    }catch(e){ if(e?.name!=="NavigationAbort") console.error(e); }
+  },400);
+}
 async function tcLoadMore(btn){
   if(TC_LOADING_MORE||!TC_DATA) return;
   const offset=Number(TC_DATA.next_offset);
@@ -1413,7 +1428,7 @@ async function tcLoadMore(btn){
   TC_LOADING_MORE=true;
   if(btn){ btn.disabled=true; btn.textContent="加载中…"; }
   try{
-    const page=await api(`/task-center?limit=500&offset=${offset}`);
+    const page=await api(`/task-center?limit=500&offset=${offset}&q=${encodeURIComponent(TC_QUERY.trim())}`);
     const seen=new Set(TC_DATA.items.map(item=>item.key));
     const additions=(page.items||[]).filter(item=>!seen.has(item.key));
     const hasMore=page.has_more===true||(page.has_more===undefined&&page.truncated===true);

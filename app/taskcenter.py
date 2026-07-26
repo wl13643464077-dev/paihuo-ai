@@ -278,23 +278,41 @@ def _employee_scope(tenant_id: int, allowed_modules: set[str]
     return task_idxs, meeting_idxs
 
 
+def _like_value(value: str, max_length: int = 100) -> str:
+    """与 main._like_value 同款:转义 LIKE 元字符,防通配符注入。"""
+    raw = (value or "").strip()[:max_length]
+    return ("%" + raw.replace("\\", "\\\\").replace("%", "\\%")
+            .replace("_", "\\_") + "%")
+
+
 def _visible_header_query(tenant_id: int, allowed_modules: set[str],
                           task_idxs: set[int],
-                          meeting_idxs: set[int]) -> tuple[str, list]:
-    """构造只含排序/计数列的跨业务表 UNION，不触碰正文和结果 JSON。"""
+                          meeting_idxs: set[int],
+                          q: str = "") -> tuple[str, list]:
+    """构造只含排序/计数列的跨业务表 UNION，不触碰正文和结果 JSON。
+
+    q 非空时每臂按各自的"标题字段"做参数化 LIKE:计数与分页天然同源,
+    搜索结果的 counts 就是命中总数,不再有"假全局搜索"。
+    """
     branches: list[str] = []
     args: list = []
+    like = _like_value(q) if (q or "").strip() else None
 
     def add(kind: str, table: str, raw_status: str, where: str,
-            values: tuple | list):
+            values: tuple | list, search_expr: str = None):
+        clause = where
+        vals = list(values)
+        if like and search_expr:
+            clause += f" AND {search_expr} LIKE ? ESCAPE '\\'"
+            vals.append(like)
         branches.append(
             f"SELECT '{kind}' AS kind,id AS record_id,"
             f"{raw_status} AS raw_status,"
             "COALESCE(created_at,0) AS created_at,"
             "COALESCE(NULLIF(updated_at,0),NULLIF(created_at,0),0) "
-            f"AS updated_at FROM {table} WHERE {where}"
+            f"AS updated_at FROM {table} WHERE {clause}"
         )
-        args.extend(values)
+        args.extend(vals)
 
     if task_idxs:
         add(
@@ -302,16 +320,23 @@ def _visible_header_query(tenant_id: int, allowed_modules: set[str],
             "tenant_id=? AND deleted_at IS NULL AND emp_idx IN "
             "(SELECT CAST(value AS INTEGER) FROM json_each(?))",
             (tenant_id, _json_array(task_idxs)),
+            search_expr="COALESCE(json_extract(brief_json,'$.direction'),'')",
         )
 
     if "content" in allowed_modules:
         add("content", "job", "status",
-            "tenant_id=? AND deleted_at IS NULL", (tenant_id,))
-        add("video", "tv_job", "status", "tenant_id=?", (tenant_id,))
-        add("tool", "tool_job", "status", "tenant_id=?", (tenant_id,))
-        add("publish", "pub_task", "status", "tenant_id=?", (tenant_id,))
+            "tenant_id=? AND deleted_at IS NULL", (tenant_id,),
+            search_expr="COALESCE(json_extract(brief_json,'$.direction'),'')")
+        add("video", "tv_job", "status", "tenant_id=?", (tenant_id,),
+            search_expr="COALESCE(json_extract(params_json,'$.title'),"
+                        "params_json,'')")
+        add("tool", "tool_job", "status", "tenant_id=?", (tenant_id,),
+            search_expr="COALESCE(params_json,'')")
+        add("publish", "pub_task", "status", "tenant_id=?", (tenant_id,),
+            search_expr="COALESCE(json_extract(payload_json,'$.title'),'')")
         add("wechat", "wechat_draft_delivery", "status",
-            "tenant_id=?", (tenant_id,))
+            "tenant_id=?", (tenant_id,),
+            search_expr="COALESCE(title,'')")
 
     if meeting_idxs:
         add(
@@ -319,11 +344,13 @@ def _visible_header_query(tenant_id: int, allowed_modules: set[str],
             "COALESCE(NULLIF(phase,''),status,'queued')",
             "tenant_id=? AND " + _meeting_visibility_sql("meeting"),
             (tenant_id, _json_array(meeting_idxs)),
+            search_expr="COALESCE(question,'')",
         )
 
     if "avatar" in allowed_modules:
         add("avatar", "avatar_job", "status",
-            "tenant_id=? AND deleted_at IS NULL", (tenant_id,))
+            "tenant_id=? AND deleted_at IS NULL", (tenant_id,),
+            search_expr="COALESCE(params_json,'')")
 
     if not branches:
         return "", []
@@ -356,7 +383,7 @@ def _rows_for_ids(select_sql: str, table: str, tenant_id: int,
 
 
 def list_items(tenant_id: int, allowed_modules: set[str], limit: int = 300,
-               offset: int = 0) -> dict:
+               offset: int = 0, q: str = "") -> dict:
     """返回当前租户可见的统一任务流。
 
     counts 基于全部匹配记录；items 是稳定排序后的一个 offset 分页。调用方必须使用
@@ -373,7 +400,7 @@ def list_items(tenant_id: int, allowed_modules: set[str], limit: int = 300,
         tenant_id, allowed_modules
     )
     headers_sql, header_args = _visible_header_query(
-        tenant_id, allowed_modules, task_idxs, meeting_idxs
+        tenant_id, allowed_modules, task_idxs, meeting_idxs, q=q
     )
     if not headers_sql:
         counts["open"] = 0

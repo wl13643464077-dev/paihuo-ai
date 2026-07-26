@@ -2553,10 +2553,11 @@ async def experts_match(body: dict):
 
 
 @app.get("/api/task-center")
-def task_center(limit: int = 300, offset: int = 0):
+def task_center(limit: int = 300, offset: int = 0, q: str = ""):
     """老板任务总账：聚合真实业务表，不复制状态，也不跨租户/越板块展示。"""
     modules = {m["key"] for m in auth.all_modules() if auth.allowed(m["key"])}
-    return taskcenter.list_items(TEN(), modules, limit=limit, offset=offset)
+    return taskcenter.list_items(TEN(), modules, limit=limit, offset=offset,
+                                 q=(q or "").strip()[:100])
 
 
 @app.get("/api/task-center/{kind}/{rid}")
