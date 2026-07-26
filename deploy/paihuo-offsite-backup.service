@@ -1,0 +1,53 @@
+[Unit]
+Description=Paihuo AI encrypted offsite backup push
+Documentation=file:/srv/paihuo/current/deploy/BACKUP_RECOVERY.md
+After=local-fs.target network-online.target
+Wants=network-online.target
+RequiresMountsFor=/var/backups/paihuo /var/lib/paihuo-upgrade
+OnFailure=paihuo-failure-alert@%n.service
+# 未经老板授权(未配置目的地与密钥)时,本单元启动即快速失败并告警,
+# 不会静默跳过——"以为有异地备份"比"知道没有"危险得多。
+ConditionPathExists=/etc/paihuo/offsite.env
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/usr/local/lib/paihuo-ops
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONPATH=/usr/local/lib/paihuo-ops
+# offsite.env 必须 root:root 0600,内容:
+#   PAIHUO_OFFSITE_DEST=ssh://backup@host:/srv/paihuo  (或已挂载的绝对路径)
+#   PAIHUO_OFFSITE_KEY=<高熵 token,与会话/配置密钥独立,抄入离线恢复信封>
+EnvironmentFile=/etc/paihuo/offsite.env
+ExecStart=/usr/bin/python3 -m deploy.offsite_backup --backup-dir /var/backups/paihuo --receipt /var/lib/paihuo-upgrade/latest-offsite-backup.json --keep 14
+TimeoutStartSec=30min
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+# 只读备份目录,只写回执;推送需要网络(ssh/rsync)与挂载点。
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/usr/local/lib/paihuo-ops /var/backups/paihuo
+ReadWritePaths=/var/lib/paihuo-upgrade /mnt
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProcSubset=pid
+
+[Install]
+WantedBy=multi-user.target
