@@ -1261,7 +1261,7 @@ async function trashView(offset=0){
   $("#main").innerHTML=`<div class="card" style="background:linear-gradient(120deg,#f4edde,#fffaf0)">
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <div style="flex:1;min-width:220px"><h2 style="margin:0">🗑 回收站</h2>
-        <div class="sub" style="margin-top:5px">误删的工单、员工任务、知识沉淀、资产、人设档案和数字人任务可在这里恢复；交付物不会在移入回收站时被销毁。回收站内容<b>长期保留、暂无自动清理</b>;含敏感信息需要彻底删除的,请点右下角 💬 联系平台顾问处理。</div></div>
+        <div class="sub" style="margin-top:5px">误删的工单、员工任务、知识沉淀、资产、人设档案和数字人任务可在这里恢复；交付物不会在移入回收站时被销毁,内容<b>长期保留、暂无自动清理</b>。含敏感客户信息的记录可在此「⛔ 彻底删除」,连同交付文件一并销毁。</div></div>
       <button class="btn" onclick="trashView()">↻ 刷新</button></div>
     ${data.truncated?`<div class="notice">当前已展示 ${rows.length} 条，下面还能加载更早记录。</div>`:""}</div>
   <div class="card">${rows.length?rows.map(item=>`<div class="topic" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
@@ -1271,6 +1271,7 @@ async function trashView(offset=0){
         <div class="sub" style="margin-top:5px">${item.assignee?`👤 ${esc(item.assignee)} · `:""}移入时间 ${tcFmt(item.deleted_at)}
           ${item.reason?` · ${esc(item.reason)}`:""}</div></div>
       <button class="btn pri" onclick="trashRestore(${cp(item.kind)},${item.id},this)">↩️ 恢复</button>
+      <button class="btn sm bad" onclick="trashPurge(${cp(item.kind)},${item.id},this)">⛔ 彻底删除</button>
     </div>`).join(""):'<div class="empty">回收站是空的</div>'}
     ${data.truncated?`<div class="actions"><button class="btn" onclick="trashView(${data.next_offset})">加载更早记录</button></div>`:""}</div>`;
 }
@@ -1284,6 +1285,22 @@ async function trashRestore(kind,id,btn){
   }catch(e){
     toast(e.message);
     btn.disabled=false; btn.textContent="↩️ 恢复";
+  }
+}
+async function trashPurge(kind,id,btn){
+  if(!await uiConfirm(`彻底删除后不可恢复，交付文件会一并销毁。确定彻底删除 #${id}?`,{
+    title:"彻底删除",confirmText:"彻底删除",danger:true})) return;
+  if(!await uiConfirm(`最后确认:#${id} 将永久消失，无法找回。`,{
+    title:"最后确认",confirmText:"永久删除",danger:true})) return;
+  btn.disabled=true; btn.innerHTML='<span class="spin"></span> 删除中…';
+  try{
+    const r=await api(`/trash/${encodeURIComponent(kind)}/${id}/purge`,{method:"POST"});
+    toast(r.files_failed?`已彻底删除，但有 ${r.files_failed} 个交付文件清理失败`:"已彻底删除");
+    SHELL_DIRTY=true;
+    await trashView();
+  }catch(e){
+    toast(e.message);
+    btn.disabled=false; btn.textContent="⛔ 彻底删除";
   }
 }
 

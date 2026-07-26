@@ -3459,6 +3459,101 @@ def trash_restore(kind: str, rid: int):
     return {"ok": True, "restored": True, "kind": kind, "id": rid}
 
 
+# 进行中状态理论上进不了回收站,但硬删是不可逆操作,这里仍然逐类防御。
+# knowledge 表没有 status 列,天然不受此限制。
+_TRASH_ACTIVE_STATUS = {
+    "job": ("pending_charge", "queued", "running",
+            "awaiting_review", "gate_blocked", "paused"),
+    "task": ("pending_charge", "queued", "running"),
+    "avatar": ("pending_charge", "queued", "running"),
+}
+
+
+def _purge_local_files(kind: str, rid: int) -> tuple[int, int]:
+    """按记录种类由服务端自行推导交付文件位置并销毁。
+
+    绝不接受任何客户端路径:job 的产物固定在 data/assets/job{id}/,
+    数字人成片固定在 data/assets/avatar/avatar_{id}.mp4。
+    返回 (成功删除的文件数, 删除失败的文件数),失败不阻塞数据库硬删。
+    """
+    removed = failed = 0
+    if kind == "job":
+        job_dir = os.path.join(assetfiles.ASSET_ROOT, f"job{rid}")
+        if os.path.isdir(job_dir):
+            count = sum(len(names) for _, _, names in os.walk(job_dir))
+            try:
+                shutil.rmtree(job_dir)
+                removed += count
+            except OSError:
+                # 以磁盘上残留的文件数如实上报,方便运维手工收尾
+                failed += max(
+                    1,
+                    sum(len(names) for _, _, names in os.walk(job_dir)),
+                )
+    elif kind == "avatar":
+        clip = os.path.join(
+            assetfiles.ASSET_ROOT, "avatar", f"avatar_{rid}.mp4")
+        if os.path.isfile(clip):
+            try:
+                os.remove(clip)
+                removed += 1
+            except OSError:
+                failed += 1
+    return removed, failed
+
+
+@app.post("/api/trash/{kind}/{rid}/purge")
+def trash_purge(kind: str, rid: int):
+    """合规出路:彻底删除回收站记录并连带销毁交付文件。
+
+    账目锚点(billing_log/billing_operation)必须留存,不做任何改动。
+    """
+    _need_admin()
+    meta = _TRASH_TABLES.get(kind)
+    if not meta or rid < 1:
+        raise HTTPException(404)
+    table, _ = meta
+    row = db.one(
+        f"SELECT * FROM {table} WHERE id=? AND tenant_id=? "
+        "AND deleted_at IS NOT NULL",
+        (rid, TEN()),
+    )
+    if not row or not auth.allowed(_trash_module(kind, row)):
+        raise HTTPException(404)
+    active = _TRASH_ACTIVE_STATUS.get(kind, ())
+    if (row.get("status") or "") in active:
+        raise HTTPException(409, "该记录仍在进行中，请先等它收口再彻底删除")
+    guard = ""
+    args = [rid, TEN()]
+    if active:
+        # 与读到的快照之间可能有并发状态变化,DELETE 里再校验一次
+        guard = (
+            " AND status NOT IN (%s)" % ",".join("?" * len(active))
+        )
+        args.extend(active)
+    with db.atomic() as connection:
+        changed = connection.execute(
+            f"DELETE FROM {table} WHERE id=? AND tenant_id=? "
+            f"AND deleted_at IS NOT NULL{guard}",
+            args,
+        ).rowcount
+        if changed != 1:
+            raise HTTPException(409, "记录状态刚刚发生变化，请刷新后再删除")
+        if kind == "job":
+            # 工单的工位产出(含正文/图片引用)一并硬删,不能留孤儿行
+            connection.execute(
+                "DELETE FROM station_run WHERE job_id=?", (rid,))
+    files_removed, files_failed = _purge_local_files(kind, rid)
+    return {
+        "ok": True,
+        "purged": True,
+        "kind": kind,
+        "id": rid,
+        "files_removed": files_removed,
+        "files_failed": files_failed,
+    }
+
+
 # ---------------- V22:企业档案(品牌知识 → 提炼 → 注入每个数字员工) ----------------
 _COMPANY_FIELDS = ("brand", "business", "audience", "tone", "selling_points", "taboo", "keywords")
 
