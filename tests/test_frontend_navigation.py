@@ -39,7 +39,10 @@ class FrontendNavigationContractTests(unittest.TestCase):
             r"function closeModal\(\)\{\s*stopSoloWatch\(\);",
         )
         self.assertIn("SOLO_TIMER=null", self.app_js)
-        self.assertIn("setTimeout(tick, 60000)", self.app_js)
+        # 12s:轮询兜底 SSE(实时步骤流已挂 data-tasksteps),又不至于打爆后端。
+        self.assertIn("setTimeout(tick, 12000)", self.app_js)
+        # 单人任务的实时步骤流挂载点:没有它,老板派完活要干等一个轮询周期。
+        self.assertIn('data-tasksteps="${t.id}"', self.app_js)
         self.assertIn('window.addEventListener("pagehide"', self.app_js)
 
     def test_optional_route_data_does_not_swallow_abort_or_permission(self):

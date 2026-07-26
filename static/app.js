@@ -941,7 +941,7 @@ function empState(idx){
   }
   if(!best) return {st:"idle", label:"待命中", job:null};
   const map = {running:["work","干活中"], awaiting_review:["await","等您拍板"],
-    interrupted:["fail","被打断"], failed:["fail","挂起求助"]};
+    interrupted:["fail","被打断"], failed:["fail","已失败·点数退回"]};
   const [st,label] = map[best.s];
   return {st, label, job:best.job};
 }
@@ -949,10 +949,10 @@ const PILL_CLS = {work:"work",await:"await",fail:"fail",learn:"learn",idle:"idle
 
 /* ---------- 办公室(工作台) ---------- */
 const MODE_LABEL = {fullauto:"完全托管",autopilot:"全自动",copilot:"关键审批",manual:"逐站审批"};
-const ST_LABEL = {running:"进行中",awaiting_review:"待您审批",gate_blocked:"质检拦截",failed:"已挂起",
+const ST_LABEL = {running:"进行中",awaiting_review:"待您审批",gate_blocked:"质检拦截",failed:"已失败",
   done:"已交付",cancelled:"已终止",paused:"已暂停"};
 const RUN_LABEL = {queued:"排队中",running:"工作中…",awaiting_review:"待您审批",done:"已完成",
-  failed:"失败挂起",stale:"待重算",skipped:"已跳过",rejected:"重做中",interrupted:"被打断"};
+  failed:"执行失败",stale:"待重算",skipped:"已跳过",rejected:"重做中",interrupted:"被打断"};
 
 function roomCard(s){
   const {st,label,job} = empState(s.idx);
@@ -1094,7 +1094,7 @@ async function dashboard(){
       <button class="btn sm pri" onclick="notificationOpen(${n.id},${cp(safeRouteUrl(n.link)||"#/")})">查看</button></div>`).join("")}</div>`:"";
   const jobsCard = `<div class="card" style="margin-top:22px"><h2>📋 全部工单(${jobsContract.total??jobs.length})</h2>
     ${listContractNotice(jobsContract,"内容工单")}
-    ${jobs.length?jobs.map(jobRow).join(""):`<div class="empty">这一页没有工单；返回上一页，或点上面「发一单内容」开工。</div>`}
+    ${jobs.length?jobs.map(jobRow).join(""):`<div class="empty">${(jobsContract.total??0)===0?"还没有工单。点上面「发一单内容」,3 分钟看你的数字员工团队跑起来。":"这一页没有工单；返回上一页,或点上面「发一单内容」开工。"}</div>`}
     ${listPager(jobsContract,"jobs")}</div>`;
   let floorSection;
   if(isRoot){
@@ -1284,7 +1284,7 @@ async function tasksView(tid){
   }
   TC_LOADING_MORE = false;
   TC_DATA = await api("/task-center?limit=500&offset=0");
-  if(TC_STATUS==="open" && !(TC_DATA.counts?.open) && (TC_DATA.counts?.all||0)>0) TC_STATUS="all";
+  if(TC_STATUS==="open" && !(TC_DATA.counts?.open)) TC_STATUS="all";
   taskCenterDraw();
 }
 function tcVisibleItems(){
@@ -1304,7 +1304,7 @@ function tcStatusCard(key,emoji,label,n,color){
     <div class="sub">${emoji} ${label}</div><div style="font-size:25px;font-weight:900;margin-top:3px">${n||0}</div></div>`;
 }
 function tcNewButton(){
-  if(canWork("content")) return `<a class="btn pri" href="#/new">➕ 再派一个任务</a>`;
+  if(canWork("content")) return `<a class="btn pri" href="#/new">➕ 派一个任务</a>`;
   if(canWork("avatar")) return `<a class="btn pri" href="#/avatar">➕ 新建数字人任务</a>`;
   return `<a class="btn pri" href="#/">➕ 去办公室找员工派活</a>`;
 }
@@ -1333,7 +1333,7 @@ function taskCenterDraw(){
       <b style="font-size:16px">${{open:"当前任务",waiting:"等我处理",done:"已完成",failed:"失败",all:"全部任务"}[TC_STATUS]||"任务"}</b>
       <span class="tag" id="tc-count">${rows.length} 条</span>${hasMore?`<span class="sub">已加载 ${d.items.length} / ${c.all||d.items.length} 条</span><button class="btn sm" onclick="tcLoadMore(this)">加载更早任务</button>`:""}
       <button class="btn sm" style="margin-left:auto" onclick="tasksView()">↻ 刷新</button></div>
-    <div id="tc-list">${rows.length?rows.map(tcRow).join(""):`<div class="empty">这个筛选下没有任务。换个状态或关键词看看。</div>`}</div>
+    <div id="tc-list">${rows.length?rows.map(tcRow).join(""):`<div class="empty">${(c.all||0)===0?`还没有任务。<div class="actions" style="margin-top:10px;justify-content:center"><a class="btn sm pri" href="#/new">✍️ 发第一单内容</a><a class="btn sm" href="#/">🧑‍🔧 找行业专家派活</a></div>`:"这个筛选下没有任务。换个状态或关键词看看。"}</div>`}</div>
   </div>`;
 }
 function tcRow(x){
@@ -1598,7 +1598,7 @@ function soloTab(s,e){
           <a class="btn sm" href="/api/tasks/${t.id}/export.docx">⬇️ Word</a>
           <button class="btn sm" onclick="taskToKnow(${t.id})">📚 存沉淀</button>`:""}
         <button class="btn sm" onclick="stopSoloWatch();SOLO_TASK=null;drawModal()">收起</button></div>
-      ${["queued","running"].includes(t.status)?`<div class="steps" style="margin-top:8px">${(t.steps||[]).map((x,i)=>stepRow(x,i+1)).join("")||`<div class="step"><span class="ic">⏳</span><span class="lb">员工上线中…</span></div>`}</div>`:""}
+      ${["queued","running"].includes(t.status)?`<div class="steps" data-tasksteps="${t.id}" style="margin-top:8px">${(t.steps||[]).map((x,i)=>stepRow(x,i+1)).join("")||`<div class="step"><span class="ic">⏳</span><span class="lb">员工上线中…</span></div>`}</div>`:""}
       ${t.status==="done"?taskBody(t):""}
       ${t.status==="failed"?`<div class="notice red">${esc(t.output_md||"失败")}
         <div class="actions">${t.retryable?`<button class="btn sm pri" onclick="retryExpertTask(${t.id},this)">🔁 免费重试</button>
@@ -1647,7 +1647,7 @@ function soloWatch(tid){
     if(MODAL_IDX!==null && MODAL_TAB==="solo") drawModal();
     if(!["queued","running"].includes(SOLO_TASK.status)){ stopSoloWatch(); return; }
     if(MODAL_IDX===null||MODAL_TAB!=="solo"){ stopSoloWatch(); return; }
-    SOLO_TIMER=setTimeout(tick, 60000);
+    SOLO_TIMER=setTimeout(tick, 12000);
   };
   tick();
 }
@@ -2221,14 +2221,14 @@ async function newBrief(){
     <div class="notice" style="margin-top:8px">👔 <b>老板只需要三步</b>:①选行业 ②说方向 ③点提交。剩下的交给流水线:趋势官找热点 → 情报员查资料 → 拆解师学爆款 → 撰稿改稿配图封面 → 质检 → 各平台发布包。关键节点会停下来等您拍板。</div>
     <label>① 行业/赛道(内容会贴着这个行业做:渠道、黑话、案例、对标)</label>
     <div class="chips" id="b-ind">${META.industries.map((t,i)=>`<span class="chip${i===0?" on":""}" onclick="pick(this)">${t}</span>`).join("")}</div>
-    <input id="b-ind-c" placeholder="✏️ 或自己输入行业/赛道(如:宠物烘焙、二手奢侈品)——填了就用您输入的" style="margin-top:6px">
+    <input id="b-ind-c" value="${esc(PRE?.industry||"")}" placeholder="✏️ 或自己输入行业/赛道(如:宠物烘焙、二手奢侈品)——填了就用您输入的" style="margin-top:6px">
     <label>② 内容方向 * <span class="sub">(一句话说清"聊什么",越具体越好;没灵感点下面的例子)</span></label>
     <textarea id="b-dir" placeholder="例:${esc(BRIEF_EXAMPLES[0])}">${esc(PRE?.direction||"")}</textarea>
     ${PRE?`<div class="notice green">🔥 来自「今日必发」:${esc(PRE.why||"")}</div>`:""}
     <div class="chips" style="margin-top:4px">${BRIEF_EXAMPLES.map(x=>`<span class="chip" style="font-size:11px" onclick="$('#b-dir').value=this.textContent;scheduleBriefDraftSave()">${esc(x)}</span>`).join("")}</div>
     <label>③ 内容类型 <span class="sub">(决定整条流水线的打法)</span></label>
     <div class="chips" id="b-tpl">${META.brief_templates.map((t,i)=>`<span class="chip${i===1?" on":""}" onclick="pick(this)" title="${{蹭热点:"追当下热点,时效优先",日更选题:"从趋势里挑题,稳定日更",产品软文:"带货种草,卖点前置",观点输出:"独到观点,人设优先",教程干货:"手把手教程,信息密度高",二创改写:"对标内容二次创作"}[t]||t}">${t}</span>`).join("")}</div>
-    <input id="b-tpl-c" placeholder="✏️ 或自己输入内容类型(如:门店探访日记、老板问答)——填了就用您输入的" style="margin-top:6px">
+    <input id="b-tpl-c" value="${esc(PRE?.template||"")}" placeholder="✏️ 或自己输入内容类型(如:门店探访日记、老板问答)——填了就用您输入的" style="margin-top:6px">
     <label>④ 配图 · 张数</label>
     <div class="chips" id="b-imgn">${["自动","2","3","4","5","6"].map((n,i)=>`<span class="chip${i===0?" on":""}" onclick="pick(this)">${n}${i?"张":""}</span>`).join("")}</div>
     <label>配图来源 <span class="sub">(真实图=全网抓取真实照片,适合公众号/资讯类;AI=生成插画)</span></label>
@@ -2254,14 +2254,15 @@ async function newBrief(){
         <option value="manual">逐站审批 — 10 个工位每一步都等您</option></select></div>
     </div>
     <details style="margin-top:12px"><summary class="sub" style="cursor:pointer">📎 高级选项:参考链接 / 附加素材 / 演绎稿(选填)</summary>
-      <label>参考链接</label><input id="b-ref" placeholder="热点新闻/对标文章链接,情报员会精读">
+      <label>参考链接</label><input id="b-ref" placeholder="热点新闻/对标文章链接,情报员会精读" value="${esc(PRE?.ref_link||"")}">
       <label>附加素材(可传文件:txt/pdf/图片自动读成文字)</label>
       <input type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.jpg,.jpeg,.png,.webp" onchange="parseFileInto(this,'#b-mat')" style="margin-bottom:6px">
-      <textarea id="b-mat" placeholder="产品资料、您的观点、必须包含的数据…都塞进来,员工会用上"></textarea>
+      <textarea id="b-mat" placeholder="产品资料、您的观点、必须包含的数据…都塞进来,员工会用上">${esc(PRE?.material||"")}</textarea>
       <label style="display:flex;align-items:center"><input type="checkbox" id="b-deck" style="width:auto;margin-right:8px">启用「演绎师」:额外产出一页交互式 HTML 演绎稿(适合教程/知识类)</label>
     </details>
     <div class="actions" style="margin-top:16px"><button class="btn pri" style="font-size:15px" onclick="submitBrief(this)">🚀 提交,让团队开工</button>
-      <span class="sub">提交后可在办公室看全程直播,随时打断</span></div>
+      <span class="sub">💎 本单 ${META?.job_points??18} 点 · 余额 ${Math.round(STATE?.balance||0)} 点 · 提交后可看全程直播,随时打断</span></div>
+    ${(STATE&&Math.round(STATE.balance||0)<(META?.job_points??18))?`<div class="notice" style="background:#fff3d6;margin-top:8px">⚠️ 余额不足本单所需 ${META?.job_points??18} 点。<a href="#/billing" style="font-weight:800;text-decoration:underline">先去充值 →</a>(余额不够时提交会直接提示,不会扣费)</div>`:""}
   </div>`;
   const restored=!PRE&&restoreBriefDraft();
   if(restored) $("#brief-draft-notice").innerHTML=`<div class="notice green" role="status">
@@ -2295,6 +2296,16 @@ async function submitBrief(btn){
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🚀 提交,让团队开工"; }
 }
 
+function rebrief(id){
+  const j = CUR_JOB && CUR_JOB.id===id ? CUR_JOB : null;
+  const b = j?.brief || {};
+  localStorage.setItem("prefill_brief", JSON.stringify({
+    direction: b.direction||"", material: b.material||"", ref_link: b.ref_link||"",
+    template: b.template||"", industry: b.industry||"",
+    why: `已带入失败工单 #${id} 的原 Brief，修改后可直接重新开单`}));
+  location.hash = "#/new";
+}
+
 /* ---------- 工单详情 ---------- */
 function stnState(stat){
   return {running:"work",rejected:"work",awaiting_review:"await",failed:"fail",interrupted:"fail"}[stat]||"idle";
@@ -2321,7 +2332,9 @@ function jobProgress(j){
   else if(j.status==="awaiting_review") note="当前已停在审批点，需您拍板后才继续；离开页面不会丢单。";
   else if(j.status==="gate_blocked") note="内容被质检关卡拦下，需您处理后才会继续。";
   else if(j.status==="paused") note="工单已暂停，恢复开工后会从被打断处重跑。";
-  else if(j.status==="failed") note="工单已挂起，请处理失败工位后再继续。";
+  else if(j.status==="failed") note = j.billing_status==="refunded"
+    ? "本单执行失败，点数已自动退回，没有扣费。可点上方「复制 Brief 重新开单」再来一次。"
+    : "本单中途失败，但已产出可用正文（按已产出部分计）。可在下方工位取回已完成内容，或点上方「复制 Brief 重新开单」。";
   else if(j.status==="cancelled") note="工单已经终止。";
   else note=`可以离开本页，后台继续执行。${STATE?.setup?.wechat?"完成或等您拍板时会发微信提醒。":"随时回「任务中心」查看最新结果。"}`;
   return {total,completed,current,percent,elapsed,note};
@@ -2369,12 +2382,13 @@ async function jobView(id){
       ${canPause?`<button class="btn sm" onclick="pauseJob(${j.id})">⏸ 打断</button>`:""}
       ${j.status==="paused"?`<button class="btn sm ok" onclick="resumeJob(${j.id})">▶️ 恢复开工</button>`:""}
       ${j.status==="done"?`<a class="btn pri" href="#/delivery/${j.id}">📦 查看交付包</a>`:""}
+      ${["failed","cancelled"].includes(j.status)?`<button class="btn pri sm" onclick="rebrief(${j.id})">🔁 复制 Brief 重新开单</button>`:""}
       ${!["done","cancelled"].includes(j.status)?`<button class="btn bad sm" onclick="cancelWholeJob(${j.id})">终止工单</button>`:""}
       <button class="btn bad sm" onclick="deleteJob(${j.id})" title="彻底删除工单及全部产物">🗑 删除</button>
     </div>
     <div class="kv"><span>Brief:${esc(j.brief.direction)}</span><span>模式:${esc(MODE_LABEL[j.mode]||j.mode)}</span>
       <span>平台:${(j.brief.platforms||[]).map(esc).join("/")}</span>
-      <span>成本:${rmb(j.cost_usd)} · ${((j.tokens||0)/1000).toFixed(1)}k tokens</span></div>
+      ${ME.role==="root"?`<span>成本:${rmb(j.cost_usd)} · ${((j.tokens||0)/1000).toFixed(1)}k tokens</span>`:""}</div>
     <div class="notice ${j.status==="done"?"green":j.status==="failed"?"red":""}" style="margin:12px 0 4px">
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <b style="flex:1">整单进度：已完成 ${whole.completed}/${whole.total} 个工位 · 当前第 ${whole.current}/${whole.total} 步</b>
@@ -2601,7 +2615,7 @@ async function deliveryView(id){
       ${d.packs?.length?`<a class="btn pri" href="/api/jobs/${id}/pack.zip" download>🚀 全平台发布包 zip</a>`:""}</div>
     <div class="kv"><span>成本:${rmb(d.cost_usd)}</span><span>${((d.tokens||0)/1000).toFixed(1)}k tokens</span></div></div>
   <div class="row" style="align-items:flex-start">
-    <div class="card" style="flex:2;min-width:340px"><h3 style="margin-top:0">终稿正文</h3>
+    <div class="card" style="flex:2;min-width:min(340px,100%)"><h3 style="margin-top:0">终稿正文</h3>
       <div class="actions" style="margin:0 0 10px"><button class="btn sm" onclick="copyText(${cp((d.title||"")+"\n\n"+(d.body||""))})">📋 复制正文</button></div>
       <div class="md">${md(d.body)}</div>
       <div style="margin-top:10px">${(d.tags||[]).map(t=>`<span class="tag">#${esc(t)}</span>`).join("")}</div></div>
@@ -3045,7 +3059,7 @@ function schedForm(){
   const profiles = STATE.profiles;
   $("#sform").innerHTML = `<div class="card" style="background:#fff6dc">
     <h3 style="margin-top:0">新建定时任务</h3>
-    <div class="notice" style="margin-top:6px">💡 <b>定好主题,以后每天全自动</b>:到点自动走完整条流水线(<b>每次自动开工扣 18点</b>,点数不足自动暂停)。建议先跑两单手动任务,满意了再定时。</div>
+    <div class="notice" style="margin-top:6px">💡 <b>定好主题,以后每天全自动</b>:到点自动走完整条流水线(<b>每次自动开工扣 ${META?.job_points??18}点</b>,点数不足自动暂停)。建议先跑两单手动任务,满意了再定时。</div>
     <label>任务名</label><input id="s-name" placeholder="如:每日行业选题">
     <label>行业/赛道</label>
     <div class="chips" id="s-ind">${META.industries.map((t,i)=>`<span class="chip${i===0?" on":""}" onclick="pick(this)">${t}</span>`).join("")}</div>
@@ -3094,6 +3108,7 @@ async function schedToggle(id,enabled){
   try{ await api("/schedules/"+id,{method:"PUT",body:{enabled:!!enabled}}); render(); }catch(e){ toast(e.message); }
 }
 async function schedRunNow(id){
+  if(!await uiConfirm(`立即按该主题跑一单完整流水线,将扣 ${META?.job_points??18} 点?`,{okText:"🚀 开工",okClass:"pri"})) return;
   try{ const r = await api(`/schedules/${id}/run-now`,{method:"POST"});
     toast("已开工 → 工单 #"+r.job_id); location.hash="#/job/"+r.job_id;
   }catch(e){ toast(e.message); }
@@ -3595,6 +3610,12 @@ async function feishuSaveUrl(){
 }
 
 /* ---------- V8:权限管理 ---------- */
+async function saveSupportContact(btn){
+  btn.disabled=true;
+  try{ const r=await api('/team/support-contact',{method:'POST',body:{contact:$('#sc-input').value}});
+    if(META) META.support_contact=r.contact; toast('已保存,立即生效');
+  }catch(e){ toast(e.message); } btn.disabled=false;
+}
 async function teamView(){
   const t = await api("/team");
   const modChips = (sel)=>t.all_modules.map(m=>`<span class="chip mod-chip${(sel||[]).includes(m.key)?" on":""}" data-k="${m.key}" onclick="this.classList.toggle('on')">${esc(m.label)}</span>`).join("");
@@ -3630,7 +3651,7 @@ async function teamView(){
     <div class="actions"><button class="btn pri" onclick="tmMyPw()">💾 修改</button></div></div>
   ${ME.role==="root"&&(t.guests||[]).length?`
   <div class="card"><h2>📇 客资(访客留资 ${t.guests.length} 条)</h2>
-    <div class="dimwrap"><table class="dimtable" style="min-width:520px"><thead><tr>
+    <div class="dimwrap"><table class="dimtable" style="min-width:min(520px,100%)"><thead><tr>
       <th>手机号</th><th>称呼</th><th>企业/行业</th><th>时间</th><th>状态</th></tr></thead><tbody>
       ${t.guests.map(g=>`<tr><td><b>${esc(g.phone)}</b></td><td>${esc(g.name||"-")}</td>
         <td>${esc(g.company||"-")}</td><td>${new Date(g.created_at*1000).toLocaleString("zh-CN")}</td>
@@ -3650,6 +3671,10 @@ async function teamView(){
           :`<button class="btn sm pri" onclick="tmApprove(${a.id})">⚡ 一键开通</button>
             <button class="btn sm" onclick="tmApplyDone(${a.id})" title="不开账号,仅归档">归档</button>`}</td></tr>`).join("")}</tbody></table></div></div>`:""}
   ${ME.role==="root"?`
+  <div class="card"><h3 style="margin-top:0">📞 对客联系方式</h3>
+    <div class="sub">显示在所有租户的套餐页与「点数不足」提示里;不填的话,客户想充值只能靠右下角反馈留言。</div>
+    <div class="actions" style="margin-top:8px"><input id="sc-input" placeholder="如:微信 paihuo-vip / 电话 138xxxx" value="${esc(META?.support_contact||"")}" style="flex:1;min-width:220px">
+    <button class="btn sm pri" onclick="saveSupportContact(this)">保存</button></div></div>
   <div class="card" style="background:#fff6dc"><h2>🏦 租户管理(平台老板专属)</h2>
     <div class="sub">每个客户企业一个租户:开租户→给主账号→客户登录自建副账号。收款您线下收,这里给TA充点/开套餐。</div>
     <div class="actions"><button class="btn pri" onclick="tmTenantForm()">➕ 开新企业租户</button>
@@ -3862,7 +3887,7 @@ async function billingView(){
       <span class="tb ${BILL_TAB==="all"?"on":""}" onclick="BILL_TAB='all';render()">全部(${b.log.length})</span>
       <span class="tb ${BILL_TAB==="in"?"on":""}" onclick="BILL_TAB='in';render()">💰 充值记录(${b.log.filter(l=>l.delta>0).length})</span>
       <span class="tb ${BILL_TAB==="out"?"on":""}" onclick="BILL_TAB='out';render()">🔻 消耗记录(${b.log.filter(l=>l.delta<0).length})</span></div>
-    ${shown.length?`<div class="dimwrap" style="margin-top:10px"><table class="dimtable" style="min-width:520px"><thead><tr>
+    ${shown.length?`<div class="dimwrap" style="margin-top:10px"><table class="dimtable" style="min-width:min(520px,100%)"><thead><tr>
       <th>时间</th><th>类型</th><th>项目</th><th>积分变动</th><th>余额</th></tr></thead><tbody>
       ${shown.map(l=>`<tr>
         <td class="sub" style="white-space:nowrap">${new Date(l.created_at*1000).toLocaleString("zh-CN",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"})}</td>
@@ -3872,10 +3897,10 @@ async function billingView(){
         <td class="sub">${l.balance.toFixed(0)}</td></tr>`).join("")}</tbody></table></div>`
       :`<div class="empty" style="padding:26px">${b.is_platform?"平台自用不产生账单":BILL_TAB==="in"?"还没有充值记录":BILL_TAB==="out"?"还没有消耗记录":"暂无积分变动记录"}</div>`}</div>
   <div class="card"><h2>📋 价目表(按次消耗)</h2>
-    <div class="dimwrap"><table class="dimtable" style="min-width:560px"><thead><tr><th>动作</th><th>消耗</th><th>成本参考</th></tr></thead>
+    <div class="dimwrap"><table class="dimtable" style="min-width:min(560px,100%)"><thead><tr><th>动作</th><th>消耗</th><th>成本参考</th></tr></thead>
     <tbody>${Object.values(b.prices).map(p=>`<tr><td>${esc(p.label)}</td><td><b>${p.points} 点</b></td><td class="sub">${esc(p.cost||"")}</td></tr>`).join("")}</tbody></table></div></div>
   <div class="card"><h2>📦 套餐(月/季/年)</h2>
-    <div class="sub">季付 9 折,年付 8 折(按活动价再折)。开通请联系平台顾问${ME.role==="root"?",或在「权限管理→租户管理」直接给客户开通":""}。</div>
+    <div class="sub">季付 9 折,年付 8 折(按活动价再折)。开通请联系平台顾问${META?.support_contact?`:<b style="font-size:15px">${esc(META.support_contact)}</b>(微信/电话均可)`:"(点右下角 💬 留下联系方式,顾问会主动联系您)"}${ME.role==="root"?";root 可在「权限管理→租户管理」给客户开通,并设置对客联系方式":""}。</div>
     <div class="grid3" style="grid-template-columns:repeat(auto-fit,minmax(210px,1fr));margin-top:12px">
     ${b.plans.map((p,i)=>`<div class="topic" style="text-align:center;${i===1?"border-color:#ef476f;border-width:3px":""}">
       ${i===1?`<div style="color:#ef476f;font-weight:900;font-size:12px">🔥 最多人选</div>`:""}
@@ -3940,6 +3965,11 @@ function mtConsensus(cur){
 }
 function mtBody(cur){
   const msgsBox = open => `<div id="mt-msgs" style="max-height:520px;overflow:auto;margin-top:10px;display:${open?"block":"none"}">${(cur.messages||[]).map(mtBubble).join("")||`<div class="empty">等员工进群…</div>`}</div>`;
+  if(["failed","cancelled"].includes(cur.status)){
+    return `<div class="notice red" style="margin-top:10px"><b>本场会议没有开成。</b> ${esc(cur.next_action||"执行中断")}
+      <div class="sub" style="margin-top:4px">会议点数已自动退回,没有扣费。可换一批参会人或改写议题后重新召开。</div>
+      <div class="actions" style="margin-top:8px"><a class="btn sm pri" href="#/tasks">🔁 到任务中心看这场会议并重试</a></div></div>${msgsBox(true)}`;
+  }
   if(cur.status!=="done" || !(cur.summary_md||"").trim()){
     setBoundedState(MT_LIVE,cur.id,true);
     return msgsBox(true);

@@ -36,6 +36,26 @@ logging.basicConfig(
 log = logging.getLogger("main")
 app = FastAPI(title="派活 PaiHuo — 老板会派活，数字员工去干活")
 
+# 全站 55 处 raise HTTPException(404) 之类的裸状态码,默认 detail 是英文
+# ("Not Found"/"Forbidden"…),前端会原样弹给老板。统一在出口翻译成人话;
+# 带自定义中文 detail 的异常原样放行。
+_BARE_DETAIL_CN = {
+    "Not Found": "没有找到这条内容,可能已被删除或不属于当前账号",
+    "Forbidden": "没有权限执行这个操作",
+    "Unauthorized": "请先登录",
+    "Method Not Allowed": "请求方式不对,请刷新页面后重试",
+    "Bad Request": "请求内容有误,请刷新页面后重试",
+}
+
+
+@app.exception_handler(HTTPException)
+async def _friendly_http_exception(request, exc: HTTPException):
+    detail = exc.detail
+    if isinstance(detail, str) and detail in _BARE_DETAIL_CN:
+        detail = _BARE_DETAIL_CN[detail]
+    return JSONResponse({"detail": detail}, status_code=exc.status_code,
+                        headers=getattr(exc, "headers", None))
+
 APP_NAME = "派活"
 APP_SLOGAN = "老板会派活，数字员工去干活"
 INDUSTRIES = ["通用", "餐饮", "科技数码", "美妆个护", "教育培训", "母婴亲子", "家居生活",
@@ -923,6 +943,15 @@ async def feishu_sync(body: dict):
         raise HTTPException(400, str(e)) from None
 
 
+@app.post("/api/team/support-contact")
+def set_support_contact(body: dict):
+    """root 配置对客联系方式(微信号/电话);套餐页与点数不足提示会展示它。"""
+    _need_root()
+    value = str(body.get("contact") or "").strip()[:80]
+    db.set_setting("support_contact", value or None)
+    return {"ok": True, "contact": value}
+
+
 @app.post("/api/team/tenants/{tid}/subscribe")
 def tenant_subscribe(tid: int, body: dict):
     _need_root()
@@ -1600,6 +1629,11 @@ def meta():
               "stations": stations,
               "modes": {"fullauto": "完全托管", "autopilot": "全自动", "copilot": "关键审批",
                         "manual": "逐站审批"},
+              # 老板派活前必须能看到这单要花多少点(明码标价);价格可被 root 调整,
+              # 所以从价目表读,不许前端写死。
+              "job_points": (billing.prices().get("content_job") or {}).get("points", 18),
+              # 对客联系方式(root 配置):没有它,「点数不足→看套餐→联系顾问」是死胡同。
+              "support_contact": (db.get_setting("support_contact") or "")[:80],
               "brief_templates": ["蹭热点", "日更选题", "产品软文", "观点输出", "教程干货", "二创改写"],
               "platforms": list(registry.PLATFORM_SPECS),
               "platform_specs": registry.PLATFORM_SPECS,

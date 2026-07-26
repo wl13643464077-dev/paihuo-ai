@@ -48,6 +48,8 @@ header nav .navlogout{margin-left:auto;color:#e9a8a0}
   header{height:auto;min-height:60px;flex-wrap:wrap}
   header nav{flex:1 0 100%;order:10;flex-wrap:nowrap;overflow-x:auto;padding-bottom:3px;
     -webkit-overflow-scrolling:touch;scrollbar-width:none}
+  /* nav 开了 overflow-x:auto,绝对定位的「更多」下拉会被裁掉打不开;改为 fixed 脱出裁剪 */
+  .navmore .navmenu{position:fixed;left:8px;right:8px;top:auto;min-width:0}
   header nav::-webkit-scrollbar{display:none}
   header nav a,header nav .nav-action{flex:0 0 auto}
   header nav .navlogout{margin-left:4px}
@@ -97,7 +99,7 @@ label{display:block;font-weight:800;font-size:13px;margin:13px 0 6px}
 .notice.green{background:#dcf5e8}
 .notice.violet{background:#ece3ff}
 .actions{display:flex;gap:10px;margin-top:15px;flex-wrap:wrap;align-items:center}
-.toast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%) translateY(6px);background:var(--ink);color:#ffd166;
+.toast{max-width:88vw;box-sizing:border-box;position:fixed;bottom:28px;left:50%;transform:translateX(-50%) translateY(6px);background:var(--ink);color:#ffd166;
   padding:11px 24px;border-radius:14px;z-index:200;opacity:0;transition:.25s;font-weight:800;border:2px solid #ffd166;pointer-events:none}
 .toast.show{opacity:1;transform:translateX(-50%)}
 .empty{text-align:center;color:var(--ink2);padding:42px 0}

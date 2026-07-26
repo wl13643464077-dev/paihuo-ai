@@ -81,6 +81,7 @@ button:active{transform:translateY(1px);box-shadow:2px 2px 0 rgba(51,41,31,.2)}
 </div>
 <script>
 async function go(){
+  const _b=document.querySelector('button'); if(_b){ if(_b.disabled) return; _b.disabled=true; const _t=_b.textContent; _b.textContent='登录中…'; setTimeout(()=>{_b.disabled=false;_b.textContent=_t;}, 8000); }
   const err = document.getElementById('err'); err.textContent = '';
   try{
     const r = await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},

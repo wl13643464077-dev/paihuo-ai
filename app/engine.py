@@ -16,6 +16,20 @@ from .skills import registry
 
 log = logging.getLogger("engine")
 
+STATUS_CN = {
+    "queued": "排队中", "running": "执行中", "awaiting_review": "等您审批",
+    "gate_blocked": "被质检拦截", "failed": "已失败", "done": "已完成",
+    "cancelled": "已终止", "paused": "已暂停", "rejected": "重做中",
+    "stale": "待重算", "skipped": "已跳过", "interrupted": "被打断",
+    "pending_charge": "待扣费",
+}
+
+
+def status_cn(value) -> str:
+    """把内部状态枚举翻成老板能懂的词;未知值原样返回。"""
+    return STATUS_CN.get(str(value or ""), str(value or "未知"))
+
+
 MAX_RETRY = 2
 LAST_IDX = 9
 JOB_WORKING_STATUSES = (
@@ -438,7 +452,7 @@ class Engine:
                 return False
             if status != "cancelled" and status not in JOB_WORKING_STATUSES:
                 outcome["invalid"] = (
-                    f"当前状态 {status} 不能取消；请新建工单")
+                    f"工单{status_cn(status)},不能取消；请新建工单")
                 return False
 
             # 兼容升级前留下的 cancelled+charged：仅在确实没有可用交付时补退。
@@ -1157,7 +1171,7 @@ class Engine:
             if action in ("approve", "edit"):
                 if run["status"] != "awaiting_review":
                     raise ValueError(
-                        f"当前状态 {run['status']} 不可审批；请刷新工单状态")
+                        f"该工位{status_cn(run['status'])},现在不需要审批；请刷新页面看最新状态")
                 edits = payload.get("edits") or {}
                 out.update(edits)
                 if "selected" in payload:
@@ -1189,7 +1203,7 @@ class Engine:
             elif action == "reject":
                 if run["status"] != "awaiting_review":
                     raise ValueError(
-                        f"当前状态 {run['status']} 不可打回；请刷新工单状态")
+                        f"该工位{status_cn(run['status'])},现在不能打回；请刷新页面看最新状态")
                 comment = (payload.get("comment") or "").strip()
                 if not comment:
                     raise ValueError("打回必须填写修改意见")
@@ -1205,7 +1219,7 @@ class Engine:
             else:  # rerun：仅允许仍在进行中的整单重跑已交付/待审批工位。
                 if run["status"] not in ("done", "awaiting_review"):
                     raise ValueError(
-                        f"当前状态 {run['status']} 不可重跑；失败工单请新建工单")
+                        f"该工位{status_cn(run['status'])},不能重跑；失败的工单请重新开单")
                 comment = (payload.get("comment") or "").strip()
                 changed = c.execute(
                     "UPDATE station_run SET status='rejected',review_comment=?,"
@@ -1251,7 +1265,7 @@ class Engine:
                 raise ValueError("工单不存在")
             if (job["billing_status"] != "charged"
                     or job["status"] not in JOB_EXECUTABLE_STATUSES):
-                raise ValueError(f"当前状态 {job['status']} 无需打断")
+                raise ValueError(f"工单{status_cn(job['status'])},不需要打断")
             now = time.time()
             changed = c.execute(
                 "UPDATE job SET status='paused',updated_at=? "
