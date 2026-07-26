@@ -45,11 +45,21 @@ def add_entry(tid: int, platform: str, title: str, job_id=None, url: str = "",
         "retro_json": json.dumps(retro)})
 
 
-def entries(tid: int) -> list:
-    rows = db.q("SELECT * FROM publish_log WHERE tenant_id=? ORDER BY id DESC LIMIT 60", (tid,))
+def entries(tid: int, limit: int = 60, offset: int = 0) -> list:
+    rows = db.q(
+        "SELECT * FROM publish_log WHERE tenant_id=? "
+        "ORDER BY id DESC LIMIT ? OFFSET ?",
+        (tid, limit, offset),
+    )
     for r in rows:
         r["retro"] = db.jloads(r.pop("retro_json"), {})
     return rows
+
+
+def entries_total(tid: int) -> int:
+    return int(db.one(
+        "SELECT COUNT(*) n FROM publish_log WHERE tenant_id=?", (tid,)
+    )["n"] or 0)
 
 
 def mark_published(tid: int, pid: int):

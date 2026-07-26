@@ -137,7 +137,7 @@ function listContractNotice(contract,label="记录"){
 }
 const LIST_PAGE_SIZE=40;
 const LIST_OFFSETS={assets:0,knowledge:0,censor:0,video:0,publish:0,
-  jobs:0,avatar:0,meetings:0};
+  jobs:0,avatar:0,meetings:0,publog:0};
 function listOffset(key){ return Math.max(0,Number(LIST_OFFSETS[key])||0); }
 function resetListPage(key){ LIST_OFFSETS[key]=0; }
 function listPath(path,key,params={}){
@@ -1383,6 +1383,7 @@ function taskCenterDraw(){
       <b style="font-size:16px">${{open:"当前任务",waiting:"等我处理",done:"已完成",failed:"失败",all:"全部任务"}[TC_STATUS]||"任务"}</b>
       <span class="tag" id="tc-count">${rows.length} 条</span>${hasMore?`<span class="sub">已加载 ${d.items.length} / ${c.all||d.items.length} 条</span><button class="btn sm" onclick="tcLoadMore(this)">加载更早任务</button>`:""}
       <button class="btn sm" style="margin-left:auto" onclick="tasksView()">↻ 刷新</button></div>
+    ${TC_QUERY.trim()&&hasMore?`<div class="notice" style="margin:0 0 9px">🔍 搜索只在<b>已加载的 ${d.items.length} 条</b>里进行(共 ${c.all||d.items.length} 条)。没搜到想找的?点上面「加载更早任务」把更早的记录拉进来再搜。</div>`:""}
     <div id="tc-list">${rows.length?rows.map(tcRow).join(""):`<div class="empty">${(c.all||0)===0?`还没有任务。<div class="actions" style="margin-top:10px;justify-content:center"><a class="btn sm pri" href="#/new">✍️ 发第一单内容</a><a class="btn sm" href="#/">🧑‍🔧 找行业专家派活</a></div>`:"这个筛选下没有任务。换个状态或关键词看看。"}</div>`}</div>
   </div>`;
 }
@@ -3156,11 +3157,12 @@ function schedRow(s,selected=false){
       <span class="t" style="flex:1">${esc(s.name)}</span>
       <span class="tag">🔁 ${esc(s.human)}</span>
       <span class="tag">⏭ 下次 ${s.enabled?nxt:"已停用"}</span>
+      ${s.last_run_at?`<span class="tag" title="上次实际开工时间">🕘 上次 ${tcFmt(s.last_run_at)}</span>`:""}
       <button class="btn sm" onclick="schedEdit(${s.id})">✏️ 编辑</button>
       <button class="btn sm" onclick="schedRunNow(${s.id})">▶️ 立即来一单</button>
       <button class="btn sm bad" onclick="schedDel(${s.id})">🗑</button></div>
     <div class="sub" style="margin-top:6px">方向:${esc(s.brief.direction||"")} · ${(s.brief.platforms||[]).map(esc).join("/")} · ${esc(MODE_LABEL[s.mode]||s.mode)}</div>
-    ${s.last_note?`<div class="sub" style="margin-top:3px">📝 ${esc(s.last_note)}</div>`:""}
+    ${s.last_note?`<div class="sub" style="margin-top:3px">📝 ${esc(s.last_note).replace(/工单 #(\d+)/,'工单 <a href="#/job/$1" style="text-decoration:underline;font-weight:800">#$1</a>')}</div>`:""}
   </div>`;
 }
 function schedForm(s){
@@ -4044,7 +4046,13 @@ async function billingView(){
   const shown = (BILL_TAB==="in"?b.log.filter(l=>l.delta>0):BILL_TAB==="out"?b.log.filter(l=>l.delta<0):b.log);
   const spendActs = (!b.is_platform&&b.spend_by_action)?b.spend_by_action.filter(s=>(s.points||0)>0):[];
   const spendTotal = spendActs.reduce((sum,s)=>sum+(s.points||0),0);
-  $("#main").innerHTML = tourBanner + `
+  const expDays = b.plan_expires? Math.ceil((b.plan_expires*1000-Date.now())/86400000) : null;
+  const expBanner = (expDays!==null&&expDays<=7&&!b.is_platform)?`<div class="notice red" style="margin-top:0">${
+    expDays>0?`⏰ 当前套餐 <b>${esc(b.plan||"")}</b> 还有 <b>${expDays} 天</b>到期`
+    :`⛔ 套餐 <b>${esc(b.plan||"")}</b> 已到期`},到期后不再按月发点。续费请${
+    ME.role==="member"?"联系<b>贵司主账号(企业主)</b>"
+    :`联系平台顾问${META?.support_contact?`:<b>${esc(META.support_contact)}</b>`:"(点右下角 💬 留言)"}`}。</div>`:"";
+  $("#main").innerHTML = tourBanner + expBanner + `
   <div class="card" style="background:linear-gradient(120deg,#fff6dc,#fffaf0 60%)">
     <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
       <div style="flex:1;min-width:200px"><h2 style="margin:0">💎 我的积分账户</h2>
@@ -4550,7 +4558,7 @@ async function censorView(){
     <div id="cenr-out" style="margin-top:10px"></div>`;
   else if(CEN_TAB==="publog"){
     const publogContract=normalizeListContract(
-      await api("/publog").catch(optionalResult([])),60);
+      await api(listPath("/publog","publog")).catch(optionalResult([])),60);
     const rows=publogContract.items;
     const retroConf=await api("/publog/auto-retro").catch(()=>({enabled:true}));
     listNotice=listContractNotice(publogContract,"发布记录");
@@ -4570,7 +4578,8 @@ async function censorView(){
         <div class="sub" style="margin-top:5px">复盘:T+1 ${st("1")} · T+3 ${st("3")} · T+7 ${st("7")}
           <button class="btn sm" style="margin-left:8px" onclick="plPull(${r.id},this)">📥 自动拉数据复盘</button>
           <button class="btn sm" onclick="plMark(${r.id})" title="把复盘计时从现在重新起算">✔ 我刚群发</button>
-          <button class="btn sm bad" onclick="plDel(${r.id})" title="删除后不再自动复盘扣点">🗑</button></div></div>`;}).join(""):`<div class="empty">还没有登记,发草稿箱会自动记一笔</div>`}</div>`;
+          <button class="btn sm bad" onclick="plDel(${r.id})" title="删除后不再自动复盘扣点">🗑</button></div></div>`;}).join(""):`<div class="empty">还没有登记,发草稿箱会自动记一笔</div>`}</div>
+    ${listPager(publogContract,"publog")}`;
   }
   else {
     const logContract=normalizeListContract(
@@ -4605,7 +4614,7 @@ async function censorView(){
       <div class="sub" style="margin-top:5px">流水线质检关卡就是他;发布前把关(广告法/平台规范/敏感违禁),发布后复盘(数据判读/限流体检)。公众号、小红书等平台规范逐条对照,发草稿箱前会自动终审。</div></div>
       <a class="btn sm" href="#/">← 回办公室</a></div></div>
   <div class="card">
-    <div class="tabs">${tabs.map(([k,l])=>`<span class="tb ${CEN_TAB===k?"on":""}" onclick="CEN_TAB=${cp(k)};resetListPage('censor');render()">${l}</span>`).join("")}</div>
+    <div class="tabs">${tabs.map(([k,l])=>`<span class="tb ${CEN_TAB===k?"on":""}" onclick="CEN_TAB=${cp(k)};resetListPage('censor');resetListPage('publog');render()">${l}</span>`).join("")}</div>
     ${listNotice}
     <div style="margin-top:10px">${body}</div></div>`;
 }

@@ -1,12 +1,17 @@
-"""三人设走查修复批A的合同:报错说人话、500 不吐英文、游客留资出口放行。"""
+"""三人设走查修复批A/B的合同:报错说人话、500 不吐英文、游客留资出口放行、
+台账分页、定时连续失败告警、套餐临期提醒。"""
 import asyncio
 import os
+import tempfile
+import time
 import types
 import unittest
+from datetime import datetime
+from unittest.mock import patch
 
 from fastapi import HTTPException
 
-from app import main
+from app import auth, db, main, pubtrack, scheduler
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -56,6 +61,67 @@ class WalkthroughFixContracts(unittest.TestCase):
         src = _read("static/app.js")
         self.assertIn("DEPTS.filter(d=>can(d.key)).flatMap", src,
                       "会议室手工选人池必须按板块过滤,否则 member 勾了专家才 403")
+
+
+class ReturningBossContracts(unittest.TestCase):
+    """批B:第30天回头老板的对账合同。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old_path = db.DB_PATH
+        if db._conn is not None:
+            db._conn.close()
+        db._conn = None
+        db.DB_PATH = os.path.join(self.tmp.name, "returning.db")
+        db.conn()
+        db.insert("tenants", {"id": 2, "name": "企业", "balance": 30})
+        auth.set_current({"id": 20, "tenant_id": 2, "username": "owner",
+                          "role": "owner", "modules": ["content"]})
+
+    def tearDown(self):
+        auth.set_current(None)
+        if db._conn is not None:
+            db._conn.close()
+        db._conn = None
+        db.DB_PATH = self.old_path
+        self.tmp.cleanup()
+
+    def test_publog_paginated_contract_and_legacy_list(self):
+        for i in range(3):
+            pubtrack.add_entry(2, "公众号", f"文章{i}")
+        page = main.publog_list(limit=2, offset=0)
+        self.assertEqual(3, page["total"])
+        self.assertEqual(2, len(page["items"]))
+        self.assertTrue(page["has_more"])
+        self.assertEqual(2, page["next_offset"])
+        legacy = main.publog_list()
+        self.assertIsInstance(legacy, list, "旧调用方仍拿裸数组,不破坏兼容")
+
+    def test_schedule_consecutive_failure_notifies_at_three(self):
+        sid = db.insert("schedule", {
+            "tenant_id": 2, "name": "日更", "brief_json": "{}",
+            "kind": "daily", "at_time": "09:00", "enabled": 1,
+            "next_run_at": time.time() - 60, "fail_streak": 2,
+        })
+        with patch.object(scheduler, "fire",
+                          side_effect=RuntimeError("上游挂了")):
+            scheduler._tick(None)
+        row = db.one("SELECT fail_streak,last_note FROM schedule WHERE id=?",
+                     (sid,))
+        self.assertEqual(3, row["fail_streak"])
+        self.assertIn("连续失败 3 次", row["last_note"])
+        notes = db.q("SELECT title FROM notification WHERE tenant_id=2 "
+                     "AND kind='schedule_failed'")
+        self.assertEqual(1, len(notes), "连续第 3 次失败必须告警一次")
+
+    def test_daily_digest_sent_for_expiring_plan_without_activity(self):
+        db.execute("UPDATE tenants SET plan='标准版',plan_expires=? WHERE id=2",
+                   (time.time() + 3 * 86400,))
+        scheduler._run_daily_digest(datetime.now(scheduler.TZ))
+        note = db.one("SELECT body FROM notification WHERE tenant_id=2 "
+                      "AND kind='daily_digest'")
+        self.assertIsNotNone(note, "套餐临期即使昨日无活动也要提醒")
+        self.assertIn("到期", note["body"])
 
 
 if __name__ == "__main__":

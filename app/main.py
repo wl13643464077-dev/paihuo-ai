@@ -7620,9 +7620,15 @@ def tv_clip_delete(name: str):
 
 # ---------------- ② 发布台账 ----------------
 @app.get("/api/publog")
-def publog_list():
+def publog_list(limit: int = None, offset: int = 0):
+    """发布台账此前硬截 60 条且不告知;接入标准分页契约,老板能翻到月初。"""
     _need_module("content")
-    return pubtrack.entries(TEN())
+    page_limit, page_offset, paged = _pagination(limit, offset, 60)
+    rows = pubtrack.entries(TEN(), limit=page_limit, offset=page_offset)
+    if not paged:
+        return rows
+    return _page_result(rows, pubtrack.entries_total(TEN()),
+                        page_limit, page_offset)
 
 
 @app.get("/api/publog/auto-retro")

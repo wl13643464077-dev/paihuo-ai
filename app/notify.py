@@ -53,6 +53,11 @@ def build_msg(kind: str, payload: dict) -> str:
         return (f"**⏸️ 派活 · 定时任务已暂停**\n「{title}」因点数不足自动暂停,"
                 f"内容会断更!\n充值后请到定时任务页重新打开开关\n"
                 f"[去充值]({base}/#/billing) · [看定时任务]({base}/#/schedules)")
+    if kind == "schedule_failed":
+        return (f"**⚠️ 派活 · 定时任务连续失败**\n「{title}」已连续 "
+                f"{int(p.get('streak') or 0)} 次到点开工失败(系统会每 10 分钟"
+                f"自动重试),日更可能断更,建议点开看看\n"
+                f"[看定时任务]({base}/#/schedules)")
     if kind == "learn_done":
         fresh = int(p.get("new") or 0)
         return (f"**🎓 派活 · 员工进修完成**\n「{title}」新学 {fresh} 条技能,"
@@ -75,6 +80,11 @@ def build_msg(kind: str, payload: dict) -> str:
         if p.get("days_left") is not None:
             balance_line += f",按近 7 天日均消耗约可再跑 {int(p['days_left'])} 天"
         lines.append(balance_line)
+        if p.get("plan_days_left") is not None and int(p["plan_days_left"]) <= 7:
+            expire_days = int(p["plan_days_left"])
+            lines.append("⏰ 套餐:" + ("已到期,请尽快续费"
+                         if expire_days < 0
+                         else f"还有 {expire_days} 天到期,记得续费"))
         lines.append(f"[看账单明细]({base}/#/billing)"
                      + (f" · [去处理定时任务]({base}/#/schedules)" if p.get("paused") else ""))
         return "\n".join(lines)
@@ -107,6 +117,8 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
         "learn_done": "员工进修完成",
         "learn_failed": "员工进修失败(已退点)",
         "daily_digest": f"昨日经营简报({p.get('date', '')})",
+        "schedule_failed": "定时任务连续失败,可能断更",
+        "schedule_paused": "定时任务因点数不足已暂停,内容会断更",
     }
     title = str(labels.get(kind) or "派活有新进展")[:80]
     body = str(
@@ -127,6 +139,8 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
         link = "#/channels"
     elif kind == "daily_digest":
         link = "#/billing"
+    elif kind in {"schedule_paused", "schedule_failed"}:
+        link = "#/schedules"
     else:
         link = str(p.get("link") or "#/knowledge")
     if not re.match(r"^#/[A-Za-z0-9_~.%/?=&:+-]*$", link):

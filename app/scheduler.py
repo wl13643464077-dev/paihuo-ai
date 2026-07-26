@@ -237,7 +237,8 @@ def _run_daily_digest(now: datetime):
     from . import notify
     today = now.strftime("%Y-%m-%d")
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    for t in db.q("SELECT id,balance FROM tenants WHERE enabled=1 AND id!=1"):
+    for t in db.q("SELECT id,balance,plan,plan_expires FROM tenants "
+                  "WHERE enabled=1 AND id!=1"):
         tid = int(t["id"])
         try:
             if db.get_setting(f"daily_digest_off:{tid}"):
@@ -245,9 +246,15 @@ def _run_daily_digest(now: datetime):
             if db.get_setting(f"daily_digest_sent:{tid}") == today:
                 continue                              # 今天已发过,不重发
             stats = _digest_stats(tid, float(t["balance"] or 0), day_start)
+            # 套餐临期是必须叫醒老板的风险:即使昨日无活动也要提醒
+            plan_days_left = None
+            if t.get("plan_expires"):
+                plan_days_left = int(
+                    (float(t["plan_expires"]) - now.timestamp()) // 86400)
+            expiring = plan_days_left is not None and plan_days_left <= 7
             had_activity = (stats["jobs_done"] or stats["tasks_done"]
                             or stats["spent"] > 0 or stats["refunds"])
-            if not had_activity and not stats["paused"]:
+            if not had_activity and not stats["paused"] and not expiring:
                 continue                              # 昨日没动静也没风险,别骚扰
             spend_part = f"消耗 {stats['spent']:.0f} 点"
             if stats["refunds"]:
@@ -257,7 +264,11 @@ def _run_daily_digest(now: datetime):
                        + (f"{stats['paused']} 个定时任务已暂停;" if stats["paused"] else "")
                        + f"余额 {stats['balance']:.0f} 点"
                        + (f"(约可再跑 {stats['days_left']} 天)"
-                          if stats["days_left"] is not None else ""))
+                          if stats["days_left"] is not None else "")
+                       + (("" if not expiring else
+                           ";套餐已到期,请尽快续费" if plan_days_left < 0
+                           else f";套餐还有 {plan_days_left} 天到期")))
+            stats["plan_days_left"] = plan_days_left
             # 先落幂等标记再推送:宁可极端情况漏一天,也不给老板发两条
             db.set_setting(f"daily_digest_sent:{tid}", today)
             notify.push(tid, "daily_digest", {**stats, "summary": summary})
@@ -440,7 +451,8 @@ def _claim_due(schedule_id: int, now: float) -> str | None:
 
 
 def _finish_claim(schedule_id: int, token: str, **fields) -> bool:
-    allowed = {"last_run_at", "next_run_at", "last_note", "enabled"}
+    allowed = {"last_run_at", "next_run_at", "last_note", "enabled",
+               "fail_streak"}
     data = {key: value for key, value in fields.items() if key in allowed}
     data.update({"claim_token": None, "claim_until": None, "updated_at": time.time()})
     sets = ",".join(f"{key}=?" for key in data)
@@ -468,6 +480,7 @@ def _tick(engine):
                 last_run_at=now,
                 next_run_at=compute_next(s, now),
                 last_note=f"已按时开工 → 工单 #{job_id}",
+                fail_streak=0,
             )
             log.info("schedule %s fired -> job %s", s["id"], job_id)
         except Exception as e:
@@ -498,11 +511,24 @@ def _tick(engine):
                     s["id"],
                     type(e).__name__,
                 )
+                streak = int(s.get("fail_streak") or 0) + 1
                 _finish_claim(
                     s["id"], claim_token,
                     next_run_at=now + 600,
-                    last_note="开工出错，10分钟后重试",
+                    last_note=f"开工出错,10分钟后重试(已连续失败 {streak} 次)",
+                    fail_streak=streak,
                 )
+                # 静默重试一整天老板毫不知情是最伤的:连续 3 次就告警一次,
+                # 之后每 12 次(约 2 小时)再提醒,直到某次成功清零。
+                if streak == 3 or (streak > 3 and streak % 12 == 0):
+                    try:
+                        from . import notify
+                        notify.push(s.get("tenant_id") or 1, "schedule_failed",
+                                    {"title": s.get("name") or "定时任务",
+                                     "streak": streak})
+                    except Exception:
+                        log.warning(
+                            "schedule fail notify failed id=%s", s["id"])
 
 
 async def _periodic():

@@ -353,6 +353,9 @@ def _initialize_anchor():
         _add_column(_conn, "avatar_job", "billing_points", "REAL")
         _add_column(_conn, "employee_config", "enabled", "INTEGER NOT NULL DEFAULT 1")
         _add_column(_conn, "schedule", "claim_until", "REAL")
+        # 连续非计费失败要累计,静默 10 分钟重试一天 144 次老板却毫不知情
+        _add_column(_conn, "schedule", "fail_streak",
+                    "INTEGER NOT NULL DEFAULT 0")
         _add_column(_conn, "schedule", "claim_token", "TEXT")
         for col in ("model_text", "model_image"):  # v6 迁移:员工级模型路由
             _add_column(_conn, "employee_config", col, "TEXT")
