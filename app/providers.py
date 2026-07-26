@@ -352,59 +352,126 @@ async def _discard_response_body(response) -> None:
         await read()
 
 
+# 流式响应的硬上限。httpx 的 read 超时是"两次读取之间"的间隔,不是总时长:
+# 上游每隔几百毫秒吐一个字节就能让协程无限悬挂,且正文无上限时可被推爆内存。
+MAX_STREAM_CHARS = 2_000_000
+# 可重试的瞬时故障:限流与网关侧 5xx。其余状态码属请求本身有问题,重试无意义。
+RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
+MAX_CHAT_ATTEMPTS = 3
+
+
+def _retry_after_seconds(response, attempt: int) -> float:
+    """优先听上游的 Retry-After,否则指数退避。"""
+    raw = ""
+    try:
+        raw = (response.headers or {}).get("retry-after") or ""
+    except Exception:
+        raw = ""
+    try:
+        wait = float(str(raw).strip())
+        if 0 <= wait <= 60:
+            return wait
+    except (TypeError, ValueError):
+        pass
+    return min(2 ** attempt, 20)
+
+
 async def chat(prompt: str, model: str = DEFAULT_TEXT, timeout: int = 600,
-               progress=None, token: str = None, system_prompt: str = None) -> dict:
+               progress=None, token: str = None, system_prompt: str = None,
+               max_tokens: int = None) -> dict:
     """云雾 chat(流式),返回 {text, cost_usd, tokens}。与 llm.call 同构."""
     model = _api_text_model(model)
     base, key = yunwu_conf()
     if not key:
         raise ProviderError("未配置云雾API key(管理后台→供应商)")
     progress = progress or (lambda *a: None)
+    last_error = None
+    for attempt in range(MAX_CHAT_ATTEMPTS):
+        try:
+            return await _chat_once(
+                prompt=prompt, model=model, base=base, key=key, timeout=timeout,
+                progress=progress, system_prompt=system_prompt,
+                max_tokens=max_tokens, attempt=attempt,
+            )
+        except _RetryableProviderError as exc:
+            last_error = exc
+            if attempt == MAX_CHAT_ATTEMPTS - 1:
+                break
+            progress("retry", f"上游繁忙,{exc.wait:.0f}s 后重试…")
+            await asyncio.sleep(exc.wait)
+    raise ProviderError(str(last_error) if last_error else "云雾模型服务暂时不可用")
+
+
+class _RetryableProviderError(ProviderError):
+    def __init__(self, message: str, wait: float):
+        super().__init__(message)
+        self.wait = wait
+
+
+async def _chat_once(*, prompt, model, base, key, timeout, progress,
+                     system_prompt, max_tokens, attempt) -> dict:
     progress("boot", f"员工已上线({model}),阅读任务简报…")
     chars = 0
     text_parts = []
     usage = {}
     t_last = 0.0
+    body = {"model": model, "stream": True,
+            "stream_options": {"include_usage": True},
+            "messages": _chat_messages(prompt, system_prompt)}
+    if max_tokens:
+        # 不设上限时输出长度全凭网关默认值,被截断的 JSON 又会触发昂贵的整轮重试。
+        body["max_tokens"] = int(max_tokens)
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=30)) as cli:
-            async with cli.stream("POST", f"{base}/v1/chat/completions",
-                                  headers={"Authorization": f"Bearer {key}"},
-                                  json={"model": model, "stream": True,
-                                        "stream_options": {"include_usage": True},
-                                        "messages": _chat_messages(prompt, system_prompt)}) as r:
-                if r.status_code != 200:
-                    # Consume the body so the connection can close cleanly, but
-                    # never reflect it: compatible gateways may echo prompts.
-                    await _discard_response_body(r)
-                    raise ProviderError(
-                        f"云雾模型服务暂时不可用（HTTP {r.status_code}）"
-                    )
-                async for line in r.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    payload = line[5:].strip()
-                    if payload == "[DONE]":
-                        break
-                    try:
-                        ev = json.loads(payload)
-                    except ValueError:
-                        continue
-                    if ev.get("usage"):
-                        usage = ev["usage"]
-                    for ch in ev.get("choices") or []:
-                        d = ch.get("delta") or {}
-                        if d.get("reasoning_content"):
-                            now = time.time()
-                            if now - t_last > 1:
-                                progress("tool", "正在思考推理…")
-                                t_last = now
-                        if d.get("content"):
-                            text_parts.append(d["content"])
-                            chars += len(d["content"])
-                            now = time.time()
-                            if now - t_last > 1:
-                                progress("typing", f"正在撰写产出…已写 {chars} 字")
-                                t_last = now
+        # asyncio.timeout 卡的是整段流式读取的墙钟时间,补上 httpx 逐次读超时的缺口。
+        async with asyncio.timeout(timeout):
+            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=30)) as cli:
+                async with cli.stream("POST", f"{base}/v1/chat/completions",
+                                      headers={"Authorization": f"Bearer {key}"},
+                                      json=body) as r:
+                    if r.status_code != 200:
+                        # Consume the body so the connection can close cleanly, but
+                        # never reflect it: compatible gateways may echo prompts.
+                        await _discard_response_body(r)
+                        message = f"云雾模型服务暂时不可用（HTTP {r.status_code}）"
+                        if r.status_code in RETRYABLE_STATUS:
+                            raise _RetryableProviderError(
+                                message, _retry_after_seconds(r, attempt)
+                            )
+                        raise ProviderError(message)
+                    async for line in r.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        payload = line[5:].strip()
+                        if payload == "[DONE]":
+                            break
+                        try:
+                            ev = json.loads(payload)
+                        except ValueError:
+                            continue
+                        if ev.get("usage"):
+                            usage = ev["usage"]
+                        for ch in ev.get("choices") or []:
+                            d = ch.get("delta") or {}
+                            if d.get("reasoning_content"):
+                                now = time.time()
+                                if now - t_last > 1:
+                                    progress("tool", "正在思考推理…")
+                                    t_last = now
+                            if d.get("content"):
+                                text_parts.append(d["content"])
+                                chars += len(d["content"])
+                                if chars > MAX_STREAM_CHARS:
+                                    raise ProviderError(
+                                        "云雾返回内容超出长度上限，已中断"
+                                    )
+                                now = time.time()
+                                if now - t_last > 1:
+                                    progress("typing", f"正在撰写产出…已写 {chars} 字")
+                                    t_last = now
+    except _RetryableProviderError:
+        raise
+    except (asyncio.TimeoutError, TimeoutError) as exc:
+        raise ProviderError("云雾模型服务响应超时，请稍后重试") from exc
     except httpx.HTTPError as exc:
         raise ProviderError("云雾模型服务连接失败，请稍后重试") from exc
     text = "".join(text_parts)

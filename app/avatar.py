@@ -190,18 +190,65 @@ def _hg_headers():
     return {"X-Api-Key": secureconfig.get_secret("heygen_key")}
 
 
-async def hg_cleanup_photos():
-    """HeyGen 只允许存 3 个照片数字人(photo avatar group),满了就清掉旧组释放槽位.
-    实测有效端点:GET /v2/avatar_group.list?include_public=false 列自己的组,
-    DELETE /v2/photo_avatar/{id}(有look的组)或 /v2/avatar_group/{id}(空组)."""
+HG_PHOTO_REGISTRY = "heygen_photo_registry"
+HG_REGISTRY_MAX = 60
+
+
+def _hg_registry() -> list:
+    return db.jloads(db.get_setting(HG_PHOTO_REGISTRY), []) or []
+
+
+def hg_register_photo(photo_id: str, tenant_id, job_id) -> None:
+    """记下我们上传的照片数字人属于哪个租户的哪个任务。
+
+    HeyGen 的 API key 是平台级的,所有租户共用同一批照片槽位。没有这份归属登记,
+    清理时就分不清哪个组是谁的——那正是此前"清理即删光全平台数字人"的根因。
+    """
+    if not photo_id:
+        return
+    entries = [e for e in _hg_registry() if e.get("id") != photo_id]
+    entries.append({
+        "id": str(photo_id),
+        "tenant_id": tenant_id,
+        "job_id": job_id,
+        "ts": time.time(),
+    })
+    db.set_setting(
+        HG_PHOTO_REGISTRY,
+        json.dumps(entries[-HG_REGISTRY_MAX:], ensure_ascii=False),
+    )
+
+
+def _hg_active_job_ids() -> set:
+    rows = db.q(
+        "SELECT id FROM avatar_job WHERE status IN ('queued','running')"
+    )
+    return {r["id"] for r in rows}
+
+
+async def hg_cleanup_photos() -> int:
+    """释放照片槽位:只删我们登记过、且其任务已结束的旧组。
+
+    绝不碰未登记的组——它们可能属于其他租户正在使用的数字人,或是老板在 HeyGen
+    后台手工创建的形象。没有可安全删除的对象时返回 0,由调用方给出明确提示,
+    而不是靠删别人的东西来腾位置。
+    """
+    registry = _hg_registry()
+    if not registry:
+        log.info("heygen cleanup skipped: no owned photo avatars recorded")
+        return 0
+    active = _hg_active_job_ids()
+    # 任务仍在排队/执行中的照片不能删,否则会打断在途成片。
+    candidates = [e for e in registry if e.get("job_id") not in active]
+    if not candidates:
+        log.info("heygen cleanup skipped: all owned photo avatars are in use")
+        return 0
+    candidates.sort(key=lambda e: e.get("ts") or 0)     # 最旧的先释放
+    removed: set = set()
     try:
         async with httpx.AsyncClient(timeout=60) as cli:
-            r = await cli.get(f"{HEYGEN_API}/v2/avatar_group.list",
-                              params={"include_public": "false"}, headers=_hg_headers())
-            groups = ((r.json().get("data") or {}).get("avatar_group_list")) or []
-            n = 0
-            for g in groups:
-                gid = g.get("id")
+            for entry in candidates:
+                gid = entry.get("id")
                 if not gid:
                     continue
                 for path in (f"{HEYGEN_API}/v2/photo_avatar/{gid}",
@@ -209,18 +256,26 @@ async def hg_cleanup_photos():
                     try:
                         rr = await cli.delete(path, headers=_hg_headers())
                         if rr.status_code == 200 and (rr.json().get("code") == 100):
-                            n += 1
+                            removed.add(gid)
                             break
                     except Exception:
                         pass
-            log.info("heygen cleaned %d/%d old photo avatar groups", n, len(groups))
+                if removed:
+                    break                    # 腾出一个槽位就够本次使用
     except Exception as exc:
-        log.warning(
-            "heygen cleanup failed error_type=%s", type(exc).__name__
+        log.warning("heygen cleanup failed error_type=%s", type(exc).__name__)
+    if removed:
+        db.set_setting(
+            HG_PHOTO_REGISTRY,
+            json.dumps([e for e in _hg_registry() if e.get("id") not in removed],
+                       ensure_ascii=False),
         )
+    log.info("heygen released %d owned photo avatar slot(s)", len(removed))
+    return len(removed)
 
 
-async def hg_upload_talking_photo(photo_path: str, _retry: bool = True) -> str:
+async def hg_upload_talking_photo(photo_path: str, tenant_id=None, job_id=None,
+                                  _retry: bool = True) -> str:
     ext = os.path.splitext(photo_path)[1].lower()
     ctype = "image/png" if ext == ".png" else "image/jpeg"
     with open(photo_path, "rb") as f:
@@ -231,14 +286,20 @@ async def hg_upload_talking_photo(photo_path: str, _retry: bool = True) -> str:
         d = r.json()
         tid = ((d.get("data") or {}).get("talking_photo_id")) or ((d.get("data") or {}).get("id"))
         if tid:
+            hg_register_photo(tid, tenant_id, job_id)
             return tid
         blob = json.dumps(d).lower()
         if "exceeded" in blob or "limit" in blob or "401028" in blob:
-            # 照片槽位满(HeyGen 只允许3个照片数字人)——清旧组重试一次,不是余额问题
-            if _retry:
-                await hg_cleanup_photos()
-                return await hg_upload_talking_photo(photo_path, _retry=False)
-            raise providers.ProviderError("HeyGen 照片槽位已满且清理无效,请到 app.heygen.com 手动删除旧照片数字人")
+            # 照片槽位满(HeyGen 只允许3个照片数字人)——只回收我们自己且已结束任务的组。
+            if _retry and await hg_cleanup_photos():
+                return await hg_upload_talking_photo(
+                    photo_path, tenant_id, job_id, _retry=False
+                )
+            raise providers.ProviderError(
+                "HeyGen 照片槽位已满,且没有可安全回收的旧数字人"
+                "(其余槽位仍被进行中的任务占用)。请稍后重试,"
+                "或到 app.heygen.com 手动删除不再需要的照片数字人"
+            )
         if "credit" in blob or "insufficient" in blob:
             # 真·余额不足才标记耗尽,走可灵兜底
             db.set_setting("heygen_exhausted", "1")
@@ -2227,7 +2288,9 @@ async def run_job(job_id: int, broadcast):
         elif eng == "heygen":
             try:
                 progress("start", "HeyGen 引擎:上传数字人照片…")
-                tp_id = await hg_upload_talking_photo(photo_path)
+                tp_id = await hg_upload_talking_photo(
+                    photo_path, tenant_id=j.get("tenant_id"), job_id=job_id
+                )
                 audio_asset = None
                 if own_audio:
                     progress("start", "上传您的原声录音(成片就是您本人的声音)…")
