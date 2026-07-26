@@ -467,7 +467,7 @@ const routes = {"":dashboard,"new":newBrief,"job":jobView,"profiles":profilesVie
   "delivery":deliveryView,"knowledge":knowledgeView,"schedules":schedulesView,"settings":settingsView,
   "avatar":avatarView,"admin":adminView,"team":teamView,"billing":billingView,"meetings":meetingsView,
   "tasks":tasksView,"company":companyView,"production":productionView,"censor":censorView,
-  "channels":channelsView,"tools":toolsView,"trash":trashView};
+  "channels":channelsView,"tools":toolsView,"trash":trashView,"guide":guideReset};
 function nav(){
   const cur = location.hash.replace("#/","").split("/")[0];
   const inbox = (STATE?.inbox?.length||0)+(STATE?.notifications?.length||0);
@@ -489,6 +489,8 @@ function nav(){
   more.push(["billing","💎 套餐"]);
   if(ME && (ME.role==="owner"||ME.role==="root")) more.push(["team","👥 权限管理"]);
   if(ME && ME.role==="root") more.push(["admin","🛠 后台"]);
+  // 引导卡(开工四步/发布三件套)只对 owner/root 展示,重看入口同样只给他们
+  if(ME && (ME.role==="owner"||ME.role==="root")) more.push(["guide","🧭 重看新手引导"]);
   const link = ([k,l])=>`<a href="#/${k}" class="${cur===k?"on":""}">${l}${k===""&&inbox?`<span class="badge">${inbox}</span>`:""}</a>`;
   const moreOn = more.some(([k])=>k===cur);
   $("#nav").innerHTML = primary.map(link).join("")
@@ -1022,10 +1024,16 @@ function gateRoom(){
 }
 /* ---------- V27 首页聚焦:三大动作卡 + 部门楼层折叠(仅非 root 租户) ---------- */
 function deptOpenKey(key){ return "deptopen_"+((ME&&ME.tenant)||"")+"_"+key; }
-function deptIsOpen(key){ return localStorage.getItem(deptOpenKey(key))==="1"; }
+function deptIsOpen(key){
+  const v = localStorage.getItem(deptOpenKey(key));
+  // 无记录(新租户首访)时默认:内容生产部展开、其他楼层收起;手动开合过则完全尊重记录
+  if(v===null) return key==="content";
+  return v==="1";
+}
 function toggleDept(key){
   const k = deptOpenKey(key);
-  if(localStorage.getItem(k)==="1") localStorage.removeItem(k); else localStorage.setItem(k,"1");
+  // 显式记 "0"/"1":收起也落一笔,避免「内容生产部收起后因无记录又默认展开」
+  localStorage.setItem(k, deptIsOpen(key)?"0":"1");
   render();
 }
 function goExperts(){
@@ -1112,7 +1120,7 @@ async function dashboard(){
   const inboxCard = inbox.length?`<div class="card" style="background:#fff6dc"><h2>📥 等您拍板(${inbox.length})</h2>${inbox.map(jobRow).join("")}</div>`:"";
   const notificationCard = notifications.length?`<div class="card" style="background:#eef6ff">
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><h2 style="margin:0;flex:1">🔔 新进展(${notifications.length})</h2>
-      <button class="btn sm" onclick="notificationReadAll(this)">全部已读</button></div>
+      ${isAdmin()?`<button class="btn sm" onclick="notificationReadAll(this)">全部已读</button>`:""}</div>
     ${notifications.map(n=>`<div class="topic" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <div style="flex:1;min-width:190px"><b>${esc(n.title)}</b>${n.body?`<div class="sub">${esc(n.body)}</div>`:""}
         <div class="sub">${tcFmt(n.created_at)}</div></div>
@@ -1203,15 +1211,24 @@ function trioGo(step){
   if(step==="mp") MP_AUTO = j.id;
   location.hash = "#/delivery/"+j.id;
 }
+/* 「更多」菜单里的「重看新手引导」:不是真页面,清掉两张引导卡的「不再提示」标记后回办公室。
+   借用 routes 机制(菜单项统一是 #/xxx 链接);改 hash 后本次 render 会因 hash 变化自动中止,由 hashchange 重新渲染办公室 */
+function guideReset(){
+  localStorage.removeItem("ob_hide_"+((ME&&ME.tenant)||""));
+  localStorage.removeItem("trio_hide_"+((ME&&ME.tenant)||""));
+  toast("新手引导已恢复,回到办公室即可重看");
+  location.hash = "#/";
+}
 function obCard(){
   if(!ME || !["owner","root"].includes(ME.role)) return "";
   if(localStorage.getItem("ob_hide_"+(ME.tenant||""))) return "";
   const su = STATE.setup||{};
   const steps = [
     {done:su.profile, t:"① 建人设档案", d:"产出像您本人写的", h:"#/profiles"},
-    {done:su.first_job, t:"② 发出第一单", d:"看流水线全程直播", h:"#/new"},
+    {done:su.first_job, t:"② 发出第一单", d:"看流水线全程直播", h:"#/new", pts:`${META?.job_points??18} 点`},
     {done:su.wechat, t:"③ 打通微信", d:"通知/公众号草稿箱", h:"#/channels"},
-    {done:su.clone, t:"④ 克隆您的声音", d:"视频都用您的原声", h:"#/avatar"},
+    // 声音克隆 9 点:META 未下发该价,写死当前值,与摄影棚「开始克隆(9点)」及后端 app/billing.py DEFAULT_PRICES.voice_clone 保持一致
+    {done:su.clone, t:"④ 克隆您的声音", d:"视频都用您的原声", h:"#/avatar", pts:"9 点"},
   ];
   const undone = steps.filter(x=>!x.done).length;
   if(!undone) return "";
@@ -1221,8 +1238,9 @@ function obCard(){
       <span class="sub" style="cursor:pointer;text-decoration:underline" onclick="localStorage.setItem('ob_hide_'+(ME.tenant||''),1);render()">不再提示</span></div>
     <div class="grid3" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr));margin-top:10px">
       ${steps.map(x=>`<a href="${x.h}" class="topic" style="margin:0;display:block;text-decoration:none;${x.done?"opacity:.55":""}">
-        <b>${x.done?"✅":"⬜"} ${x.t}</b><div class="sub" style="margin-top:3px">${x.d}${x.done?"":" →"}</div></a>`).join("")}
-    </div></div>`;
+        <b>${x.done?"✅":"⬜"} ${x.t}</b>${x.pts?` <span class="sub">${esc(x.pts)}</span>`:""}<div class="sub" style="margin-top:3px">${x.d}${x.done?"":" →"}</div></a>`).join("")}
+    </div>
+    <div class="sub" style="margin-top:8px">试用额度有限?②必做,其余可开通后再补,不影响先跑通第一单</div></div>`;
 }
 function jobRow(j){
   const stn = META.stations[j.current_idx];
@@ -1313,7 +1331,7 @@ async function trashPurge(kind,id,btn){
 }
 
 /* ---------- V29:老板全局任务中心 ---------- */
-let TC_DATA = null, TC_STATUS = "open", TC_KIND = "all", TC_QUERY = "", TC_LOADING_MORE = false;
+let TC_DATA = null, TC_DATA_Q = "", TC_STATUS = "open", TC_KIND = "all", TC_QUERY = "", TC_LOADING_MORE = false;
 const TC_KIND_LABEL = {expert:"数字员工任务",content:"内容工单",meeting:"AI会议",avatar:"数字人视频",
   video:"图文成片",tool:"营销工具",publish:"发布任务",wechat:"公众号草稿投递"};
 function tcPill(group){ return group==="done"?"done":group==="failed"?"failed":
@@ -1334,17 +1352,21 @@ async function tasksView(tid){
   }
   TC_LOADING_MORE = false;
   TC_DATA = await api(`/task-center?limit=500&offset=0&q=${encodeURIComponent((TC_QUERY||"").trim())}`);
+  TC_DATA_Q = (TC_QUERY||"").trim();
   if(TC_STATUS==="open" && !(TC_DATA.counts?.open)) TC_STATUS="all";
   taskCenterDraw();
 }
 function tcVisibleItems(){
   if(!TC_DATA) return [];
   const q = TC_QUERY.trim().toLowerCase();
+  // 服务端已按当前关键词全局过滤时,客户端不再二次文本过滤——
+  // 两套口径(服务端搜参数全文/客户端只搜标题)叠加会让命中数与列表互相矛盾
+  const serverFiltered = (TC_DATA_Q||"").toLowerCase()===q;
   return TC_DATA.items.filter(x=>{
     const statusOk = TC_STATUS==="all" || (TC_STATUS==="open"
       ? ["active","waiting"].includes(x.status_group) : x.status_group===TC_STATUS);
     const kindOk = TC_KIND==="all" || x.kind===TC_KIND;
-    const textOk = !q || [x.title,x.assignee,x.source_label,x.kind_label,x.source_detail]
+    const textOk = serverFiltered || !q || [x.title,x.assignee,x.source_label,x.kind_label,x.source_detail]
       .join(" ").toLowerCase().includes(q);
     return statusOk && kindOk && textOk;
   });
@@ -1375,7 +1397,7 @@ function taskCenterDraw(){
     ${tcStatusCard("all","📚","全部",c.all,"#eef3ff")}
   </div>
   <div class="card"><div class="row" style="align-items:end">
-    <div style="flex:2"><label style="margin-top:0">搜任务</label><input id="tc-q" value="${esc(TC_QUERY)}" placeholder="搜任务内容、负责人或来源" oninput="tcSearch(this.value)"></div>
+    <div style="flex:2"><label style="margin-top:0">搜任务</label><input id="tc-q" value="${esc(TC_QUERY)}" placeholder="搜任务主题/标题(全部历史)" oninput="tcSearch(this.value)"></div>
     <div><label style="margin-top:0">任务类型</label><select id="tc-kind" onchange="tcSetKind(this.value)">
       <option value="all">全部类型</option>${kinds.map(k=>`<option value="${k}" ${TC_KIND===k?"selected":""}>${TC_KIND_LABEL[k]} (${d.kind_counts[k]})</option>`).join("")}
     </select></div></div>
@@ -1417,7 +1439,7 @@ function tcSearch(q){
   TC_SEARCH_TIMER=setTimeout(async()=>{
     try{
       const data=await api(`/task-center?limit=500&offset=0&q=${encodeURIComponent(TC_QUERY.trim())}`);
-      if(location.hash.startsWith("#/tasks")&&TC_QUERY===q){ TC_DATA=data; taskCenterDraw(); }
+      if(location.hash.startsWith("#/tasks")&&TC_QUERY===q){ TC_DATA=data; TC_DATA_Q=TC_QUERY.trim(); taskCenterDraw(); }
     }catch(e){ if(e?.name!=="NavigationAbort") console.error(e); }
   },400);
 }
@@ -1478,6 +1500,7 @@ async function taskDetailView(tid){
       <span class="pill ${tcPill(group)}">${esc(statusLabel)}</span></div>
     <div style="font-size:18px;font-weight:900;margin-top:14px">${esc(t.brief?.direction||"未命名任务")}</div>
     <div class="kv"><span>👤 ${esc(t.emp_name||"数字员工")}</span><span>🏢 ${esc(t.dept_name||"")}</span>
+      <span>发起人:${esc(t.created_by_name||"—")}</span>
       <span>🕒 ${tcFmt(t.created_at)}</span>${t.cost_usd?`<span>模型成本 ${rmb(t.cost_usd)}</span>`:""}</div>
     <div class="notice violet" style="margin-top:12px"><b>↳ 生成来源：${esc(t.source?.label||"直接派活")}</b>
       ${t.source?.detail?`<div class="sub" style="margin-top:3px">${esc(t.source.detail)}</div>`:""}</div>
@@ -2455,6 +2478,7 @@ async function jobView(id){
       ${isAdmin()?`<button class="btn bad sm" onclick="deleteJob(${j.id})" title="移入回收站,可恢复">🗑 删除</button>`:""}
     </div>
     <div class="kv"><span>Brief:${esc(j.brief.direction)}</span><span>模式:${esc(MODE_LABEL[j.mode]||j.mode)}</span>
+      <span>发起人:${esc(j.created_by_name||"—")}</span>
       <span>平台:${(j.brief.platforms||[]).map(esc).join("/")}</span>
       ${ME.role==="root"?`<span>成本:${rmb(j.cost_usd)} · ${((j.tokens||0)/1000).toFixed(1)}k tokens</span>`:""}</div>
     <div class="notice ${j.status==="done"?"green":j.status==="failed"?"red":""}" style="margin:12px 0 4px">
@@ -2500,7 +2524,9 @@ function stationPanel(j, idx){
   if(r.status==="stale")
     return `<div class="card">${head}<div class="out sub">上游产出已更新,本工位待自动重算…${stepsLog(idx, r.steps)}</div></div>`;
   const body = OUT_RENDER[s.key] ? OUT_RENDER[s.key](r, j) : `<pre>${esc(JSON.stringify(r.output,null,2))}</pre>`;
-  return `<div class="card">${head}<div class="out">${body}</div>${actionsBar(j,idx,r)}${stepsLog(idx, r.steps)}</div>`;
+  const reviewedBy = r.status==="done"&&r.reviewed_by_name
+    ?`<div class="sub" style="margin-top:8px">✅ 由 ${esc(r.reviewed_by_name)} 拍板</div>`:"";
+  return `<div class="card">${head}<div class="out">${body}</div>${reviewedBy}${actionsBar(j,idx,r)}${stepsLog(idx, r.steps)}</div>`;
 }
 function actionsBar(j, idx, r){
   const s = META.stations[idx];
@@ -4056,9 +4082,10 @@ async function tmTenantToggle(tid,en){
 let BILL_TAB="all";
 function billReasonHtml(reason){
   // 流水项目里的单号变成可点链接:老板终于能从账单跳回"这笔钱买了哪单"
+  // 长别名规则必须先于「工单」执行,否则「数字人工单 #7」会被错链到内容工单 #7
   return esc(reason)
-    .replace(/工单\s?#(\d+)/g,'工单 <a href="#/job/$1" style="text-decoration:underline;font-weight:800">#$1</a>')
     .replace(/(?:数字人工单|成片任务)\s?#(\d+)/g,m=>m.replace(/#(\d+)/,'<a href="#/tasks" style="text-decoration:underline;font-weight:800">#$1</a>'))
+    .replace(/(^|[^人])工单\s?#(\d+)/g,'$1工单 <a href="#/job/$2" style="text-decoration:underline;font-weight:800">#$2</a>')
     .replace(/任务#(\d+)/g,'任务<a href="#/tasks/$1" style="text-decoration:underline;font-weight:800">#$1</a>')
     .replace(/会议#(\d+)/g,'会议<a href="#/meetings" style="text-decoration:underline;font-weight:800">#$1</a>');
 }
@@ -4895,7 +4922,8 @@ async function mxQuickPub(platform, jobId, title, body){
   const images = (d.images||[]).map(im=>im.file).filter(f=>/\.(png|jpe?g)$/i.test(f||""));
   try{
     const r = await api("/matrix/publish",{method:"POST",body:{platform, account:acc.id, title, body, images, job_id:jobId}});
-    toast("🚀 "+r.note);
+    // 「发布渠道」页只有主账号能进;成员指到首页🔔新进展(发布结果会推到那里)
+    toast("🚀 "+(isAdmin()?r.note:"已进发布队列,结果会推到首页「🔔 新进展」提醒"));
   }catch(e){ toast(e.message); }
 }
 async function mxRetry(pid, btn){
@@ -4910,7 +4938,7 @@ async function mxPubVideo(tvId, accId){
   try{
     const r = await api("/matrix/publish",{method:"POST",body:{platform:"douyin", account:accId,
       title:t.params?.title||"", body:"", video:t.video_file}});
-    toast("🚀 "+r.note);
+    toast("🚀 "+(isAdmin()?r.note:"已进发布队列,结果会推到首页「🔔 新进展」提醒"));
   }catch(e){ toast(e.message); }
 }
 async function plAdd(){

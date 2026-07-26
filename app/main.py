@@ -151,7 +151,21 @@ async def _metrics_mw(request: Request, call_next):
     t0 = time.perf_counter()
     status = 500                      # 抛异常未产生响应时按 5xx 计
     try:
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            # 必须在这里拦下:交给 Starlette 的 ServerErrorMiddleware 会在
+            # 发送响应后无条件 re-raise,uvicorn 随即把完整堆栈打进 journal,
+            # 违反「日志只记异常类型」的保密口径。中文文案与 _unhandled_exception 一致。
+            logging.getLogger("main").error(
+                "unhandled error path=%s error_type=%s",
+                request.url.path, type(exc).__name__,
+            )
+            response = JSONResponse(
+                {"detail": "系统开小差了,这一步没做成。请再试一次;"
+                           "反复失败请点右下角 💬 反馈给我们,会有人跟进"},
+                status_code=500,
+            )
         status = response.status_code
         return response
     finally:
@@ -715,14 +729,38 @@ def billing_get():
     agg = db.one("SELECT COALESCE(SUM(CASE WHEN delta>0 THEN delta END),0) recharged, "
                  "COALESCE(-SUM(CASE WHEN delta<0 THEN delta END),0) spent, COUNT(*) n "
                  "FROM billing_log WHERE tenant_id=?", (TEN(),)) or {}
-    # 近30天按动作聚合消耗:只算实际收钱的状态(charged=已扣费在跑,succeeded=已交付),
-    # pending 未扣费、refunded 已退回,都不算老板真正花掉的钱。
-    spend_by_action = db.q(
-        "SELECT action, COUNT(*) n, COALESCE(SUM(points),0) points "
-        "FROM billing_operation WHERE tenant_id=? "
-        "AND status IN ('charged','succeeded') AND created_at>? "
-        "GROUP BY action ORDER BY SUM(points) DESC",
-        (TEN(), time.time() - 30 * 86400))
+    # 近30天按动作聚合消耗:必须从 billing_log 流水算——核心扣点路径
+    # (内容工单/专家任务/会议/成片/工具/定时)走 charge_if_claimed,
+    # 只写流水不写 billing_operation;此前从后者聚合会把大头全部漏掉。
+    # 口径:扣款按 reason 的价目 label 归类,「退回:」流水按 label 冲抵。
+    label_to_action = {
+        (row.get("label") or act): act
+        for act, row in billing.prices().items()
+    }
+    spend_map: dict = {}
+    for flow in db.q(
+            "SELECT delta, reason FROM billing_log "
+            "WHERE tenant_id=? AND created_at>?",
+            (TEN(), time.time() - 30 * 86400)):
+        reason = flow.get("reason") or ""
+        delta = float(flow.get("delta") or 0)
+        is_refund = reason.startswith("退回:")
+        core = reason[3:] if is_refund else reason
+        action = label_to_action.get(core.split(" · ", 1)[0].strip())
+        if not action:
+            continue
+        entry = spend_map.setdefault(
+            action, {"action": action, "n": 0, "points": 0.0})
+        if delta < 0 and not is_refund:
+            entry["n"] += 1
+            entry["points"] += -delta
+        elif delta > 0 and is_refund:
+            entry["n"] -= 1
+            entry["points"] -= delta
+    spend_by_action = sorted(
+        ({**e, "n": max(1, e["n"]), "points": round(e["points"], 1)}
+         for e in spend_map.values() if e["points"] > 0.01),
+        key=lambda e: -e["points"])
     # 按月对账(北京时区自然月,近6个月):老板问"这个月花了多少"要有答案
     monthly = db.q(
         "SELECT strftime('%Y-%m', created_at, 'unixepoch', '+8 hours') AS ym, "
@@ -831,11 +869,23 @@ def records_export(kind: str = "billing"):
         headers={"Content-Disposition": f'attachment; filename="{kind}.xlsx"'})
 
 
+_feedback_ips: dict = {}   # ip -> (当天已提交条数, 日序号);重启即清,轻量防灌
+
+
 @app.post("/api/feedback")
-async def feedback_submit(body: dict):
-    txt = (body.get("text") or "").strip()
+async def feedback_submit(request: Request, body: dict):
+    txt = (body.get("text") or "").strip()[:2000]
     if not txt:
         raise HTTPException(400, "反馈内容不能为空")
+    # 游客也能留资(转化出口),但要挡住无限灌邮箱:每 IP 每天限 10 条
+    client_ip = (request.client.host if request.client else "") or "?"
+    day_no = int(time.time() // 86400)
+    used, marker = _feedback_ips.get(client_ip, (0, day_no))
+    if marker != day_no:
+        used = 0
+    if used >= 10:
+        raise HTTPException(429, "今天反馈次数已达上限,明天再来或直接联系顾问")
+    _feedback_ips[client_ip] = (used + 1, day_no)
     u = auth.current() or {}
     t = db.one("SELECT name FROM tenants WHERE id=?", (u.get("tenant_id", 1),)) or {}
     who = f"{t.get('name','')}·{u.get('username','?')}({u.get('role','')})"
@@ -1874,6 +1924,10 @@ def state(limit: int | None = None, offset: int = 0):
 def notifications_read(body: dict):
     raw_ids = body.get("ids")
     if raw_ids is None:
+        # 通知是租户级共享的:一键全读会替企业主清掉「等拍板/发布失败/该复盘」等待办,
+        # 所以只允许主账号操作;成员对自己看过的单条点已读不受限。
+        if not auth.is_admin():
+            raise HTTPException(403, "一键全读会替企业主清掉待办,请单条已读或让主账号操作")
         changed = db.execute(
             "UPDATE notification SET read_at=?,updated_at=? "
             "WHERE tenant_id=? AND read_at IS NULL",
@@ -2035,6 +2089,8 @@ def _create_charged_content_job(data: dict, note: str) -> int:
         "status": "pending_charge",
         "billing_status": "pending",
         "billing_points": points,
+        # 发起人:副账号开的单老板事后能查到;系统内部路径(如定时任务)无会话则留空
+        "created_by": (auth.current() or {}).get("id"),
     })
     job_id = db.insert("job", job_data)
 
@@ -2090,6 +2146,41 @@ def _job_or_404(job_id: int) -> dict:
     return j
 
 
+def _tenant_username(uid) -> str | None:
+    """按当前租户查用户名做展示;跨租户/已删除账号一律返回 None,不泄露别家用户。"""
+    try:
+        uid = int(uid or 0)
+    except (TypeError, ValueError):
+        return None
+    if uid <= 0:
+        return None
+    row = db.one(
+        "SELECT username FROM users WHERE id=? AND tenant_id=?",
+        (uid, TEN()),
+    )
+    return row["username"] if row else None
+
+
+def _notify_member_review(job: dict, idx: int, action) -> None:
+    """member 代老板拍板(通过/打回)后推送 member_reviewed,老板不再毫不知情。
+
+    放在 HTTP 层而非 engine:审批事务已提交、操作者会话上下文确定,
+    且"按角色决定要不要惊动老板"属于账号策略,不属于流水线状态机。
+    """
+    u = auth.current() or {}
+    if u.get("role") != "member" or action not in ("approve", "edit", "reject"):
+        return
+    station = registry.BY_IDX.get(idx) or {}
+    from . import notify
+    notify.push(int(job.get("tenant_id") or TEN()), "member_reviewed", {
+        "job_id": int(job["id"]),
+        "user": u.get("username") or "",
+        "station": station.get("name") or f"{idx + 1}",
+        "approved": action != "reject",
+        "title": engine._job_title(job["id"]),
+    })
+
+
 def _public_failure_for_view(status, value, internal: bool):
     """Hide legacy/raw diagnostics while preserving human review comments.
 
@@ -2133,6 +2224,8 @@ def _public_publish_failure(status, value):
 def _serialize_station_run(row: dict, internal: bool) -> dict:
     item = dict(row)
     item["output"] = db.jloads(item.pop("output_json", None), {})
+    # 拍板人用户名不是内部资料:member 也应看到某工位是谁批的(限同租户)。
+    item["reviewed_by_name"] = _tenant_username(item.get("reviewed_by"))
     if internal:
         item["steps"] = _steps_for_view(
             item.pop("steps_json", None),
@@ -2157,6 +2250,7 @@ def _serialize_station_run(row: dict, internal: bool) -> dict:
             "created_at",
             "updated_at",
             "output",
+            "reviewed_by_name",
         )
     }
     public["review_comment"] = _public_failure_for_view(
@@ -2208,6 +2302,8 @@ def job_detail(job_id: int):
     j["brief"] = db.jloads(j.pop("brief_json"))
     j["gate"] = db.jloads(j.pop("gate_json"), None)
     j["title"] = engine._job_title(job_id)
+    # 发起人:副账号开的单,老板在详情页一眼可见;查不到(历史单/跨租户)为 None
+    j["created_by_name"] = _tenant_username(j.get("created_by"))
     runs = {}
     hist = {}
     for r in db.q("SELECT * FROM station_run WHERE job_id=? ORDER BY station_idx, version", (job_id,)):
@@ -2244,6 +2340,8 @@ def station_action(job_id: int, idx: int, body: dict):
         engine.user_action(job_id, idx, body.get("action"), body.get("payload"))
     except ValueError as e:
         raise HTTPException(400, str(e))
+    # 审批已成功提交;若是副账号代拍板,同步告知老板(站内必达,配企微再外推)
+    _notify_member_review(job, idx, body.get("action"))
     return {"ok": True}
 
 
@@ -2444,6 +2542,8 @@ def _create_charged_expert_task(task_data: dict, note: str = "") -> int:
         "status": "pending_charge",
         "billing_status": "pending",
         "billing_points": points,
+        # 发起人:记录是哪个账号派的活;无会话的内部路径留空
+        "created_by": (auth.current() or {}).get("id"),
     })
 
     def claim(connection):
@@ -2945,6 +3045,8 @@ def task_get(tid: int):
     e = departments.get(t["emp_idx"]) or registry.BY_IDX.get(t["emp_idx"]) or {}
     t["emp_name"] = e.get("name", "")
     t["dept_name"] = e.get("dept_name") or e.get("dept") or "内容生产部"
+    # 发起人:是哪个账号派的活;查不到(历史任务/跨租户)为 None
+    t["created_by_name"] = _tenant_username(t.get("created_by"))
     retries = int(t.get("retry_count") or 0)
     t["free_retries_remaining"] = max(
         0, taskrunner.MAX_FREE_RETRIES - retries
@@ -3661,6 +3763,13 @@ def trash_purge(kind: str, rid: int):
             " AND status NOT IN (%s)" % ",".join("?" * len(active))
         )
         args.extend(active)
+    # 工单的成片(tv_job)也是交付物:先记下文件位置,行与文件一并销毁,
+    # 否则「连同交付文件一并销毁」的承诺打折(对抗性审查发现)。
+    tv_files = []
+    if kind == "job":
+        tv_files = [r.get("video_file") for r in db.q(
+            "SELECT video_file FROM tv_job WHERE job_id=? AND tenant_id=? "
+            "AND video_file IS NOT NULL", (rid, TEN()))]
     with db.atomic() as connection:
         changed = connection.execute(
             f"DELETE FROM {table} WHERE id=? AND tenant_id=? "
@@ -3673,7 +3782,17 @@ def trash_purge(kind: str, rid: int):
             # 工单的工位产出(含正文/图片引用)一并硬删,不能留孤儿行
             connection.execute(
                 "DELETE FROM station_run WHERE job_id=?", (rid,))
+            connection.execute(
+                "DELETE FROM tv_job WHERE job_id=? AND tenant_id=?",
+                (rid, TEN()))
     files_removed, files_failed = _purge_local_files(kind, rid)
+    for clip_url in tv_files:
+        try:
+            clip = assetfiles.resolve_tenant_asset(clip_url, TEN())
+            os.remove(clip)
+            files_removed += 1
+        except (assetfiles.AssetAccessError, OSError):
+            files_failed += 1
     return {
         "ok": True,
         "purged": True,
@@ -3935,6 +4054,8 @@ def schedule_update(sid: int, body: dict):
         # 否则卡片上新旧状态互相打架,老板分不清恢复没恢复。
         if data["enabled"] and str(s.get("last_note") or "").startswith("已暂停"):
             data["last_note"] = "已重新启用,下次到点自动开工"
+        if data["enabled"]:
+            data["fail_streak"] = 0   # 复通后连续失败告警从头计数
     if data:
         merged = _validated_schedule({**s, **data})
         for k in ("kind", "at_time", "weekday", "every_hours"):

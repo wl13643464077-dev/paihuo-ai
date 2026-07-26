@@ -737,6 +737,11 @@ def _initialize_anchor():
             "CREATE INDEX IF NOT EXISTS idx_notification_tenant_unread "
             "ON notification(tenant_id, read_at, id DESC)"
         )
+        # 副账号协作可见:工单/任务记录发起人,工位记录拍板人。老板事后可追溯
+        # "这单是哪个副账号开的、这一站是谁批的";历史数据没有操作人,留空即可。
+        _add_column(_conn, "job", "created_by", "INTEGER")
+        _add_column(_conn, "task", "created_by", "INTEGER")
+        _add_column(_conn, "station_run", "reviewed_by", "INTEGER")
         # v47:会话签名密钥只能由 root-owned systemd EnvironmentFile 注入。
         # 清除旧版写入业务库的全局密钥，避免只读数据库泄漏演变为会话伪造。
         _conn.execute(

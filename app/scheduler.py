@@ -251,7 +251,10 @@ def _run_daily_digest(now: datetime):
             if t.get("plan_expires"):
                 plan_days_left = int(
                     (float(t["plan_expires"]) - now.timestamp()) // 86400)
-            expiring = plan_days_left is not None and plan_days_left <= 7
+            # 只在临期窗口 [-3,7] 内叫醒:流失租户过期几百天还每天推,
+            # 就成了永动骚扰,与"没动静别打扰"的原则矛盾。
+            expiring = (plan_days_left is not None
+                        and -3 <= plan_days_left <= 7)
             had_activity = (stats["jobs_done"] or stats["tasks_done"]
                             or stats["spent"] > 0 or stats["refunds"])
             if not had_activity and not stats["paused"] and not expiring:
@@ -490,6 +493,7 @@ def _tick(engine):
                     s["id"], claim_token,
                     enabled=0,
                     last_note=f"已暂停:{str(e)[:60]}",
+                    fail_streak=0,   # 暂停不是开工失败;复通后告警计数从头算
                 )
                 # 自动日更是老板买这套系统的核心理由;静默停更等于让他两周后
                 # 才发现断更。站内必达,配了企微立刻推手机。

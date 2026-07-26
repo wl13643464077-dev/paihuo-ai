@@ -88,6 +88,12 @@ def build_msg(kind: str, payload: dict) -> str:
         lines.append(f"[看账单明细]({base}/#/billing)"
                      + (f" · [去处理定时任务]({base}/#/schedules)" if p.get("paused") else ""))
         return "\n".join(lines)
+    if kind == "member_reviewed":
+        verdict = "通过" if p.get("approved") else "打回"
+        return (f"**👤 派活 · 成员代拍板**\n"
+                f"👤 {p.get('user', '')} 已代拍板 工单#{p.get('job_id')} "
+                f"工位{p.get('station', '')}:{verdict}\n"
+                f"[看工单]({base}/#/job/{p.get('job_id')})")
     if kind == "report":
         return (f"**📰 派活 · {p.get('report_name', '报告出炉')}**\n{(p.get('summary') or '')[:180]}\n"
                 f"[查看]({base}/{p.get('link') or '#/knowledge'})")
@@ -119,6 +125,12 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
         "daily_digest": f"昨日经营简报({p.get('date', '')})",
         "schedule_failed": "定时任务连续失败,可能断更",
         "schedule_paused": "定时任务因点数不足已暂停,内容会断更",
+        # 副账号代老板拍板:标题直接说清谁、哪单、哪站、通过还是打回
+        "member_reviewed": (
+            f"👤 {p.get('user', '')} 已代拍板 工单#{p.get('job_id')} "
+            f"工位{p.get('station', '')}:"
+            f"{'通过' if p.get('approved') else '打回'}"
+        ),
     }
     title = str(labels.get(kind) or "派活有新进展")[:80]
     body = str(
@@ -127,7 +139,7 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
         or p.get("why")
         or ""
     ).strip()[:240]
-    if kind in {"awaiting", "gate"} and p.get("job_id"):
+    if kind in {"awaiting", "gate", "member_reviewed"} and p.get("job_id"):
         link = f"#/job/{int(p['job_id'])}"
     elif kind == "done" and p.get("job_id"):
         link = f"#/delivery/{int(p['job_id'])}"

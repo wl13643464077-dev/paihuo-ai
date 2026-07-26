@@ -1,15 +1,18 @@
-"""账单页「近30天花在哪」聚合:租户隔离、状态过滤、30天窗口."""
+"""账单页「近30天花在哪」聚合:必须以 billing_log 流水为准。
+
+对抗性审查发现:核心扣点路径(内容工单/专家任务/会议/成片/工具/定时)
+走 charge_if_claimed,只写流水不写 billing_operation;从后者聚合会把
+老板最大头的花销全部漏掉。本组测试用【真实扣款路径】产生数据自证。
+"""
 import os
 import tempfile
 import time
 import unittest
 
-from app import auth, db
+from app import auth, billing, db
 
 
 class BillingSpendByActionCase(unittest.TestCase):
-    """/api/billing 的 spend_by_action 只统计本租户、近30天、实际收钱的操作."""
-
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.old_db_path = db.DB_PATH
@@ -19,8 +22,8 @@ class BillingSpendByActionCase(unittest.TestCase):
         db.DB_PATH = os.path.join(self.tmp.name, "spend.db")
         db.conn()
         db.insert("tenants", {"id": 1, "name": "平台", "balance": 0})
-        db.insert("tenants", {"id": 2, "name": "企业甲", "balance": 100})
-        db.insert("tenants", {"id": 3, "name": "企业乙", "balance": 100})
+        db.insert("tenants", {"id": 2, "name": "企业甲", "balance": 500})
+        db.insert("tenants", {"id": 3, "name": "企业乙", "balance": 500})
         auth.set_current({
             "id": 20,
             "tenant_id": 2,
@@ -37,70 +40,53 @@ class BillingSpendByActionCase(unittest.TestCase):
         db.DB_PATH = self.old_db_path
         self.tmp.cleanup()
 
-    def _op(self, key, tenant_id, action, points, status, age_seconds=0):
-        now = time.time()
-        db.insert("billing_operation", {
-            "op_key": key,
-            "tenant_id": tenant_id,
-            "action": action,
-            "units": 1,
-            "points": points,
-            "status": status,
-            "created_at": now - age_seconds,
-            "updated_at": now - age_seconds,
-        })
+    def _charge(self, tid, action, note=""):
+        self.assertTrue(billing.charge_if_claimed(
+            action, tid, lambda c: True, note=note))
 
-    def test_aggregates_only_paid_statuses_of_own_tenant_within_30_days(self):
-        # 本租户,实际收钱:charged(已扣费在跑)与 succeeded(已交付)都要计入
-        self._op("a1", 2, "content_job", 18, "succeeded")
-        self._op("a2", 2, "content_job", 18, "succeeded")
-        self._op("a3", 2, "learn", 3, "charged")
-        # 本租户,但未成交/已退回:pending 未扣费、refunded 已退款,均不计
-        self._op("a4", 2, "avatar_video", 12, "refunded")
-        self._op("a5", 2, "avatar_video", 12, "pending")
-        # 本租户,超出30天窗口:不计
-        self._op("a6", 2, "content_job", 18, "succeeded",
-                 age_seconds=31 * 86400)
-        # 其他租户:绝不能串进来
-        self._op("b1", 3, "voice_clone", 9, "succeeded")
-        self._op("b2", 3, "content_job", 18, "charged")
+    def test_charge_if_claimed_spend_is_visible_and_refund_offsets(self):
+        # 真实主路径:charge_if_claimed 两笔内容工单 + 一笔专家任务
+        self._charge(2, "content_job", note="工单#5·门店开业")
+        self._charge(2, "content_job", note="工单#6·周年庆")
+        self._charge(2, "expert_task", note="任务#9·菜单定价")
+        # 其中一单失败退回:必须按 label 冲抵
+        self.assertTrue(billing.refund_if_claimed(
+            "content_job", 2, lambda c: True, note="工单#6·周年庆"))
+        # 其他租户的消耗绝不能串进来
+        self._charge(3, "content_job", note="别家的单")
 
         from app import main
-        resp = main.billing_get()
-        spend = resp["spend_by_action"]
+        spend = main.billing_get()["spend_by_action"]
+        as_map = {r["action"]: r for r in spend}
+        self.assertIn("content_job", as_map, "主路径消耗必须出现在聚合里")
+        self.assertEqual(18, as_map["content_job"]["points"],
+                         "两笔 36 点冲抵一笔退款 18 点后净 18")
+        self.assertEqual(1, as_map["content_job"]["n"])
+        self.assertEqual(1, as_map["expert_task"]["points"])
+        # 排序按净消耗从高到低
+        self.assertEqual("content_job", spend[0]["action"])
 
-        # 只剩本租户近30天已收钱的两类动作,且按消耗从高到低
-        self.assertEqual(
-            [{"action": "content_job", "n": 2, "points": 36},
-             {"action": "learn", "n": 1, "points": 3}],
-            [{"action": r["action"], "n": r["n"], "points": r["points"]}
-             for r in spend])
-        # 退款/待扣费动作与他租户动作都不应出现
-        actions = {r["action"] for r in spend}
-        self.assertNotIn("avatar_video", actions)
-        self.assertNotIn("voice_clone", actions)
-
-    def test_empty_when_no_paid_operations(self):
-        # 只有退款与 pending 记录时,聚合应为空(前端据此不渲染整张卡)
-        self._op("c1", 2, "learn", 3, "refunded")
-        self._op("c2", 2, "learn", 3, "pending")
-
+    def test_fully_refunded_action_disappears(self):
+        self._charge(2, "expert_task")
+        self.assertTrue(billing.refund_if_claimed(
+            "expert_task", 2, lambda c: True))
         from app import main
-        resp = main.billing_get()
-        self.assertEqual([], resp["spend_by_action"])
+        self.assertEqual([], main.billing_get()["spend_by_action"])
 
     def test_window_boundary_keeps_recent_and_drops_old(self):
-        # 29 天前的计入,31 天前的不计
-        self._op("d1", 2, "learn", 3, "succeeded", age_seconds=29 * 86400)
-        self._op("d2", 2, "learn", 3, "succeeded", age_seconds=31 * 86400)
-
+        now = time.time()
+        label = billing.prices()["expert_task"]["label"]
+        for age, note in ((29 * 86400, "计入"), (31 * 86400, "剔除")):
+            db.insert("billing_log", {
+                "tenant_id": 2, "delta": -1, "balance": 499,
+                "reason": f"{label} · {note}",
+                "created_at": now - age, "updated_at": now - age,
+            })
         from app import main
-        resp = main.billing_get()
-        spend = resp["spend_by_action"]
+        spend = main.billing_get()["spend_by_action"]
         self.assertEqual(1, len(spend))
-        self.assertEqual("learn", spend[0]["action"])
-        self.assertEqual(1, spend[0]["n"])
-        self.assertEqual(3, spend[0]["points"])
+        self.assertEqual("expert_task", spend[0]["action"])
+        self.assertEqual(1, spend[0]["points"])
 
 
 if __name__ == "__main__":

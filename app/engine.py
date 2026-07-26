@@ -11,7 +11,7 @@ import json
 import logging
 import time
 
-from . import billing, db, gate, llm, providers
+from . import auth, billing, db, gate, llm, providers
 from .skills import registry
 
 log = logging.getLogger("engine")
@@ -1143,6 +1143,9 @@ class Engine:
         payload = payload or {}
         if action not in ("approve", "edit", "reject", "rerun"):
             raise ValueError(f"未知动作 {action}")
+        # 拍板人:HTTP 线程池会拷贝请求 contextvars,这里能拿到操作者;
+        # 系统内部无会话路径(恢复/调度)不走本方法,拿不到时留空即可。
+        reviewer_id = (auth.current() or {}).get("id")
 
         with db.atomic() as c:
             job_row = c.execute(
@@ -1180,11 +1183,12 @@ class Engine:
                     out["selected_title"] = payload["selected_title"]
                 changed = c.execute(
                     "UPDATE station_run SET status='done',output_json=?,"
-                    "review_comment=?,updated_at=? "
+                    "review_comment=?,reviewed_by=?,updated_at=? "
                     "WHERE id=? AND status='awaiting_review'",
                     (
                         json.dumps(out, ensure_ascii=False),
                         payload.get("comment"),
+                        reviewer_id,
                         now,
                         run["id"],
                     ),
@@ -1209,8 +1213,9 @@ class Engine:
                     raise ValueError("打回必须填写修改意见")
                 changed = c.execute(
                     "UPDATE station_run SET status='rejected',review_comment=?,"
-                    "updated_at=? WHERE id=? AND status='awaiting_review'",
-                    (comment, now, run["id"]),
+                    "reviewed_by=?,updated_at=? "
+                    "WHERE id=? AND status='awaiting_review'",
+                    (comment, reviewer_id, now, run["id"]),
                 )
                 if changed.rowcount != 1:
                     raise ValueError("这个工位的状态刚刚更新了(可能已自动推进或被他人操作),刷新页面看最新状态")
@@ -1223,8 +1228,9 @@ class Engine:
                 comment = (payload.get("comment") or "").strip()
                 changed = c.execute(
                     "UPDATE station_run SET status='rejected',review_comment=?,"
-                    "updated_at=? WHERE id=? AND status IN ('done','awaiting_review')",
-                    (comment or "老板要求重跑", now, run["id"]),
+                    "reviewed_by=?,updated_at=? "
+                    "WHERE id=? AND status IN ('done','awaiting_review')",
+                    (comment or "老板要求重跑", reviewer_id, now, run["id"]),
                 )
                 if changed.rowcount != 1:
                     raise ValueError("这个工位的状态刚刚更新了(可能已自动推进或被他人操作),刷新页面看最新状态")

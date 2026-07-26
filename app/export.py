@@ -94,9 +94,12 @@ def md_to_docx(md: str, title: str = "交付物") -> bytes:
     return buf.getvalue()
 
 
-def _xlsx_safe(value) -> str:
+def _xlsx_safe(value):
     """防 CSV/Excel 公式注入:客资、线索等表格含用户可控文本,以 = + - @ 开头的单元格
-    会被 Excel 当公式执行(如 =HYPERLINK(...) 外带数据)。加前导单引号强制文本。"""
+    会被 Excel 当公式执行(如 =HYPERLINK(...) 外带数据)。加前导单引号强制文本。
+    数字不可能是公式,原样写入——否则 -18 变成 '-18 文本,金额列无法求和对账。"""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
     text = str(value if value is not None else "")
     if text[:1] in ("=", "+", "-", "@", "\t", "\r"):
         return "'" + text
