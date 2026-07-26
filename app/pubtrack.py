@@ -199,7 +199,7 @@ async def _auto_retro_result(tid: int, row: dict, day: int) -> str:
             "censor_retro",
             tid,
             claim_start,
-            note=f"自动复盘T+{day}",
+            note=f"自动复盘T+{day}·《{(row.get('title') or '')[:14]}》",
             op_key=op_key,
         )
     except billing.InsufficientPoints:

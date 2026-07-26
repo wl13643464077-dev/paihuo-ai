@@ -157,6 +157,19 @@ class ReturningBossContracts(unittest.TestCase):
                 main.records_export(kind)
             self.assertEqual(403, denied.exception.status_code, kind)
 
+    def test_billing_notes_carry_record_ids_and_frontend_linkifies(self):
+        src = _read("app/main.py")
+        for anchor in ('note=f"工单#{job_id}·{note}"',
+                       'note=f"任务#{task_id}·{note}"',
+                       'note=f"会议#{meeting_id}·圆桌会议"',
+                       'f"工具单#{jid}'):
+            self.assertIn(anchor, src, f"扣费流水必须带单号:{anchor}")
+        self.assertIn("自动复盘T+{day}·《", _read("app/pubtrack.py"),
+                      "复盘扣点必须写明是哪篇文章")
+        js = _read("static/app.js")
+        self.assertIn("function billReasonHtml", js)
+        self.assertIn('#/job/$1', js, "工单单号必须链接到工单页")
+
     def test_daily_digest_sent_for_expiring_plan_without_activity(self):
         db.execute("UPDATE tenants SET plan='标准版',plan_expires=? WHERE id=2",
                    (time.time() + 3 * 86400,))

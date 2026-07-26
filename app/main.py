@@ -2048,7 +2048,8 @@ def _create_charged_content_job(data: dict, note: str) -> int:
 
     try:
         charged = billing.charge_if_claimed(
-            "content_job", tid, claim, note=note, points=points)
+            "content_job", tid, claim,
+            note=f"工单#{job_id}·{note}"[:160], points=points)
     except billing.InsufficientPoints as e:
         db.q("DELETE FROM job WHERE id=? AND billing_status='pending'", (job_id,))
         raise HTTPException(402, str(e)) from e
@@ -2455,7 +2456,8 @@ def _create_charged_expert_task(task_data: dict, note: str = "") -> int:
 
     try:
         charged = billing.charge_if_claimed(
-            "expert_task", tid, claim, note=note, points=points)
+            "expert_task", tid, claim,
+            note=f"任务#{task_id}·{note}"[:160], points=points)
     except Exception:
         db.q(
             "DELETE FROM task WHERE id=? AND status='pending_charge' "
@@ -5023,7 +5025,7 @@ def _create_charged_meeting(data: dict, member_count: int) -> int:
 
     try:
         charged = billing.charge_if_claimed(
-            "expert_task", tid, claim, note="圆桌会议",
+            "expert_task", tid, claim, note=f"会议#{meeting_id}·圆桌会议",
             n=member_count, points=points)
     except Exception:
         db.q(
@@ -8203,7 +8205,9 @@ def _tool_enqueue(kind: str, params: dict, note: str = "") -> dict:
 
     try:
         charged = billing.charge_if_claimed(
-            action, tid, claim, note=note, points=points
+            action, tid, claim,
+            note=(f"工具单#{jid}·{note}" if note else f"工具单#{jid}")[:160],
+            points=points
         )
     except billing.InsufficientPoints as exc:
         db.q(

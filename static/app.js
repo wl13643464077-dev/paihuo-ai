@@ -4039,6 +4039,14 @@ async function tmTenantToggle(tid,en){
 
 /* ---------- V8:套餐与点数 ---------- */
 let BILL_TAB="all";
+function billReasonHtml(reason){
+  // 流水项目里的单号变成可点链接:老板终于能从账单跳回"这笔钱买了哪单"
+  return esc(reason)
+    .replace(/工单\s?#(\d+)/g,'工单 <a href="#/job/$1" style="text-decoration:underline;font-weight:800">#$1</a>')
+    .replace(/(?:数字人工单|成片任务)\s?#(\d+)/g,m=>m.replace(/#(\d+)/,'<a href="#/tasks" style="text-decoration:underline;font-weight:800">#$1</a>'))
+    .replace(/任务#(\d+)/g,'任务<a href="#/tasks/$1" style="text-decoration:underline;font-weight:800">#$1</a>')
+    .replace(/会议#(\d+)/g,'会议<a href="#/meetings" style="text-decoration:underline;font-weight:800">#$1</a>');
+}
 async function billingView(){
   trackFunnelSessionOnce("pricing_view","billing");
   const b = await api("/billing");
@@ -4094,7 +4102,7 @@ async function billingView(){
       ${shown.map(l=>`<tr>
         <td class="sub" style="white-space:nowrap">${tcFmt(l.created_at)}</td>
         <td>${l.delta>0?'<span class="tag" style="background:#a7ecc9">充值</span>':'<span class="tag" style="background:#ffd7d9">消耗</span>'}</td>
-        <td>${esc(l.reason||"")}</td>
+        <td>${billReasonHtml(l.reason||"")}</td>
         <td><b style="color:${l.delta<0?"#e5484d":"#2f9e6e"}">${l.delta>0?"+":""}${l.delta}</b></td>
         <td class="sub">${l.balance.toFixed(0)}</td></tr>`).join("")}</tbody></table></div>`
       :`<div class="empty" style="padding:26px">${b.is_platform?"平台自用不产生账单":BILL_TAB==="in"?"还没有充值记录":BILL_TAB==="out"?"还没有消耗记录":"暂无积分变动记录"}</div>`}</div>
