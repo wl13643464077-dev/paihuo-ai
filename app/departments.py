@@ -108,6 +108,30 @@ def get(idx: int):
     return specialists().get(idx)
 
 
+# 按步骤内容给能力项配图标。内容部的能力矩阵每项都有专属 emoji,专家这边此前
+# 一律是 🔹,一屏几十项时完全分不出哪步是算账、哪步是查合规。
+_CAP_EMOJI = (
+    ("合规|法规|资质|许可|证照|监管|官方来源", "⚖️"),
+    ("校验|口径|核对|复核|验算|盘点", "🔍"),
+    ("计算|测算|模型|P&L|现金流|保本|敏感性|财务", "🧮"),
+    ("预测|需求|趋势|情景", "📈"),
+    ("库存|补货|订货|效期|周转|损耗", "📦"),
+    ("排班|人力|编制|培训|考核|绩效", "👥"),
+    ("客户|会员|复购|留存|获客|渠道|营销|评价", "🎯"),
+    ("供应商|采购|比价|账期|谈判", "🤝"),
+    ("巡检|质量|事故|投诉|风险|应急|安全", "🛡️"),
+    ("定价|价格|毛利|成本|折扣", "💰"),
+    ("方案|设计|规划|建立|制定|输出|清单", "📋"),
+)
+
+
+def _cap_emoji(text: str) -> str:
+    for pattern, emoji in _CAP_EMOJI:
+        if re.search(pattern, text, re.I):
+            return emoji
+    return "🔹"
+
+
 def capabilities_for(idx: int, caps_off: list) -> list:
     """专家的能力项 = 其工作流步骤(可开关)."""
     e = get(idx)
@@ -125,7 +149,7 @@ def capabilities_for(idx: int, caps_off: list) -> list:
         if 2 <= len(head) <= 24 and head not in seen:
             name = head
         seen.add(name)
-        caps.append({"name": name, "emoji": "🔹", "desc": s,
+        caps.append({"name": name, "emoji": _cap_emoji(str(s)), "desc": s,
                      "enabled": name not in off})
     return caps
 
