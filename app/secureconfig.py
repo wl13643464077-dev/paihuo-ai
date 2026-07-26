@@ -32,6 +32,15 @@ SECRET_SETTING_KEYS = (
 )
 _SECRET_SETTING_SET = frozenset(SECRET_SETTING_KEYS)
 
+# 部分凭据不是独立的 app_setting 行,而是存在按租户切分的 JSON 里
+# (公众号 AppSecret 在 wechat_mp:{tid}、平台登录态 Cookie 在 matrix_accounts:{tid})。
+# 它们同样不能明文落库,用与上面一致的密钥和绑定语义做字段级加密。
+SECRET_FIELD_DOMAINS = (
+    "wechat_mp_secret",
+    "matrix_cookie",
+)
+_SECRET_FIELD_SET = frozenset(SECRET_FIELD_DOMAINS)
+
 
 class SecureConfigError(RuntimeError):
     """A production secret is missing, weak, corrupt, or bound to another key."""
@@ -89,6 +98,48 @@ def _decrypt(name: str, stored: str, cipher: Fernet) -> str:
         ValueError,
     ) as exc:
         raise SecureConfigError("encrypted configuration is invalid") from exc
+
+
+def is_encrypted(stored) -> bool:
+    return str(stored or "").startswith(ENCRYPTED_PREFIX)
+
+
+def encrypt_field(domain: str, value: str | None) -> str:
+    """加密嵌在 JSON 里的凭据字段;与 set_secret 同密钥、同绑定语义。
+
+    没有配置包装密钥时(仅本地开发,生产由 REQUIRE_CONFIG_KEY=1 兜住)原样返回,
+    与 set_secret 的降级行为保持一致。
+    """
+    if domain not in _SECRET_FIELD_SET:
+        raise ValueError("unsupported secret field domain")
+    normalized = str(value or "").strip()
+    if not normalized:
+        return ""
+    if len(normalized) > MAX_SECRET_CHARS:
+        raise ValueError("secret field is too long")
+    if normalized.startswith(ENCRYPTED_PREFIX):
+        return normalized          # 已是密文,避免重复保存时二次加密
+    cipher = _configured_fernet()
+    if cipher is None:
+        return normalized
+    return _encrypt(domain, normalized, cipher)
+
+
+def decrypt_field(domain: str, stored: str | None) -> str:
+    """读取嵌在 JSON 里的凭据字段;兼容升级前写入的明文历史值。"""
+    if domain not in _SECRET_FIELD_SET:
+        raise ValueError("unsupported secret field domain")
+    text = str(stored or "")
+    if not text:
+        return ""
+    if not text.startswith(ENCRYPTED_PREFIX):
+        # 升级前的明文历史值:保持可用,下一次保存时会被自动加密。
+        _configured_fernet()       # 生产缺密钥时仍然 fail-closed
+        return text
+    cipher = _configured_fernet()
+    if cipher is None:
+        raise SecureConfigError("configuration key is required for encrypted settings")
+    return _decrypt(domain, text, cipher)
 
 
 def set_secret(name: str, value: str | None) -> None:

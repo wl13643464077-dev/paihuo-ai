@@ -812,7 +812,9 @@ async def feishu_sync(body: dict):
 def tenant_subscribe(tid: int, body: dict):
     _need_root()
     try:
-        return billing.subscribe(tid, body.get("plan"), body.get("period"))
+        # 前端可传 order_id 做防重:同一单号重复提交只成交一次,不会二次发点。
+        return billing.subscribe(tid, body.get("plan"), body.get("period"),
+                                 op_key=(body.get("order_id") or "").strip() or None)
     except ValueError as e:
         raise HTTPException(400, str(e))
 

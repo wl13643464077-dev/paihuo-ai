@@ -8,6 +8,7 @@
 import json
 import logging
 import os
+import re
 
 from . import providers
 
@@ -114,11 +115,16 @@ def capabilities_for(idx: int, caps_off: list) -> list:
         return []
     off = set(caps_off or [])
     caps = []
+    seen: set = set()
     for i, s in enumerate(e.get("steps") or []):
+        # 步骤是完整句子,取首个分句当能力名。分号也是常见的首句边界,
+        # 只切逗号/冒号会让长步骤全部退化成"第N步",老板看不出这步在干嘛。
         name = f"第{i + 1}步"
-        head = s.split(",")[0].split("，")[0].split(":")[0].split("：")[0]
-        if 2 <= len(head) <= 14:
+        head = re.split(r"[,，:：;；。]", str(s or "").strip(), maxsplit=1)[0].strip()
+        head = head.replace("**", "").strip()
+        if 2 <= len(head) <= 24 and head not in seen:
             name = head
+        seen.add(name)
         caps.append({"name": name, "emoji": "🔹", "desc": s,
                      "enabled": name not in off})
     return caps

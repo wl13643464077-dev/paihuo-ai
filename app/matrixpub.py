@@ -18,7 +18,7 @@ import uuid
 
 import httpx
 
-from . import db, notify, pubtrack
+from . import db, notify, pubtrack, secureconfig
 
 log = logging.getLogger("matrixpub")
 _PUB_SEM = None
@@ -42,12 +42,36 @@ PLATFORMS = {
 
 
 # ---------------- 账号管理 ----------------
+COOKIE_FIELD = "matrix_cookie"
+
+
 def accounts(tid: int) -> list:
-    return db.jloads(db.get_setting(f"matrix_accounts:{tid}"), []) or []
+    """返回可直接使用的账号(Cookie 已解密,仅存在于内存)。
+
+    解不开的 Cookie(密钥轮换或数据损坏)不让它把整个账号列表打挂:该账号按
+    「登录态失效」呈现,老板重新绑定即可,发布侧自然走已有的失效分支。
+    """
+    out = []
+    for acc in db.jloads(db.get_setting(f"matrix_accounts:{tid}"), []) or []:
+        if acc.get("cookie"):
+            try:
+                acc = {**acc, "cookie": secureconfig.decrypt_field(
+                    COOKIE_FIELD, acc["cookie"])}
+            except secureconfig.SecureConfigError:
+                log.warning("matrix cookie undecryptable account=%s", acc.get("id"))
+                acc = {**acc, "cookie": "", "status": "expired"}
+        out.append(acc)
+    return out
 
 
 def _save(tid: int, accs: list):
-    db.set_setting(f"matrix_accounts:{tid}", json.dumps(accs, ensure_ascii=False))
+    # 平台登录态等同于账号本身,泄露即被接管;绝不明文落库。
+    stored = [
+        {**a, "cookie": secureconfig.encrypt_field(COOKIE_FIELD, a.get("cookie"))}
+        if a.get("cookie") else a
+        for a in accs
+    ]
+    db.set_setting(f"matrix_accounts:{tid}", json.dumps(stored, ensure_ascii=False))
 
 
 def add_account(tid: int, platform: str, name: str, cookie: str) -> dict:
@@ -129,9 +153,15 @@ async def check_account(tid: int, acc_id: str) -> dict:
 
 # ---------------- 发布队列 ----------------
 def enqueue(tid: int, platform: str, acc_id: str, payload: dict) -> int:
+    # 入队即校验:平台非法或与账号绑定的平台不一致时,发布协程会在 PLATFORMS[...]
+    # 抛 KeyError,任务永久卡在 running。这里提前拒掉,报错也更像人话。
+    if platform not in PLATFORMS:
+        raise ValueError("暂只支持小红书/抖音(公众号在发布渠道页单独配)")
     acc = next((a for a in accounts(tid) if a["id"] == acc_id), None)
     if not acc:
         raise ValueError("先绑定该平台账号")
+    if acc.get("platform") != platform:
+        raise ValueError("所选账号不属于该平台,请重新选择")
     return db.insert("pub_task", {
         "tenant_id": tid,
         "platform": platform,

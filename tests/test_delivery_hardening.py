@@ -9,6 +9,7 @@
 """
 import asyncio
 import io
+import json
 import os
 import pathlib
 import tempfile
@@ -263,6 +264,268 @@ class DeliverableSandboxTests(unittest.TestCase):
         response = self._serve("media_v1_1.png", "\x89PNG fake")
         self.assertEqual(200, response.status_code)
         self.assertIsNone(response.headers.get("content-security-policy"))
+
+
+class CredentialAtRestTests(unittest.TestCase):
+    """平台登录态与 AppSecret 等同于账号本身,库文件泄露即被接管。"""
+
+    def setUp(self):
+        from app import db, secureconfig
+
+        self.db = db
+        self.secureconfig = secureconfig
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.old_path = db.DB_PATH
+        if db._conn is not None:
+            db._conn.close()
+        db._conn = None
+        db.DB_PATH = os.path.join(self.tmp.name, "creds.db")
+        db.conn()
+
+        def _restore():
+            if db._conn is not None:
+                db._conn.close()
+            db._conn = None
+            db.DB_PATH = self.old_path
+
+        self.addCleanup(_restore)
+
+        # 提供包装密钥,模拟生产形态(生产由 REQUIRE_CONFIG_KEY=1 强制)。
+        # 必须是真高熵 token:低多样性的值会被 validate_secret_token 正确拒绝。
+        import secrets
+        key = secrets.token_urlsafe(48)
+        old = os.environ.get(self.secureconfig.CONFIG_KEY_ENV)
+        os.environ[self.secureconfig.CONFIG_KEY_ENV] = key
+
+        def _restore_env():
+            if old is None:
+                os.environ.pop(self.secureconfig.CONFIG_KEY_ENV, None)
+            else:
+                os.environ[self.secureconfig.CONFIG_KEY_ENV] = old
+
+        self.addCleanup(_restore_env)
+
+    def _raw(self, key):
+        return str(self.db.get_setting(key) or "")
+
+    def test_wechat_appsecret_is_encrypted_at_rest(self):
+        from app import wechat
+
+        secret = "wx-app-secret-abcdef123456"
+        wechat.set_conf(2, "wxappid001", secret)
+
+        raw = self._raw("wechat_mp:2")
+        self.assertNotIn(secret, raw, "AppSecret 明文落库")
+        self.assertIn("wxappid001", raw, "AppID 不是机密,不必加密")
+        # 读回时必须还原,否则接口直接不可用。
+        self.assertEqual(secret, wechat.get_conf(2)["secret"])
+
+    def test_matrix_cookie_is_encrypted_at_rest(self):
+        from app import matrixpub
+
+        cookie = "sessionid=" + "c" * 60
+        matrixpub.add_account(2, "xhs", "小红书号", cookie)
+
+        raw = self._raw("matrix_accounts:2")
+        self.assertNotIn(cookie, raw, "平台登录态明文落库")
+        self.assertEqual(cookie, matrixpub.accounts(2)[0]["cookie"])
+
+    def test_legacy_plaintext_credentials_still_load(self):
+        """升级前写入的明文历史值不能因为这次改动就打不开。"""
+        from app import matrixpub
+
+        legacy = "sessionid=" + "d" * 60
+        self.db.set_setting("matrix_accounts:2", json.dumps(
+            [{"id": "abc", "platform": "xhs", "name": "旧号", "cookie": legacy}]
+        ))
+        self.assertEqual(legacy, matrixpub.accounts(2)[0]["cookie"])
+
+        # 下一次保存即自动升级为密文。
+        matrixpub._save(2, matrixpub.accounts(2))
+        self.assertNotIn(legacy, self._raw("matrix_accounts:2"))
+
+    def test_undecryptable_cookie_degrades_to_expired(self):
+        """密钥轮换/数据损坏不该让整个账号列表打不开。"""
+        from app import matrixpub
+
+        self.db.set_setting("matrix_accounts:2", json.dumps([{
+            "id": "abc", "platform": "xhs", "name": "坏号",
+            "cookie": self.secureconfig.ENCRYPTED_PREFIX + "not-a-valid-token",
+        }]))
+        accounts = matrixpub.accounts(2)
+        self.assertEqual(1, len(accounts))
+        self.assertEqual("", accounts[0]["cookie"])
+        self.assertEqual("expired", accounts[0]["status"])
+
+    def test_account_listing_never_exposes_cookies(self):
+        from app import matrixpub
+
+        matrixpub.add_account(2, "xhs", "小红书号", "sessionid=" + "e" * 60)
+        for item in matrixpub.pub_list(2):
+            self.assertNotIn("cookie", item)
+
+
+class MatrixEnqueueValidationTests(unittest.TestCase):
+    """入队不校验平台,发布协程会在 PLATFORMS[...] 抛 KeyError 并永久卡住任务。"""
+
+    def setUp(self):
+        from app import db
+
+        self.db = db
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.old_path = db.DB_PATH
+        if db._conn is not None:
+            db._conn.close()
+        db._conn = None
+        db.DB_PATH = os.path.join(self.tmp.name, "enqueue.db")
+        db.conn()
+
+        def _restore():
+            if db._conn is not None:
+                db._conn.close()
+            db._conn = None
+            db.DB_PATH = self.old_path
+
+        self.addCleanup(_restore)
+
+    def test_unknown_platform_is_rejected_at_enqueue(self):
+        from app import matrixpub
+
+        with patch.object(matrixpub, "accounts", return_value=[
+            {"id": "a1", "platform": "xhs"}
+        ]):
+            with self.assertRaises(ValueError):
+                matrixpub.enqueue(2, "weibo", "a1", {})
+
+    def test_account_platform_mismatch_is_rejected(self):
+        from app import matrixpub
+
+        with patch.object(matrixpub, "accounts", return_value=[
+            {"id": "a1", "platform": "xhs"}
+        ]):
+            with self.assertRaises(ValueError):
+                matrixpub.enqueue(2, "douyin", "a1", {})
+
+
+class SubscriptionIdempotencyTests(unittest.TestCase):
+    """套餐开通是入金路径:重复提交绝不能重复发点。"""
+
+    def setUp(self):
+        from app import db
+
+        self.db = db
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.old_path = db.DB_PATH
+        if db._conn is not None:
+            db._conn.close()
+        db._conn = None
+        db.DB_PATH = os.path.join(self.tmp.name, "billing.db")
+        db.conn()
+        db.insert("tenants", {"id": 2, "name": "租户甲", "balance": 0})
+
+        def _restore():
+            if db._conn is not None:
+                db._conn.close()
+            db._conn = None
+            db.DB_PATH = self.old_path
+
+        self.addCleanup(_restore)
+
+    def _balance(self):
+        return self.db.one("SELECT balance FROM tenants WHERE id=2")["balance"]
+
+    def _plan(self):
+        from app import billing
+
+        return billing.PLANS[0]["key"], billing.PERIODS[0]["key"]
+
+    def test_same_order_id_grants_points_once(self):
+        from app import billing
+
+        plan, period = self._plan()
+        first = billing.subscribe(2, plan, period, op_key="order-1")
+        after_first = self._balance()
+        self.assertGreater(after_first, 0)
+
+        with self.assertRaises(ValueError):
+            billing.subscribe(2, plan, period, op_key="order-1")
+
+        self.assertEqual(after_first, self._balance(), "重复提交二次发点")
+        self.assertEqual("order-1", first["op_key"])
+
+    def test_distinct_orders_still_stack(self):
+        from app import billing
+
+        plan, period = self._plan()
+        billing.subscribe(2, plan, period, op_key="order-1")
+        one = self._balance()
+        billing.subscribe(2, plan, period, op_key="order-2")
+        self.assertGreater(self._balance(), one)
+
+    def test_plan_and_points_move_together(self):
+        """发点失败时套餐也不该生效,反之亦然。"""
+        from app import billing
+
+        plan, period = self._plan()
+        with patch.object(billing, "grant", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                billing.subscribe(2, plan, period, op_key="order-x")
+
+        row = self.db.one("SELECT plan,balance FROM tenants WHERE id=2")
+        self.assertIn(row["plan"] or "", ("", None))
+        self.assertEqual(0, row["balance"] or 0)
+        # 失败的单号没有占位,可以重试。
+        self.assertIsNone(
+            self.db.one(
+                "SELECT op_key FROM billing_operation WHERE op_key='order-x'"
+            )
+        )
+
+
+class TenantClipIsolationTests(unittest.TestCase):
+    """混剪片段必须收敛回本租户素材库,不能只信 params_json 里的路径。"""
+
+    def setUp(self):
+        from app import textvideo
+
+        self.textvideo = textvideo
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.old_root = textvideo.CLIP_ROOT
+        textvideo.CLIP_ROOT = os.path.join(self.tmp.name, "tvclips")
+        self.addCleanup(lambda: setattr(textvideo, "CLIP_ROOT", self.old_root))
+
+    def _make_clip(self, tid: int, name: str) -> str:
+        directory = self.textvideo.clip_dir(tid)
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, name)
+        with open(path, "wb") as handle:
+            handle.write(b"\x00\x00\x00\x18ftypmp42")
+        return path
+
+    def test_own_clip_resolves(self):
+        path = self._make_clip(2, "c_0123456789.mp4")
+        self.assertEqual(path, self.textvideo.owned_clip_path(2, path))
+
+    def test_other_tenant_clip_is_rejected(self):
+        foreign = self._make_clip(3, "c_00feedbeef.mp4")
+        self.assertIsNone(self.textvideo.owned_clip_path(2, foreign))
+
+    def test_arbitrary_server_path_is_rejected(self):
+        outside = os.path.join(self.tmp.name, "c_00deadbeef.mp4")
+        with open(outside, "wb") as handle:
+            handle.write(b"\x00")
+        self.assertIsNone(self.textvideo.owned_clip_path(2, outside))
+
+    def test_traversal_in_stored_path_is_rejected(self):
+        self._make_clip(2, "c_00cafebabe.mp4")
+        sneaky = os.path.join(
+            self.textvideo.clip_dir(2), "..", "..", "c_00cafebabe.mp4"
+        )
+        self.assertIsNone(self.textvideo.owned_clip_path(2, sneaky))
 
 
 class EngineCrossThreadWakeupTests(unittest.TestCase):

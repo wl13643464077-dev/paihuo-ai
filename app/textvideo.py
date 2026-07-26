@@ -363,6 +363,23 @@ def resolve_clip_path(tid: int, name: str) -> str | None:
     return candidate
 
 
+def owned_clip_path(tid: int, stored: str) -> str | None:
+    """把 params_json 里存下的片段路径重新收敛回本租户素材库。
+
+    入队时已校验过,但执行时不能只信库里的字符串:参数被改写或历史数据被污染,
+    都会让成片混进服务器上的任意视频(含他租户素材)。这里按文件名重新解析,
+    并要求解析结果与存下来的路径一致。
+    """
+    if not isinstance(stored, str) or not stored:
+        return None
+    resolved = resolve_clip_path(tid, os.path.basename(stored))
+    if not resolved:
+        return None
+    if os.path.realpath(resolved) != os.path.realpath(stored):
+        return None
+    return resolved
+
+
 def _bounded_media_command(
     profile: str,
     executable: str,
@@ -1522,7 +1539,11 @@ async def _run_job_inner(tvid: int, row: dict, p: dict, tid: int, broadcast):
         script = p.get("script") or await make_script(title, p.get("body") or "")
         # V25.3:混剪模式——用户自己的 vlog 片段当画面(原图文成片模式原样保留)
         if p.get("mode") == "clips":
-            clips = [{"path": c} for c in (p.get("clips") or []) if os.path.isfile(c)]
+            clips = []
+            for stored in p.get("clips") or []:
+                owned = owned_clip_path(tid, stored)
+                if owned:
+                    clips.append({"path": owned})
             if not clips:
                 raise ValueError("没有可用的视频片段,先在混剪页上传")
             out_dir = "tv"

@@ -19,10 +19,14 @@ BASE = "https://open.feishu.cn/open-apis"
 SYNC_READ_PAGE_SIZE = 200
 FEISHU_WRITE_BATCH_SIZE = 100
 
-KNOW_FIELDS = ["标题", "内容", "类别", "平台", "行业", "主题", "关键词", "质量分",
-               "匹配度", "复用度", "时效性", "情绪", "摘要", "来源", "创建时间"]
-ASSET_FIELDS = ["标题", "类型", "类别", "平台", "行业", "主题", "关键词", "质量分",
-                "匹配度", "复用度", "时效性", "摘要", "创建时间"]
+# 同步编号:每条记录在源库里的稳定标识。飞书侧只能追加写,没有它就无法判断
+# 一条记录是否已同步过——那样每点一次同步都会把整库重复插一遍。
+SYNC_KEY_FIELD = "同步编号"
+KNOW_FIELDS = [SYNC_KEY_FIELD, "标题", "内容", "类别", "平台", "行业", "主题",
+               "关键词", "质量分", "匹配度", "复用度", "时效性", "情绪", "摘要",
+               "来源", "创建时间"]
+ASSET_FIELDS = [SYNC_KEY_FIELD, "标题", "类型", "类别", "平台", "行业", "主题",
+                "关键词", "质量分", "匹配度", "复用度", "时效性", "摘要", "创建时间"]
 
 
 class FeishuProviderError(RuntimeError):
@@ -142,6 +146,44 @@ async def _ensure_table(cli, tok, app_token, name, fields) -> str:
     return table_id
 
 
+def sync_key(kind: str, row_id) -> str:
+    """源库记录的稳定标识,用于判断该条是否已经同步过。"""
+    return f"{kind}-{row_id}" if row_id is not None else ""
+
+
+async def existing_sync_keys(cli, tok: str, app_token: str, table_id: str) -> set:
+    """读回表里已有的同步编号。读不动时返回空集合——宁可重复也不能漏同步。"""
+    keys: set = set()
+    page_token = ""
+    for _ in range(50):        # 上限兜底,避免异常分页把同步拖死
+        url = (f"{BASE}/bitable/v1/apps/{app_token}/tables/{table_id}"
+               f"/records?page_size=500")
+        if page_token:
+            url += f"&page_token={page_token}"
+        data = await _request_json(
+            cli, "get", url,
+            action="读取飞书已同步记录",
+            headers={"Authorization": f"Bearer {tok}"},
+        )
+        payload = data.get("data") or {}
+        for item in payload.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            value = (item.get("fields") or {}).get(SYNC_KEY_FIELD)
+            if isinstance(value, list):     # 飞书文本字段可能回富文本片段
+                value = "".join(
+                    seg.get("text", "") for seg in value if isinstance(seg, dict)
+                )
+            if isinstance(value, str) and value:
+                keys.add(value)
+        if not payload.get("has_more"):
+            break
+        page_token = payload.get("page_token") or ""
+        if not page_token:
+            break
+    return keys
+
+
 async def _batch_create(cli, tok: str, app_token: str, table_id: str,
                         records: list) -> None:
     await _request_json(
@@ -155,10 +197,21 @@ async def _batch_create(cli, tok: str, app_token: str, table_id: str,
 
 
 async def _write_batches(cli, tok: str, app_token: str, table_id: str,
-                         records: list) -> int:
+                         records: list, seen: set = None) -> int:
+    """写入尚未同步过的记录;``seen`` 传入时同批内与跨批都不会重复写。"""
+    fresh = records
+    if seen is not None:
+        fresh = []
+        for item in records:
+            key = item.get(SYNC_KEY_FIELD) or ""
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            fresh.append(item)
     written = 0
-    for index in range(0, len(records), FEISHU_WRITE_BATCH_SIZE):
-        batch = records[index:index + FEISHU_WRITE_BATCH_SIZE]
+    for index in range(0, len(fresh), FEISHU_WRITE_BATCH_SIZE):
+        batch = fresh[index:index + FEISHU_WRITE_BATCH_SIZE]
         await _batch_create(cli, tok, app_token, table_id, batch)
         written += len(batch)
     return written
@@ -166,7 +219,8 @@ async def _write_batches(cli, tok: str, app_token: str, table_id: str,
 
 def _know_record(r):
     m = r.get("meta") or {}
-    return {"标题": r.get("title") or "", "内容": (r.get("content") or "")[:800],
+    return {SYNC_KEY_FIELD: sync_key("knowledge", r.get("id")),
+            "标题": r.get("title") or "", "内容": (r.get("content") or "")[:800],
             "类别": m.get("category") or "", "平台": m.get("platform") or "",
             "行业": m.get("industry") or "", "主题": m.get("theme") or "",
             "关键词": "、".join(m.get("keywords") or []),
@@ -180,7 +234,8 @@ def _know_record(r):
 def _asset_record(r):
     m = r.get("meta") or {}
     p = r.get("payload") or {}
-    return {"标题": p.get("title") or "", "类型": r.get("type") or "",
+    return {SYNC_KEY_FIELD: sync_key("asset", r.get("id")),
+            "标题": p.get("title") or "", "类型": r.get("type") or "",
             "类别": m.get("category") or "", "平台": m.get("platform") or "",
             "行业": m.get("industry") or "", "主题": m.get("theme") or "",
             "关键词": "、".join(m.get("keywords") or []),
@@ -201,7 +256,8 @@ async def sync_rows(name: str, fields: list, recs: list) -> dict:
     async with httpx.AsyncClient(timeout=60) as cli:
         tok = await _token(cli)
         table_id = await _ensure_table(cli, tok, app_token, name, fields)
-        n = await _write_batches(cli, tok, app_token, table_id, recs)
+        seen = await existing_sync_keys(cli, tok, app_token, table_id)
+        n = await _write_batches(cli, tok, app_token, table_id, recs, seen)
     return {"synced": n, "table": name}
 
 
@@ -252,6 +308,9 @@ async def sync(kind: str) -> dict:
     async with httpx.AsyncClient(timeout=60) as cli:
         tok = await _token(cli)
         table_id = await _ensure_table(cli, tok, app_token, name, fields)
+        # 已同步过的记录不再重复写:飞书侧只能追加,不去重的话每点一次同步
+        # 表里就会多出整整一份重复数据。
+        seen = await existing_sync_keys(cli, tok, app_token, table_id)
         n = 0
         while records:
             n += await _write_batches(
@@ -260,6 +319,7 @@ async def sync(kind: str) -> dict:
                 app_token,
                 table_id,
                 records,
+                seen,
             )
             if len(records) < SYNC_READ_PAGE_SIZE:
                 break

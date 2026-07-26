@@ -435,7 +435,12 @@ def grant(tid: int, points: float, reason: str):
     return newbal
 
 
-def subscribe(tid: int, plan_key: str, period_key: str):
+def subscribe(tid: int, plan_key: str, period_key: str, op_key: str = None):
+    """开通/续费套餐:改套餐与发点必须同生共死,且同一笔订单只能发一次点。
+
+    ``op_key`` 由调用方传入(如订单号)时才有防重放能力:重复提交、前端重试或网络
+    重放都只会成交一次。省略时退化为一次性键——仍然保证原子性,但挡不住重复点击。
+    """
     plan = next((p for p in PLANS if p["key"] == plan_key), None)
     period = next((p for p in PERIODS if p["key"] == period_key), None)
     if not plan or not period:
@@ -443,7 +448,22 @@ def subscribe(tid: int, plan_key: str, period_key: str):
     pts = plan["points"] * period["months"]
     price = round(plan["sale"] * period["months"] * period["discount"])
     expires = time.time() + period["months"] * 31 * 86400
-    db.update("tenants", tid, {"plan": f"{plan['name']}·{period['label']}",
-                               "plan_expires": expires})
-    grant(tid, pts, f"开通{plan['name']}({period['label']},实收¥{price}),含 {pts} 点")
-    return {"points": pts, "price": price, "expires": expires}
+    key = (op_key or uuid.uuid4().hex).strip()
+    if not key or len(key) > 160:
+        raise ValueError("无效的开通单号")
+    now = time.time()
+    label = f"开通{plan['name']}({period['label']},实收¥{price}),含 {pts} 点"
+    # 套餐变更与点数入账放进同一个事务:中途崩溃不会留下"有套餐没点数"或反之。
+    with db.atomic() as c:
+        cur = c.execute(
+            "INSERT OR IGNORE INTO billing_operation"
+            "(op_key,tenant_id,action,units,points,note,status,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,'charged',?,?)",
+            (key, tid, "subscribe", period["months"], pts, label[:200], now, now),
+        )
+        if cur.rowcount != 1:
+            raise ValueError("该开通单号已处理过,请勿重复提交")
+        db.update("tenants", tid, {"plan": f"{plan['name']}·{period['label']}",
+                                   "plan_expires": expires})
+        grant(tid, pts, label)
+    return {"points": pts, "price": price, "expires": expires, "op_key": key}

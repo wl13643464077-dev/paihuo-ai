@@ -19,7 +19,7 @@ import time
 
 import httpx
 
-from . import db
+from . import db, secureconfig
 
 log = logging.getLogger("wechat")
 
@@ -53,8 +53,15 @@ class WeChatError(Exception):
         super().__init__(f"{detail}(errcode {code})")
 
 
+SECRET_FIELD = "wechat_mp_secret"
+
+
 def get_conf(tid: int) -> dict:
-    return db.jloads(db.get_setting(f"wechat_mp:{tid}"), {}) or {}
+    """返回可直接使用的配置;AppSecret 在库里是密文,这里解密后只存在于内存。"""
+    conf = db.jloads(db.get_setting(f"wechat_mp:{tid}"), {}) or {}
+    if conf.get("secret"):
+        conf["secret"] = secureconfig.decrypt_field(SECRET_FIELD, conf["secret"])
+    return conf
 
 
 def set_conf(tid: int, appid: str, secret: str):
@@ -63,7 +70,11 @@ def set_conf(tid: int, appid: str, secret: str):
         cur["appid"] = appid.strip()
     if secret:                      # 前端回存打码值时不覆盖
         cur["secret"] = secret.strip()
-    db.set_setting(f"wechat_mp:{tid}", json.dumps(cur))
+    stored = dict(cur)
+    # AppSecret 能代表公众号做任何事,不能与备份一起明文流出。
+    if stored.get("secret"):
+        stored["secret"] = secureconfig.encrypt_field(SECRET_FIELD, stored["secret"])
+    db.set_setting(f"wechat_mp:{tid}", json.dumps(stored))
     db.set_setting(f"wechat_token:{tid}", None)   # 换号后旧 token 作废
 
 
