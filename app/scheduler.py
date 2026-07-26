@@ -383,6 +383,14 @@ def _tick(engine):
                     enabled=0,
                     last_note=f"已暂停:{str(e)[:60]}",
                 )
+                # 自动日更是老板买这套系统的核心理由;静默停更等于让他两周后
+                # 才发现断更。站内必达,配了企微立刻推手机。
+                try:
+                    from . import notify
+                    notify.push(s.get("tenant_id") or 1, "schedule_paused",
+                                {"title": s.get("name") or "定时任务"})
+                except Exception:
+                    log.warning("schedule pause notify failed id=%s", s["id"])
             elif isinstance(e, ValueError):
                 _finish_claim(
                     s["id"], claim_token,

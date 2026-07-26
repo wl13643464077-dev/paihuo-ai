@@ -197,6 +197,16 @@ async def check(tid: int, title: str, body: str, platform: str = "公众号",
                     i["suggest"] = i["fix"]
             issues += ai_issues
             summary = r["data"].get("summary") or ""
+            if len(body or "") > 4500:
+                # 长文只深审前 4500 字:必须让老板知道后半段只过了词库,
+                # 否则「审查通过」就是卖假安全感——后半段恰恰是导流/承诺高发区。
+                issues.append({
+                    "type": "覆盖范围", "severity": "低",
+                    "detail": f"正文共 {len(body)} 字,AI 深审覆盖前 4500 字;"
+                              "其余部分仅规则词库扫描。建议将卖点/导流段落前移或分段送审",
+                    "suggest": "重点段落放前 4500 字内,或拆两次送审",
+                })
+                summary = (summary + f"(深审覆盖前4500字/全文{len(body)}字)")[:200]
             cost, tokens = r["cost_usd"], r["tokens"]
         except Exception as e:
             log.warning(

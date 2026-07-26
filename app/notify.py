@@ -49,6 +49,10 @@ def build_msg(kind: str, payload: dict) -> str:
         return (f"**📊 派活 · 该复盘了**\n《{title}》({p.get('platform', '')})发布已满 "
                 f"{p.get('day', '')} 天\n把后台数据丢给审查官,看看表现和限流风险\n"
                 f"[一键复盘]({base}/#/censor)")
+    if kind == "schedule_paused":
+        return (f"**⏸️ 派活 · 定时任务已暂停**\n「{title}」因点数不足自动暂停,"
+                f"内容会断更!\n充值后请到定时任务页重新打开开关\n"
+                f"[去充值]({base}/#/billing) · [看定时任务]({base}/#/schedules)")
     if kind == "report":
         return (f"**📰 派活 · {p.get('report_name', '报告出炉')}**\n{(p.get('summary') or '')[:180]}\n"
                 f"[查看]({base}/{p.get('link') or '#/knowledge'})")

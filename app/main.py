@@ -4097,11 +4097,11 @@ def avatar_meta():
     _need_module("avatar")
     eng = avatar.engine_name()
     return {"voices": avatar.cloned_voices() + avatar.VOICES,
-            "engines": ([{"key": "basic", "label": "基础版·省钱(RunningHub·¥6/条)"}]
+            "engines": ([{"key": "basic", "label": "基础版·省钱(6点/条,不限时长)"}]
                         if avatar.rh_ready() else [])
                        + [{"key": "", "label": f"自动(当前:{'HeyGen' if eng=='heygen' else '可灵'})"},
-                          {"key": "heygen", "label": "HeyGen(会动·快·¥12/30秒)"},
-                          {"key": "kling", "label": "可灵(对口型·¥12/30秒)"}],
+                          {"key": "heygen", "label": "HeyGen(会动·快)"},
+                          {"key": "kling", "label": "可灵(对口型)"}],
             "durations": [{"s": 15, "label": "15秒(快闪)"}, {"s": 30, "label": "30秒(标准)"},
                           {"s": 60, "label": "60秒(深度)"}],
             "public_base": avatar.public_base(),

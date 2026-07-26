@@ -1726,7 +1726,7 @@ function skillsTab(s,e){
   return `
   <div class="notice violet" style="margin-top:0">📚 <b>全网进修</b>:员工联网检索本岗位最新方法论、平台规则、爆款技巧,学成技能卡。启用中的技能会自动用于 TA 之后的每一次工作。</div>
   <div class="actions" style="margin-top:10px">
-    <button class="btn pri" id="learnBtn" ${e.learning?"disabled":""} onclick="startLearn(${s.idx})">${e.learning?`<span class="spin"></span> 进修中…`:"🎓 送去全网进修(3点)"}</button>
+    ${ME.role!=="root"?"":`<button class="btn pri" id="learnBtn" ${e.learning?"disabled":""} onclick="startLearn(${s.idx})">${e.learning?`<span class="spin"></span> 进修中…`:"🎓 送去全网进修(3点)"}</button>`}
     <span class="sub">${e.learned_at?`上次进修:${new Date(e.learned_at*1000).toLocaleString("zh-CN")}`:"还没进修过"}</span></div>
   ${(e.learning||logs.length)?`<div class="steps" id="learnlog-${s.idx}" style="margin-top:10px">${logs.map(x=>stepRow(x)).join("")}</div>`:""}
   <h3>已掌握技能(${skills.length})</h3>
@@ -2706,7 +2706,7 @@ function profileCard(p){
 }
 function profileForm(p){
   const s = (p&&p.persona)||{};
-  return `<div class="card" style="max-width:780px">
+  return `<div class="card pform" style="max-width:780px">
     <h2>${p?"编辑":"新建"}人设档案</h2>
     <label>账号名称 *</label><input id="p-name" value="${esc(p?.name||"")}" placeholder="如:阿磊聊AI">
     <div class="row">
@@ -2719,7 +2719,7 @@ function profileForm(p){
     <label>历史作品喂养(粘贴 5–20 篇代表作,用于提炼文风)</label>
     <div class="notice" style="margin:4px 0 8px">📁 有文件包?直接选文件(支持多选,txt/md/csv/json 的内容会自动读进来;各种记录、往期文案、语录都行)</div>
     <input type="file" multiple accept=".txt,.md,.markdown,.csv,.json,.log" onchange="loadProfileFiles(this)" style="margin-bottom:8px">
-    <textarea id="p-corpus" style="min-height:160px" placeholder="把过去的爆款正文直接粘贴进来,多篇用 --- 分隔;或用上面的按钮选文件">${esc(s.corpus||"")}</textarea>
+    <textarea id="p-corpus" style="min-height:160px" placeholder="把过去的爆款正文直接粘贴进来,多篇用 --- 分隔;或用上面的按钮选文件。注:提炼实际使用前 8000 字,日常写稿注入前 3000 字——放最能代表你风格的几篇即可,不必求多">${esc(s.corpus||"")}</textarea>
     <div class="actions">
       <button class="btn pri" onclick="saveProfile(${p?p.id:"null"})">💾 保存</button>
       ${p?`<button class="btn" onclick="distill(${p.id},this)">🧬 提炼文风特征(nuwa)</button>`:""}
@@ -2735,8 +2735,11 @@ async function loadProfileFiles(input){
   toast(`已读入 ${input.files.length} 个文件,记得点保存`);
   input.value = "";
 }
-function newProfile(){ $("#plist").insertAdjacentHTML("afterbegin", profileForm(null)); }
+function closeProfileForms(){ document.querySelectorAll(".pform").forEach(f=>f.remove()); }
+function newProfile(){
+  closeProfileForms(); $("#plist").insertAdjacentHTML("afterbegin", profileForm(null)); }
 async function editProfile(id){
+  closeProfileForms();
   try{
     const p=await api("/profiles/"+id);
     if(!$("#plist")) return;
@@ -2755,7 +2758,16 @@ async function saveProfile(id){
   }catch(e){ toast(e.message); }
 }
 async function distill(id, btn){
-  await saveProfile.call(null, id).catch(()=>{});
+  // 先静默保存(不触发整页重绘——重绘会把本表单连同这颗按钮一起摘掉,
+  // 老板会以为"刚粘的语料没了",一分钟里零反馈)
+  const persona = {positioning:$("#p-pos").value, audience:$("#p-aud").value, tone:$("#p-tone").value,
+    taboo:$("#p-taboo").value, visual:$("#p-visual").value, corpus:$("#p-corpus").value};
+  const name = $("#p-name").value.trim()||"未命名账号";
+  try{
+    if(id){ const old=(STATE.profiles.find(x=>x.id===id)?.persona||{});
+      await api("/profiles/"+id,{method:"PUT",body:{name, persona:{...old,...persona}}}); }
+    else{ const r=await api("/profiles",{method:"POST",body:{name, persona}}); id=r.id||id; }
+  }catch(e){ return toast("先保存失败:"+e.message); }
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 提炼中(约1分钟)…`;
   try{ await api(`/profiles/${id}/distill`,{method:"POST",timeout:330000,longRunning:true}); toast("文风特征已写入档案"); render(); }
   catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🧬 提炼文风特征(nuwa)"; }
@@ -2939,6 +2951,10 @@ async function companySaveMat(btn){
   catch(e){ toast(e.message); } btn.disabled=false;
 }
 async function companyDistill(btn){
+  // 先把 7 个字段当前值保存(此前只传素材,老板刚改的字段既没保存又会被覆盖);
+  // 再明确告知提炼会重写全部字段。
+  if(!await uiConfirm("提炼会依据素材重写全部 7 个字段,覆盖您手动修改的内容。已自动先保存当前填写。继续?",{okText:"✨ 继续提炼",okClass:"pri"})) return;
+  try{ await companySaveProfile(null,{silent:true}); }catch(_){}
   btn.disabled=true; const t=btn.textContent; btn.innerHTML='<span class="spin"></span> 提炼中(约1分钟)…';
   try{
     await api("/company",{method:"PUT",body:{materials:$("#cp-materials").value}});
@@ -2946,16 +2962,18 @@ async function companyDistill(btn){
     toast("已提炼并同步给全部员工"); render();
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent=t; }
 }
-async function companySaveProfile(btn){
-  btn.disabled=true;
+async function companySaveProfile(btn, opts){
+  if(btn) btn.disabled=true;
   const profile={}; ["brand","business","audience","tone","selling_points","taboo","keywords"]
-    .forEach(k=>profile[k]=$("#cp-"+k).value);
-  try{ await api("/company",{method:"PUT",body:{profile}}); toast("企业档案已保存"); render(); }
-  catch(e){ toast(e.message); btn.disabled=false; }
+    .forEach(k=>{ const el=$("#cp-"+k); if(el) profile[k]=el.value; });
+  try{ await api("/company",{method:"PUT",body:{profile}});
+    if(!opts?.silent){ toast("企业档案已保存"); render(); } }
+  catch(e){ if(opts?.silent) throw e; toast(e.message); if(btn) btn.disabled=false; }
 }
+let KB_Q="";
 async function knowledgeView(){
   const knowledgeContract=normalizeListContract(await api(listPath("/knowledge","knowledge",{
-    platform:KFILTER.platform,category:KFILTER.category})),LIST_PAGE_SIZE);
+    platform:KFILTER.platform,category:KFILTER.category,q:KB_Q})),LIST_PAGE_SIZE);
   const rows=knowledgeContract.items;
   KNOW_CACHE = rows;
   const shown = rows;
@@ -2964,6 +2982,7 @@ async function knowledgeView(){
     ${listContractNotice(knowledgeContract,"沉淀")}
     <div class="actions"><button class="btn pri" onclick="knowForm()">➕ 手记一条</button>
       <button class="btn" onclick="feishuSync('knowledge',this)">📤 同步到飞书</button>
+      <input id="kb-q" placeholder="🔍 搜标题/标签/来源" value="${esc(KB_Q||"")}" style="max-width:220px" onkeydown="if(event.key==='Enter'){KB_Q=this.value.trim();render();}">
       <a class="btn" href="/api/library/export.xlsx?kind=knowledge">⬇️ 导出Excel</a>
       <button class="btn sm" onclick="feishuConfig()">🔗 飞书配置</button></div>
     <div id="fs-box"></div>
@@ -3135,7 +3154,7 @@ async function schedRunNow(id){
   }catch(e){ toast(e.message); }
 }
 async function schedDel(id){
-  if(!await uiConfirm("删除这个定时任务?",{title:"删除定时任务",confirmText:"删除"})) return;
+  if(!await uiConfirm("删除这个定时任务?此操作不进回收站、不可恢复;只想临时停用请用开关。",{title:"删除定时任务",confirmText:"删除"})) return;
   try{ await api("/schedules/"+id,{method:"DELETE"}); toast("已删除"); render(); }catch(e){ toast(e.message); }
 }
 
@@ -3183,7 +3202,7 @@ async function avatarView(){
   </div>
   <div class="card" style="background:#eef7ff"><h2>⚡ 偷懒入口:贴爆款链接,口播稿自动写</h2>
     <div class="row" style="align-items:flex-end">
-      <div style="flex:2;min-width:260px"><label>抖音/小红书/公众号爆款链接</label>
+      <div style="flex:2;min-width:260px"><label>抖音/公众号爆款链接 <span class="sub">(抖音/公众号成功率高;小红书防抓严,大概率提取不到——小红书内容建议直接复制正文粘到下方口播稿框改写)</span></label>
         <input id="av-link" placeholder="https://…(分享链接直接粘贴)"></div>
       <div style="flex:1;min-width:150px"><label>改写风格(选填)</label>
         <input id="av-style" placeholder="如:接地气、幽默"></div>
@@ -3235,13 +3254,14 @@ async function avatarView(){
         <textarea id="av-script" style="min-height:120px" placeholder="自己写、从内容部交付里复制,或用上面的爆款链接自动生成。"></textarea>
         <label>④ 生成引擎 & 时长档位</label>
         <div class="row">
-          <div><select id="av-engine">${meta.engines.map(e=>`<option value="${e.key}">${esc(e.label)}</option>`).join("")}</select></div>
-          <div><select id="av-dur">${meta.durations.map(d=>`<option value="${d.s}" ${d.s===30?"selected":""}>${d.label} · ${d.s<=30?"12点":"20点"}</option>`).join("")}</select></div>
+          <div><select id="av-engine" onchange="avPriceSync()">${meta.engines.map(e=>`<option value="${e.key}">${esc(e.label)}</option>`).join("")}</select></div>
+          <div><select id="av-dur" onchange="avPriceSync()">${meta.durations.map(d=>`<option value="${d.s}" ${d.s===30?"selected":""}>${d.label}</option>`).join("")}</select></div>
         </div>
         ${meta.heygen_ready&&meta.heygen_exhausted?`<div class="notice" style="font-size:12px">⚠️ HeyGen 余额不足,选它会自动改用可灵。想继续用请去 <a href="https://app.heygen.com/settings?nav=Subscriptions" target="_blank" style="text-decoration:underline">HeyGen 充值</a>;日常口播用<b>基础版/可灵</b>即可。</div>`:""}
         <label>⑤ 表演提示(选填)</label>
         <input id="av-prompt" placeholder="如:微笑讲述,偶尔点头,手势自然">
-        <div class="actions"><button class="btn pri" onclick="avSubmit(this)">🎬 开拍(≤30秒12点 / ≤60秒20点)</button></div>
+        <div class="actions"><button class="btn pri" onclick="avSubmit(this)">🎬 开拍</button>
+          <span class="sub" id="av-price"></span></div>
       </div>
     </div>
   </div>
@@ -3268,6 +3288,7 @@ async function avatarView(){
     </div>`).join(""):`<div class="empty">这一页没有数字人任务。</div>`}
     ${listPager(jobsContract,"avatar")}</div>`:""}`;
   active.forEach(j=>{ const box=document.querySelector(`[data-avsteps="${j.id}"]`); if(box) box.scrollTop=box.scrollHeight; });
+  avPriceSync();
 }
 let AV_VOICE_MODE = "preset", AV_OWN_AUDIO = null;
 function avVoiceMode(m){
@@ -3327,6 +3348,8 @@ async function avClone(btn){
 }
 async function avFromLink(btn){
   const url = $("#av-link").value.trim();
+  const errBox = ()=>{ let b=$("#av-link-err"); if(!b){ $("#av-link").insertAdjacentHTML("afterend",'<div id="av-link-err"></div>'); b=$("#av-link-err"); } return b; };
+  errBox().innerHTML="";
   if(!url) return toast("先贴一个爆款链接");
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 提取中(约1分钟)…`;
   try{
@@ -3340,9 +3363,12 @@ async function avFromLink(btn){
          <div class="notice" style="white-space:pre-wrap;max-height:220px;overflow:auto;font-size:12.5px" id="av-source-txt"></div></details>`); }
       $("#av-source-txt").textContent = r.source_text;
     }
-    toast("口播稿已生成,原文在下方可比对");
+    toast(r.source_text?"口播稿已生成,原文在下方可比对":"⚠️ 原文没抓到,这稿是按标题独立创作的——发布前请自己核对内容");
     $("#av-script").scrollIntoView({behavior:"smooth"});
-  }catch(e){ toast(e.message); }
+  }catch(e){
+    // 失败原因常驻红条:后端给的两条自救路径值得被读完,不能塞进转瞬即逝的 toast
+    errBox().innerHTML = `<div class="notice red" style="margin-top:6px">${esc(e.message)}(1 点已自动退回)</div>`;
+  }
   btn.disabled=false; btn.textContent="🪄 提取并改写(1点)";
 }
 async function avUpload(input){
@@ -3364,19 +3390,25 @@ async function avDelPhoto(name, ev){
     toast("已删除"); render();
   }catch(e){ toast(e.message); }
 }
+function avPriceSync(){
+  const el=$("#av-price"); if(!el) return;
+  const eng=$("#av-engine")?.value||"", dur=+($("#av-dur")?.value||30);
+  const pts = eng==="basic" ? 6 : (dur<=30 ? 12 : 20);
+  el.innerHTML = `💎 本单 <b>${pts} 点</b> · 余额 ${Math.round(STATE?.balance||0)} 点`;
+}
 async function avSubmit(btn){
   if(!AV_PHOTO) return toast("先上传照片");
   const script = $("#av-script").value.trim();
   if(!script) return toast("口播稿必填");
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 开拍中…`;
-  if(AV_VOICE_MODE==="own" && !AV_OWN_AUDIO) { btn.disabled=false; btn.textContent="🎬 开拍(≤30秒12点 / ≤60秒20点)"; return toast("先上传您的录音"); }
+  if(AV_VOICE_MODE==="own" && !AV_OWN_AUDIO) { btn.disabled=false; btn.textContent="🎬 开拍"; return toast("先上传您的录音"); }
   try{
     await api("/avatar/jobs",{method:"POST",body:{photo_name:AV_PHOTO.name,
       voice_id:$("#av-voice")?.value, script, prompt:$("#av-prompt").value.trim(),
       engine:$("#av-engine")?.value||"", duration:+($("#av-dur")?.value||30),
       own_audio_name: AV_VOICE_MODE==="own"&&AV_OWN_AUDIO ? AV_OWN_AUDIO.name : ""}});
     toast(`已开拍${AV_VOICE_MODE==="own"?"(用您的原声)":""},可继续开新的任务`); render();
-  }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🎬 开拍(≤30秒12点 / ≤60秒20点)"; }
+  }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🎬 开拍"; }
 }
 async function avCancel(id){
   if(!await uiConfirm(`取消这个数字人任务 #${id}? 未完成的渲染会退回。`,{
@@ -3811,7 +3843,7 @@ async function tmApprove(aid){
     render();
   }catch(e){ toast(e.message); }
 }
-async function tmDel(uid,name){ if(!await uiConfirm(`删除账号「${name}」?`,{
+async function tmDel(uid,name){ if(!await uiConfirm(`删除账号「${name}」?此操作不进回收站、不可恢复。如只是员工离职,建议用旁边的「⏸ 停用」。`,{
   title:"删除账号",confirmText:"删除"
 })) return;
   try{ await api(`/team/users/${uid}`,{method:"DELETE"}); toast("已删除"); render(); }catch(e){ toast(e.message); } }
@@ -4393,7 +4425,7 @@ async function censorView(){
       await api("/publog").catch(optionalResult([])),60);
     const rows=publogContract.items;
     listNotice=listContractNotice(publogContract,"发布记录");
-    body = `<div class="sub">发布台账 = 自动复盘的钟表:发草稿箱会自动登记;其他平台发完花10秒登记一下,到 T+1/3/7 审查官自动来找您复盘(公众号配了API且已群发的,数据都自动拉)。</div>
+    body = `<div class="sub">发布台账 = 自动复盘的钟表:发草稿箱会自动登记;其他平台发完花10秒登记一下,到 T+1/3/7 审查官自动来找您复盘(公众号配了API且已群发的,数据都自动拉)。<b>💎 每次自动复盘扣 1 点(每篇最多 T+1/3/7 三次共 3 点)</b>;不想复盘的记录点 🗑 删除即停止。</div>
     <div class="row" style="align-items:flex-end;margin-top:8px">
       <div style="flex:1;min-width:130px"><label>平台</label><select id="pl-pf">${CEN_PLATFORMS.map(p=>`<option>${p}</option>`).join("")}</select></div>
       <div style="flex:2;min-width:200px"><label>标题</label><input id="pl-title" placeholder="发布的内容标题"></div>
@@ -4405,7 +4437,8 @@ async function censorView(){
         <span class="sub" style="float:right">${new Date((r.published_at||r.created_at)*1000).toLocaleDateString("zh-CN")} ${r.source==="draft"?"· 草稿箱推送":""}</span>
         <div class="sub" style="margin-top:5px">复盘:T+1 ${st("1")} · T+3 ${st("3")} · T+7 ${st("7")}
           <button class="btn sm" style="margin-left:8px" onclick="plPull(${r.id},this)">📥 自动拉数据复盘</button>
-          <button class="btn sm" onclick="plMark(${r.id})" title="把复盘计时从现在重新起算">✔ 我刚群发</button></div></div>`;}).join(""):`<div class="empty">还没有登记,发草稿箱会自动记一笔</div>`}</div>`;
+          <button class="btn sm" onclick="plMark(${r.id})" title="把复盘计时从现在重新起算">✔ 我刚群发</button>
+          <button class="btn sm bad" onclick="plDel(${r.id})" title="删除后不再自动复盘扣点">🗑</button></div></div>`;}).join(""):`<div class="empty">还没有登记,发草稿箱会自动记一笔</div>`}</div>`;
   }
   else {
     const logContract=normalizeListContract(
@@ -4424,7 +4457,10 @@ async function censorView(){
       <span class="tag">${l.kind==="pre"?"发前审查":"发后复盘"}</span> <span class="tag">${esc(l.platform||"")}</span>
       <b>${esc(l.title||"(无标题)")}</b>
       <span class="sub" style="float:right">${new Date(l.created_at*1000).toLocaleString("zh-CN")}</span>
-      <div class="sub" style="margin-top:4px">${l.kind==="pre"?`结论:${esc(l.verdict||"")} · 合规分 ${l.score??"—"} · 问题 ${(l.issues||[]).length} 条`:`评级:${esc(l.verdict||"—")}`}${l.report?` · ${esc((l.report||"").slice(0,60))}`:""}</div>
+      <div class="sub" style="margin-top:4px">${l.kind==="pre"?`结论:${esc(l.verdict||"")} · 合规分 ${l.score??"—"} · 问题 ${(l.issues||[]).length} 条`:`评级:${esc(l.verdict||"—")}`}</div>
+      ${(l.issues||[]).length||l.report?`<details style="margin-top:6px"><summary class="sub" style="cursor:pointer;font-weight:800">📄 展开完整报告</summary>
+        ${(l.issues||[]).map(i=>`<div class="notice" style="margin-top:6px"><b>[${esc(i.severity||"")}] ${esc(i.type||"")}</b>:${esc(i.detail||"")}${i.suggest?`<div class="sub">改法:${esc(i.suggest)}</div>`:""}</div>`).join("")}
+        ${l.report?`<div class="md" style="margin-top:6px">${md(l.report)}</div>`:""}</details>`:""}
     </div>`).join("") : `<div class="empty">还没有审查记录</div>`)
       +listPager(logContract,"censor");
   }
@@ -4440,6 +4476,11 @@ async function censorView(){
     <div class="tabs">${tabs.map(([k,l])=>`<span class="tb ${CEN_TAB===k?"on":""}" onclick="CEN_TAB=${cp(k)};resetListPage('censor');render()">${l}</span>`).join("")}</div>
     ${listNotice}
     <div style="margin-top:10px">${body}</div></div>`;
+}
+async function plDel(id){
+  if(!await uiConfirm("删除这条台账?删除后该篇不再自动复盘,也不再扣复盘点。",{okText:"删除",okClass:"bad"})) return;
+  try{ await api("/publog/"+id,{method:"DELETE"}); toast("已删除,该篇自动复盘停止"); render(); }
+  catch(e){ toast(e.message); }
 }
 async function cenScan(){
   const r = await api("/censor/scan",{method:"POST",body:{title:$("#cen-title").value,body:$("#cen-body").value,platform:cenPf()}}).catch(e=>({error:e.message}));
@@ -4518,8 +4559,9 @@ async function channelsView(){
         <li>电脑打开 <a href="https://mp.weixin.qq.com" target="_blank" style="text-decoration:underline">mp.weixin.qq.com</a> 登录您的公众号;</li>
         <li>左侧菜单最底下「设置与开发」→「基本配置」(或「开发接口管理」);</li>
         <li>复制「开发者ID(AppID)」填到上面;点「开发者密码(AppSecret)」旁的<b>生成/重置</b>,管理员扫码后复制密钥填到上面(只显示一次,丢了就再重置);</li>
-        <li>同页往下找「IP白名单」→ 点修改 → 把服务器 IP <code>${esc(wc.server_ip)}</code> 加进去
-          <button class="btn sm" onclick="copyText(${cp(wc.server_ip)})">📋 复制IP</button>;</li>
+        <li>同页往下找「IP白名单」→ 点修改 → 把服务器 IP ${wc.server_ip?`<code>${esc(wc.server_ip)}</code> 加进去
+          <button class="btn sm" onclick="copyText(${cp(wc.server_ip)})">📋 复制IP</button>`:`加进去
+          <span class="notice" style="display:inline-block;padding:4px 8px">⚠️ 平台还没配置服务器出口 IP——请联系平台顾问索取(点右下角 💬),拿到后粘进白名单即可</span>`};</li>
         <li>回到这里点「保存」→「测试连接」,通了就能在交付包一键发草稿箱。</li></ol>
       <div class="notice" style="font-size:12.5px">⚠️ 未认证的<b>个人订阅号</b>没有草稿箱接口权限(微信的限制),需要完成微信认证;企业主体的服务号/订阅号认证后都可用。发进草稿箱后,在公众号后台「草稿箱」里预览确认再群发,更稳。</div>
     </details></div>`:""}
@@ -4546,7 +4588,8 @@ async function channelsView(){
       <button class="btn pri" onclick="mxAdd(this)">🔗 绑定并验证</button></div>
     <div id="mx-list" style="margin-top:10px">${(mx.accounts||[]).map(a=>`<div class="topic">
       <span style="font-size:16px">${a.emoji}</span> <b>${esc(a.name)}</b> <span class="sub">${esc(a.platform_name)}${a.nickname?` · ${esc(a.nickname)}`:""}</span>
-      <span class="tag" style="${a.status==="ok"?"background:#a7ecc9":a.status==="expired"?"background:#ffc2c5":""}">${{ok:"✅ 有效",expired:"⚠️ 已失效",unchecked:"未验证"}[a.status]||a.status}</span>
+      <span class="tag" style="${a.status==="ok"?"background:#a7ecc9":a.status==="expired"?"background:#ffc2c5":""}">${{ok:`✅ ${a.checked_at?new Date(a.checked_at*1000).toLocaleDateString("zh-CN")+" 验证有效":"有效"}`,expired:"⚠️ 已失效",unchecked:"未验证"}[a.status]||a.status}</span>
+      ${a.status==="ok"&&a.checked_at&&(Date.now()/1000-a.checked_at)>7*86400?`<span class="sub">⏰ 距上次验证已超一周,发布前建议先点「🔌 验证」</span>`:""}
       <span style="float:right"><button class="btn sm" onclick="mxCheck(${cp(a.id)},this)">🔌 验证</button>
       <button class="btn sm bad" onclick="mxDel(${cp(a.id)})">🗑</button></span></div>`).join("")||`<div class="empty">还没绑定账号</div>`}</div>
     ${listContractNotice(mtasksContract,"矩阵发布记录")}
