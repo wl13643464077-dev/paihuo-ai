@@ -53,6 +53,15 @@ def build_msg(kind: str, payload: dict) -> str:
         return (f"**⏸️ 派活 · 定时任务已暂停**\n「{title}」因点数不足自动暂停,"
                 f"内容会断更!\n充值后请到定时任务页重新打开开关\n"
                 f"[去充值]({base}/#/billing) · [看定时任务]({base}/#/schedules)")
+    if kind == "learn_done":
+        fresh = int(p.get("new") or 0)
+        return (f"**🎓 派活 · 员工进修完成**\n「{title}」新学 {fresh} 条技能,"
+                f"技能库共 {p.get('total', '?')} 条"
+                + ("" if fresh else "\n本次内容与已有技能全部重复,3 点已自动退回,建议隔几天再进修")
+                + f"\n[看员工技能]({base}/#/)")
+    if kind == "learn_failed":
+        return (f"**🎓 派活 · 员工进修失败**\n「{title}」本次进修没成功,"
+                f"3 点已自动退回,可稍后重试\n[回办公室]({base}/#/)")
     if kind == "report":
         return (f"**📰 派活 · {p.get('report_name', '报告出炉')}**\n{(p.get('summary') or '')[:180]}\n"
                 f"[查看]({base}/{p.get('link') or '#/knowledge'})")
@@ -79,6 +88,8 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
         "report": p.get("report_name") or "报告已出炉",
         "video": "视频成片已交付",
         "pub": "矩阵发布成功" if p.get("ok") else "矩阵发布失败",
+        "learn_done": "员工进修完成",
+        "learn_failed": "员工进修失败(已退点)",
     }
     title = str(labels.get(kind) or "派活有新进展")[:80]
     body = str(

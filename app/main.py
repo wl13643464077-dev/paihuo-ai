@@ -3071,9 +3071,13 @@ async def employee_learn(idx: int):
     except billing.InsufficientPoints as e:
         raise HTTPException(402, str(e))
 
+    tid = TEN()
+    emp_name = s.get("name", "数字员工")
+
     async def _bg():
+        from . import notify
         try:
-            await employees.learn(s, broadcast=engine.broadcast)
+            result = await employees.learn(s, broadcast=engine.broadcast)
         except BaseException as exc:
             try:
                 billing.fail_operation(billing_op, "员工进修失败自动退回")
@@ -3088,8 +3092,34 @@ async def employee_learn(idx: int):
                 idx,
                 type(exc).__name__,
             )
+            # 后台失败不能只写服务端日志:老板盯着面板等结果,必须站内告知。
+            try:
+                notify.push(tid, "learn_failed", {"title": emp_name})
+            except Exception:
+                logging.getLogger("employees").warning(
+                    "employee %s learn-failed notify failed", idx)
         else:
-            billing.complete_operation(billing_op)
+            fresh = int((result or {}).get("new") or 0)
+            if fresh:
+                billing.complete_operation(billing_op)
+            else:
+                # 一条新技能都没学到就不收钱,与全站「没产出就退点」口径一致。
+                try:
+                    billing.fail_operation(billing_op, "进修未学到新技能自动退回")
+                except Exception:
+                    logging.getLogger("employees").error(
+                        "employee %s zero-fresh refund failed", idx)
+            try:
+                notify.push(tid, "learn_done", {
+                    "title": emp_name, "new": fresh,
+                    "total": (result or {}).get("total"),
+                    "summary": (f"「{emp_name}」新学 {fresh} 条技能,技能库共 "
+                                f"{(result or {}).get('total', '?')} 条"
+                                + ("" if fresh else "(全部与已有重复,3 点已退回)")),
+                })
+            except Exception:
+                logging.getLogger("employees").warning(
+                    "employee %s learn-done notify failed", idx)
 
     asyncio.create_task(_bg())
     return {"ok": True, "started": True}
@@ -3429,9 +3459,12 @@ def company_get():
     _need_admin()
     tid = TEN()
     prof = db.jloads(db.get_setting(f"company_profile:{tid}"), {}) or {}
+    filled = sum(1 for k in _COMPANY_FIELDS if str(prof.get(k) or "").strip())
     return {"materials": db.get_setting(f"company_materials:{tid}") or "",
             "profile": prof,
-            "injected": bool(any(prof.get(k) for k in _COMPANY_FIELDS))}
+            "injected": filled > 0,
+            "filled": filled,
+            "total_fields": len(_COMPANY_FIELDS)}
 
 
 @app.put("/api/company")
@@ -3664,6 +3697,10 @@ def schedule_update(sid: int, body: dict):
         data["brief_json"] = json.dumps(brief, ensure_ascii=False)
     if "enabled" in body:
         data["enabled"] = 1 if body["enabled"] else 0
+        # 充值后重新拨开开关时,清掉「已暂停:点数不足」残留,
+        # 否则卡片上新旧状态互相打架,老板分不清恢复没恢复。
+        if data["enabled"] and str(s.get("last_note") or "").startswith("已暂停"):
+            data["last_note"] = "已重新启用,下次到点自动开工"
     if data:
         merged = _validated_schedule({**s, **data})
         for k in ("kind", "at_time", "weekday", "every_hours"):
@@ -6735,6 +6772,30 @@ async def censor_check_api(body: dict):
                 type(refund_exc).__name__,
             )
         raise
+    except providers.ProviderError as exc:
+        # AI 深审失败照旧退点,但免费的规则词库结果不能陪葬:
+        # 老板至少带走这部分,并明确知道深审没跑完、钱退了。
+        try:
+            settled = billing.fail_operation(op_key, "审查失败自动退回")
+        except Exception as settle_error:
+            log.error(
+                "censor refund failed op=%s error_type=%s",
+                op_key,
+                type(settle_error).__name__,
+            )
+            raise HTTPException(
+                503, "审查未完成，退点结算正在恢复，请稍后查看"
+            ) from settle_error
+        if not settled:
+            raise HTTPException(503, "审查结算状态待确认，请稍后查看") from exc
+        fallback = await censor.check(
+            tid, title, text, platform, deep=False, save=False
+        )
+        fallback["degraded"] = True
+        fallback["summary"] = ("AI 深审未完成,1 点已自动退回。"
+                               "以下是免费规则词库的扫描结果,可稍后重试深审")
+        fallback["label"] = "⚠️ 深审未完成(已退点),下方仅为规则词库结果"
+        return fallback
     except Exception as exc:
         try:
             settled = billing.fail_operation(op_key, "审查失败自动退回")

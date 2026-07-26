@@ -1261,7 +1261,7 @@ async function trashView(offset=0){
   $("#main").innerHTML=`<div class="card" style="background:linear-gradient(120deg,#f4edde,#fffaf0)">
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <div style="flex:1;min-width:220px"><h2 style="margin:0">🗑 回收站</h2>
-        <div class="sub" style="margin-top:5px">误删的工单、员工任务、知识沉淀、资产、人设档案和数字人任务可在这里恢复；交付物不会在移入回收站时被销毁。</div></div>
+        <div class="sub" style="margin-top:5px">误删的工单、员工任务、知识沉淀、资产、人设档案和数字人任务可在这里恢复；交付物不会在移入回收站时被销毁。回收站内容<b>长期保留、暂无自动清理</b>;含敏感信息需要彻底删除的,请点右下角 💬 联系平台顾问处理。</div></div>
       <button class="btn" onclick="trashView()">↻ 刷新</button></div>
     ${data.truncated?`<div class="notice">当前已展示 ${rows.length} 条，下面还能加载更早记录。</div>`:""}</div>
   <div class="card">${rows.length?rows.map(item=>`<div class="topic" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
@@ -2719,8 +2719,8 @@ function profileForm(p){
       <div><label>禁忌红线</label><input id="p-taboo" value="${esc(s.taboo||"")}" placeholder="如:不聊政治、不贬低同行、不承诺收益"></div></div>
     <label>视觉规范(封面偏好)</label><input id="p-visual" value="${esc(s.visual||"")}" placeholder="如:大字报风、主色橙色、每张带账号角标">
     <label>历史作品喂养(粘贴 5–20 篇代表作,用于提炼文风)</label>
-    <div class="notice" style="margin:4px 0 8px">📁 有文件包?直接选文件(支持多选,txt/md/csv/json 的内容会自动读进来;各种记录、往期文案、语录都行)</div>
-    <input type="file" multiple accept=".txt,.md,.markdown,.csv,.json,.log" onchange="loadProfileFiles(this)" style="margin-bottom:8px">
+    <div class="notice" style="margin:4px 0 8px">📁 有文件包?直接选文件(支持多选,<b>Word / PDF / Excel / PPT / 图片 / txt</b> 都能自动提取文字;各种记录、往期文案、语录都行)</div>
+    <input type="file" multiple accept=".txt,.md,.markdown,.csv,.json,.log,.pdf,.docx,.xlsx,.pptx,.jpg,.jpeg,.png,.webp" onchange="loadProfileFiles(this)" style="margin-bottom:8px">
     <textarea id="p-corpus" style="min-height:160px" placeholder="把过去的爆款正文直接粘贴进来,多篇用 --- 分隔;或用上面的按钮选文件。注:提炼实际使用前 8000 字,日常写稿注入前 3000 字——放最能代表你风格的几篇即可,不必求多">${esc(s.corpus||"")}</textarea>
     <div class="actions">
       <button class="btn pri" onclick="saveProfile(${p?p.id:"null"})">💾 保存</button>
@@ -2728,14 +2728,9 @@ function profileForm(p){
       <button class="btn" onclick="render()">取消</button></div></div>`;
 }
 async function loadProfileFiles(input){
-  const ta = $("#p-corpus");
-  for(const f of input.files){
-    if(f.size > 2*1024*1024){ toast(`${f.name} 超过2MB,跳过`); continue; }
-    const text = await f.text();
-    ta.value += (ta.value?"\n\n---\n\n":"") + `【文件:${f.name}】\n` + text;
-  }
-  toast(`已读入 ${input.files.length} 个文件,记得点保存`);
-  input.value = "";
+  // 走后端 parse-file:Word/PDF/图片都能抽文字,GBK 编码的 txt 也不会乱码
+  await parseFileInto(input, "#p-corpus");
+  toast("记得点「💾 保存」,语料才会存进档案");
 }
 function closeProfileForms(){ document.querySelectorAll(".pform").forEach(f=>f.remove()); }
 async function profileDel(id,name){
@@ -2783,11 +2778,11 @@ async function distill(id, btn){
 }
 
 /* ---------- 资产库(V5:多维表格 + 专家报告) ---------- */
-let ASSET_TAB = "topic", AFILTER = {platform:"", category:""};
+let ASSET_TAB = "topic", AFILTER = {platform:"", category:""}, ASSET_Q = "";
 function setAF(k,v){ AFILTER[k]=v; resetListPage("assets"); render(); }
 async function assetsView(){
   const assetContract=normalizeListContract(await api(listPath("/assets","assets",{
-    type:ASSET_TAB,platform:AFILTER.platform,category:AFILTER.category})),LIST_PAGE_SIZE);
+    type:ASSET_TAB,platform:AFILTER.platform,category:AFILTER.category,q:ASSET_Q})),LIST_PAGE_SIZE);
   const rows=assetContract.items;
   const shown = rows;
   const action = a => ASSET_TAB==="topic"
@@ -2805,6 +2800,8 @@ async function assetsView(){
       <span class="tb ${ASSET_TAB==="final"?"on":""}" onclick="ASSET_TAB='final';AFILTER={platform:'',category:''};resetListPage('assets');render()">📦 成品库</span>
       <span class="tb ${ASSET_TAB==="report"?"on":""}" onclick="ASSET_TAB='report';AFILTER={platform:'',category:''};resetListPage('assets');render()">📄 专家报告</span>
       <span style="flex:1"></span>
+      <input id="as-q" placeholder="🔍 搜标题" value="${esc(ASSET_Q||"")}" style="max-width:170px"
+        onkeydown="if(event.key==='Enter'){ASSET_Q=this.value.trim();resetListPage('assets');render();}">
       <button class="btn sm" onclick="feishuSync('asset',this)">📤 同步到飞书</button>
       <a class="btn sm" href="/api/library/export.xlsx?kind=asset">⬇️ Excel</a></div>
     <div id="fs-box"></div>
@@ -2937,7 +2934,10 @@ async function companyView(){
   const f = (k,label,ph)=>`<label>${esc(label)}</label><input id="cp-${k}" value="${esc(p[k]||"")}" placeholder="${esc(ph)}">`;
   $("#main").innerHTML = `<div class="card"><h2>🏢 企业档案</h2>
     <div class="sub">把企业介绍/品牌手册/产品说明/话术规范粘进来,点「提炼并同步」——AI 会压成一份固定档案,<b>自动注入每一个数字员工</b>(内容工位 / 行业专家 / 圆桌会议),让他们产出更懂你的企业、更贴品牌调性、不踩表达禁忌。也会自动带上沉淀库里的企业知识。</div>
-    ${c.injected?`<div class="notice" style="background:#e7f6ec;border-color:#8fd3a6">✅ 企业档案已生效,正注入全部数字员工</div>`:`<div class="notice">⚠️ 还没生成档案,员工暂时不了解你的企业。填资料 → 点提炼即可。</div>`}
+    ${c.injected?(c.filled>=(c.total_fields||7)
+      ?`<div class="notice" style="background:#e7f6ec;border-color:#8fd3a6">✅ 企业档案已生效(7/7 项齐全),正注入全部数字员工</div>`
+      :`<div class="notice" style="background:#fff3d6">🟡 企业档案部分生效:已填 ${c.filled}/${c.total_fields||7} 项。员工只知道已填的部分——<b>空着的字段(如调性/禁忌)不会凭空生效</b>,建议补全后重新保存。</div>`)
+      :`<div class="notice">⚠️ 还没生成档案,员工暂时不了解你的企业。填资料 → 点提炼即可。</div>`}
     <label>企业资料(可直接粘贴,或上传文档;最多 2 万字)</label>
     <textarea id="cp-materials" style="min-height:150px" placeholder="例:我们是「川小福」麻辣烫连锁,主打一人食平价麻辣烫,人均25元…目标客户…品牌调性…核心卖点…表达禁忌…slogan…">${esc(c.materials||"")}</textarea>
     <div class="actions">
@@ -3151,6 +3151,7 @@ function schedForm(s){
         ${[["daily","每天一次"],["weekly","每周一次"],["interval","每 N 小时"]].map(([v,t])=>`<option value="${v}"${s?.kind===v?" selected":""}>${t}</option>`).join("")}</select></div>
       <div id="s-when"><label>时间(北京时间)</label><input id="s-time" type="time" value="09:00"></div>
     </div>
+    <div class="sub" id="s-cost" style="margin-top:2px"></div>
     <div class="row">
       <div><label>账号人设</label><select id="s-profile"><option value="">(不使用)</option>
         ${profiles.map(p=>`<option value="${p.id}"${s?.profile_id===p.id?" selected":""}>${esc(p.name)}</option>`).join("")}</select></div>
@@ -3171,10 +3172,27 @@ function schedKindUI(s){
   const k = $("#s-kind").value;
   const t = esc(s?.at_time||"09:00");
   $("#s-when").innerHTML = k==="interval"
-    ? `<label>每几小时来一单</label><input id="s-hours" type="number" min="1" value="${s?.every_hours||24}">`
+    ? `<label>每几小时来一单</label><input id="s-hours" type="number" min="1" value="${s?.every_hours||24}" oninput="schedCost()">`
     : `<label>${k==="weekly"?"星期几 + 时间":"时间"}(北京时间)</label><div style="display:flex;gap:6px">
        ${k==="weekly"?`<select id="s-wd" style="flex:1">${WD.map((w,i)=>`<option value="${i}"${(s?.weekday??0)===i?" selected":""}>${w}</option>`).join("")}</select>`:""}
        <input id="s-time" type="time" value="${t}" style="flex:1"></div>`;
+  schedCost();
+}
+function schedCost(){
+  // 老板设频率前先看清账:这个节奏一天烧多少点、现有余额撑几天。
+  const el = $("#s-cost"); if(!el) return;
+  const pts = META?.job_points??18, bal = Math.round(STATE?.balance||0);
+  const k = $("#s-kind")?.value;
+  let perDay = 1;
+  if(k==="weekly") perDay = 1/7;
+  else if(k==="interval") perDay = 24/Math.max(1, +($("#s-hours")?.value)||24);
+  const daily = perDay*pts;
+  const runway = daily>0 ? Math.floor(bal/daily) : 0;
+  const heavy = daily > pts;   // 高于一天一单就标黄提醒
+  el.innerHTML = `💎 该节奏 ≈ <b>${k==="weekly"?`每周 1 单 · ${pts} 点/周`
+    :`${perDay===1?"1":(Math.round(perDay*10)/10)} 单/天 · ${Math.round(daily*10)/10} 点/天`}</b>
+    (每单 ${pts} 点) · 当前余额 ${bal} 点约可自动跑 <b>${k==="weekly"?`${Math.floor(bal/pts)} 周`:`${runway} 天`}</b>${
+    heavy?` <span style="color:#b45309;font-weight:800">⚠️ 高频节奏烧点快,点数不足会自动暂停并通知您</span>`:""}`;
 }
 async function schedSave(id){
   const dir = $("#s-dir").value.trim();
@@ -3633,7 +3651,7 @@ async function admDetail(idx){
     <div class="kv" style="margin-top:6px"><span>${esc(d.dept)}</span><span>${esc(d.duty)}</span>
       <span>出勤 ${d.stats.runs} 次</span><span>历史成本 ${rmb(d.stats.cost_usd)}</span>
       <span>${d.learned_at?"上次进修 "+new Date(d.learned_at*1000).toLocaleDateString("zh-CN"):"未进修过"}</span></div>
-    <div class="actions"><button class="btn pri sm" ${d.learning?"disabled":""} onclick="api('/employees/${idx}/learn',{method:'POST'}).then(()=>toast('已送去进修(3点)')).catch(e=>toast(e.message))">🎓 送去进修(3点)</button></div>
+    <div class="actions"><button class="btn pri sm" ${d.learning?"disabled":""} onclick="this.disabled=true;this.textContent='🎓 进修中…';api('/employees/${idx}/learn',{method:'POST'}).then(()=>toast('已送去进修(3点),结果会发站内通知')).catch(e=>{toast(e.message);this.disabled=false;this.textContent='🎓 送去进修(3点)';})">🎓 送去进修(3点)</button></div>
     <h3>技能库(${(d.skills||[]).length})</h3>
     ${(d.skills||[]).map((k,i)=>`<div class="skillcard ${k.enabled===false?"off":""}">
       <span class="switch ${k.enabled!==false?"on":""}" onclick="admSkillToggle(${idx},${i})"></span>
@@ -3825,9 +3843,13 @@ async function tmUserCreate(){
   const mods = [...document.querySelectorAll("#tm-mods .on")].map(e=>e.dataset.k);
   const password=$("#tm-p").value, passwordError=passwordPolicyError(password);
   if(passwordError) return toast(passwordError);
+  if(!mods.length && !await uiConfirm(
+    "还没勾选任何板块:员工登录后会是一片空白、啥也用不了。\n确定先建空账号,回头再分配?",
+    {title:"未分配板块",confirmText:"先建空账号"})) return;
   try{ await api("/team/users",{method:"POST",body:{username:$("#tm-u").value.trim(),
     password, modules:mods}});
-    toast("副账号已创建,把用户名密码发给TA即可"); render(); }catch(e){ toast(e.message); }
+    toast(mods.length?"副账号已创建,把用户名密码发给TA即可"
+      :"副账号已创建(未分配板块):记得点「板块」分配,TA 才能用"); render(); }catch(e){ toast(e.message); }
 }
 function tmEditMods(uid, name, mods){
   $("#tm-modbox").innerHTML = `<div class="card" style="background:#fff6dc">
@@ -4552,7 +4574,8 @@ async function cenDeep(btn){
   try{
     const r = await api("/censor/check",{method:"POST",body:{title:$("#cen-title").value,body:$("#cen-body").value,platform:cenPf()},
       timeout:330000,longRunning:true});
-    $("#cen-out").innerHTML = censorReportHtml(r);
+    $("#cen-out").innerHTML = (r.degraded?`<div class="notice red">⚠️ AI 深审临时没跑完,<b>1 点已自动退回</b>;下面是免费规则词库的扫描结果,可稍后再点深度审查。</div>`:"")
+      + censorReportHtml(r);
   }catch(e){ $("#cen-out").innerHTML = `<div class="notice red">${esc(e.message)}</div>`; }
   btn.disabled=false; btn.textContent="🛡️ 深度审查(1点)";
 }
@@ -4640,11 +4663,12 @@ async function channelsView(){
         <li>电脑 Chrome 登录 creator.xiaohongshu.com(或 creator.douyin.com);</li>
         <li>按 F12 打开开发者工具 → Network(网络)→ 刷新页面 → 点第一个请求;</li>
         <li>右侧 Request Headers 里找到 <code>cookie:</code> 那一行,<b>整行的值</b>复制出来;</li>
-        <li>粘到下面,起个备注名,点绑定 → 自动验证登录态。</li></ol></details>
+        <li>粘到下面,起个备注名,点绑定 → 自动验证登录态。</li></ol>
+      <div class="notice red" style="margin-top:6px">🔐 <b>整行 Cookie 等于这个账号的登录密码</b>:只粘到下面的框里,不要截图、不要发给任何人(包括自称客服的);绑定后这里也不会再显示明文。</div></details>
     <div class="row" style="align-items:flex-end">
       <div style="flex:0 0 130px"><label>平台</label><select id="mx-pf">${(mx.platforms||[]).map(pf=>`<option value="${pf.key}">${pf.emoji} ${pf.name}</option>`).join("")}</select></div>
       <div style="flex:0 0 150px"><label>备注名</label><input id="mx-name" placeholder="如:主号"></div>
-      <div style="flex:1;min-width:240px"><label>Cookie</label><input id="mx-cookie" placeholder="按向导复制整行 cookie 粘这里"></div>
+      <div style="flex:1;min-width:240px"><label>Cookie <span class="sub">(等于登录密码,勿外传)</span></label><input id="mx-cookie" type="password" autocomplete="off" placeholder="按向导复制整行 cookie 粘这里"></div>
       <button class="btn pri" onclick="mxAdd(this)">🔗 绑定并验证</button></div>
     <div id="mx-list" style="margin-top:10px">${(mx.accounts||[]).map(a=>`<div class="topic">
       <span style="font-size:16px">${a.emoji}</span> <b>${esc(a.name)}</b> <span class="sub">${esc(a.platform_name)}${a.nickname?` · ${esc(a.nickname)}`:""}</span>

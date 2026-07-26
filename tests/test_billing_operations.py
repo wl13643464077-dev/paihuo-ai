@@ -298,13 +298,14 @@ class ScheduledBillingOperationCase(unittest.IsolatedAsyncioTestCase):
             "call_text_json",
             new=AsyncMock(side_effect=RuntimeError("provider down")),
         ):
-            with self.assertRaises(HTTPException) as failed:
-                await main.censor_check_api({
-                    "title": "待审内容",
-                    "body": "这是一段需要深度审查的正文。",
-                    "platform": "公众号",
-                })
-        self.assertEqual(503, failed.exception.status_code)
+            # 深审失败退点后降级为免费规则扫描结果,而不是把整个响应变成报错。
+            report = await main.censor_check_api({
+                "title": "待审内容",
+                "body": "这是一段需要深度审查的正文。",
+                "platform": "公众号",
+            })
+        self.assertTrue(report["degraded"])
+        self.assertIn("退回", report["summary"])
         self.assertEqual(20, billing.balance(2))
         self.assertEqual(0, db.one("SELECT COUNT(*) n FROM censor_log")["n"])
         self.assertEqual(
