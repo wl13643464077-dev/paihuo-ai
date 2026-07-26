@@ -692,6 +692,14 @@ def billing_get():
     agg = db.one("SELECT COALESCE(SUM(CASE WHEN delta>0 THEN delta END),0) recharged, "
                  "COALESCE(-SUM(CASE WHEN delta<0 THEN delta END),0) spent, COUNT(*) n "
                  "FROM billing_log WHERE tenant_id=?", (TEN(),)) or {}
+    # 近30天按动作聚合消耗:只算实际收钱的状态(charged=已扣费在跑,succeeded=已交付),
+    # pending 未扣费、refunded 已退回,都不算老板真正花掉的钱。
+    spend_by_action = db.q(
+        "SELECT action, COUNT(*) n, COALESCE(SUM(points),0) points "
+        "FROM billing_operation WHERE tenant_id=? "
+        "AND status IN ('charged','succeeded') AND created_at>? "
+        "GROUP BY action ORDER BY SUM(points) DESC",
+        (TEN(), time.time() - 30 * 86400))
     return {"balance": (t or {}).get("balance") or 0,
             "plan": (t or {}).get("plan") or "",
             "plan_expires": (t or {}).get("plan_expires"),
@@ -699,7 +707,8 @@ def billing_get():
             "recharged": agg.get("recharged") or 0, "spent": agg.get("spent") or 0,
             "txn_n": agg.get("n") or 0,
             "prices": price_rows, "plans": billing.PLANS,
-            "periods": billing.PERIODS, "log": log_rows}
+            "periods": billing.PERIODS, "log": log_rows,
+            "spend_by_action": spend_by_action}
 
 
 @app.post("/api/feedback")
