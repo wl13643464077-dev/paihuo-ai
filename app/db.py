@@ -10,6 +10,10 @@ DB_PATH = os.environ.get(
     "CONTENTCREW_DB_PATH",
     os.path.join(os.path.dirname(__file__), "..", "data", "contentcrew.db"),
 )
+class StaleWriteError(RuntimeError):
+    """异步写池发现目标库已被切换;该快照写应被丢弃而非执行代际切换。"""
+
+
 _init_lock = threading.RLock()
 _thread = threading.local()
 # ``_conn`` remains the process anchor for backward-compatible lifecycle checks
@@ -796,12 +800,29 @@ def conn():
     ):
         return local
 
+    if (
+        (_conn is None or _conn_path not in (None, path))
+        and threading.current_thread().name.startswith("dbio")
+    ):
+        # 异步写池线程绝不执行代际切换:走到这里说明库已被换走(测试/维护),
+        # 这笔快照写属于已死的库,丢弃即正确语义。若允许池线程做切换,它会
+        # 与主线程互相关闭对方正在使用的连接——那是段错误,不是异常。
+        raise StaleWriteError(path)
+
+    # 数据库代际切换(测试/维护工具换 DB_PATH)前,先在锁外排空异步写池:
+    # 在途任务可能正拿着旧库连接执行,任何跨线程 close 都会段错误。
+    # 必须在 _init_lock 外等——池任务走慢路径时要拿这把锁,锁内等待会死锁。
+    if _conn is not None and _conn_path not in (None, path):
+        _shutdown_async_pool(wait=True)
+
     with _init_lock:
         # Tests/maintenance tools intentionally switch DB_PATH after closing the
         # anchor.  Treat either signal as a new database generation.
         if _conn is None or _conn_path not in (None, path):
             _close_thread_connection()
-            _close_all_connections()
+            # 不做跨线程关闭:其它线程的旧代连接由各自线程在下次 conn() 的
+            # 代际检查里自行关闭(_close_thread_connection),这里只关自己的
+            # 与锚点。跨线程 close 一个可能正在执行的连接是段错误之源。
             if _conn is not None:
                 try:
                     _conn.close()
@@ -822,6 +843,22 @@ def conn():
                 raise
             _conn_path = path
             _connection_generation += 1
+            if threading.current_thread().name.startswith("dbio"):
+                # 异步写池线程绝不领养锚点:锚点(_conn)会被测试/维护工具从主线程
+                # 直接 close,若此刻池线程正用它执行就是段错误。池线程一律用
+                # 自己的独立连接,让"谁的连接谁关"始终成立。
+                connection = sqlite3.connect(
+                    path, timeout=30, check_same_thread=False
+                )
+                _all_connections.add(connection)
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA busy_timeout=30000")
+                connection.execute("PRAGMA synchronous=NORMAL")
+                _thread.connection = connection
+                _thread.generation = _connection_generation
+                _thread.db_path = path
+                _thread.atomic_depth = 0
+                return connection
             _thread.connection = anchor
             _thread.generation = _connection_generation
             _thread.db_path = path
@@ -966,4 +1003,131 @@ def jloads(s, default=None):
         return default if default is not None else {}
 
 
-atexit.register(_close_all_connections)
+# ---------------- 异步门面 ----------------
+# SQLite 是同步库,busy_timeout=30s。事件循环上的协程(引擎流水线、SSE 周边、
+# async 路由)直接调 db 时,任何一次写锁等待都会把整个循环冻住——所有租户的
+# SSE、所有请求一起停。异步侧必须经由这里的门面把 db 调用卸载到专用线程池:
+# 连接本就是线程本地的(见 conn()),每个池线程各持一条连接,WAL 下并发安全。
+#
+# 池子刻意有界:SQLite 同时只有一个写者,更多线程只会排队占内存;4 条足够
+# 覆盖「读 + 写 + 看门狗 + 后台任务」的并发形态。
+_async_pool = None
+_async_pool_lock = threading.Lock()
+
+
+def _pool():
+    global _async_pool
+    if _async_pool is None:
+        with _async_pool_lock:
+            if _async_pool is None:
+                from concurrent.futures import ThreadPoolExecutor
+                _async_pool = ThreadPoolExecutor(
+                    max_workers=4, thread_name_prefix="dbio")
+    return _async_pool
+
+
+async def arun(fn, *args, **kwargs):
+    """在 db 线程池里执行任意同步函数(含整段 with atomic() 的事务体)。
+
+    这是异步侧访问数据库的唯一正道:事务必须整体进池(不能在持有 BEGIN 的
+    情况下 await),所以传入的是完整的同步函数而非单条语句。
+    """
+    import asyncio
+    import functools
+    loop = asyncio.get_running_loop()
+    call = functools.partial(fn, *args, **kwargs) if (args or kwargs) else fn
+    return await loop.run_in_executor(_pool(), call)
+
+
+_pending_writes: list = []
+_pending_lock = threading.Lock()
+
+
+def submit_write(fn, *args, **kwargs):
+    """不等待结果地把一次写操作投给 db 线程池(节流型进度落库用)。
+
+    只适用于「丢了也无碍、下次会整体重写」的快照类写入;需要结果或需要
+    顺序保证的写仍然要走 arun。异常在池线程里记日志,不向上冒泡。
+    需要「先前的异步写都已落地」时,用 adrain() 冲刷。
+    """
+    import functools
+    import logging
+    call = functools.partial(fn, *args, **kwargs) if (args or kwargs) else fn
+    submitted_path = os.path.abspath(DB_PATH)
+
+    def _guarded():
+        try:
+            # 数据库在提交后被切换(测试/维护)时,这笔写属于已死的库,直接丢弃;
+            # 快照类写入的语义本就允许丢帧,写进错误的库反而是事故。
+            if os.path.abspath(DB_PATH) != submitted_path:
+                return
+            call()
+        except StaleWriteError:
+            pass       # conn() 在执行中发现库被切换,静默丢弃这笔快照写
+        except Exception as exc:
+            logging.getLogger("db").warning(
+                "submit_write failed error_type=%s", type(exc).__name__)
+
+    future = _pool().submit(_guarded)
+    with _pending_lock:
+        _pending_writes.append(future)
+        if len(_pending_writes) > 64:      # 顺手清掉已完成的,防列表无限增长
+            _pending_writes[:] = [f for f in _pending_writes if not f.done()]
+
+
+async def adrain():
+    """等待此刻之前提交的全部 submit_write 落地(收尾处保证「返回即持久」)。"""
+    import asyncio
+    with _pending_lock:
+        snapshot = [f for f in _pending_writes if not f.done()]
+        _pending_writes[:] = snapshot
+    for future in snapshot:
+        await asyncio.wrap_future(future)
+
+
+async def aq(sql, args=()):
+    return await arun(q, sql, args)
+
+
+async def aone(sql, args=()):
+    return await arun(one, sql, args)
+
+
+async def ainsert(table, data):
+    return await arun(insert, table, data)
+
+
+async def aupdate(table, id_, data):
+    return await arun(update, table, id_, data)
+
+
+async def aexecute(sql, args=()):
+    return await arun(execute, sql, args)
+
+
+async def aget_setting(key, default=None):
+    return await arun(get_setting, key, default)
+
+
+async def aset_setting(key, value):
+    return await arun(set_setting, key, value)
+
+
+def _shutdown_async_pool(wait: bool = True):
+    """停掉异步写池。默认等在途任务收尾——不等就关连接会段错误。"""
+    global _async_pool
+    pool = None
+    with _async_pool_lock:
+        pool = _async_pool
+        _async_pool = None
+    if pool is not None:
+        pool.shutdown(wait=wait)
+
+
+def _shutdown_all():
+    # 顺序是安全性的一部分:必须先等池里的在途任务结束,再关闭连接。
+    _shutdown_async_pool(wait=True)
+    _close_all_connections()
+
+
+atexit.register(_shutdown_all)

@@ -2251,7 +2251,10 @@ async def run_job(job_id: int, broadcast):
 
     def progress(kind, label=""):
         steps.append({"k": kind, "l": str(label)[:300], "ts": time.time()})
-        db.update("avatar_job", job_id, {"steps_json": json.dumps(steps, ensure_ascii=False)})
+        # 在事件循环上被调用;写锁竞争时同步写库会冻结全部协程,故进 db 线程池。
+        # 快照先序列化(steps 之后还会被改),整体重写语义下丢一帧无碍。
+        snapshot = json.dumps(steps, ensure_ascii=False)
+        db.submit_write(db.update, "avatar_job", job_id, {"steps_json": snapshot})
         broadcast({"type": "avatar_step", "job_id": job_id, "step": steps[-1], "n": len(steps)})
 
     broadcast({"type": "avatar_update", "job_id": job_id})
@@ -2437,6 +2440,8 @@ async def run_job(job_id: int, broadcast):
                     "avatar temporary audio cleanup failed job=%s",
                     job_id,
                 )
+        # 进度是异步落库的;结束前冲刷,保证终态可见时步骤记录已完整。
+        await db.adrain()
         broadcast({"type": "avatar_update", "job_id": job_id})
 
 

@@ -306,20 +306,32 @@ def _digest(decision: str, selected: dict | None, summary: str, next_action: str
 
 def _push(meeting_id: int, broadcast, who: str, text: str, color="#8b7355", emoji="🧑‍💼",
           *, kind="speech", phase=None, round_no=None) -> dict:
-    current = db.one("SELECT messages_json FROM meeting WHERE id=?", (meeting_id,)) or {}
-    messages = db.jloads(current.get("messages_json"), [])
     msg = {"who": who, "text": str(text or "").strip(), "color": color, "emoji": emoji,
            "ts": time.time(), "kind": kind}
     if phase:
         msg["phase"] = phase
     if round_no is not None:
         msg["round"] = round_no
-    messages.append(msg)
-    db.update("meeting", meeting_id, {"messages_json": json.dumps(messages, ensure_ascii=False)})
+
+    def _append_tx():
+        # 读-改-写放同一事务并整体进 db 线程池:并行发言(提案/验证阶段是并发的)
+        # 不互相覆盖,事件循环也不再被写锁竞争冻住。run()/ask() 收尾会 adrain()
+        # 冲刷,保证协程返回时逐字稿已持久。
+        with db.atomic() as c:
+            row = c.execute("SELECT messages_json FROM meeting WHERE id=?",
+                            (meeting_id,)).fetchone()
+            if not row:
+                return
+            messages = db.jloads(row["messages_json"], [])
+            messages.append(msg)
+            c.execute("UPDATE meeting SET messages_json=?,updated_at=? WHERE id=?",
+                      (json.dumps(messages, ensure_ascii=False),
+                       time.time(), meeting_id))
+
+    db.submit_write(_append_tx)
     _emit(
         broadcast,
-        {"type": "meeting_msg", "meeting_id": meeting_id, "msg": msg,
-         "n": len(messages)},
+        {"type": "meeting_msg", "meeting_id": meeting_id, "msg": msg},
     )
     return msg
 
@@ -700,6 +712,8 @@ GO 要派 1-3 个能产出实物的执行任务；NEED_INFO 要派 1-2 个最小
             )
         settle_failure(meeting_id, public_error)
     finally:
+        # 逐句发言是异步落库的;协程结束前冲刷,保证「run() 返回即逐字稿已持久」。
+        await db.adrain()
         _emit(broadcast, {"type": "meeting_update", "meeting_id": meeting_id})
 
 
@@ -1323,6 +1337,7 @@ async def ask(meeting_id: int, question: str, broadcast, billing_op: str = None)
                 kind="error",
                 phase="awaiting_execution",
             )
+    await db.adrain()      # 追问的发言也要在返回前落地
     _emit(broadcast, {"type": "meeting_update", "meeting_id": meeting_id})
 
 

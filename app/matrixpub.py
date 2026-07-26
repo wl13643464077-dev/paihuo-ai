@@ -172,9 +172,18 @@ def enqueue(tid: int, platform: str, acc_id: str, payload: dict) -> int:
 
 
 def _log(pid: int, msg: str):
-    r = db.one("SELECT log FROM pub_task WHERE id=?", (pid,))
-    text = ((r or {}).get("log") or "") + f"[{time.strftime('%H:%M:%S')}] {msg}\n"
-    db.update("pub_task", pid, {"log": text[-4000:]})
+    line = f"[{time.strftime('%H:%M:%S')}] {msg}\n"
+
+    def _tx():
+        # 追加语义的读-改-写放同一事务,进池后与相邻日志并发也不丢行。
+        with db.atomic() as c:
+            r = c.execute("SELECT log FROM pub_task WHERE id=?", (pid,)).fetchone()
+            text = ((r["log"] if r else "") or "") + line
+            c.execute("UPDATE pub_task SET log=?,updated_at=? WHERE id=?",
+                      (text[-4000:], time.time(), pid))
+
+    # 发布协程在事件循环上跑;日志落库进 db 线程池,防写锁竞争冻结循环。
+    db.submit_write(_tx)
     # The persisted progress belongs to the current tenant and is shown in the
     # task UI.  The host journal receives only a stable event: account names,
     # content, screenshots and provider text must never be copied there.
@@ -435,5 +444,7 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
         notify.push(tid, "pub", {"ok": True, "platform": p["name"],
                                  "title": payload.get("title") or ""})
     finally:
+        # 发布日志是异步落库的;结束前冲刷,保证任务终态可见时日志已完整。
+        await db.adrain()
         if broadcast:
             broadcast({"type": "pub_update", "task_id": pid})

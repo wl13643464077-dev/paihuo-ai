@@ -177,24 +177,36 @@ class Engine:
             self.broadcast({"type": "station_step", "job_id": job_id, "idx": idx,
                             "n": len(steps), "step": steps[-1]})
             if run_id and (kind != "typing" or now - st["save"] > 3):
-                db.update("station_run", run_id,
-                          {"steps_json": json.dumps(steps, ensure_ascii=False)})
+                # 进度回调常在事件循环上被 provider 协程调用;这里的落库是一次
+                # 写操作,写锁竞争时会把整个循环冻住,必须投给 db 线程池。
+                # 快照在提交前序列化(steps 随后还会被循环线程改),丢一帧无碍——
+                # 下一次保存会整体重写。
+                snapshot = json.dumps(steps, ensure_ascii=False)
+                db.submit_write(db.update, "station_run", run_id,
+                                {"steps_json": snapshot})
                 st["save"] = now
         return progress, steps
 
     # ---------- 启动与恢复 ----------
     async def start(self):
         self._loop = asyncio.get_running_loop()
-        # 断点恢复:被重启打断的 running 工位重跑,进行中的工单重新入队
-        for r in db.q("SELECT id FROM station_run WHERE status='running'"):
-            db.update("station_run", r["id"], {"status": "rejected",
-                                               "review_comment": "服务重启,自动重跑"})
-        for j in db.q("SELECT id FROM job WHERE status IN ('running')"):
-            self.notify(j["id"])
-        # 兼容旧版本“先标失败、来不及退款”的窗口；CAS 保证多次启动也只退一次。
-        for j in db.q("SELECT id FROM job WHERE status='failed' "
-                      "AND billing_status='charged'"):
-            self.settle_failure(j["id"], "服务启动补做失败结算")
+
+        def _recover():
+            # 断点恢复:被重启打断的 running 工位重跑,进行中的工单重新入队
+            for r in db.q("SELECT id FROM station_run WHERE status='running'"):
+                db.update("station_run", r["id"], {"status": "rejected",
+                                                   "review_comment": "服务重启,自动重跑"})
+            running = [j["id"] for j in db.q(
+                "SELECT id FROM job WHERE status IN ('running')")]
+            # 兼容旧版本“先标失败、来不及退款”的窗口；CAS 保证多次启动也只退一次。
+            for j in db.q("SELECT id FROM job WHERE status='failed' "
+                          "AND billing_status='charged'"):
+                self.settle_failure(j["id"], "服务启动补做失败结算")
+            return running
+
+        # 恢复扫描含批量写与退款事务,放 db 线程池,启动期就不阻塞事件循环。
+        for job_id in await db.arun(_recover):
+            self.notify(job_id)
         for _ in range(4):
             asyncio.create_task(self._worker())
         log.info("engine started")
@@ -214,7 +226,9 @@ class Engine:
                 try:
                     await self._advance(job_id)
                 except Exception as e:
-                    self.settle_failure(
+                    # 失败结算含退款事务(写),放 db 线程池执行。
+                    await db.arun(
+                        self.settle_failure,
                         job_id,
                         providers.public_failure_message(
                             e,
@@ -503,7 +517,7 @@ class Engine:
                 idx += 1
                 continue
             if run and run["status"] == "awaiting_review":
-                changed = db.execute(
+                changed = await db.aexecute(
                     "UPDATE job SET status='awaiting_review',current_idx=?,updated_at=? "
                     "WHERE id=? AND billing_status='charged' "
                     "AND status IN ('running','awaiting_review','gate_blocked')",
@@ -513,29 +527,31 @@ class Engine:
                     self.touch(job_id)
                 return True
             if run and run["status"] == "failed":
-                self.settle_failure(
+                await db.arun(
+                    self.settle_failure,
                     job_id, run.get("review_comment") or f"工位{idx + 1}执行失败")
                 return True
 
             # 需要跳过的可选工位(演绎师默认关闭)
             if cfg.get("optional") and not brief.get("enable_deck"):
                 if not run:
-                    inserted = False
-                    with db.atomic() as c:
-                        current = c.execute(
-                            "SELECT status,billing_status FROM job WHERE id=?",
-                            (job_id,),
-                        ).fetchone()
-                        if self._job_row_executable(current):
+                    def _skip_tx(station_idx=idx, skill=cfg["skill"]):
+                        with db.atomic() as c:
+                            current = c.execute(
+                                "SELECT status,billing_status FROM job WHERE id=?",
+                                (job_id,),
+                            ).fetchone()
+                            if not self._job_row_executable(current):
+                                return False
                             now = time.time()
                             c.execute(
                                 "INSERT INTO station_run"
                                 "(job_id,station_idx,skill_id,status,created_at,updated_at) "
                                 "VALUES(?,?,?,'skipped',?,?)",
-                                (job_id, idx, cfg["skill"], now, now),
+                                (job_id, station_idx, skill, now, now),
                             )
-                            inserted = True
-                    if not inserted:
+                            return True
+                    if not await db.arun(_skip_tx):
                         return True
                 idx += 1
                 continue
@@ -571,39 +587,41 @@ class Engine:
             if res == "interrupted":
                 return True   # 老板打断,工单已暂停,等恢复
             if not res:
-                self.settle_failure(job_id, f"工位{idx + 1}重试后仍失败")
+                await db.arun(self.settle_failure, job_id, f"工位{idx + 1}重试后仍失败")
                 return True
 
             run = self._latest_run(job_id, idx)
             if not run:  # 删除请求可能在 provider 返回后已清掉全部工位。
                 return True
             if self._needs_review(cfg, job["mode"]):
-                transitioned = False
-                with db.atomic() as c:
-                    current_job = c.execute(
-                        "SELECT status,billing_status FROM job WHERE id=?",
-                        (job_id,),
-                    ).fetchone()
-                    current_run = c.execute(
-                        "SELECT status FROM station_run WHERE id=?",
-                        (run["id"],),
-                    ).fetchone() if run else None
-                    if (self._job_row_executable(current_job)
-                            and current_run
-                            and current_run["status"] == "running"):
+                def _review_tx(run_id=run["id"], station_idx=idx):
+                    with db.atomic() as c:
+                        current_job = c.execute(
+                            "SELECT status,billing_status FROM job WHERE id=?",
+                            (job_id,),
+                        ).fetchone()
+                        current_run = c.execute(
+                            "SELECT status FROM station_run WHERE id=?",
+                            (run_id,),
+                        ).fetchone()
+                        if not (self._job_row_executable(current_job)
+                                and current_run
+                                and current_run["status"] == "running"):
+                            return False
                         now = time.time()
                         c.execute(
                             "UPDATE station_run SET status='awaiting_review',"
                             "updated_at=? WHERE id=? AND status='running'",
-                            (now, run["id"]),
+                            (now, run_id),
                         )
                         c.execute(
                             "UPDATE job SET status='awaiting_review',current_idx=?,"
                             "updated_at=? WHERE id=? AND billing_status='charged' "
                             "AND status IN ('running','awaiting_review','gate_blocked')",
-                            (idx, now, job_id),
+                            (station_idx, now, job_id),
                         )
-                        transitioned = True
+                        return True
+                transitioned = await db.arun(_review_tx)
                 if not transitioned:
                     return True
                 self.touch(job_id)
@@ -616,37 +634,40 @@ class Engine:
             out = db.jloads(run["output_json"], {})
             if cfg["approval"] == registry.APPROVAL_PICK:
                 out.setdefault("selected", 0)
-            transition = "terminal"
-            with db.atomic() as c:
-                current_job = c.execute(
-                    "SELECT * FROM job WHERE id=?", (job_id,)).fetchone()
-                current_run = c.execute(
-                    "SELECT status FROM station_run WHERE id=?",
-                    (run["id"],),
-                ).fetchone() if run else None
-                if self._job_row_executable(current_job) and current_run:
+            def _autopass_tx(run_id=run["id"], station_idx=idx, out=out):
+                with db.atomic() as c:
+                    current_job = c.execute(
+                        "SELECT * FROM job WHERE id=?", (job_id,)).fetchone()
+                    current_run = c.execute(
+                        "SELECT status FROM station_run WHERE id=?",
+                        (run_id,),
+                    ).fetchone()
+                    if not (self._job_row_executable(current_job) and current_run):
+                        return "terminal"
                     if current_run["status"] == "stale":
-                        transition = "stale"
-                    elif current_run["status"] == "interrupted":
-                        transition = "interrupted"
-                    elif current_run["status"] == "running":
-                        now = time.time()
-                        c.execute(
-                            "UPDATE station_run SET status='done',output_json=?,"
-                            "updated_at=? WHERE id=? AND status='running'",
-                            (json.dumps(out, ensure_ascii=False), now, run["id"]),
-                        )
-                        self._finalize_station_tx(
-                            c, job_id, idx, out,
-                            int(current_job["tenant_id"] or 1),
-                        )
-                        c.execute(
-                            "UPDATE job SET status='running',current_idx=?,updated_at=? "
-                            "WHERE id=? AND billing_status='charged' "
-                            "AND status IN ('running','awaiting_review','gate_blocked')",
-                            (min(idx + 1, LAST_IDX), now, job_id),
-                        )
-                        transition = "done"
+                        return "stale"
+                    if current_run["status"] == "interrupted":
+                        return "interrupted"
+                    if current_run["status"] != "running":
+                        return "terminal"
+                    now = time.time()
+                    c.execute(
+                        "UPDATE station_run SET status='done',output_json=?,"
+                        "updated_at=? WHERE id=? AND status='running'",
+                        (json.dumps(out, ensure_ascii=False), now, run_id),
+                    )
+                    self._finalize_station_tx(
+                        c, job_id, station_idx, out,
+                        int(current_job["tenant_id"] or 1),
+                    )
+                    c.execute(
+                        "UPDATE job SET status='running',current_idx=?,updated_at=? "
+                        "WHERE id=? AND billing_status='charged' "
+                        "AND status IN ('running','awaiting_review','gate_blocked')",
+                        (min(station_idx + 1, LAST_IDX), now, job_id),
+                    )
+                    return "done"
+            transition = await db.arun(_autopass_tx)
             if transition == "stale":
                 return False
             if transition in ("interrupted", "terminal"):
@@ -656,13 +677,15 @@ class Engine:
 
         # 全部工位完成
         title = self._job_title(job_id)
-        completed = False
-        with db.atomic() as c:
-            current = c.execute(
-                "SELECT tenant_id,status,billing_status FROM job WHERE id=?",
-                (job_id,),
-            ).fetchone()
-            if self._job_row_executable(current):
+
+        def _complete_tx():
+            with db.atomic() as c:
+                current = c.execute(
+                    "SELECT tenant_id,status,billing_status FROM job WHERE id=?",
+                    (job_id,),
+                ).fetchone()
+                if not self._job_row_executable(current):
+                    return False
                 now = time.time()
                 cur = c.execute(
                     "UPDATE job SET status='done',current_idx=?,updated_at=? "
@@ -670,29 +693,31 @@ class Engine:
                     "AND status IN ('running','awaiting_review','gate_blocked')",
                     (LAST_IDX, now, job_id),
                 )
-                if cur.rowcount == 1:
-                    c.execute(
-                        "INSERT INTO asset"
-                        "(type,job_id,tenant_id,payload_json,created_at,updated_at) "
-                        "VALUES('final',?,?,?,?,?)",
-                        (
-                            job_id,
-                            int(current["tenant_id"] or 1),
-                            json.dumps(
-                                {"title": title,
-                                 "brief": brief.get("direction")},
-                                ensure_ascii=False,
-                            ),
-                            now,
-                            now,
+                if cur.rowcount != 1:
+                    return False
+                c.execute(
+                    "INSERT INTO asset"
+                    "(type,job_id,tenant_id,payload_json,created_at,updated_at) "
+                    "VALUES('final',?,?,?,?,?)",
+                    (
+                        job_id,
+                        int(current["tenant_id"] or 1),
+                        json.dumps(
+                            {"title": title,
+                             "brief": brief.get("direction")},
+                            ensure_ascii=False,
                         ),
-                    )
-                    completed = True
-        if not completed:
+                        now,
+                        now,
+                    ),
+                )
+                return True
+
+        if not await db.arun(_complete_tx):
             return True
         from . import notify
         notify.push(self._job_tenant(job_id), "done", {"job_id": job_id, "title": title})
-        self._distill_knowledge(job_id, title)
+        await db.arun(self._distill_knowledge, job_id, title)
         self.touch(job_id)
         return True
 
@@ -784,16 +809,16 @@ class Engine:
         g["steps"] = steps
         gate_cost = float(g.pop("cost_usd", 0) or 0)
         gate_tokens = int(g.pop("tokens", 0) or 0)
-        persisted = False
-        paused = False
-        with db.atomic() as c:
-            job = c.execute(
-                "SELECT status,billing_status FROM job WHERE id=?",
-                (job_id,),
-            ).fetchone()
-            if job and job["status"] == "paused":
-                paused = True
-            elif self._job_row_executable(job):
+        def _gate_tx():
+            with db.atomic() as c:
+                job = c.execute(
+                    "SELECT status,billing_status FROM job WHERE id=?",
+                    (job_id,),
+                ).fetchone()
+                if job and job["status"] == "paused":
+                    return "paused"
+                if not self._job_row_executable(job):
+                    return "gone"
                 cur = c.execute(
                     "UPDATE job SET gate_json=?,cost_usd=cost_usd+?,"
                     "tokens=tokens+?,status=?,updated_at=? "
@@ -808,7 +833,11 @@ class Engine:
                         job_id,
                     ),
                 )
-                persisted = cur.rowcount == 1
+                return "persisted" if cur.rowcount == 1 else "gone"
+
+        outcome = await db.arun(_gate_tx)
+        paused = outcome == "paused"
+        persisted = outcome == "persisted"
         if paused:   # 质检期间被老板打断：不落结论，恢复后重检。
             self.touch(job_id)
             return False
@@ -823,29 +852,34 @@ class Engine:
 
     async def _execute(self, job_id, idx, cfg, brief, profile, version,
                        revision_note, prev_output) -> bool:
-        run_id = None
-        tenant_id = 1
-        with db.atomic() as c:
-            job = c.execute("SELECT * FROM job WHERE id=?", (job_id,)).fetchone()
-            if not self._job_row_executable(job):
-                return "deleted" if not job else "cancelled"
-            tenant_id = int(job["tenant_id"] or 1)
-            now = time.time()
-            cur = c.execute(
-                "INSERT INTO station_run"
-                "(job_id,station_idx,skill_id,version,status,created_at,updated_at) "
-                "VALUES(?,?,?,?, 'running',?,?)",
-                (job_id, idx, cfg["skill"], version, now, now),
-            )
-            run_id = cur.lastrowid
-            changed = c.execute(
-                "UPDATE job SET status='running',current_idx=?,updated_at=? "
-                "WHERE id=? AND billing_status='charged' "
-                "AND status IN ('running','awaiting_review','gate_blocked')",
-                (idx, now, job_id),
-            )
-            if changed.rowcount != 1:
-                raise RuntimeError("工单状态已变化，停止创建工位")
+        def _open_tx():
+            with db.atomic() as c:
+                job = c.execute(
+                    "SELECT * FROM job WHERE id=?", (job_id,)).fetchone()
+                if not self._job_row_executable(job):
+                    return ("deleted" if not job else "cancelled"), None, 1
+                tenant = int(job["tenant_id"] or 1)
+                now = time.time()
+                cur = c.execute(
+                    "INSERT INTO station_run"
+                    "(job_id,station_idx,skill_id,version,status,created_at,updated_at) "
+                    "VALUES(?,?,?,?, 'running',?,?)",
+                    (job_id, idx, cfg["skill"], version, now, now),
+                )
+                rid = cur.lastrowid
+                changed = c.execute(
+                    "UPDATE job SET status='running',current_idx=?,updated_at=? "
+                    "WHERE id=? AND billing_status='charged' "
+                    "AND status IN ('running','awaiting_review','gate_blocked')",
+                    (idx, now, job_id),
+                )
+                if changed.rowcount != 1:
+                    raise RuntimeError("工单状态已变化，停止创建工位")
+                return None, rid, tenant
+
+        early, run_id, tenant_id = await db.arun(_open_tx)
+        if early:
+            return early
         self.touch(job_id)
         progress, steps = self._recorder(job_id, idx, run_id)
         ctx = {
@@ -867,7 +901,7 @@ class Engine:
             before = db.one(
                 "SELECT status,billing_status FROM job WHERE id=?", (job_id,))
             if not self._job_row_executable(before):
-                db.execute(
+                await db.aexecute(
                     "UPDATE station_run SET status='cancelled',"
                     "review_comment='工单已取消',updated_at=? "
                     "WHERE id=? AND status IN ('running','queued')",
@@ -883,7 +917,7 @@ class Engine:
                 after_provider = db.one(
                     "SELECT status,billing_status FROM job WHERE id=?", (job_id,))
                 if not self._job_row_executable(after_provider):
-                    db.execute(
+                    await db.aexecute(
                         "UPDATE station_run SET status='cancelled',output_json=NULL,"
                         "review_comment='工单已取消，在途结果已丢弃',updated_at=? "
                         "WHERE id=? AND status IN ('running','queued')",
@@ -893,35 +927,36 @@ class Engine:
 
                 progress("done", f"产出完成 · 用时 {int(time.time() - t0)}s · "
                                  f"{r['tokens']} tokens · ${r['cost_usd']:.3f}")
-                result_state = "terminal"
-                with db.atomic() as c:
-                    current_job = c.execute(
-                        "SELECT status,billing_status FROM job WHERE id=?",
-                        (job_id,),
-                    ).fetchone()
-                    current_run = c.execute(
-                        "SELECT status FROM station_run WHERE id=?",
-                        (run_id,),
-                    ).fetchone()
-                    if not current_job:
-                        result_state = "deleted"
-                    elif not self._job_row_executable(current_job):
-                        if current_run and current_run["status"] in (
-                                "running", "queued"):
-                            c.execute(
-                                "UPDATE station_run SET status='cancelled',"
-                                "output_json=NULL,"
-                                "review_comment='工单已取消，在途结果已丢弃',"
-                                "updated_at=? WHERE id=? "
-                                "AND status IN ('running','queued')",
-                                (time.time(), run_id),
-                            )
-                        result_state = "cancelled"
-                    elif not current_run:
-                        result_state = "deleted"
-                    elif current_run["status"] in ("stale", "interrupted"):
-                        result_state = current_run["status"]
-                    elif current_run["status"] == "running":
+                def _save_tx(r=r, steps_snapshot=json.dumps(steps, ensure_ascii=False)):
+                    with db.atomic() as c:
+                        current_job = c.execute(
+                            "SELECT status,billing_status FROM job WHERE id=?",
+                            (job_id,),
+                        ).fetchone()
+                        current_run = c.execute(
+                            "SELECT status FROM station_run WHERE id=?",
+                            (run_id,),
+                        ).fetchone()
+                        if not current_job:
+                            return "deleted"
+                        if not self._job_row_executable(current_job):
+                            if current_run and current_run["status"] in (
+                                    "running", "queued"):
+                                c.execute(
+                                    "UPDATE station_run SET status='cancelled',"
+                                    "output_json=NULL,"
+                                    "review_comment='工单已取消，在途结果已丢弃',"
+                                    "updated_at=? WHERE id=? "
+                                    "AND status IN ('running','queued')",
+                                    (time.time(), run_id),
+                                )
+                            return "cancelled"
+                        if not current_run:
+                            return "deleted"
+                        if current_run["status"] in ("stale", "interrupted"):
+                            return current_run["status"]
+                        if current_run["status"] != "running":
+                            return "terminal"
                         now = time.time()
                         c.execute(
                             "UPDATE station_run SET output_json=?,latency_ms=?,"
@@ -930,7 +965,7 @@ class Engine:
                             (
                                 json.dumps(r["data"], ensure_ascii=False),
                                 int((time.time() - t0) * 1000),
-                                json.dumps(steps, ensure_ascii=False),
+                                steps_snapshot,
                                 r["tokens"],
                                 r["cost_usd"],
                                 now,
@@ -945,8 +980,9 @@ class Engine:
                             "('running','awaiting_review','gate_blocked')",
                             (r["cost_usd"], r["tokens"], now, job_id),
                         )
-                        result_state = (
-                            "success" if updated.rowcount == 1 else "cancelled")
+                        return "success" if updated.rowcount == 1 else "cancelled"
+
+                result_state = await db.arun(_save_tx)
                 if result_state == "stale":
                     return "stale"  # 执行期间上游被打回,本次产出作废待重算
                 if result_state == "interrupted":
@@ -960,7 +996,7 @@ class Engine:
                 if not jnow or jnow["status"] in (
                         "cancelled", "done", "failed") or (
                         jnow["billing_status"] != "charged"):
-                    db.execute(
+                    await db.aexecute(
                         "UPDATE station_run SET status='cancelled',output_json=NULL,"
                         "review_comment='工单已结束，停止重试',updated_at=? "
                         "WHERE id=? AND status IN ('running','queued')",
@@ -969,7 +1005,7 @@ class Engine:
                     return "deleted" if not jnow else "cancelled"
                 if jnow and jnow["status"] == "paused":
                     progress("error", "⏸ 老板按下打断,本工位停工(恢复后自动重跑)")
-                    db.execute(
+                    await db.aexecute(
                         "UPDATE station_run SET status='interrupted',steps_json=?,"
                         "review_comment='老板打断',updated_at=? "
                         "WHERE id=? AND status='running'",
@@ -991,34 +1027,35 @@ class Engine:
                     type(e).__name__,
                 )
         progress("error", f"重试 {MAX_RETRY} 次后仍失败,工位挂起等老板处理")
-        failed = False
-        terminal = None
-        with db.atomic() as c:
-            current_job = c.execute(
-                "SELECT status,billing_status FROM job WHERE id=?",
-                (job_id,),
-            ).fetchone()
-            if not current_job:
-                terminal = "deleted"
-            elif not self._job_row_executable(current_job):
-                terminal = "cancelled"
-            else:
+
+        def _fail_tx(steps_snapshot=json.dumps(steps, ensure_ascii=False)):
+            with db.atomic() as c:
+                current_job = c.execute(
+                    "SELECT status,billing_status FROM job WHERE id=?",
+                    (job_id,),
+                ).fetchone()
+                if not current_job:
+                    return "deleted"
+                if not self._job_row_executable(current_job):
+                    return "cancelled"
                 cur = c.execute(
                     "UPDATE station_run SET status='failed',latency_ms=?,"
                     "steps_json=?,review_comment=?,updated_at=? "
                     "WHERE id=? AND status='running'",
                     (
                         int((time.time() - t0) * 1000),
-                        json.dumps(steps, ensure_ascii=False),
+                        steps_snapshot,
                         providers.public_failure_message(last_err),
                         time.time(),
                         run_id,
                     ),
                 )
-                failed = cur.rowcount == 1
-        if terminal:
-            return terminal
-        if not failed:
+                return "failed" if cur.rowcount == 1 else "raced"
+
+        outcome = await db.arun(_fail_tx)
+        if outcome in ("deleted", "cancelled"):
+            return outcome
+        if outcome != "failed":
             return "cancelled"
         return False
 

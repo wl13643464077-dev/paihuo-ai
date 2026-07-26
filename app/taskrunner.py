@@ -451,7 +451,9 @@ async def run_task(task_id: int, broadcast):
              "n": len(steps), "step": steps[-1]},
         )
         if kind != "typing" or now - st["save"] > 3:
-            db.execute(
+            # 事件循环上的进度落库进 db 线程池,避免写锁竞争冻结全部协程。
+            db.submit_write(
+                db.execute,
                 "UPDATE task SET steps_json=?,updated_at=? "
                 "WHERE id=? AND status='running' AND deleted_at IS NULL",
                 (json.dumps(steps, ensure_ascii=False), now, task_id),

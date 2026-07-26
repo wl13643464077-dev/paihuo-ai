@@ -1258,12 +1258,24 @@ async def _append_ending(td: str, title_file: str, end_text: str, segs: list, le
 
 
 def _steps_append(tvid: int, msg: str):
-    r = db.one("SELECT steps_json FROM tv_job WHERE id=?", (tvid,))
-    if not r:
-        return
-    steps = db.jloads((r or {}).get("steps_json"), [])
-    steps.append({"t": time.time(), "msg": msg})
-    db.update("tv_job", tvid, {"steps_json": json.dumps(steps, ensure_ascii=False)})
+    ts = time.time()
+
+    def _tx():
+        # 读-改-写要在同一事务里做:进池后可能与相邻追加并发,
+        # BEGIN IMMEDIATE 保证两次追加都不丢。
+        with db.atomic() as c:
+            r = c.execute(
+                "SELECT steps_json FROM tv_job WHERE id=?", (tvid,)).fetchone()
+            if not r:
+                return
+            steps = db.jloads(r["steps_json"], [])
+            steps.append({"t": ts, "msg": msg})
+            c.execute("UPDATE tv_job SET steps_json=?,updated_at=? WHERE id=?",
+                      (json.dumps(steps, ensure_ascii=False), ts, tvid))
+
+    # 常在事件循环上被 run_job 协程调用;进度落库是写操作,必须进 db 线程池,
+    # 否则写锁竞争时会冻结整个循环。丢一条进度无碍。
+    db.submit_write(_tx)
 
 
 def _active_enter(tvid: int):
@@ -1638,6 +1650,8 @@ async def _run_job_inner(tvid: int, row: dict, p: dict, tid: int, broadcast):
                 type(settlement_exc).__name__,
             )
     finally:
+        # 进度是异步落库的;结束前冲刷,保证终态可见时步骤记录已完整。
+        await db.adrain()
         _safe_broadcast(
             broadcast,
             {"type": "tv_done", "tv_id": tvid, "tenant_id": tid},
