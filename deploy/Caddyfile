@@ -1,0 +1,49 @@
+paihuo.ai, www.paihuo.ai {
+	request_body {
+		max_size 40MB
+	}
+
+	encode zstd gzip
+
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+	}
+
+	# 登录态产物即使被单独打开也按受限文档处理，避免 SVG/未知类型获得同源权限。
+	@private_assets path /files/*
+	header @private_assets {
+		Content-Security-Policy "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'"
+		Cross-Origin-Resource-Policy "same-origin"
+	}
+
+	# 数字人素材(照片/音频)公开只读,供可灵/HeyGen抓取(uuid文件名即凭证)
+	handle_path /pub/* {
+		root * /srv/paihuo-pub
+		header {
+			X-Content-Type-Options "nosniff"
+			Cache-Control "public, max-age=3600"
+		}
+		file_server
+	}
+
+	reverse_proxy 127.0.0.1:8899 {
+		# 不接受客户端自带的转发链；应用只信本机 Caddy 这一跳。
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		flush_interval -1
+		health_uri /healthz
+		health_interval 30s
+		health_timeout 5s
+		transport http {
+			dial_timeout 5s
+			response_header_timeout 10m
+			keepalive 2m
+		}
+	}
+}

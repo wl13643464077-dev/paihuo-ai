@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>派活 — 老板会派活，数字员工去干活</title>
+<style>
+:root{--ink:#33291f;--cream:#f6efdd;--gold:#ffd166;--pink:#f28cb1;--blue:#4cc9f0;--green:#90be6d;--purple:#9b5de5}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;background:var(--cream);color:var(--ink);overflow-x:hidden}
+body:before{content:"";position:fixed;inset:0;background-image:radial-gradient(rgba(51,41,31,.05) 1.2px,transparent 1.2px);background-size:22px 22px;pointer-events:none}
+.wrap{max-width:1080px;margin:0 auto;padding:0 22px;position:relative}
+nav{position:sticky;top:0;z-index:10;background:#2b2317;color:#fffaf0;padding:0 22px}
+nav .in{max-width:1080px;margin:0 auto;height:58px;display:flex;align-items:center;gap:14px}
+nav b{letter-spacing:2px;font-size:17px}
+.bulb{width:9px;height:9px;border-radius:50%;background:var(--gold);box-shadow:0 0 9px 2px #ffd16688;animation:neon 2.1s infinite}
+@keyframes neon{0%,100%{opacity:1}50%{opacity:.35}}
+nav a{color:#fffaf0;text-decoration:none;font-size:14px;opacity:.85;margin-left:14px}
+nav .cta{margin-left:auto;background:var(--gold);color:var(--ink);font-weight:900;padding:8px 18px;border-radius:10px;border:2px solid #fffaf0;opacity:1}
+.hero{text-align:center;padding:86px 0 60px;position:relative}
+.hero h1{font-size:min(56px,9vw);font-weight:900;letter-spacing:6px;line-height:1.25}
+.hero h1 span{background:linear-gradient(transparent 60%,var(--gold) 60%)}
+.hero p{font-size:19px;color:#8b7355;margin:20px 0 34px;letter-spacing:2px}
+.hero .big{display:inline-block;background:var(--gold);border:3px solid var(--ink);border-radius:16px;padding:15px 42px;
+  font-size:19px;font-weight:900;letter-spacing:4px;color:var(--ink);text-decoration:none;box-shadow:6px 6px 0 rgba(51,41,31,.2);transition:.15s}
+.hero .big:hover{transform:translateY(-3px);box-shadow:8px 8px 0 rgba(51,41,31,.2)}
+.crew{display:flex;justify-content:center;gap:6px;margin-top:52px;flex-wrap:wrap}
+.crew svg{animation:floaty 5s ease-in-out infinite}
+.crew svg:nth-child(2n){animation-delay:1.2s}.crew svg:nth-child(3n){animation-delay:2.4s}
+@keyframes floaty{0%,100%{transform:translateY(0)}50%{transform:translateY(-12px)}}
+.stats{display:flex;justify-content:center;gap:14px;flex-wrap:wrap;margin-top:44px}
+.stat{background:#fffdf7;border:3px solid var(--ink);border-radius:16px;padding:16px 26px;box-shadow:4px 4px 0 rgba(51,41,31,.15)}
+.stat b{font-size:30px;display:block}
+.stat span{font-size:13px;color:#8b7355}
+h2.sec{font-size:32px;text-align:center;margin:90px 0 12px;letter-spacing:3px}
+p.sub{text-align:center;color:#8b7355;margin-bottom:36px;font-size:15px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:18px}
+.grid.who{grid-template-columns:repeat(2,1fr)}
+@media(max-width:640px){.grid.who{grid-template-columns:1fr}}
+.feat{background:#fffdf7;border:3px solid var(--ink);border-radius:20px;padding:24px;box-shadow:5px 5px 0 rgba(51,41,31,.15);
+  opacity:0;transform:translateY(30px);transition:.6s}
+.feat.show{opacity:1;transform:none}
+.feat .ic{font-size:38px}
+.feat h3{margin:10px 0 8px;font-size:19px}
+.feat p{font-size:14px;color:#6b5d49;line-height:1.75}
+.feat .tagline{display:inline-block;margin-top:10px;background:#2b2317;color:var(--gold);border-radius:8px;padding:2px 10px;font-size:12px}
+.feat.ind{padding:18px 18px 16px}
+.feat.ind .ic{font-size:30px}
+.feat.ind h3{font-size:16.5px;margin:8px 0 6px}
+.feat.ind p{font-size:13px;line-height:1.7}
+.flow{display:flex;align-items:stretch;gap:0;overflow-x:auto;padding:10px 4px 22px}
+.fstep{min-width:150px;flex:1;background:#fffdf7;border:3px solid var(--ink);border-radius:16px;padding:16px 14px;text-align:center;
+  box-shadow:4px 4px 0 rgba(51,41,31,.15);position:relative;margin-right:34px;opacity:0;transform:scale(.85);transition:.5s}
+.fstep.show{opacity:1;transform:scale(1)}
+.fstep:last-child{margin-right:0}
+.fstep:not(:last-child):after{content:"➜";position:absolute;right:-27px;top:50%;transform:translateY(-50%);font-size:19px;color:#a4947c;animation:pulse 1.6s infinite}
+@keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}
+.fstep .e{font-size:30px}
+.fstep b{display:block;margin-top:6px;font-size:14.5px}
+.fstep span{font-size:12px;color:#8b7355}
+.plans{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:18px;align-items:stretch}
+.plan{background:#fffdf7;border:3px solid var(--ink);border-radius:20px;padding:26px 22px;text-align:center;box-shadow:5px 5px 0 rgba(51,41,31,.15);position:relative;opacity:0;transform:translateY(30px);transition:.6s}
+.plan.show{opacity:1;transform:none}
+.plan.hot{background:linear-gradient(160deg,#fff6dc,#fffdf7);border-width:4px}
+.plan .hotbadge{position:absolute;top:-14px;left:50%;transform:translateX(-50%);background:#ef476f;color:#fff;border:2.5px solid var(--ink);border-radius:99px;padding:3px 16px;font-size:12.5px;font-weight:900}
+.plan h3{font-size:20px}
+.plan .old{color:#a4947c;text-decoration:line-through;font-size:14px;margin-top:12px}
+.plan .price{font-size:38px;font-weight:900;margin:2px 0 2px}
+.plan .price small{font-size:14px;font-weight:400;color:#8b7355}
+.plan .pts{background:#2b2317;color:var(--gold);display:inline-block;border-radius:9px;padding:3px 14px;font-size:13px;margin:8px 0 12px}
+.plan p{font-size:13px;color:#6b5d49;line-height:1.7}
+footer{margin-top:100px;background:#2b2317;color:#cbb994;text-align:center;padding:36px 20px;font-size:13px;line-height:2}
+footer a{color:var(--gold)}
+</style>
+</head>
+<body>
+<nav><div class="in"><span class="bulb"></span><b>派活 PaiHuo</b>
+  <a href="#film">宣传片</a><a href="#depts">产业部门</a><a href="#flow">怎么干活</a><a href="#try">免费体验</a><a href="#plans">套餐</a>
+  <a class="cta" href="/login">登录集团 →</a></div></nav>
+
+<div class="wrap">
+  <div class="hero">
+    <h1><span>老板会派活</span><br>数字员工去干活</h1>
+    <p>派活 PaiHuo · 430 位 AI 数字员工听您调遣 · 覆盖 <b>11 个连锁行业</b>,从内容营销到门店经营,一句话派活即出方案</p>
+    <a class="big" href="/login">立即开始派活</a>
+    <div style="margin-top:46px;opacity:0;transform:translateY(30px);transition:.8s" class="heroimg">
+      <picture>
+        <source srcset="/static/img/hero-1280.webp" type="image/webp">
+        <img src="/static/img/hero.png" alt="派活数字员工协作办公室界面预览" width="1280" height="853" loading="eager" fetchpriority="high" decoding="async" style="width:min(880px,94%);height:auto;border:4px solid var(--ink);border-radius:26px;box-shadow:10px 10px 0 rgba(51,41,31,.18)">
+      </picture>
+    </div>
+    <div class="crew" id="crew"></div>
+    <div class="stats">
+      <div class="stat"><b>430 位</b><span>数字员工在岗</span></div>
+      <div class="stat"><b>11 个</b><span>连锁行业专家团</span></div>
+      <div class="stat"><b>10 工位</b><span>内容流水线全自动</span></div>
+      <div class="stat"><b>3-8 分钟</b><span>数字人视频出片</span></div>
+    </div>
+  </div>
+
+  <div class="wrap" style="max-width:820px;margin:40px auto 0;text-align:center">
+    <div class="feat" style="opacity:1;transform:none;background:linear-gradient(160deg,#fff6dc,#fffdf7)">
+      <div class="ic" style="font-size:30px">📣 品牌宣言</div>
+      <p style="font-size:16px;line-height:2;margin-top:10px">
+      每个连锁老板都缺人:缺懂行的策划、缺会做内容的、缺能出镜的、缺算得清账的。<br>
+      <b>派活,把一整支专家团装进你的手机。</b>不用招人、不用培训、不用等——<br>
+      开一家茶饮店、一家健身房、一家宠物店,还是一家连锁餐饮,<br>
+      <b>你只管派活,专家团联网核实、按你的生意出可落地的方案。</b><br>
+      <span style="color:#c47f1a;font-weight:900;font-size:18px">老板会派活，数字员工去干活。</span></p>
+    </div>
+  </div>
+
+  <div class="feat" style="max-width:880px;margin:22px auto 0;text-align:center">
+    <b style="font-size:19px">🔥 老板们上手第一周用得最多的「发布三件套」</b>
+    <p style="margin-top:8px;line-height:1.9">🎬 <b>图文一键成片</b>(自动配音+字幕+抓真实图,不用出镜) ·
+      🪪 <b>审查官发前把关</b>(广告法极限词/平台规范,发出去才安心) ·
+      📰 <b>公众号 12 套排版</b>(一键复制或直接进草稿箱)</p>
+    <p class="sub" style="margin-top:4px">写完就能发、发前有人把关、发出去像大号——这一条龙,单点工具给不了。</p>
+  </div>
+
+  <h2 class="sec" id="film">🎬 5 分钟看懂派活</h2>
+  <p class="sub">从老板的深夜,到 430 位数字员工开工——花 5 分钟,看完您就知道活该怎么派</p>
+  <div style="max-width:880px;margin:0 auto">
+    <div class="feat" style="padding:10px;background:#2b2317">
+      <video id="promofilm" controls preload="none" playsinline poster="/static/img/promo_poster.jpg"
+        style="display:block;width:100%;border-radius:12px;background:#000">
+        <source src="/pub/paihuo-promo-31-web.mp4" type="video/mp4">
+        您的浏览器不支持视频播放,<a href="/pub/paihuo-promo-31-web.mp4" style="color:#ffd166">点此下载观看</a>
+      </video>
+    </div>
+    <p class="sub" style="margin-top:12px">看完想上手?<a href="#try" style="font-weight:900;text-decoration:underline">先免费进办公室参观 →</a></p>
+  </div>
+
+  <h2 class="sec" id="who">👔 谁在用派活</h2>
+  <p class="sub">连锁品牌老板 · 单店/多店门店老板 · 想创业开店的人 · 代运营/咨询服务商</p>
+  <div class="grid who" style="max-width:900px;margin:0 auto">
+    <div class="feat"><div class="ic">🏪</div><h3>门店/连锁老板</h3><p>选址、菜单/服务设计、食安合规、供应链、门店运营、活动策划、财务复盘——整条经营链都有专家兜着,决策不再靠拍脑袋。</p></div>
+    <div class="feat"><div class="ic">📱</div><h3>做内容/私域的老板</h3><p>10 工位流水线全自动出多平台成品,公众号排版+草稿箱一键进,文案一键变短视频,vlog 智能混剪,发完还有自动复盘。</p></div>
+    <div class="feat"><div class="ic">🚀</div><h3>想创业开店的人</h3><p>还没开店就能先让「市场机会/选址/单店模型」专家帮你算清楚能不能干、怎么干,少交学费。</p></div>
+    <div class="feat"><div class="ic">🤝</div><h3>代运营/咨询服务商</h3><p>给客户做方案、做内容、做诊断的服务商,把派活当自己的后台军团:一个人同时服务十个客户,交付又快又专业。</p></div>
+  </div>
+
+  <h2 class="sec" id="depts">🏢 覆盖 11 个连锁行业,每一行都有一支专家团</h2>
+  <p class="sub">每个行业 36-60 位成建制专家、一人一岗;您这行老板天天愁的事,都有专人接活,联网核实后交付可落地方案</p>
+  <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(250px,1fr))">
+    <div class="feat ind"><div class="ic">🍜</div><h3>餐饮 · 60 位专家</h3><p>翻台率上不去?外卖不赚钱?——选址商圈、菜单工程、食安合规、供应链、连锁扩张,8 大分部整链兜底,还有超级店长盯全国同行的活动打法。</p></div>
+    <div class="feat ind"><div class="ic">🧋</div><h3>茶饮咖啡 · 36 位专家</h3><p>上新不断、联名不翻车:新品研发、杯量与坪效提升、外卖平台打法、季节营销日历,旺季来临前专家先把仗排好。</p></div>
+    <div class="feat ind"><div class="ic">🏪</div><h3>便利零售 · 36 位专家</h3><p>小店也配总部班子:选品汰换、动线与陈列、鲜食引流、24 小时排班、社区会员——把每一平米都卖出钱。</p></div>
+    <div class="feat ind"><div class="ic">🍿</div><h3>零食量贩 · 36 位专家</h3><p>低毛利怎么活?爆品选品、供应链议价、定价与损耗管控、开店节奏测算,量贩生意的细账有人替您算。</p></div>
+    <div class="feat ind"><div class="ic">🛒</div><h3>商超生鲜 · 36 位专家</h3><p>生鲜损耗降一个点就是纯利润:档口坪效、库存周转、社区团购、会员复购,数据说话的经营复盘。</p></div>
+    <div class="feat ind"><div class="ic">💊</div><h3>医药健康 · 36 位专家</h3><p>合规是生命线:处方药管理、GSP 合规、专业药事服务转型、会员健康档案与慢病复购,稳着把店开大。</p></div>
+    <div class="feat ind"><div class="ic">🏨</div><h3>酒店住宿 · 36 位专家</h3><p>入住率与房价的平衡术:OTA 运营与点评口碑、动态定价、淡旺季营收管理、连锁标准化,每间夜都不白空。</p></div>
+    <div class="feat ind"><div class="ic">🚗</div><h3>汽车后市场 · 36 位专家</h3><p>进店客从哪来?集客活动、会员卡项设计、工位效率、配件供应链与技师培训,把一次保养做成长期生意。</p></div>
+    <div class="feat ind"><div class="ic">🧘</div><h3>健身瑜伽 · 36 位专家</h3><p>拓客、锁客、续卡三件事:私教课包设计、续卡率提升、教练排班与绩效、社群运营,会员留下来生意才成立。</p></div>
+    <div class="feat ind"><div class="ic">💇</div><h3>美容美业 · 36 位专家</h3><p>手艺人生意也能标准化:拓客卡项、复购锁客、门店合规、员工带教与分成设计,不再被大工离职卡脖子。</p></div>
+    <div class="feat ind"><div class="ic">🐾</div><h3>宠物 · 36 位专家</h3><p>活体+洗美+零售怎么组合赚钱:洗美预约与产能、会员粘性、社群运营、异业合作,毛孩子经济一店吃透。</p></div>
+    <div class="feat ind" style="background:#fff6dc"><div class="ic">➕</div><h3>您的行业?</h3><p>行业部门持续入驻中。按您的业务开通,账号里只看您这行的专家团,不被无关信息打扰。</p></div>
+  </div>
+
+  <h2 class="sec">⚙️ 行业专家之外,还给您配了整套班子</h2>
+  <p class="sub">内容部队、数字人出镜、越用越值钱的知识资产——一个账号全都有</p>
+  <div class="grid">
+    <div class="feat"><div class="ic">🎬</div><h3>内容生产部 · 10 工位流水线 + 审查官</h3>
+      <p>趋势官找热点 → 情报员查资料 → 拆解师学爆款 → 撰稿改稿 → 真实图/AI 配图封面 → <b>审查官把关</b>(广告法极限词/平台规范,发布前拦截风险) → 六平台发布包。公众号 <b>12 套精美排版</b>,一键复制或直接进草稿箱。</p>
+      <span class="tagline">定时自动开工 · 公众号排版+草稿箱 · 发前审查</span></div>
+    <div class="feat"><div class="ic">🎞️</div><h3>视频工厂:成片 + 混剪 + 数字人</h3>
+      <p>一篇文案一键变竖版短视频(自动配音/字幕/转场/BGM);手机拍的 vlog 片段丢进来,AI 看懂画面按文案智能混剪;一张照片+口播稿=会动会说的数字人,声音克隆成您本人的。</p>
+      <span class="tagline">图文成片 · Vlog智能混剪 · 数字人+声音克隆</span></div>
+    <div class="feat"><div class="ic">🧰</div><h3>老板营销工具箱</h3>
+      <p>今日必发(只扫您勾选的渠道,3 个当天就该发的选题一键开工)、私域朋友圈日历(整月排好还能同步飞书)、竞品盯梢周报(每周一自动出)、30 天起号计划、获客线索雷达、随手拍变海报+文案。</p>
+      <span class="tagline">热点 · 私域 · 盯梢 · 起号 · 线索 · 素材</span></div>
+    <div class="feat"><div class="ic">📊</div><h3>发完不是结束:自动复盘</h3>
+      <p>发布台账自动记账,T+1/3/7 审查官自动上岗复盘:数据判读、限流体检、合规回看、下一步行动清单;公众号配好接口连数据都自动拉。等拍板/交付/复盘提醒,全部推到您微信。</p>
+      <span class="tagline">发布台账 · 自动复盘 · 微信通知</span></div>
+    <div class="feat"><div class="ic">📚</div><h3>越用越值钱的公司资产</h3>
+      <p>每一单交付自动沉淀经验入知识库,11 维自动评估打标(质量/匹配度/关键词/时效…),按平台类别筛选。员工全网进修,平台规则一变他们先知道。</p>
+      <span class="tagline">知识沉淀 · 资产库 · 全网进修</span></div>
+    <div class="feat"><div class="ic">👔</div><h3>老板视角,拍板就行</h3>
+      <p>办公室楼层实时直播每个员工在干什么、写了多少字;关键节点等您拍板,也可以完全托管。企业主账号可开副账号,按板块分配权限,数据完全隔离。</p>
+      <span class="tagline">多账号 · 板块权限 · 数据隔离</span></div>
+    <div class="feat"><div class="ic">⚡</div><h3>开箱即用,无需配置</h3>
+      <p>不用申请任何 API、不用懂技术。注册开通即用,按点数计费透明可查,套餐月付季付年付随选。</p>
+      <span class="tagline">充值即用 · 无需任何 API 配置</span></div>
+  </div>
+
+  <div style="text-align:center;margin-top:70px">
+    <picture class="heroimg">
+      <source srcset="/static/img/avatar-1152.webp" type="image/webp">
+      <img src="/static/img/avatar.png" alt="派活数字人制作与出镜功能预览" width="1152" height="768" loading="lazy" decoding="async" style="width:min(760px,94%);height:auto;border:4px solid var(--ink);border-radius:26px;box-shadow:10px 10px 0 rgba(51,41,31,.18);opacity:0;transform:translateY(30px);transition:.8s">
+    </picture>
+    <p class="sub" style="margin-top:14px">一张照片+一段稿子 = 会动会说的数字人;声音还能克隆成您本人的</p></div>
+  <h2 class="sec" id="flow">🚀 老板只需要三步</h2>
+  <p class="sub">剩下的交给数字员工们接力</p>
+  <div class="flow">
+    <div class="fstep"><div class="e">🏭</div><b>选板块</b><span>内容 / 餐饮 / 数字人</span></div>
+    <div class="fstep"><div class="e">🗣</div><b>说需求</b><span>一句话+选行业</span></div>
+    <div class="fstep"><div class="e">🤖</div><b>员工接力</b><span>检索·撰写·设计·质检</span></div>
+    <div class="fstep"><div class="e">👍</div><b>您拍板</b><span>或完全托管不打扰</span></div>
+    <div class="fstep"><div class="e">📦</div><b>拿交付</b><span>发布包/报告/视频</span></div>
+  </div>
+
+  <h2 class="sec" id="try">🎁 免费进来参观</h2>
+  <p class="sub">留个联系方式,直接进办公室逛:430位数字员工长什么样、怎么干活,一目了然</p>
+  <div style="max-width:640px;margin:0 auto">
+    <div id="try-form" style="background:#fffdf7;border:3px solid var(--ink);border-radius:20px;padding:24px;box-shadow:5px 5px 0 rgba(51,41,31,.15)">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+        <input id="g-phone" placeholder="手机号 *" style="border:2.5px solid var(--ink);border-radius:11px;padding:10px 12px;font-size:14px">
+        <input id="g-name" placeholder="怎么称呼您" style="border:2.5px solid var(--ink);border-radius:11px;padding:10px 12px;font-size:14px">
+        <input id="g-co" placeholder="您的企业/行业" style="border:2.5px solid var(--ink);border-radius:11px;padding:10px 12px;font-size:14px">
+      </div>
+      <button onclick="guestTry(this)" style="margin-top:12px;width:100%;border:3px solid var(--ink);border-radius:13px;padding:12px;font-size:16px;font-weight:900;background:var(--gold);cursor:pointer;box-shadow:4px 4px 0 rgba(51,41,31,.2)">🎁 进入办公室参观</button>
+      <div id="g-err" style="color:#e5484d;font-size:13px;margin-top:8px;min-height:16px;font-weight:700"></div>
+    </div>
+    <div id="try-answer" style="display:none;background:#fffdf7;border:3px solid var(--ink);border-radius:20px;padding:24px;margin-top:14px;box-shadow:5px 5px 0 rgba(51,41,31,.15)">
+      <b>💼 数字员工的回答:</b>
+      <div id="g-a" style="margin-top:10px;line-height:1.9;font-size:14px;white-space:pre-wrap"></div>
+      <div style="margin-top:16px;text-align:center;background:#fff6dc;border:2px solid var(--ink);border-radius:13px;padding:12px">
+        觉得不错?这只是 430 位员工里的一位。<a href="/login" style="font-weight:900;text-decoration:underline">开通账号,把活都派出去 →</a></div>
+    </div>
+  </div>
+
+  <h2 class="sec" id="plans">💎 套餐与定价</h2>
+  <p class="sub">点数计费,1 点 = ¥1 · 内容整单 24 点 / 专家任务 1 点 / 数字人视频 12 点 · 季付 9 折,年付 8 折</p>
+  <div class="plans">
+    <div class="plan"><h3>体验版</h3><div class="old">原价 ¥99/月</div>
+      <div class="price">¥69<small>/月</small></div><div class="pts">每月 150 点</div>
+      <p>季付 ¥186 · 年付 ¥662<br>先试试水:每月约 5 单内容 + 3 条数字人视频</p></div>
+    <div class="plan hot"><div class="hotbadge">🔥 最多人选</div><h3>创业版</h3><div class="old">原价 ¥299/月</div>
+      <div class="price">¥199<small>/月</small></div><div class="pts">每月 500 点</div>
+      <p>季付 ¥537 · 年付 ¥1910<br>一人公司日更标配:每月约 15 单内容 + 10 条数字人 + 专家任务按需派发</p></div>
+    <div class="plan"><h3>企业版</h3><div class="old">原价 ¥899/月</div>
+      <div class="price">¥599<small>/月</small></div><div class="pts">每月 1800 点</div>
+      <p>季付 ¥1617 · 年付 ¥5750<br>小团队矩阵运营:多账号分权,内容矩阵 + 数字人矩阵</p></div>
+    <div class="plan"><h3>旗舰版</h3><div class="old">原价 ¥2999/月</div>
+      <div class="price">¥1999<small>/月</small></div><div class="pts">每月 7000 点</div>
+      <p>季付 ¥5397 · 年付 ¥19190<br>MCN / 连锁多门店:全板块放开跑,专属服务</p></div>
+  </div>
+</div>
+
+<footer>派活 PaiHuo · 老板会派活，数字员工去干活<br>
+开通与咨询请联系您的渠道顾问 · <a href="/login">已有账号?登录 →</a></footer>
+
+<script>
+// 悬浮员工天团
+const colors=["#f4a261","#4cc9f0","#e76f51","#ffd166","#cdb4db","#90be6d","#f28cb1","#43aa8b","#577590","#9b5de5"];
+document.getElementById("crew").innerHTML = colors.map(c=>`
+<svg width="64" height="68" viewBox="0 0 120 128"><path d="M28 112 Q22 46 60 41 Q98 46 92 112 Z" fill="${c}" stroke="#33291f" stroke-width="3.5"/>
+<circle cx="47" cy="64" r="4" fill="#33291f"/><circle cx="73" cy="64" r="4" fill="#33291f"/>
+<path d="M52 76 q8 8 16 0" stroke="#33291f" stroke-width="3" fill="none" stroke-linecap="round"/>
+<path d="M40 88 Q40 112 40 112 L80 112 Q80 88 80 88 Q70 96 60 96 Q50 96 40 88 Z" fill="#fffaf0" stroke="#33291f" stroke-width="2.6"/></svg>`).join("");
+function publicFunnel(event,dimension){
+  fetch("/api/funnel/events",{method:"POST",keepalive:true,
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({event,dimension})}).catch(()=>{});
+}
+publicFunnel("landing_view","promo");
+const plans = document.getElementById("plans");
+if(plans){
+  const planObserver = new IntersectionObserver(entries=>{
+    if(entries.some(entry=>entry.isIntersecting)){
+      publicFunnel("pricing_view","promo");
+      planObserver.disconnect();
+    }
+  },{threshold:.25});
+  planObserver.observe(plans);
+}
+async function guestTry(btn){
+  const err = document.getElementById('g-err'); err.textContent='';
+  const phone = document.getElementById('g-phone').value.trim();
+  if(!/^1\d{10}$/.test(phone)){ err.textContent='请填 11 位手机号'; return; }
+  btn.disabled = true; btn.textContent = '开门中…';
+  try{
+    let r = await fetch('/api/guest/register',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({phone, name:document.getElementById('g-name').value.trim(), company:document.getElementById('g-co').value.trim()})});
+    if(!r.ok) throw new Error((await r.json()).detail||'登记失败');
+    location.href = '/';
+  }catch(e){ err.textContent = e.message; btn.disabled=false; btn.textContent='🎁 进入办公室参观'; }
+}
+// 进场动画
+const io = new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add("show");e.target.style.opacity=1;e.target.style.transform="none";io.unobserve(e.target);}}),{threshold:.12});
+document.querySelectorAll(".feat,.fstep,.plan,.heroimg").forEach((el,i)=>{el.style.transitionDelay=(i%6)*80+"ms";io.observe(el);});
+</script>
+</body>
+</html>

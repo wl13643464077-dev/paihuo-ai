@@ -1,0 +1,171 @@
+"""微信通知(V25):企业微信群机器人 webhook,把派活的大事推到老板微信里.
+
+傻瓜化配置:企业微信群 → 右上角…→ 添加群机器人 → 复制 Webhook 地址 → 粘到
+「发布渠道」页,完事。个人微信也能收:企业微信 App 和微信互通,或把机器人加进
+和自己的单人群。事件:等拍板 / 交付完成 / 审查拦截 / 复盘提醒 / 周报出炉。
+"""
+import asyncio
+import json
+import logging
+import re
+
+import httpx
+
+from . import db
+
+log = logging.getLogger("notify")
+
+_WEBHOOK_RE = re.compile(r"^https://qyapi\.weixin\.qq\.com/cgi-bin/webhook/send\?key=[\w-]+$")
+
+
+def get_webhook(tid: int) -> str:
+    return db.get_setting(f"wechat_webhook:{tid}") or ""
+
+
+def set_webhook(tid: int, url: str):
+    url = (url or "").strip()
+    if url and not _WEBHOOK_RE.match(url):
+        raise ValueError("这不是企业微信群机器人的 Webhook 地址(应形如 "
+                         "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx)")
+    db.set_setting(f"wechat_webhook:{tid}", url or None)
+
+
+def build_msg(kind: str, payload: dict) -> str:
+    """事件 → 企微 markdown 消息(老板一眼能看懂,带直达链接)."""
+    base = db.get_setting("site_base") or "https://paihuo.ai"
+    p = payload or {}
+    title = (p.get("title") or "")[:40]
+    if kind == "awaiting":
+        return (f"**📥 派活 · 等您拍板**\n工单 #{p.get('job_id')} 《{title}》\n"
+                f"工位:{p.get('station', '')}\n"
+                f"[去拍板]({base}/#/job/{p.get('job_id')})")
+    if kind == "done":
+        return (f"**📦 派活 · 交付完成**\n工单 #{p.get('job_id')} 《{title}》已出交付包\n"
+                f"[看交付包]({base}/#/delivery/{p.get('job_id')})")
+    if kind == "gate":
+        return (f"**⛔ 派活 · 审查官拦截**\n工单 #{p.get('job_id')} 《{title}》被质检拦下\n"
+                f"[去处理]({base}/#/job/{p.get('job_id')})")
+    if kind == "retro_due":
+        return (f"**📊 派活 · 该复盘了**\n《{title}》({p.get('platform', '')})发布已满 "
+                f"{p.get('day', '')} 天\n把后台数据丢给审查官,看看表现和限流风险\n"
+                f"[一键复盘]({base}/#/censor)")
+    if kind == "report":
+        return (f"**📰 派活 · {p.get('report_name', '报告出炉')}**\n{(p.get('summary') or '')[:180]}\n"
+                f"[查看]({base}/{p.get('link') or '#/knowledge'})")
+    if kind == "video":
+        return (f"**🎬 派活 · 视频成片**\n《{title}》已出片,可下载发布\n"
+                f"[查看]({base}{p.get('file', '')})")
+    if kind == "pub":
+        if p.get("ok"):
+            return (f"**🚀 派活 · 矩阵发布成功**\n《{title}》已发到{p.get('platform', '')},"
+                    f"台账已登记,T+1/3/7 自动复盘\n[看发布记录]({base}/#/channels)")
+        return (f"**🚀 派活 · 矩阵发布失败**\n《{title}》({p.get('platform', '')})\n"
+                f"{p.get('why', '')}\n👉 {p.get('fix', '')}\n[去处理]({base}/#/channels)")
+    return f"**派活**\n{json.dumps(p, ensure_ascii=False)[:300]}"
+
+
+def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
+    """Build a compact, non-sensitive in-app notification."""
+    p = payload or {}
+    labels = {
+        "awaiting": "有工单等您拍板",
+        "done": "内容工单已交付",
+        "gate": "审查官拦截了一项内容",
+        "retro_due": "发布内容该复盘了",
+        "report": p.get("report_name") or "报告已出炉",
+        "video": "视频成片已交付",
+        "pub": "矩阵发布成功" if p.get("ok") else "矩阵发布失败",
+    }
+    title = str(labels.get(kind) or "派活有新进展")[:80]
+    body = str(
+        p.get("summary")
+        or p.get("title")
+        or p.get("why")
+        or ""
+    ).strip()[:240]
+    if kind in {"awaiting", "gate"} and p.get("job_id"):
+        link = f"#/job/{int(p['job_id'])}"
+    elif kind == "done" and p.get("job_id"):
+        link = f"#/delivery/{int(p['job_id'])}"
+    elif kind == "retro_due":
+        link = "#/censor"
+    elif kind == "video":
+        link = "#/tasks"
+    elif kind == "pub":
+        link = "#/channels"
+    else:
+        link = str(p.get("link") or "#/knowledge")
+    if not re.match(r"^#/[A-Za-z0-9_~.%/?=&:+-]*$", link):
+        link = "#/"
+    return title, body, link
+
+
+def record(tid: int, kind: str, payload: dict) -> int | None:
+    """Persist the notification even when no external webhook is configured."""
+    try:
+        title, body, link = _inbox_item(kind, payload)
+        return db.insert(
+            "notification",
+            {
+                "tenant_id": int(tid),
+                "kind": str(kind or "event")[:40],
+                "title": title,
+                "body": body,
+                "link": link,
+            },
+        )
+    except Exception as exc:
+        log.error(
+            "站内通知落库失败 tid=%s kind=%s error_type=%s",
+            tid,
+            kind,
+            type(exc).__name__,
+        )
+        return None
+
+
+def send_sync(tid: int, kind: str, payload: dict) -> bool:
+    """同步发送(调度器线程用);没配 webhook 静默跳过."""
+    url = get_webhook(tid)
+    if not url:
+        return False
+    try:
+        r = httpx.post(url, json={"msgtype": "markdown",
+                                  "markdown": {"content": build_msg(kind, payload)}}, timeout=8)
+        d = r.json()
+        if d.get("errcode") != 0:
+            log.warning(
+                "企微通知失败 tid=%s errcode=%s",
+                tid,
+                d.get("errcode"),
+            )
+            return False
+        return True
+    except Exception as exc:
+        log.warning(
+            "企微通知异常 tid=%s error_type=%s",
+            tid,
+            type(exc).__name__,
+        )
+        return False
+
+
+def push(tid: int, kind: str, payload: dict):
+    """站内必达；配置企微时再异步发送外部提醒。"""
+    record(tid, kind, payload)
+    if not get_webhook(tid):
+        return
+    try:
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, send_sync, tid, kind, payload)
+    except RuntimeError:
+        send_sync(tid, kind, payload)
+
+
+async def test_send(tid: int) -> dict:
+    ok = await asyncio.to_thread(send_sync, tid, "report",
+                                 {"report_name": "通知测试", "summary": "看到这条说明打通了!以后等拍板/交付/复盘提醒都会推到这里。",
+                                  "link": "#/"})
+    if not ok:
+        raise ValueError("发送失败:检查 Webhook 地址是否完整、机器人是否还在群里")
+    return {"ok": True, "note": "已发送测试消息,去群里看"}

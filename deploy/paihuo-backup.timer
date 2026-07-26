@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Paihuo AI verified SQLite backup every hour
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=5min
+AccuracySec=1min
+Unit=paihuo-backup.service
+
+[Install]
+WantedBy=timers.target

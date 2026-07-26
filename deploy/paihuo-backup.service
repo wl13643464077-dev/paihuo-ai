@@ -1,0 +1,49 @@
+[Unit]
+Description=Paihuo AI verified SQLite online backup
+Documentation=file:/srv/paihuo/current/deploy/BACKUP_RECOVERY.md
+After=local-fs.target
+RequiresMountsFor=/var/backups/paihuo /var/lib/paihuo-upgrade
+OnFailure=paihuo-failure-alert@%n.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/usr/local/lib/paihuo-ops
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONPATH=/usr/local/lib/paihuo-ops
+ExecStartPre=/usr/bin/python3 /usr/local/lib/paihuo-ops/deploy/start_guard.py --mode backup --control-dir /var/lib/paihuo-upgrade --permit /run/paihuo-upgrade/start.permit
+ExecStartPre=/usr/bin/python3 -m deploy.backup_health --database /var/lib/paihuo/data/contentcrew.db --backup-dir /var/backups/paihuo --disk-only
+ExecStart=/usr/bin/python3 -m deploy.backup_db --database /var/lib/paihuo/data/contentcrew.db --backup-dir /var/backups/paihuo --keep-days 14 --keep-minimum 24 --restore-drill --success-attestation /var/lib/paihuo-upgrade/latest-periodic-backup.json
+TimeoutStartSec=15min
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+# 备份不需要联网，也不应写入源码或线上主库。
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/usr/local/lib/paihuo-ops /var/lib/paihuo/data
+ReadWritePaths=/var/backups/paihuo /var/lib/paihuo-upgrade
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_DAC_READ_SEARCH
+LockPersonality=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProcSubset=pid
+
+[Install]
+WantedBy=multi-user.target

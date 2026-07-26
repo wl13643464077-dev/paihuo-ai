@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>登录 · 派活</title>
+<style>
+:root{--ink:#33291f;--cream:#f6efdd;--gold:#ffd166;--accent:#f4a261}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;background:var(--cream);color:var(--ink);
+  min-height:100vh;display:flex;align-items:center;justify-content:center;overflow-y:auto;overflow-x:hidden;position:relative;padding:40px 0}
+body:before{content:"";position:fixed;inset:0;background-image:radial-gradient(rgba(51,41,31,.05) 1.2px,transparent 1.2px);background-size:22px 22px}
+.orb{position:fixed;border-radius:50%;filter:blur(60px);opacity:.5;animation:drift 14s ease-in-out infinite alternate}
+.orb.o1{width:420px;height:420px;background:#ffd16688;top:-120px;left:-100px}
+.orb.o2{width:380px;height:380px;background:#f28cb166;bottom:-120px;right:-80px;animation-delay:4s}
+.orb.o3{width:300px;height:300px;background:#4cc9f055;top:40%;left:65%;animation-delay:8s}
+@keyframes drift{from{transform:translate(0,0) scale(1)}to{transform:translate(50px,40px) scale(1.15)}}
+.emp{position:fixed;animation:floaty 6s ease-in-out infinite;opacity:.92}
+@keyframes floaty{0%,100%{transform:translateY(0) rotate(-2deg)}50%{transform:translateY(-16px) rotate(2deg)}}
+.wrap{position:relative;z-index:2;width:min(430px,92vw)}
+.logo{display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:18px}
+.bulb{width:11px;height:11px;border-radius:50%;background:var(--gold);box-shadow:0 0 12px 3px #ffd16699;animation:neon 2.1s ease-in-out infinite}
+.bulb:last-child{background:#f28cb1;box-shadow:0 0 12px 3px #f28cb199;animation-delay:.7s}
+@keyframes neon{0%,100%{opacity:1}50%{opacity:.35}}
+h1{font-size:30px;letter-spacing:3px;text-align:center;font-weight:900}
+.slogan{text-align:center;color:#8b7355;margin:10px 0 26px;font-size:14.5px;letter-spacing:2px}
+.slogan b{color:var(--ink);background:linear-gradient(transparent 62%,var(--gold) 62%)}
+.card{background:#fffdf7;border:3px solid var(--ink);border-radius:22px;padding:30px 28px;
+  box-shadow:7px 7px 0 rgba(51,41,31,.18);animation:pop .5s cubic-bezier(.2,1.6,.4,1)}
+@keyframes pop{from{transform:scale(.92);opacity:0}to{transform:scale(1);opacity:1}}
+label{display:block;font-weight:800;font-size:13px;margin:14px 0 6px}
+input{width:100%;border:2.5px solid var(--ink);border-radius:12px;padding:12px 14px;font-size:15px;background:#fff;outline:none;transition:.15s}
+input:focus{box-shadow:3px 3px 0 rgba(51,41,31,.15);transform:translateY(-1px)}
+button{width:100%;margin-top:22px;border:3px solid var(--ink);border-radius:14px;padding:13px;font-size:16px;font-weight:900;
+  background:var(--gold);cursor:pointer;box-shadow:4px 4px 0 rgba(51,41,31,.2);transition:.12s;letter-spacing:4px}
+button:hover{transform:translateY(-2px);box-shadow:6px 6px 0 rgba(51,41,31,.2)}
+button:active{transform:translateY(1px);box-shadow:2px 2px 0 rgba(51,41,31,.2)}
+.err{color:#e5484d;font-size:13px;text-align:center;margin-top:12px;min-height:18px;font-weight:700}
+.foot{text-align:center;margin-top:18px;font-size:12px;color:#a4947c}
+.foot a{color:#8b7355}
+.alt{display:flex;gap:10px;margin-top:14px}
+.alt button{margin-top:0;padding:10px;font-size:13.5px;letter-spacing:1px;background:#fffdf7}
+.alt button.tour{background:#e8f6fb}
+.applycard{display:none;margin-top:14px}
+.applycard textarea{width:100%;border:2.5px solid var(--ink);border-radius:12px;padding:10px 14px;font-size:14px;background:#fff;outline:none;min-height:64px;resize:vertical;font-family:inherit}
+.ok{color:#2c8a4b;font-size:13.5px;text-align:center;margin-top:12px;font-weight:800;min-height:18px}
+</style>
+</head>
+<body>
+<div class="orb o1"></div><div class="orb o2"></div><div class="orb o3"></div>
+<svg class="emp" style="top:12%;left:8%" width="90" height="96" viewBox="0 0 120 128"><path d="M28 112 Q22 46 60 41 Q98 46 92 112 Z" fill="#f4a261" stroke="#33291f" stroke-width="3.5"/><circle cx="47" cy="64" r="4" fill="#33291f"/><circle cx="73" cy="64" r="4" fill="#33291f"/><path d="M52 76 q8 8 16 0" stroke="#33291f" stroke-width="3" fill="none" stroke-linecap="round"/><path d="M40 88 Q40 112 40 112 L80 112 Q80 88 80 88 Q70 96 60 96 Q50 96 40 88 Z" fill="#fffaf0" stroke="#33291f" stroke-width="3"/></svg>
+<svg class="emp" style="top:18%;right:9%;animation-delay:1.5s" width="74" height="79" viewBox="0 0 120 128"><path d="M28 112 Q22 46 60 41 Q98 46 92 112 Z" fill="#4cc9f0" stroke="#33291f" stroke-width="3.5"/><circle cx="47" cy="64" r="4" fill="#33291f"/><circle cx="73" cy="64" r="4" fill="#33291f"/><path d="M56 78 q4 3.4 8 0" stroke="#33291f" stroke-width="3" fill="none" stroke-linecap="round"/></svg>
+<svg class="emp" style="bottom:14%;left:14%;animation-delay:3s" width="66" height="70" viewBox="0 0 120 128"><path d="M28 112 Q22 46 60 41 Q98 46 92 112 Z" fill="#cdb4db" stroke="#33291f" stroke-width="3.5"/><circle cx="47" cy="64" r="4" fill="#33291f"/><circle cx="73" cy="64" r="4" fill="#33291f"/><path d="M52 76 q8 8 16 0" stroke="#33291f" stroke-width="3" fill="none" stroke-linecap="round"/></svg>
+<svg class="emp" style="bottom:20%;right:16%;animation-delay:4.5s" width="82" height="87" viewBox="0 0 120 128"><path d="M28 112 Q22 46 60 41 Q98 46 92 112 Z" fill="#90be6d" stroke="#33291f" stroke-width="3.5"/><circle cx="47" cy="64" r="4" fill="#33291f"/><circle cx="73" cy="64" r="4" fill="#33291f"/><path d="M56 78 q4 3.4 8 0" stroke="#33291f" stroke-width="3" fill="none" stroke-linecap="round"/></svg>
+
+<div class="wrap">
+  <div class="logo"><span class="bulb"></span><h1>派 活</h1><span class="bulb"></span></div>
+  <div class="slogan"><b>老板会派活，数字员工去干活</b> · 430 位数字员工·11大连锁行业听您调遣</div>
+  <div class="card">
+    <label>账号</label>
+    <input id="u" placeholder="您的账号" autocomplete="username">
+    <label>密码</label>
+    <input id="p" type="password" placeholder="您的密码" autocomplete="current-password" onkeydown="if(event.key==='Enter')go()">
+    <button onclick="go()">进 入 集 团</button>
+    <div class="err" id="err"></div>
+    <div class="alt">
+      <button onclick="toggleApply()">📝 申请开通账号</button>
+      <button class="tour" onclick="goTour(this)">👀 游客参观(只看不用)</button>
+    </div>
+  </div>
+  <div class="card applycard" id="applycard">
+    <b style="font-size:15px">📝 申请开通账号</b>
+    <div style="font-size:12.5px;color:#8b7355;margin-top:4px">留下联系方式,我们 1 个工作日内联系您开通企业账号</div>
+    <label>手机号 *</label><input id="a-phone" placeholder="11 位手机号">
+    <label>怎么称呼您</label><input id="a-name" placeholder="如:王老板">
+    <label>您的企业 / 行业</label><input id="a-co" placeholder="如:茶饮连锁 5 家店">
+    <label>想用派活做什么(选填)</label><textarea id="a-note" placeholder="如:想让数字员工帮我做内容和新店选址"></textarea>
+    <button onclick="applyGo(this)">提 交 申 请</button>
+    <div class="err" id="a-err"></div><div class="ok" id="a-ok"></div>
+  </div>
+  <div class="foot">副账号请联系您的企业主开通 · <a href="/promo">了解产品 →</a></div>
+</div>
+<script>
+async function go(){
+  const err = document.getElementById('err'); err.textContent = '';
+  try{
+    const r = await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({username:document.getElementById('u').value.trim(),password:document.getElementById('p').value})});
+    if(!r.ok){ err.textContent = (await r.json()).detail||'登录失败'; return; }
+    location.href = '/';
+  }catch(e){ err.textContent = '网络异常,稍后再试'; }
+}
+function toggleApply(){
+  const c = document.getElementById('applycard');
+  c.style.display = c.style.display==='block' ? 'none' : 'block';
+  if(c.style.display==='block') c.scrollIntoView({behavior:'smooth',block:'center'});
+}
+async function applyGo(btn){
+  const err = document.getElementById('a-err'), ok = document.getElementById('a-ok');
+  err.textContent=''; ok.textContent='';
+  const phone = document.getElementById('a-phone').value.trim();
+  if(!/^1\d{10}$/.test(phone)){ err.textContent='请填 11 位手机号'; return; }
+  btn.disabled = true; btn.textContent = '提交中…';
+  try{
+    const r = await fetch('/api/guest/apply',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({phone, name:document.getElementById('a-name').value.trim(),
+        company:document.getElementById('a-co').value.trim(), note:document.getElementById('a-note').value.trim()})});
+    const j = await r.json();
+    if(!r.ok) throw new Error(j.detail||'提交失败');
+    if(j.account){   // 自动开通:凭据当场给,并帮客户填好登录框
+      ok.innerHTML = '🎉 ' + j.msg + '<br>账号:<b>' + j.account.username + '</b> 初始密码:<b>'
+        + j.account.password + '</b><br>👉 已帮您填进上面登录框,截图保存好密码,点「进入办公室」开工!';
+      document.getElementById('u').value = j.account.username;
+      document.getElementById('p').value = j.account.password;
+      document.getElementById('u').scrollIntoView({behavior:'smooth',block:'center'});
+    } else {
+      ok.textContent = '✅ ' + (j.msg||'申请已收到,我们会尽快联系您');
+    }
+    btn.textContent = '已 提 交';
+  }catch(e){ err.textContent = e.message; btn.disabled=false; btn.textContent='提 交 申 请'; }
+}
+async function goTour(btn){
+  btn.disabled = true; btn.textContent = '开门中…';
+  try{
+    const r = await fetch('/api/guest/tour',{method:'POST'});
+    if(!r.ok) throw new Error('进入失败,稍后再试');
+    location.href = '/';
+  }catch(e){ document.getElementById('err').textContent = e.message; btn.disabled=false; btn.textContent='👀 游客参观(只看不用)'; }
+}
+</script>
+</body>
+</html>

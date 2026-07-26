@@ -1,0 +1,78 @@
+[Unit]
+Description=ContentCrew 老板的内容生产部
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=12
+OnFailure=paihuo-failure-alert@%n.service
+
+[Service]
+Type=simple
+User=paihuo
+Group=paihuo
+WorkingDirectory=/srv/paihuo/current
+EnvironmentFile=/etc/paihuo/paihuo.env
+Environment=CONTENTCREW_REQUIRE_SESSION_SECRET=1
+Environment=CONTENTCREW_REQUIRE_CONFIG_KEY=1
+Environment=CONTENTCREW_ROOT=/srv/paihuo/current
+Environment=CONTENTCREW_PYTHON=/srv/paihuo/current/venv/bin/python
+Environment=CONTENTCREW_DB_PATH=/var/lib/paihuo/data/contentcrew.db
+Environment=CONTENTCREW_YTDLP_PATH=/srv/paihuo/current/venv/bin/yt-dlp
+Environment=CONTENTCREW_FFMPEG_PATH=/usr/bin/ffmpeg
+Environment=CONTENTCREW_CLAUDE_PATH=/srv/paihuo/bin/claude
+Environment=CONTENTCREW_PUBLIC_DIR=/srv/paihuo-pub
+Environment=PLAYWRIGHT_BROWSERS_PATH=/var/lib/paihuo/ms-playwright
+Environment=CONTENTCREW_HOST=127.0.0.1
+Environment=CONTENTCREW_PORT=8899
+Environment=CONTENTCREW_FORWARDED_ALLOW_IPS=127.0.0.1
+Environment=CONTENTCREW_TRUSTED_PROXIES=127.0.0.1/32,::1/128
+Environment=HOME=/var/lib/paihuo
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStartPre=+/usr/bin/python3 /usr/local/lib/paihuo-ops/deploy/start_guard.py --mode application --control-dir /var/lib/paihuo-upgrade --permit /run/paihuo-upgrade/start.permit
+# This check lives in fixed root-owned ops, not the selected release.  A failed
+# candidate can therefore switch current back to an older release and still
+# pass the same secret gate during rollback.
+ExecStartPre=+/usr/bin/env PYTHONPATH=/usr/local/lib/paihuo-ops /usr/bin/python3 -m deploy.session_secret_env --check --path /etc/paihuo/paihuo.env
+ExecStartPre=/srv/paihuo/current/venv/bin/python -m deploy.preflight --root /srv/paihuo/current --state /var/lib/paihuo/data --venv /srv/paihuo/current/venv
+ExecStart=/srv/paihuo/current/run.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=90
+TimeoutStopSec=30
+KillMode=mixed
+UMask=0027
+
+RuntimeDirectory=paihuo
+StateDirectory=paihuo
+ReadOnlyPaths=/srv/paihuo/current
+ReadWritePaths=/var/lib/paihuo /srv/paihuo-pub
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+MemoryMax=3G
+TasksMax=512
+CPUQuota=300%
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

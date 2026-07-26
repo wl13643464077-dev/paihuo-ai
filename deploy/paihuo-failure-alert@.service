@@ -1,0 +1,18 @@
+[Unit]
+Description=Notify operator that %i failed
+
+[Service]
+Type=oneshot
+User=paihuo
+Group=paihuo
+EnvironmentFile=-/etc/paihuo/paihuo.env
+ExecStart=/usr/bin/python3 /srv/paihuo/current/deploy/failure_alert.py %i
+TimeoutStartSec=15
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
