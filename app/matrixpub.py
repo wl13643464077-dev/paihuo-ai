@@ -422,7 +422,7 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
                 "为避免重复发帖，系统不会自动重试"
             )
         fail = {"kind": kind, "why": why, "fix": fix,
-                "err": "自动发布失败，已安全收口",
+                "err": "自动发布没有成功，内容未发出；可重试，或用「一键复制」手动发布",
                 "shot": shot_url, "home": p["home"]}
         _log(pid, f"❌ {why} → {fix}")
         db.update("pub_task", pid, {"status": "failed",

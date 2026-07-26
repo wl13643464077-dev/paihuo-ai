@@ -1902,7 +1902,7 @@ def _create_charged_content_job(data: dict, note: str) -> int:
         raise
     if not charged:
         db.q("DELETE FROM job WHERE id=? AND billing_status='pending'", (job_id,))
-        raise HTTPException(409, "工单已提交，请到任务中心查看")
+        raise HTTPException(409, "这单刚刚已经提交过了,原单正在执行,没有重复扣点;正在带您去任务中心查看")
     return job_id
 
 
@@ -2154,7 +2154,7 @@ def delete_job(job_id: int):
                 and settled["billing_status"] == "charged"
                 and not engine._has_usable_delivery(job_id))):
         # 退款系统故障时保留业务锚点，禁止用 DELETE 绕过下次对账恢复。
-        raise HTTPException(503, "工单结算尚未完成，请稍后重试删除")
+        raise HTTPException(503, "这单的退点还在处理中(约几秒),稍等片刻再删除")
 
     deleted_at = time.time()
     with db.atomic() as c:
@@ -2905,7 +2905,7 @@ def task_delete(tid: int):
     if not row:
         raise HTTPException(404)
     if row["status"] not in ("done", "failed"):
-        raise HTTPException(503, "任务结算尚未完成，请稍后重试删除")
+        raise HTTPException(503, "这个任务的退点还在处理中(约几秒),稍等片刻再删除")
     if row["status"] == "failed" and row["billing_status"] == "charged":
         raise HTTPException(503, "任务退款尚未完成，请稍后重试删除")
     deleted_at = time.time()
@@ -4624,7 +4624,7 @@ def avatar_job_delete(jid: int):
     if not current:
         raise HTTPException(404)
     if current["status"] in ("pending_charge", "queued", "running"):
-        raise HTTPException(503, "数字人任务结算尚未完成，请稍后重试删除")
+        raise HTTPException(503, "这个数字人任务的退点还在处理中(约几秒),稍等片刻再删除")
     if (
         current["status"] in ("failed", "cancelled")
         and current["billing_status"] == "charged"
@@ -6098,12 +6098,12 @@ async def reconcile_wechat_delivery(delivery_id: int):
             if not _finalize_wechat_delivery(delivery):
                 raise RuntimeError("草稿台账结算状态冲突")
         except Exception as exc:
-            raise HTTPException(503, "草稿已送达，平台台账正在补记") from exc
+            raise HTTPException(503, "好消息:文章已经进入公众号草稿箱✅ 系统记录稍后自动补齐,请勿重复发送") from exc
         return _wechat_delivery_result(
             _wechat_delivery_or_404(delivery_id)
         )
     if delivery["status"] != "submitting":
-        raise HTTPException(409, "这笔投递当前不需要对账")
+        raise HTTPException(409, "这篇已确认送达公众号草稿箱,不需要再处理")
     try:
         media_id = await wechat.find_draft_by_marker(
             int(delivery["tenant_id"]), delivery["request_key"]
@@ -6123,7 +6123,7 @@ async def reconcile_wechat_delivery(delivery_id: int):
         if not _finalize_wechat_delivery(delivery):
             raise RuntimeError("草稿台账结算状态冲突")
     except Exception as exc:
-        raise HTTPException(503, "草稿已确认送达，平台台账正在补记") from exc
+        raise HTTPException(503, "文章已确认在公众号草稿箱✅ 系统记录稍后自动补齐,请勿重复发送") from exc
     return _wechat_delivery_result(_wechat_delivery_or_404(delivery_id))
 
 
@@ -6139,7 +6139,7 @@ async def confirm_wechat_delivery_not_delivered(delivery_id: int, body: dict):
         delivery["status"] != "submitting"
         or delivery["billing_status"] != "charged"
     ):
-        raise HTTPException(409, "这笔投递当前不能执行人工解锁")
+        raise HTTPException(409, "这篇的状态不需要人工确认(可能已送达或已退点),刷新页面看最新状态")
     age = time.time() - float(
         delivery.get("updated_at") or delivery.get("created_at") or time.time()
     )
@@ -6171,7 +6171,7 @@ async def confirm_wechat_delivery_not_delivered(delivery_id: int, body: dict):
             if not _finalize_wechat_delivery(delivery):
                 raise RuntimeError("草稿台账结算状态冲突")
         except Exception as exc:
-            raise HTTPException(503, "已找到草稿，平台台账正在补记") from exc
+            raise HTTPException(503, "已在公众号草稿箱里找到这篇文章✅ 系统记录稍后自动补齐,请勿重复发送") from exc
         return _wechat_delivery_result(_wechat_delivery_or_404(delivery_id))
     try:
         settled = _fail_wechat_delivery(
@@ -6183,7 +6183,7 @@ async def confirm_wechat_delivery_not_delivered(delivery_id: int, body: dict):
             delivery_id,
             type(exc).__name__,
         )
-        raise HTTPException(503, "人工解锁结算失败，未重复发送，请稍后重试") from exc
+        raise HTTPException(503, "确认操作没有完成(文章不会重复发送),请稍后再点一次") from exc
     if not settled:
         raise HTTPException(409, "草稿投递状态已变化，请刷新")
     return {
@@ -6241,7 +6241,7 @@ async def job_wechat_draft(job_id: int, body: dict):
                 raise RuntimeError("草稿台账结算状态冲突")
         except Exception as exc:
             raise HTTPException(
-                503, "草稿已进入公众号，平台台账正在补记；请稍后重试，不会重复发送"
+                503, "文章已经进入公众号草稿箱✅ 系统记录稍后自动补齐;请勿再点发送,不会重复扣点"
             ) from exc
         return _wechat_delivery_result(
             db.one("SELECT * FROM wechat_draft_delivery WHERE id=?", (existing["id"],))
@@ -6269,7 +6269,7 @@ async def job_wechat_draft(job_id: int, body: dict):
             _finalize_wechat_delivery(existing)
         except Exception as exc:
             raise HTTPException(
-                503, "草稿已确认送达，平台台账正在补记；请稍后重试"
+                503, "文章已确认在公众号草稿箱✅ 系统记录稍后自动补齐,请勿重复发送"
             ) from exc
         return _wechat_delivery_result(
             db.one("SELECT * FROM wechat_draft_delivery WHERE id=?", (existing["id"],))
@@ -6387,7 +6387,7 @@ async def job_wechat_draft(job_id: int, body: dict):
         if not _mark_wechat_submitted(
                 delivery["id"], delivery["op_key"], media_id):
             raise HTTPException(
-                503, "草稿已送达微信，平台正在补记结果；稍后重试不会重复发送"
+                503, "文章已经进入公众号草稿箱✅ 系统记录稍后自动补齐;请勿再点发送,不会重复扣点"
             )
         delivery = db.one(
             "SELECT * FROM wechat_draft_delivery WHERE id=?", (delivery["id"],)
@@ -6415,7 +6415,7 @@ async def job_wechat_draft(job_id: int, body: dict):
                 type(settle_error).__name__,
             )
             raise HTTPException(
-                503, "微信已拒绝草稿，但退点结算暂未完成；请稍后重试"
+                503, "微信拒收了这篇草稿(内容或配置问题)。点数退回正在处理,稍后在账单明细可见,不会多扣"
             ) from settle_error
         if not settled:
             raise HTTPException(503, "微信已拒绝草稿，但退点结算状态待确认")
@@ -6445,7 +6445,7 @@ async def job_wechat_draft(job_id: int, body: dict):
                     503, "草稿未提交，但退点结算暂未完成；请稍后重试"
                 ) from settle_error
             if not settled:
-                raise HTTPException(503, "草稿未提交，但退点结算状态待确认")
+                raise HTTPException(503, "这篇没有发出去。点数退回正在处理,稍后可在「套餐与点数」的明细里核对,不会多扣")
         raise exc
     except Exception as exc:
         if not external_started:
@@ -6464,7 +6464,7 @@ async def job_wechat_draft(job_id: int, body: dict):
                     503, "草稿未提交，但退点结算暂未完成；请稍后重试"
                 ) from settle_error
             if not settled:
-                raise HTTPException(503, "草稿未提交，但退点结算状态待确认")
+                raise HTTPException(503, "这篇没有发出去。点数退回正在处理,稍后可在「套餐与点数」的明细里核对,不会多扣")
             raise HTTPException(500, "发草稿箱失败，点数已退回，请重试") from exc
         raise HTTPException(
             503, "草稿可能已送达微信，系统已停止重复发送；请稍后重试自动对账"

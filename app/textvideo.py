@@ -1639,7 +1639,7 @@ async def _run_job_inner(tvid: int, row: dict, p: dict, tid: int, broadcast):
         cleanup_job_assets(tvid, row, produced_file)
         public_error = providers.public_failure_message(
             e,
-            "成片任务处理失败，已安全收口，可从原任务免费重试",
+            "成片生成失败，点数已自动退回；可从原任务免费重试",
         )
         try:
             settle_failure(tvid, public_error, terminal_status="failed")

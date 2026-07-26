@@ -699,7 +699,7 @@ GO 要派 1-3 个能产出实物的执行任务；NEED_INFO 要派 1-2 个最小
         )
         public_error = providers.public_failure_message(
             exc,
-            "会议执行失败，已安全收口，可免费重试",
+            "会议执行失败，会议点数已自动退回；可免费重试或重新召开",
         )
         try:
             _push(meeting_id, broadcast, "系统", public_error,

@@ -182,7 +182,8 @@ class SourceURLMutation(ProviderError):
 
 
 PUBLIC_MODEL_FAILURE = "模型服务暂时不可用，请稍后重试"
-PUBLIC_TASK_FAILURE = "任务处理失败，已安全收口，可从原任务免费重试"
+PUBLIC_TASK_FAILURE = ("任务执行失败。未产出可用内容时点数会自动退回(账单里可查)；"
+                       "可直接免费重试")
 
 
 def public_failure_message(
@@ -190,11 +191,21 @@ def public_failure_message(
         fallback: str = PUBLIC_TASK_FAILURE) -> str:
     """Return a stable public failure message without reflecting exception text.
 
-    Provider/CLI exceptions are fed by untrusted remote responses and may echo
-    private system context.  Callers must never persist or broadcast ``str(error)``.
+    保密边界不变:CLI/上游异常可能回显私有上下文,除下述白名单外绝不透出
+    ``str(error)``。白名单是 ProviderError——它的每一条文案都由本代码库自己
+    书写(固定字符串,至多含 HTTP 状态码或截断的配置名,已逐点核对),对老板
+    直接可读;其余异常只按类型归类成安全文案,并说明钱与下一步。
     """
     if isinstance(error, PrivatePromptLeak):
-        return "交付未通过内部资料安全检查，已安全收口，可免费重试"
+        return "交付未通过内部资料安全检查，已安全终止；点数按未交付自动退回，可免费重试"
+    if isinstance(error, ProviderError):
+        return f"{str(error)[:160]}。未产出可用内容时点数自动退回，可免费重试"
+    if isinstance(error, (KeyError, TypeError, ValueError)):
+        return ("员工产出的格式没通过校验，已自动终止。点数按未交付自动退回；"
+                "可免费重试，连续失败时换个说法重新描述需求,成功率更高")
+    if isinstance(error, llm.LLMError):
+        return ("AI 服务超时或繁忙，本次执行失败。未产出可用内容时点数自动退回，"
+                "稍后免费重试即可")
     return str(fallback or PUBLIC_TASK_FAILURE)[:200]
 
 

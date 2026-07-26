@@ -2411,7 +2411,7 @@ async def run_job(job_id: int, broadcast):
         )
         public_error = providers.public_failure_message(
             e,
-            "数字人任务处理失败，已安全收口，可从原任务免费重试",
+            "数字人视频生成失败，点数已自动退回；可从原任务免费重试",
         )
         try:
             settle_failure(job_id, public_error, terminal_status="failed")

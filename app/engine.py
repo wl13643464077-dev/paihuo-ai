@@ -246,7 +246,7 @@ class Engine:
                         job_id,
                         providers.public_failure_message(
                             e,
-                            "内容流水线处理失败，已安全收口，可从原工单重试",
+                            "内容流水线执行失败。未产出可用正文时整单点数自动退回(账单可查)；可复制 Brief 重新开单",
                         ),
                     )
                     log.error(

@@ -464,6 +464,8 @@ function nav(){
   if(canWork("content")) primary.push(["tools","🧰 工具箱"]);
   const more = [];
   if(canWork("content") && ME && (ME.role==="owner"||ME.role==="root")) more.push(["channels","📣 发布渠道"]);
+  // 审查官是核心卖点(发前合规把关),此前只藏在可被永久关闭的引导卡后面
+  if(canWork("content")) more.push(["censor","🛡️ 审查官"]);
   if(canWork("content")) more.push(["schedules","⏰ 定时任务"],["profiles","🎭 人设档案"]);
   if(canWork("library")) more.push(["assets","🗂️ 资产库"],["knowledge","📚 沉淀库"]);
   if(ME && (ME.role==="owner"||ME.role==="root")) more.push(["production","📊 员工产出"],["company","🏢 企业档案"]);
@@ -2293,7 +2295,9 @@ async function submitBrief(btn){
       mode: $("#b-mode").value}});
     clearBriefDraft();
     location.hash = "#/job/"+r.job_id;
-  }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🚀 提交,让团队开工"; }
+  }catch(e){
+    if(e.status===409){ toast(e.message); setTimeout(()=>location.hash="#/tasks", 900); return; }
+    toast(e.message); btn.disabled=false; btn.textContent="🚀 提交,让团队开工"; }
 }
 
 function rebrief(id){
@@ -2579,7 +2583,8 @@ function draftLike(r){
   return `<h3>标题候选${canPick?"(选一个)":""}</h3>`+
     (o.title_candidates||[]).map((t,i)=>`<label style="display:block;margin:4px 0;font-weight:${i===tsel?800:400}">
       ${canPick?`<input type="radio" name="picktitle" value="${i}" ${i===tsel?"checked":""} style="width:auto;margin-right:8px">`:(i===tsel?"✅ ":"· ")}${esc(t)}</label>`).join("")+
-    `<h3>正文</h3>${bodyHtml}`+
+    `<h3 style="display:flex;align-items:center;gap:10px">正文
+      <button class="btn sm" style="font-weight:600" onclick="copyText(${cp(((o.title_candidates||[])[tsel]||"")+"\n\n"+(o.body||""))})">📋 复制这版</button></h3>${bodyHtml}`+
     (o.tags?`<div style="margin-top:8px">${o.tags.map(t=>`<span class="tag">#${esc(t)}</span>`).join("")}</div>`:"")+
     (o.image_plan?`<h3>配图点位建议</h3><ul class="list">${o.image_plan.map(p=>`<li><b>${esc(p.slot)}</b>:${esc(p.desc)}</li>`).join("")}</ul>`:"");
 }
@@ -3256,13 +3261,31 @@ function avVoiceMode(m){
   $("#av-voice-preset").style.display = m==="preset"?"":"none";
   $("#av-voice-own").style.display = m==="own"?"":"none";
 }
+function xhrUpload(url, fd, input){
+  return new Promise((resolve,reject)=>{
+    const xhr=new XMLHttpRequest(); xhr.open("POST", url);
+    const pill=document.createElement("div");
+    pill.style.cssText="position:fixed;left:50%;transform:translateX(-50%);bottom:70px;z-index:99;background:#2b2317;color:#ffd166;border:2.5px solid #ffd166;border-radius:12px;padding:8px 16px;font-weight:800;box-shadow:3px 4px 0 rgba(0,0,0,.4)";
+    pill.textContent="上传中… 0%"; document.body.appendChild(pill);
+    if(input) input.disabled=true;
+    const done=()=>{ pill.remove(); if(input){ input.disabled=false; input.value=""; } };
+    xhr.upload.onprogress=e=>{ if(e.lengthComputable) pill.textContent=`上传中… ${Math.round(e.loaded/e.total*100)}%${e.total>3e6?"(文件较大,请别关页面)":""}`; };
+    xhr.onload=()=>{ done();
+      let body={}; try{ body=JSON.parse(xhr.responseText||"{}"); }catch(_){}
+      if(xhr.status>=200&&xhr.status<300) resolve(body);
+      else reject(new Error(body.detail||"上传失败,请重试"));
+    };
+    xhr.onerror=()=>{ done(); reject(new Error("网络中断,上传失败;请检查网络后重试")); };
+    xhr.ontimeout=()=>{ done(); reject(new Error("上传超时;网络较慢时建议换 WiFi 再试")); };
+    xhr.timeout=300000;
+    xhr.send(fd);
+  });
+}
 async function avUploadVoice(input){
   const f = input.files[0]; if(!f) return;
   const fd = new FormData(); fd.append("file", f); fd.append("kind", "voice");
   try{
-    const r = await fetch("/api/avatar/upload",{method:"POST",body:fd});
-    if(!r.ok) throw new Error((await r.json()).detail||"上传失败");
-    AV_OWN_AUDIO = await r.json();
+    AV_OWN_AUDIO = await xhrUpload("/api/avatar/upload", fd, input);
     $("#av-own-status").innerHTML = `✅ 已上传:${esc(f.name)} <audio controls src="${esc(safeAssetUrl(AV_OWN_AUDIO.preview))}" style="vertical-align:middle;height:28px"></audio>`;
   }catch(e){ toast(e.message); }
 }
@@ -3271,9 +3294,7 @@ async function avUploadCloneSample(input){
   const f = input.files[0]; if(!f) return;
   const fd = new FormData(); fd.append("file", f); fd.append("kind", "voice");
   try{
-    const r = await fetch("/api/avatar/upload",{method:"POST",body:fd});
-    if(!r.ok) throw new Error((await r.json()).detail||"上传失败");
-    AV_CLONE_SAMPLE = await r.json();
+    AV_CLONE_SAMPLE = await xhrUpload("/api/avatar/upload", fd, input);
     $("#av-clone-btn").disabled = false;
     $("#av-clone-status").textContent = `已上传:${f.name},点「开始克隆」`;
   }catch(e){ toast(e.message); }
@@ -3311,9 +3332,7 @@ async function avUpload(input){
   const f = input.files[0]; if(!f) return;
   const fd = new FormData(); fd.append("file", f); fd.append("kind", "photo");
   try{
-    const r = await fetch("/api/avatar/upload",{method:"POST",body:fd});
-    if(!r.ok) throw new Error((await r.json()).detail||"上传失败");
-    AV_PHOTO = await r.json();
+    AV_PHOTO = await xhrUpload("/api/avatar/upload", fd, input);
     toast("照片已上传");
     render();
   }catch(e){ toast(e.message); }
@@ -3571,12 +3590,9 @@ async function admResetPrompt(idx){
 async function parseFileInto(input, targetSel){
   const ta = $(targetSel); if(!ta || !input.files.length) return;
   for(const f of input.files){
-    toast(`解析 ${f.name} 中…`);
     const fd = new FormData(); fd.append("file", f);
     try{
-      const r = await fetch("/api/parse-file",{method:"POST",body:fd});
-      if(!r.ok) throw new Error((await r.json()).detail||"解析失败");
-      const d = await r.json();
+      const d = await xhrUpload("/api/parse-file", fd, input);
       ta.value += (ta.value?"\n\n":"") + `【文件:${d.name}】\n${d.text}`;
     }catch(e){ toast(e.message); }
   }
@@ -5008,10 +5024,8 @@ async function clipUpload(input){
   for(const f of input.files){
     const fd=new FormData(); fd.append("file",f);
     try{
-      const r=await fetch("/api/tv/clips",{method:"POST",body:fd});
-      const d=await r.json().catch(()=>({}));
-      if(!r.ok) toast(`${f.name}:${d.detail||"上传失败"}`);
-      else { TS.clips=[...(TS.clips||[]),d]; TS.clipSel=[...(TS.clipSel||[]),d.name]; }
+      const d = await xhrUpload("/api/tv/clips", fd, null);
+      TS.clips=[...(TS.clips||[]),d]; TS.clipSel=[...(TS.clipSel||[]),d.name];
     }catch(e){ toast(`${f.name}:${e.message}`); }
   }
   TS.busy.clipup=false; render();

@@ -1054,16 +1054,21 @@ def submit_write(fn, *args, **kwargs):
     import logging
     call = functools.partial(fn, *args, **kwargs) if (args or kwargs) else fn
     submitted_path = os.path.abspath(DB_PATH)
+    submitted_generation = _connection_generation
 
     def _guarded():
         try:
             # 数据库在提交后被切换(测试/维护)时,这笔写属于已死的库,直接丢弃;
             # 快照类写入的语义本就允许丢帧,写进错误的库反而是事故。
-            if os.path.abspath(DB_PATH) != submitted_path:
+            # 同时比对代际:路径字符串在切换瞬间可能仍相同(TOCTOU),代际不会。
+            if (os.path.abspath(DB_PATH) != submitted_path
+                    or _connection_generation != submitted_generation):
                 return
             call()
         except StaleWriteError:
             pass       # conn() 在执行中发现库被切换,静默丢弃这笔快照写
+        except sqlite3.ProgrammingError:
+            pass       # 连接在执行间隙被回收(库已切换),同样按过期快照丢弃
         except Exception as exc:
             logging.getLogger("db").warning(
                 "submit_write failed error_type=%s", type(exc).__name__)
