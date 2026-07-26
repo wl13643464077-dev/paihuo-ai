@@ -304,6 +304,41 @@ class PublicationRetroBillingCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("retro_due", pushed.call_args.args[1])
         self.assertEqual(10, billing.balance(2))
 
+    async def test_tenant_auto_retro_switch_pauses_tick_and_reminders(self):
+        self.make_due()
+        pubtrack.set_auto_enabled(2, False)
+        self.assertFalse(pubtrack.auto_enabled(2))
+        fake_datetime = type(
+            "NoonDateTime",
+            (),
+            {"now": staticmethod(lambda _tz: SimpleNamespace(hour=12))},
+        )
+        worker = AsyncMock(return_value=pubtrack.RETRO_DONE)
+        with patch.object(
+            pubtrack, "datetime", fake_datetime
+        ), patch.object(
+            pubtrack, "_auto_retro_result", worker
+        ), patch.object(pubtrack.notify, "push") as pushed:
+            await pubtrack.tick()
+
+        worker.assert_not_awaited()
+        pushed.assert_not_called()
+        self.assertEqual(
+            "pending", db.jloads(self.row()["retro_json"], {})["1"]["state"]
+        )
+        self.assertEqual(10, billing.balance(2))
+
+        # 重新打开后同一到期项立即恢复自动处理。
+        pubtrack.set_auto_enabled(2, True)
+        self.assertTrue(pubtrack.auto_enabled(2))
+        with patch.object(
+            pubtrack, "datetime", fake_datetime
+        ), patch.object(
+            pubtrack, "_auto_retro_result", worker
+        ), patch.object(pubtrack.notify, "push"):
+            await pubtrack.tick()
+        worker.assert_awaited_once()
+
     async def test_stale_no_data_worker_cannot_notify_new_publication_cycle(self):
         self.make_due()
         original_published_at = self.row()["published_at"]

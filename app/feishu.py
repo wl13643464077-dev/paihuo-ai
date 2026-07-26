@@ -280,7 +280,7 @@ def _sync_page(kind: str, tid: int, before_id: int | None) -> tuple:
         records = [_know_record(row) for row in rows]
     else:
         rows = db.q(
-            "SELECT * FROM asset WHERE tenant_id=?"
+            "SELECT * FROM asset WHERE tenant_id=? AND deleted_at IS NULL"
             f"{cursor_sql} ORDER BY id DESC LIMIT ?",
             args,
         )

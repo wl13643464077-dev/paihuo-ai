@@ -263,6 +263,69 @@ class RecoverableLifecycleCase(unittest.TestCase):
                 )["deleted_at"]
             )
 
+    def test_profile_and_asset_soft_delete_show_in_trash_and_restore(self):
+        pid = db.insert(
+            "account_profile",
+            {"tenant_id": 2, "name": "主理人人设", "persona_json": "{}"},
+        )
+        aid = db.insert(
+            "asset",
+            {
+                "tenant_id": 2,
+                "type": "topic",
+                "payload_json": json.dumps(
+                    {"title": "选题A"}, ensure_ascii=False
+                ),
+            },
+        )
+        self.assertTrue(main.delete_profile(pid)["soft_deleted"])
+        self.assertTrue(main.delete_asset(aid)["soft_deleted"])
+
+        with self.assertRaises(HTTPException) as gone:
+            main.get_profile(pid)
+        self.assertEqual(404, gone.exception.status_code)
+        self.assertFalse(
+            any(row["id"] == aid for row in main.assets(type="topic"))
+        )
+        with self.assertRaises(HTTPException) as detail_gone:
+            main.asset_detail(aid)
+        self.assertEqual(404, detail_gone.exception.status_code)
+
+        by_key = {
+            (item["kind"], item["id"]): item
+            for item in main.trash_list()["items"]
+        }
+        self.assertEqual("主理人人设", by_key[("profile", pid)]["title"])
+        self.assertEqual("选题A", by_key[("asset", aid)]["title"])
+
+        self.assertTrue(main.trash_restore("profile", pid)["restored"])
+        self.assertTrue(main.trash_restore("asset", aid)["restored"])
+        self.assertEqual(pid, main.get_profile(pid)["id"])
+        self.assertEqual(aid, main.asset_detail(aid)["id"])
+
+    def test_profile_delete_blocked_while_enabled_schedule_references_it(self):
+        pid = db.insert(
+            "account_profile",
+            {"tenant_id": 2, "name": "被引用人设", "persona_json": "{}"},
+        )
+        db.insert(
+            "schedule",
+            {
+                "tenant_id": 2,
+                "name": "每日小红书",
+                "brief_json": "{}",
+                "profile_id": pid,
+                "enabled": 1,
+            },
+        )
+        with self.assertRaises(HTTPException) as blocked:
+            main.delete_profile(pid)
+        self.assertEqual(409, blocked.exception.status_code)
+        self.assertIn("每日小红书", blocked.exception.detail)
+
+        db.execute("UPDATE schedule SET enabled=0 WHERE profile_id=?", (pid,))
+        self.assertTrue(main.delete_profile(pid)["soft_deleted"])
+
     def test_restore_unique_conflict_rolls_back_connection(self):
         deleted = self._failed_task(
             source_meeting_id=7,

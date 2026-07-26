@@ -1702,7 +1702,8 @@ def state(limit: int | None = None, offset: int = 0):
         j["brief"] = {k: brief.get(k) for k in ("direction", "template", "platforms")}
         j["title"] = engine._job_title(j["id"])
         j["stations"] = [stn.get(j["id"], {}).get(i) for i in range(10)]
-    profiles = (db.q("SELECT * FROM account_profile WHERE tenant_id=? ORDER BY id", (TEN(),))
+    profiles = (db.q("SELECT * FROM account_profile WHERE tenant_id=? "
+                     "AND deleted_at IS NULL ORDER BY id", (TEN(),))
                 if can_content else [])
     for p in profiles:
         persona = db.jloads(p.pop("persona_json")) or {}
@@ -1784,7 +1785,8 @@ def _profile_id_for_tenant(value):
         profile_id = int(value)
     except (TypeError, ValueError):
         raise HTTPException(400, "人设档案参数无效")
-    if not db.one("SELECT id FROM account_profile WHERE id=? AND tenant_id=?",
+    if not db.one("SELECT id FROM account_profile WHERE id=? AND tenant_id=? "
+                  "AND deleted_at IS NULL",
                   (profile_id, TEN())):
         raise HTTPException(400, "人设档案不存在或无权使用")
     return profile_id
@@ -3182,7 +3184,8 @@ async def knowledge_analyze(kid: int):
 @app.post("/api/assets/{aid}/analyze")
 async def asset_analyze(aid: int):
     _need_module("library")
-    row = db.one("SELECT tenant_id FROM asset WHERE id=?", (aid,))
+    row = db.one("SELECT tenant_id FROM asset WHERE id=? AND deleted_at IS NULL",
+                 (aid,))
     if not row or row.get("tenant_id", 1) != TEN():
         raise HTTPException(404)
     try:
@@ -3261,6 +3264,8 @@ _TRASH_TABLES = {
     "task": ("task", None),
     "knowledge": ("knowledge", "library"),
     "avatar": ("avatar_job", "avatar"),
+    "profile": ("account_profile", "content"),
+    "asset": ("asset", "library"),
 }
 
 
@@ -3275,6 +3280,11 @@ def _trash_module(kind: str, row: dict) -> str:
 def _trash_title(kind: str, row: dict) -> str:
     if kind == "knowledge":
         return (row.get("title") or "未命名知识")[:160]
+    if kind == "profile":
+        return (row.get("title") or "未命名人设")[:160]
+    if kind == "asset":
+        payload = db.jloads(row.get("params_json"), {}) or {}
+        return (payload.get("title") or "未命名资产")[:160]
     if kind == "avatar":
         params = db.jloads(row.get("params_json"), {}) or {}
         return (
@@ -3315,10 +3325,20 @@ def trash_list(limit: int = 200, offset: int = 0):
                  params_json,status,NULL AS emp_idx,
                  deleted_at,created_at,delete_reason
           FROM avatar_job WHERE tenant_id=? AND deleted_at IS NOT NULL
+          UNION ALL
+          SELECT 'profile' AS kind,id,NULL AS brief_json,name AS title,
+                 NULL AS params_json,'' AS status,NULL AS emp_idx,
+                 deleted_at,created_at,delete_reason
+          FROM account_profile WHERE tenant_id=? AND deleted_at IS NOT NULL
+          UNION ALL
+          SELECT 'asset' AS kind,id,NULL AS brief_json,NULL AS title,
+                 payload_json AS params_json,'' AS status,NULL AS emp_idx,
+                 deleted_at,created_at,delete_reason
+          FROM asset WHERE tenant_id=? AND deleted_at IS NOT NULL
         ) AS deleted_records
         ORDER BY deleted_at DESC,id DESC LIMIT ? OFFSET ?
         """,
-        (TEN(), TEN(), TEN(), TEN(), limit + 1, offset),
+        (TEN(), TEN(), TEN(), TEN(), TEN(), TEN(), limit + 1, offset),
     )
     truncated = len(rows) > limit
     for row in rows[:limit]:
@@ -3419,9 +3439,14 @@ def company_put(body: dict):
     """保存企业原始资料,或手动微调已提炼的档案字段."""
     _need_admin()
     tid = TEN()
+    result = {"ok": True}
     if "materials" in body:
-        db.set_setting(f"company_materials:{tid}",
-                       (body.get("materials") or "").strip()[:20000] or None)
+        raw = (body.get("materials") or "").strip()
+        clipped = raw[:20000]
+        db.set_setting(f"company_materials:{tid}", clipped or None)
+        # 超长静默丢尾巴老板不会发现;明说存了多少,前端据此提醒。
+        result["materials_saved_chars"] = len(clipped)
+        result["materials_truncated"] = len(raw) > 20000
     if isinstance(body.get("profile"), dict):
         cur = db.jloads(db.get_setting(f"company_profile:{tid}"), {}) or {}
         for k in _COMPANY_FIELDS:
@@ -3429,7 +3454,7 @@ def company_put(body: dict):
                 cur[k] = str(body["profile"].get(k) or "").strip()[:600]
         cur["updated_at"] = time.time()
         db.set_setting(f"company_profile:{tid}", json.dumps(cur, ensure_ascii=False))
-    return {"ok": True}
+    return result
 
 
 @app.post("/api/company/distill")
@@ -4121,7 +4146,8 @@ async def _avatar_script_from_link_work(body: dict, url: str, dur: int) -> dict:
     style = (body.get("style") or "").strip()
     persona_txt = ""
     if body.get("profile_id"):
-        p = db.one("SELECT * FROM account_profile WHERE id=? AND tenant_id=?",
+        p = db.one("SELECT * FROM account_profile WHERE id=? AND tenant_id=? "
+                   "AND deleted_at IS NULL",
                    (body["profile_id"], TEN()))
         if p:
             per = db.jloads(p["persona_json"], {})
@@ -5067,7 +5093,7 @@ def library_export(kind: str = "knowledge"):
         out = []
         for r in rows:
             m = db.jloads(r.get("meta_json"), {})
-            out.append({"标题": r["title"], "内容": (r["content"] or "")[:500],
+            out.append({"标题": r["title"], "内容": (r["content"] or "")[:8000],
                         "类别": m.get("category"), "平台": m.get("platform"),
                         "行业": m.get("industry"), "主题": m.get("theme"),
                         "关键词": "、".join(m.get("keywords") or []),
@@ -5079,20 +5105,25 @@ def library_export(kind: str = "knowledge"):
                    "匹配度", "复用度", "时效性", "情绪", "摘要", "来源"]
         name = "沉淀库"
     else:
-        rows = db.q("SELECT * FROM asset WHERE tenant_id=? ORDER BY id DESC", (TEN(),))
+        rows = db.q("SELECT * FROM asset WHERE tenant_id=? "
+                    "AND deleted_at IS NULL ORDER BY id DESC", (TEN(),))
         out = []
         for r in rows:
             m = db.jloads(r.get("meta_json"), {})
             p = db.jloads(r.get("payload_json"), {})
             out.append({"标题": p.get("title"), "类型": r["type"],
+                        "内容": str(p.get("angle") or p.get("brief")
+                                    or p.get("desc") or "")[:8000],
+                        "关联": (f"工单#{r['job_id']}" if r.get("job_id")
+                                 else str(p.get("file") or "")),
                         "类别": m.get("category"), "平台": m.get("platform"),
                         "行业": m.get("industry"), "主题": m.get("theme"),
                         "关键词": "、".join(m.get("keywords") or []),
                         "质量分": m.get("quality"), "匹配度": m.get("match"),
                         "复用度": m.get("reuse"), "时效性": m.get("timeliness"),
                         "摘要": m.get("summary")})
-        headers = ["标题", "类型", "类别", "平台", "行业", "主题", "关键词", "质量分",
-                   "匹配度", "复用度", "时效性", "摘要"]
+        headers = ["标题", "类型", "内容", "关联", "类别", "平台", "行业", "主题",
+                   "关键词", "质量分", "匹配度", "复用度", "时效性", "摘要"]
         name = "资产库"
     return Response(export.rows_to_xlsx(out, headers, name),
                     media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -5476,7 +5507,8 @@ def export_fmt(job_id: int, fmt: str):
 @app.get("/api/profiles/{pid}")
 def get_profile(pid: int):
     _need_module("content")
-    p = db.one("SELECT * FROM account_profile WHERE id=? AND tenant_id=?", (pid, TEN()))
+    p = db.one("SELECT * FROM account_profile WHERE id=? AND tenant_id=? "
+               "AND deleted_at IS NULL", (pid, TEN()))
     if not p:
         raise HTTPException(404)
     return {"id": p["id"], "name": p["name"],
@@ -5495,7 +5527,8 @@ def create_profile(body: dict):
 @app.put("/api/profiles/{pid}")
 def update_profile(pid: int, body: dict):
     _need_module("content")
-    row = db.one("SELECT tenant_id FROM account_profile WHERE id=?", (pid,))
+    row = db.one("SELECT tenant_id FROM account_profile WHERE id=? "
+                 "AND deleted_at IS NULL", (pid,))
     if not row or row.get("tenant_id", 1) != TEN():
         raise HTTPException(404)
     data = {}
@@ -5507,11 +5540,56 @@ def update_profile(pid: int, body: dict):
     return {"ok": True}
 
 
+@app.delete("/api/profiles/{pid}")
+def delete_profile(pid: int):
+    """人设档案软删除进回收站;被启用中的定时任务引用时先提示解绑。"""
+    _need_admin()
+    _need_module("content")
+    row = db.one(
+        "SELECT id FROM account_profile WHERE id=? AND tenant_id=? "
+        "AND deleted_at IS NULL",
+        (pid, TEN()),
+    )
+    if not row:
+        raise HTTPException(404)
+    schedules = db.q(
+        "SELECT name FROM schedule WHERE tenant_id=? AND profile_id=? "
+        "AND enabled=1",
+        (TEN(), pid),
+    )
+    if schedules:
+        names = "、".join(
+            f"「{(s.get('name') or '未命名')[:20]}」" for s in schedules[:5]
+        )
+        raise HTTPException(
+            409,
+            f"该人设还被启用中的定时任务 {names} 使用。"
+            "请先到定时任务里换人设或停用任务,再删除",
+        )
+    deleted_at = time.time()
+    changed = db.execute(
+        "UPDATE account_profile SET deleted_at=?,deleted_by=?,delete_reason=?,"
+        "updated_at=? WHERE id=? AND tenant_id=? AND deleted_at IS NULL",
+        (
+            deleted_at,
+            int((auth.current() or {}).get("id") or 0),
+            "用户移入回收站",
+            deleted_at,
+            pid,
+            TEN(),
+        ),
+    )
+    if changed != 1:
+        raise HTTPException(409, "人设状态刚刚发生变化，请刷新后再删除")
+    return {"ok": True, "soft_deleted": True, "deleted_at": deleted_at}
+
+
 @app.post("/api/profiles/{pid}/distill")
 async def distill(pid: int):
     """喂历史作品 → 提炼文风特征(nuwa-skill 的建档职责)."""
     _need_module("content")
-    p = db.one("SELECT * FROM account_profile WHERE id=?", (pid,))
+    p = db.one("SELECT * FROM account_profile WHERE id=? AND deleted_at IS NULL",
+               (pid,))
     if not p or p.get("tenant_id", 1) != TEN():
         raise HTTPException(404)
     persona = db.jloads(p["persona_json"])
@@ -5542,7 +5620,7 @@ def assets(
 ):
     _need_module("library")
     page_limit, page_offset, paged = _pagination(limit, offset, 200)
-    where = ["tenant_id=?"]
+    where = ["tenant_id=?", "deleted_at IS NULL"]
     params = [TEN()]
     if type:
         where.append("type=?")
@@ -5580,7 +5658,8 @@ def assets(
     total = db.one(
         f"SELECT COUNT(*) AS n FROM asset WHERE {where_sql}", tuple(params)
     )["n"]
-    facet_where = "type=?" if type else ""
+    facet_where = ("deleted_at IS NULL AND type=?" if type
+                   else "deleted_at IS NULL")
     facet_params = ((type or "")[:40],) if type else ()
     return _page_result(
         rows, total, page_limit, page_offset,
@@ -5591,12 +5670,38 @@ def assets(
 @app.get("/api/assets/{aid}")
 def asset_detail(aid: int):
     _need_module("library")
-    row = db.one("SELECT * FROM asset WHERE id=? AND tenant_id=?", (aid, TEN()))
+    row = db.one(
+        "SELECT * FROM asset WHERE id=? AND tenant_id=? AND deleted_at IS NULL",
+        (aid, TEN()),
+    )
     if not row:
         raise HTTPException(404)
     row["payload"] = db.jloads(row.pop("payload_json"), {})
     row["meta"] = db.jloads(row.pop("meta_json", None), None)
     return row
+
+
+@app.delete("/api/assets/{aid}")
+def delete_asset(aid: int):
+    """资产软删除进回收站,可恢复;不碰任何工单产物文件。"""
+    _need_admin()
+    _need_module("library")
+    deleted_at = time.time()
+    changed = db.execute(
+        "UPDATE asset SET deleted_at=?,deleted_by=?,delete_reason=?,"
+        "updated_at=? WHERE id=? AND tenant_id=? AND deleted_at IS NULL",
+        (
+            deleted_at,
+            int((auth.current() or {}).get("id") or 0),
+            "用户移入回收站",
+            deleted_at,
+            aid,
+            TEN(),
+        ),
+    )
+    if changed != 1:
+        raise HTTPException(404)
+    return {"ok": True, "soft_deleted": True, "deleted_at": deleted_at}
 
 
 # ---------------- SSE ----------------
@@ -7325,6 +7430,22 @@ def publog_list():
     return pubtrack.entries(TEN())
 
 
+@app.get("/api/publog/auto-retro")
+def publog_auto_retro_get():
+    _need_module("content")
+    return {"enabled": pubtrack.auto_enabled(TEN())}
+
+
+@app.post("/api/publog/auto-retro")
+def publog_auto_retro_set(body: dict):
+    """租户级自动复盘总开关;只有企业主能动钱袋子相关的开关。"""
+    _need_admin()
+    _need_module("content")
+    enabled = bool(body.get("enabled"))
+    pubtrack.set_auto_enabled(TEN(), enabled)
+    return {"ok": True, "enabled": enabled}
+
+
 @app.post("/api/publog")
 def publog_add(body: dict):
     _need_module("content")
@@ -7922,7 +8043,8 @@ async def warmup_gen(body: dict):
     _tool_require_idle("warm")
     persona_text = ""
     if body.get("profile_id"):
-        pr = db.one("SELECT * FROM account_profile WHERE id=? AND tenant_id=?",
+        pr = db.one("SELECT * FROM account_profile WHERE id=? AND tenant_id=? "
+                    "AND deleted_at IS NULL",
                     (body["profile_id"], TEN()))
         if pr:
             persona_text = registry._persona_text({"persona": db.jloads(pr["persona_json"], {})})

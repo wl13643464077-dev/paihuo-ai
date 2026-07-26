@@ -686,7 +686,9 @@ def _initialize_anchor():
             _add_column(_conn, "task", col, typ)
         # v42:核心业务对象进入可恢复回收站。删除只隐藏/终止，不再摧毁计费锚点
         # 或交付文件；重试次数也持久化，避免失败重试被并发提交多次。
-        for table in ("job", "task", "knowledge", "avatar_job"):
+        # (人设档案与资产库后续也纳入同一回收站,老板误删可自行找回。)
+        for table in ("job", "task", "knowledge", "avatar_job",
+                      "account_profile", "asset"):
             for col, typ in (
                 ("deleted_at", "REAL"),
                 ("deleted_by", "INTEGER"),
@@ -722,7 +724,8 @@ def _initialize_anchor():
                       "ON task(tenant_id, emp_idx, id DESC)")
         _conn.execute("CREATE INDEX IF NOT EXISTS idx_job_tenant_created "
                       "ON job(tenant_id, id DESC)")
-        for table in ("job", "task", "knowledge", "avatar_job"):
+        for table in ("job", "task", "knowledge", "avatar_job",
+                      "account_profile", "asset"):
             _conn.execute(
                 f"CREATE INDEX IF NOT EXISTS idx_{table}_tenant_deleted "
                 f"ON {table}(tenant_id, deleted_at, id DESC)"

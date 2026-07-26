@@ -414,13 +414,28 @@ def recover_interrupted() -> int:
     return recovered
 
 
+def auto_enabled(tid: int) -> bool:
+    """租户级自动复盘总开关;默认开启,关掉后既不扣点跑复盘也不发到期提醒。"""
+    return not db.get_setting(f"retro_auto_off:{tid}")
+
+
+def set_auto_enabled(tid: int, enabled: bool):
+    db.set_setting(f"retro_auto_off:{tid}", None if enabled else "1")
+
+
 async def tick():
     """调度器定期调用:处理到期的 T+1/3/7."""
     hour = datetime.now(TZ).hour
     if not (9 <= hour <= 22):     # 别半夜打扰老板
         return
     now = time.time()
+    paused_tenants: dict = {}
     for row in db.q("SELECT * FROM publish_log WHERE created_at > ?", (now - 40 * 86400,)):
+        tenant = row["tenant_id"]
+        if tenant not in paused_tenants:
+            paused_tenants[tenant] = not auto_enabled(tenant)
+        if paused_tenants[tenant]:
+            continue
         retro = db.jloads(row["retro_json"], {})
         changed = False
         for d in RETRO_DAYS:

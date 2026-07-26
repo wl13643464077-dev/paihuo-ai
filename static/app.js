@@ -1247,7 +1247,8 @@ async function deleteJob(id){
 }
 
 /* ---------- V42:可恢复回收站 ---------- */
-const TRASH_KIND_LABEL = {job:"内容工单",task:"数字员工任务",knowledge:"知识沉淀",avatar:"数字人任务"};
+const TRASH_KIND_LABEL = {job:"内容工单",task:"数字员工任务",knowledge:"知识沉淀",avatar:"数字人任务",
+  profile:"人设档案",asset:"资产"};
 let TRASH_ITEMS=[];
 async function trashView(offset=0){
   if(!isAdmin()){ $("#main").innerHTML='<div class="empty">需要企业主账号权限</div>'; return; }
@@ -1260,11 +1261,11 @@ async function trashView(offset=0){
   $("#main").innerHTML=`<div class="card" style="background:linear-gradient(120deg,#f4edde,#fffaf0)">
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <div style="flex:1;min-width:220px"><h2 style="margin:0">🗑 回收站</h2>
-        <div class="sub" style="margin-top:5px">误删的工单、员工任务、知识沉淀和数字人任务可在这里恢复；交付物不会在移入回收站时被销毁。</div></div>
+        <div class="sub" style="margin-top:5px">误删的工单、员工任务、知识沉淀、资产、人设档案和数字人任务可在这里恢复；交付物不会在移入回收站时被销毁。</div></div>
       <button class="btn" onclick="trashView()">↻ 刷新</button></div>
     ${data.truncated?`<div class="notice">当前已展示 ${rows.length} 条，下面还能加载更早记录。</div>`:""}</div>
   <div class="card">${rows.length?rows.map(item=>`<div class="topic" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-      <div style="font-size:23px">${{job:"📝",task:"🧑‍💼",knowledge:"📚",avatar:"🎥"}[item.kind]||"🗂"}</div>
+      <div style="font-size:23px">${{job:"📝",task:"🧑‍💼",knowledge:"📚",avatar:"🎥",profile:"🎭",asset:"🗂️"}[item.kind]||"🗂"}</div>
       <div style="flex:1;min-width:190px"><div><span class="tag">${esc(TRASH_KIND_LABEL[item.kind]||item.kind)}</span>
         <b>#${item.id} · ${esc(item.title)}</b></div>
         <div class="sub" style="margin-top:5px">${item.assignee?`👤 ${esc(item.assignee)} · `:""}移入时间 ${tcFmt(item.deleted_at)}
@@ -2698,7 +2699,8 @@ function profileCard(p){
   const s = p.persona||{};
   return `<div class="card">
     <div style="display:flex;gap:10px;align-items:center"><h3 style="margin:0;flex:1">${esc(p.name)}</h3>
-      <button class="btn sm" onclick="editProfile(${p.id})">编辑</button></div>
+      <button class="btn sm" onclick="editProfile(${p.id})">编辑</button>
+      ${isAdmin()?`<button class="btn sm bad" onclick="profileDel(${p.id},${cp(p.name)})" title="移入回收站">🗑</button>`:""}</div>
     <div class="kv" style="margin-top:8px">
       <span>定位:${esc(s.positioning||"—")}</span><span>受众:${esc(s.audience||"—")}</span><span>语气:${esc(s.tone||"—")}</span></div>
     ${s.style_notes?`<div class="notice green" style="margin-top:8px">🧬 文风特征:${esc(s.style_notes)}<br>口头禅:${esc(s.catchphrases||"—")}</div>`:""}
@@ -2736,6 +2738,13 @@ async function loadProfileFiles(input){
   input.value = "";
 }
 function closeProfileForms(){ document.querySelectorAll(".pform").forEach(f=>f.remove()); }
+async function profileDel(id,name){
+  if(!await uiConfirm(`把人设档案「${name}」移入回收站?\n历史作品语料会保留,可从回收站恢复。正在跑的工单不受影响。`,{
+    title:"移入回收站",confirmText:"移入回收站"
+  })) return;
+  try{ await api("/profiles/"+id,{method:"DELETE"}); toast("已移入回收站"); SHELL_DIRTY=true; render(); }
+  catch(e){ toast(e.message); }
+}
 function newProfile(){
   closeProfileForms(); $("#plist").insertAdjacentHTML("afterbegin", profileForm(null)); }
 async function editProfile(id){
@@ -2810,7 +2819,8 @@ async function assetsView(){
           ${a.meta?.category?`<span class="tag">${esc(a.meta.category)}</span>`:""}</div>
         <div class="actions" style="margin:0">
           <button class="btn sm pri" onclick="openReport(${a.payload.task_id||0})">📄 看报告</button>
-          <button class="btn sm" onclick="reAnalyze('assets',${a.id},this)">🔁 重评</button></div>
+          <button class="btn sm" onclick="reAnalyze('assets',${a.id},this)">🔁 重评</button>
+          ${isAdmin()?`<button class="btn sm bad" onclick="assetDel(${a.id})" title="移入回收站">🗑</button>`:""}</div>
       </div>`).join("")}</div>`
       :`<div class="empty">空的。行业专家(如餐饮部)交付的报告会沉淀到这里;工具箱的报告在工具箱当页看,点「💾 沉淀」的会进沉淀库。</div>`)
     : shown.length?`<div class="dimwrap"><table class="dimtable"><thead><tr>
@@ -2820,7 +2830,8 @@ async function assetsView(){
       <td style="min-width:150px">${title(a)}</td>
       ${metaCells(a.meta)}
       <td style="white-space:nowrap">${action(a)}
-        <button class="btn sm" onclick="reAnalyze('assets',${a.id},this)" title="重新评估">🔁</button></td>
+        <button class="btn sm" onclick="reAnalyze('assets',${a.id},this)" title="重新评估">🔁</button>
+        ${isAdmin()?`<button class="btn sm bad" onclick="assetDel(${a.id})" title="移入回收站">🗑</button>`:""}</td>
     </tr>`).join("")}</tbody></table></div>`
     :`<div class="empty">空的。${{topic:"趋势官没被选中的选题会自动沉淀到这里",final:"完成的工单会沉淀到这里",report:"行业专家(如餐饮部)交付的报告会沉淀到这里"}[ASSET_TAB]}</div>`}
     ${listPager(assetContract,"assets")}
@@ -2837,6 +2848,13 @@ async function openReport(tid){
       <button class="btn sm" onclick="taskToKnow(${t.id})">📚 存沉淀</button>
       <button class="btn sm" onclick="this.closest('.overlay').remove()">✕</button></div>
     <div class="pbody">${taskBody(t)}</div></div></div>`);
+}
+async function assetDel(id){
+  if(!await uiConfirm("把这条资产移入回收站? 之后可以恢复;关联工单的交付物不受影响。",{
+    title:"移入回收站",confirmText:"移入回收站"
+  })) return;
+  try{ await api("/assets/"+id,{method:"DELETE"}); toast("已移入回收站"); render(); }
+  catch(e){ toast(e.message); }
 }
 async function fromTopic(aid){
   const a = await api("/assets/"+aid).catch(e=>{toast(e.message);return null;});
@@ -2940,14 +2958,21 @@ async function companyView(){
     <div class="actions"><button class="btn pri" onclick="companySaveProfile(this)">💾 保存档案</button></div>
   </div>`;
 }
+async function companySaveMaterials(){
+  const r = await api("/company",{method:"PUT",body:{materials:$("#cp-materials").value}});
+  if(r?.materials_truncated) toast(`⚠️ 资料超过 2 万字上限,只保存了前 ${r.materials_saved_chars} 字,超出部分没有存——建议删掉过时内容再粘新的`);
+  return r;
+}
 async function companyUpload(input){
   await parseFileInto(input, "#cp-materials");   // 提取多格式文档文字→追加到资料框
-  try{ await api("/company",{method:"PUT",body:{materials:$("#cp-materials").value}}); toast("文档已读入并保存,点「提炼」即可同步给员工"); }
+  try{ const r=await companySaveMaterials();
+    if(!r?.materials_truncated) toast("文档已读入并保存,点「提炼」即可同步给员工"); }
   catch(e){ toast(e.message); }
 }
 async function companySaveMat(btn){
   btn.disabled=true;
-  try{ await api("/company",{method:"PUT",body:{materials:$("#cp-materials").value}}); toast("已保存企业资料"); }
+  try{ const r=await companySaveMaterials();
+    if(!r?.materials_truncated) toast("已保存企业资料"); }
   catch(e){ toast(e.message); } btn.disabled=false;
 }
 async function companyDistill(btn){
@@ -2957,7 +2982,7 @@ async function companyDistill(btn){
   try{ await companySaveProfile(null,{silent:true}); }catch(_){}
   btn.disabled=true; const t=btn.textContent; btn.innerHTML='<span class="spin"></span> 提炼中(约1分钟)…';
   try{
-    await api("/company",{method:"PUT",body:{materials:$("#cp-materials").value}});
+    await companySaveMaterials();
     await api("/company/distill",{method:"POST",timeout:330000,longRunning:true});
     toast("已提炼并同步给全部员工"); render();
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent=t; }
@@ -2978,7 +3003,8 @@ async function knowledgeView(){
   KNOW_CACHE = rows;
   const shown = rows;
   $("#main").innerHTML = `<div class="card"><h2>📚 公司沉淀库</h2>
-    <div class="sub">交付自动沉淀 + 老板手记。每条自动做 <b>11 维评估</b>(类别/平台/行业/主题/关键词/质量/匹配/复用/时效/情绪/摘要);📌 置顶的会注入员工每次工作。</div>
+    <div class="sub">交付自动沉淀 + 老板手记。每条自动做 <b>11 维评估</b>(类别/平台/行业/主题/关键词/质量/匹配/复用/时效/情绪/摘要);📌 置顶的会注入员工每次工作(<b>每次最多带 12 条、每条取前 800 字</b>,置顶优先)。</div>
+    ${(n=>n>12?`<div class="notice red" style="margin-top:8px">📌 已置顶 ${n} 条,超过单次注入上限 <b>12 条</b>:每次开工只有最新置顶的 12 条会带上,建议把最关键的留在置顶、其余取消。</div>`:"")(rows.filter(k=>k.pinned).length)}
     ${listContractNotice(knowledgeContract,"沉淀")}
     <div class="actions"><button class="btn pri" onclick="knowForm()">➕ 手记一条</button>
       <button class="btn" onclick="feishuSync('knowledge',this)">📤 同步到飞书</button>
@@ -3061,7 +3087,11 @@ async function knowSave(id){
   }catch(e){ toast(e.message); }
 }
 async function knowPin(id,pinned){
-  try{ await api("/knowledge/"+id,{method:"PUT",body:{pinned:!!pinned}}); render(); }catch(e){ toast(e.message); }
+  try{
+    await api("/knowledge/"+id,{method:"PUT",body:{pinned:!!pinned}});
+    if(pinned) toast("📌 已置顶。员工每次开工最多带 12 条置顶知识(每条取前 800 字)");
+    render();
+  }catch(e){ toast(e.message); }
 }
 async function knowDel(id){
   if(!await uiConfirm("把这条沉淀移入回收站? 之后可以恢复。",{
@@ -3072,8 +3102,10 @@ async function knowDel(id){
 
 /* ---------- V4:定时任务 ---------- */
 const WD = ["周一","周二","周三","周四","周五","周六","周日"];
+let SCHED_ROWS=[];
 async function schedulesView(selectedId){
   const rows = await api("/schedules");
+  SCHED_ROWS = rows;
   $("#main").innerHTML = `<div class="card"><h2>⏰ 定时任务</h2>
     <div class="sub">设好节奏,内容部到点自动开工(北京时间)。比如「每天 09:00 来一单日更选题」。到点若 3 单并行已满会自动顺延,不硬塞。</div>
     <div class="actions"><button class="btn pri" onclick="schedForm()">➕ 新建定时任务</button></div>
@@ -3089,48 +3121,62 @@ function schedRow(s,selected=false){
       <span class="t" style="flex:1">${esc(s.name)}</span>
       <span class="tag">🔁 ${esc(s.human)}</span>
       <span class="tag">⏭ 下次 ${s.enabled?nxt:"已停用"}</span>
+      <button class="btn sm" onclick="schedEdit(${s.id})">✏️ 编辑</button>
       <button class="btn sm" onclick="schedRunNow(${s.id})">▶️ 立即来一单</button>
       <button class="btn sm bad" onclick="schedDel(${s.id})">🗑</button></div>
     <div class="sub" style="margin-top:6px">方向:${esc(s.brief.direction||"")} · ${(s.brief.platforms||[]).map(esc).join("/")} · ${esc(MODE_LABEL[s.mode]||s.mode)}</div>
     ${s.last_note?`<div class="sub" style="margin-top:3px">📝 ${esc(s.last_note)}</div>`:""}
   </div>`;
 }
-function schedForm(){
+function schedForm(s){
   const profiles = STATE.profiles;
+  const b = s?.brief||{};
+  const indOn = t => s? t===(b.industry||"") : false;
+  const anyInd = s && META.industries.some(indOn);
+  const tplOn = t => s? t===(b.template||"") : false;
+  const anyTpl = s && META.brief_templates.some(tplOn);
+  const pfOn = p => s? (b.platforms||[]).includes(p) : false;
+  const anyPf = s && META.platforms.some(pfOn);
   $("#sform").innerHTML = `<div class="card" style="background:#fff6dc">
-    <h3 style="margin-top:0">新建定时任务</h3>
-    <div class="notice" style="margin-top:6px">💡 <b>定好主题,以后每天全自动</b>:到点自动走完整条流水线(<b>每次自动开工扣 ${META?.job_points??18}点</b>,点数不足自动暂停)。建议先跑两单手动任务,满意了再定时。</div>
-    <label>任务名</label><input id="s-name" placeholder="如:每日行业选题">
+    <h3 style="margin-top:0">${s?`✏️ 编辑定时任务 #${s.id}`:"新建定时任务"}</h3>
+    ${s?"":`<div class="notice" style="margin-top:6px">💡 <b>定好主题,以后每天全自动</b>:到点自动走完整条流水线(<b>每次自动开工扣 ${META?.job_points??18}点</b>,点数不足自动暂停)。建议先跑两单手动任务,满意了再定时。</div>`}
+    <label>任务名</label><input id="s-name" value="${esc(s?.name||"")}" placeholder="如:每日行业选题">
     <label>行业/赛道</label>
-    <div class="chips" id="s-ind">${META.industries.map((t,i)=>`<span class="chip${i===0?" on":""}" onclick="pick(this)">${t}</span>`).join("")}</div>
-    <label>主题(每天围绕它自动拆解出当天的选题) *</label><textarea id="s-dir" placeholder="如:本行业今天值得聊的新动态,选和普通人最相关的一条"></textarea>
-    <label>内容类型</label><div class="chips" id="s-tpl">${META.brief_templates.map((t,i)=>`<span class="chip${i===1?" on":""}" onclick="pick(this)">${t}</span>`).join("")}</div>
-    <label>目标平台(多选)</label><div class="chips" id="s-pf">${META.platforms.map((p,i)=>`<span class="chip${i===0?" on":""}" data-p="${p}" onclick="this.classList.toggle('on')">${p}</span>`).join("")}</div>
+    <div class="chips" id="s-ind">${META.industries.map((t,i)=>`<span class="chip${(anyInd?indOn(t):i===0)?" on":""}" onclick="pick(this)">${t}</span>`).join("")}</div>
+    <label>主题(每天围绕它自动拆解出当天的选题) *</label><textarea id="s-dir" placeholder="如:本行业今天值得聊的新动态,选和普通人最相关的一条">${esc(b.direction||"")}</textarea>
+    <label>内容类型</label><div class="chips" id="s-tpl">${META.brief_templates.map((t,i)=>`<span class="chip${(anyTpl?tplOn(t):i===1)?" on":""}" onclick="pick(this)">${t}</span>`).join("")}</div>
+    <label>目标平台(多选)</label><div class="chips" id="s-pf">${META.platforms.map((p,i)=>`<span class="chip${(anyPf?pfOn(p):i===0)?" on":""}" data-p="${p}" onclick="this.classList.toggle('on')">${p}</span>`).join("")}</div>
     <div class="row">
       <div><label>频率</label><select id="s-kind" onchange="schedKindUI()">
-        <option value="daily">每天一次</option><option value="weekly">每周一次</option><option value="interval">每 N 小时</option></select></div>
+        ${[["daily","每天一次"],["weekly","每周一次"],["interval","每 N 小时"]].map(([v,t])=>`<option value="${v}"${s?.kind===v?" selected":""}>${t}</option>`).join("")}</select></div>
       <div id="s-when"><label>时间(北京时间)</label><input id="s-time" type="time" value="09:00"></div>
     </div>
     <div class="row">
       <div><label>账号人设</label><select id="s-profile"><option value="">(不使用)</option>
-        ${profiles.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join("")}</select></div>
+        ${profiles.map(p=>`<option value="${p.id}"${s?.profile_id===p.id?" selected":""}>${esc(p.name)}</option>`).join("")}</select></div>
       <div><label>驾驶模式</label><select id="s-mode">
-        <option value="copilot">关键审批(推荐)</option><option value="fullauto">完全托管(一停不停)</option>
-        <option value="autopilot">全自动</option><option value="manual">逐站审批</option></select></div>
+        ${[["copilot","关键审批(推荐)"],["fullauto","完全托管(一停不停)"],["autopilot","全自动"],["manual","逐站审批"]].map(([v,t])=>`<option value="${v}"${s?.mode===v?" selected":""}>${t}</option>`).join("")}</select></div>
     </div>
-    <div class="actions"><button class="btn pri" onclick="schedSave()">💾 创建</button>
+    <div class="actions"><button class="btn pri" onclick="schedSave(${s?s.id:"null"})">💾 ${s?"保存修改":"创建"}</button>
       <button class="btn" onclick="$('#sform').innerHTML=''">取消</button></div></div>`;
+  schedKindUI(s);
   window.scrollTo(0,0);
 }
-function schedKindUI(){
-  const k = $("#s-kind").value;
-  $("#s-when").innerHTML = k==="interval"
-    ? `<label>每几小时来一单</label><input id="s-hours" type="number" min="1" value="24">`
-    : `<label>${k==="weekly"?"星期几 + 时间":"时间"}(北京时间)</label><div style="display:flex;gap:6px">
-       ${k==="weekly"?`<select id="s-wd" style="flex:1">${WD.map((w,i)=>`<option value="${i}">${w}</option>`).join("")}</select>`:""}
-       <input id="s-time" type="time" value="09:00" style="flex:1"></div>`;
+function schedEdit(id){
+  const s = SCHED_ROWS.find(x=>x.id===id);
+  if(!s) return toast("刷新后再试");
+  schedForm(s);
 }
-async function schedSave(){
+function schedKindUI(s){
+  const k = $("#s-kind").value;
+  const t = esc(s?.at_time||"09:00");
+  $("#s-when").innerHTML = k==="interval"
+    ? `<label>每几小时来一单</label><input id="s-hours" type="number" min="1" value="${s?.every_hours||24}">`
+    : `<label>${k==="weekly"?"星期几 + 时间":"时间"}(北京时间)</label><div style="display:flex;gap:6px">
+       ${k==="weekly"?`<select id="s-wd" style="flex:1">${WD.map((w,i)=>`<option value="${i}"${(s?.weekday??0)===i?" selected":""}>${w}</option>`).join("")}</select>`:""}
+       <input id="s-time" type="time" value="${t}" style="flex:1"></div>`;
+}
+async function schedSave(id){
   const dir = $("#s-dir").value.trim();
   if(!dir) return toast("内容方向必填");
   const kind = $("#s-kind").value;
@@ -3141,8 +3187,12 @@ async function schedSave(){
     brief:{direction:dir, template:$("#s-tpl .on")?.textContent||"",
       industry:$("#s-ind .on")?.textContent||"",
       platforms:[...document.querySelectorAll("#s-pf .on")].map(e=>e.dataset.p||e.textContent)}};
-  try{ await api("/schedules",{method:"POST",body}); toast("定时任务已创建"); render(); }
-  catch(e){ toast(e.message); }
+  if(id && !body.name) delete body.name;   // 编辑时清空任务名=保留原名
+  try{
+    if(id){ await api("/schedules/"+id,{method:"PUT",body}); toast("定时任务已更新,下次执行时间已按新节奏重算"); }
+    else{ await api("/schedules",{method:"POST",body}); toast("定时任务已创建"); }
+    render();
+  }catch(e){ toast(e.message); }
 }
 async function schedToggle(id,enabled){
   try{ await api("/schedules/"+id,{method:"PUT",body:{enabled:!!enabled}}); render(); }catch(e){ toast(e.message); }
@@ -3171,7 +3221,7 @@ async function settingsView(){
       <span>工单 ${st.jobs} 单</span><span>工位记录 ${st.station_runs} 条</span>
       <span>知识沉淀 ${st.knowledge} 条</span><span>进修技能 ${st.skills} 条</span>
       <span>定时任务 ${st.schedules} 个</span><span>资产 ${st.assets} 条</span></div>
-    <div class="notice" style="margin-top:10px">📂 全部数据存在服务器 <code>${esc(st.data_dir)}</code>:单文件 SQLite(contentcrew.db)+ 素材目录(assets/)。删除工单会连带清理其素材;沉淀库/技能库/人设档案永久保留,是越用越值钱的部分。</div></div>`;
+    <div class="notice" style="margin-top:10px">📂 全部数据存在服务器 <code>${esc(st.data_dir)}</code>:单文件 SQLite(contentcrew.db)+ 素材目录(assets/)。删除工单/沉淀/资产/人设都是先进 <a href="#/trash" style="text-decoration:underline"><b>🗑 回收站</b></a>(可恢复),交付素材不会被销毁;进修技能库与企业档案长期保留,是越用越值钱的部分。</div></div>`;
 }
 
 /* ---------- V6:数字人摄影棚 ---------- */
@@ -4424,8 +4474,12 @@ async function censorView(){
     const publogContract=normalizeListContract(
       await api("/publog").catch(optionalResult([])),60);
     const rows=publogContract.items;
+    const retroConf=await api("/publog/auto-retro").catch(()=>({enabled:true}));
     listNotice=listContractNotice(publogContract,"发布记录");
     body = `<div class="sub">发布台账 = 自动复盘的钟表:发草稿箱会自动登记;其他平台发完花10秒登记一下,到 T+1/3/7 审查官自动来找您复盘(公众号配了API且已群发的,数据都自动拉)。<b>💎 每次自动复盘扣 1 点(每篇最多 T+1/3/7 三次共 3 点)</b>;不想复盘的记录点 🗑 删除即停止。</div>
+    <div class="notice" style="margin-top:8px"><label style="display:flex;gap:8px;align-items:flex-start;margin:0;cursor:${isAdmin()?"pointer":"default"}">
+      <input type="checkbox" style="margin-top:3px" ${retroConf.enabled?"checked":""} ${isAdmin()?"":"disabled"} onchange="retroAutoToggle(this)">
+      <span><b>自动复盘总开关(全公司)</b>:开=到点自动跑、自动扣点;关=所有台账都不自动复盘、也不发到期提醒,想看数据时点各条的「📥 自动拉数据复盘」手动跑(同样 1 点/次)。${isAdmin()?"":"(仅企业主可改)"}</span></label></div>
     <div class="row" style="align-items:flex-end;margin-top:8px">
       <div style="flex:1;min-width:130px"><label>平台</label><select id="pl-pf">${CEN_PLATFORMS.map(p=>`<option>${p}</option>`).join("")}</select></div>
       <div style="flex:2;min-width:200px"><label>标题</label><input id="pl-title" placeholder="发布的内容标题"></div>
@@ -4476,6 +4530,12 @@ async function censorView(){
     <div class="tabs">${tabs.map(([k,l])=>`<span class="tb ${CEN_TAB===k?"on":""}" onclick="CEN_TAB=${cp(k)};resetListPage('censor');render()">${l}</span>`).join("")}</div>
     ${listNotice}
     <div style="margin-top:10px">${body}</div></div>`;
+}
+async function retroAutoToggle(cb){
+  try{
+    await api("/publog/auto-retro",{method:"POST",body:{enabled:cb.checked}});
+    toast(cb.checked?"✅ 自动复盘已开启,到点自动跑":"⏸ 自动复盘已全部暂停,不再自动扣点(手动复盘不受影响)");
+  }catch(e){ cb.checked=!cb.checked; toast(e.message); }
 }
 async function plDel(id){
   if(!await uiConfirm("删除这条台账?删除后该篇不再自动复盘,也不再扣复盘点。",{okText:"删除",okClass:"bad"})) return;

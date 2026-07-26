@@ -238,7 +238,8 @@ def fire(s: dict, engine, occurrence: str | None = None) -> int:
             raise ValueError("并行工单已满(3)")
         profile_id = s.get("profile_id")
         if profile_id and not db.one(
-                "SELECT id FROM account_profile WHERE id=? AND tenant_id=?",
+                "SELECT id FROM account_profile WHERE id=? AND tenant_id=? "
+                "AND deleted_at IS NULL",
                 (profile_id, tid)):
             # 兼容旧版本可能留下的越租户引用：不读取、不传播，按未选人设安全执行。
             profile_id = None
