@@ -8451,6 +8451,21 @@ async def webhook_test():
         raise HTTPException(400, str(e))
 
 
+@app.get("/api/notify/daily-digest")
+def daily_digest_get():
+    """每日经营简报开关:默认开;任何登录角色可读."""
+    return {"enabled": not db.get_setting(f"daily_digest_off:{TEN()}")}
+
+
+@app.post("/api/notify/daily-digest")
+def daily_digest_set(body: dict):
+    """租户级简报开关;推送打扰与否只有企业主说了算."""
+    _need_admin()
+    enabled = bool(body.get("enabled"))
+    db.set_setting(f"daily_digest_off:{TEN()}", None if enabled else "1")
+    return {"ok": True, "enabled": enabled}
+
+
 # ---------------- ⑧ 矩阵发布(beta) ----------------
 @app.get("/api/matrix/accounts")
 def matrix_accounts_list():

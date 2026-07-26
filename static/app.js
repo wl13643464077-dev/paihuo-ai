@@ -4021,6 +4021,7 @@ let BILL_TAB="all";
 async function billingView(){
   trackFunnelSessionOnce("pricing_view","billing");
   const b = await api("/billing");
+  const digestConf = await api("/notify/daily-digest").catch(()=>({enabled:true}));
   const tourBanner = ME&&ME.role==="tour" ? `<div class="notice" style="background:#ece3ff;margin-top:0">👀 <b>参观模式</b>:点击员工卡片,了解每位数字员工可以为您的业务提供什么帮助。<a href="/promo#plans" style="text-decoration:underline;font-weight:900">查看套餐</a> 或联系开通企业账号后直接派活。</div>` : "";
   const shown = (BILL_TAB==="in"?b.log.filter(l=>l.delta>0):BILL_TAB==="out"?b.log.filter(l=>l.delta<0):b.log);
   const spendActs = (!b.is_platform&&b.spend_by_action)?b.spend_by_action.filter(s=>(s.points||0)>0):[];
@@ -4047,6 +4048,9 @@ async function billingView(){
       <div style="height:9px;background:#eadfcd;border:1.5px solid var(--ink);border-radius:999px;overflow:hidden;margin-top:5px">
         <div style="height:100%;width:${spendTotal?Math.max(2,Math.round((s.points||0)/spendTotal*100)):0}%;background:#ffd166"></div></div></div>`).join("")}</div>`:""}
   <div class="card"><h2>🧾 积分明细(充值 & 消耗记录)</h2>
+    <label style="display:flex;gap:8px;align-items:flex-start;margin:6px 0 4px;cursor:${isAdmin()?"pointer":"default"}">
+      <input type="checkbox" style="margin-top:3px" ${digestConf.enabled?"checked":""} ${isAdmin()?"":"disabled"} onchange="digestToggle(this)">
+      <span class="sub">📮 每日经营简报(昨日完成/花销/风险,推到站内+企微)${isAdmin()?"":"(仅企业主可改)"}</span></label>
     <div class="tabs">
       <span class="tb ${BILL_TAB==="all"?"on":""}" onclick="BILL_TAB='all';render()">全部(${b.log.length})</span>
       <span class="tb ${BILL_TAB==="in"?"on":""}" onclick="BILL_TAB='in';render()">💰 充值记录(${b.log.filter(l=>l.delta>0).length})</span>
@@ -4075,6 +4079,12 @@ async function billingView(){
       <div class="sub" style="margin:4px 0"><b>季付 ¥${Math.round(p.sale*3*0.9)}</b>(省¥${p.sale*3-Math.round(p.sale*3*0.9)}) · <b>年付 ¥${Math.round(p.sale*12*0.8)}</b>(省¥${p.sale*12-Math.round(p.sale*12*0.8)})</div>
       <div class="sub">${esc(p.desc)}</div></div>`).join("")}</div></div>
 `;
+}
+async function digestToggle(cb){
+  try{
+    await api("/notify/daily-digest",{method:"POST",body:{enabled:cb.checked}});
+    toast(cb.checked?"✅ 每日经营简报已开启,每天早上推昨日情况":"⏸ 每日经营简报已关闭,不再推送");
+  }catch(e){ cb.checked=!cb.checked; toast(e.message); }
 }
 
 /* ---------- V10:任务编辑/入库 ---------- */

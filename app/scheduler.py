@@ -176,6 +176,100 @@ async def _run_bench_weekly(tid: int):
     )
 
 
+def _digest_stats(tid: int, balance: float, day_start: datetime) -> dict:
+    """汇总某租户「昨日」(北京时区自然日)的经营数字,纯查询不写库."""
+    y_start = (day_start - timedelta(days=1)).timestamp()
+    y_end = day_start.timestamp()
+    week_start = (day_start - timedelta(days=7)).timestamp()
+    jobs_done = db.one(
+        "SELECT COUNT(*) n FROM job WHERE tenant_id=? AND status='done' "
+        "AND updated_at>=? AND updated_at<?",
+        (tid, y_start, y_end),
+    )["n"]
+    tasks_done = db.one(
+        "SELECT COUNT(*) n FROM task WHERE tenant_id=? AND status='done' "
+        "AND deleted_at IS NULL AND updated_at>=? AND updated_at<?",
+        (tid, y_start, y_end),
+    )["n"]
+    spent = float(db.one(
+        "SELECT COALESCE(SUM(-delta),0) s FROM billing_log "
+        "WHERE tenant_id=? AND delta<0 AND created_at>=? AND created_at<?",
+        (tid, y_start, y_end),
+    )["s"] or 0)
+    # 退点口径:所有退款路径(操作退款/工单失败退款)都会写一条
+    # reason 以「退回」开头的正向流水;billing_operation 只覆盖走操作记录的
+    # 退款,漏掉 refund_if_claimed 等直退路径,故以流水为准。
+    refunds = db.one(
+        "SELECT COUNT(*) n FROM billing_log WHERE tenant_id=? AND delta>0 "
+        "AND reason LIKE '退回%' AND created_at>=? AND created_at<?",
+        (tid, y_start, y_end),
+    )["n"]
+    paused = db.one(
+        "SELECT COUNT(*) n FROM schedule WHERE tenant_id=? AND enabled=0 "
+        "AND last_note LIKE '已暂停%'",
+        (tid,),
+    )["n"]
+    week_spent = float(db.one(
+        "SELECT COALESCE(SUM(-delta),0) s FROM billing_log "
+        "WHERE tenant_id=? AND delta<0 AND created_at>=? AND created_at<?",
+        (tid, week_start, y_end),
+    )["s"] or 0)
+    daily_avg = week_spent / 7
+    days_left = int(balance // daily_avg) if daily_avg > 0 and balance > 0 else None
+    return {
+        "date": (day_start - timedelta(days=1)).strftime("%m-%d"),
+        "jobs_done": int(jobs_done or 0),
+        "tasks_done": int(tasks_done or 0),
+        "spent": spent,
+        "refunds": int(refunds or 0),
+        "paused": int(paused or 0),
+        "balance": float(balance or 0),
+        "days_left": days_left,
+    }
+
+
+def _run_daily_digest(now: datetime):
+    """老板「昨日经营简报」:每天早上一次,被动推给不天天登录的老板。
+
+    幂等靠 app_setting ``daily_digest_sent:{tid}`` 记最近已发日期(北京时区),
+    同日再 tick 直接跳过,重启后也不重发;昨日完全无活动且无暂停风险则不打扰。
+    """
+    from . import notify
+    today = now.strftime("%Y-%m-%d")
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    for t in db.q("SELECT id,balance FROM tenants WHERE enabled=1 AND id!=1"):
+        tid = int(t["id"])
+        try:
+            if db.get_setting(f"daily_digest_off:{tid}"):
+                continue                              # 老板关了开关,不发
+            if db.get_setting(f"daily_digest_sent:{tid}") == today:
+                continue                              # 今天已发过,不重发
+            stats = _digest_stats(tid, float(t["balance"] or 0), day_start)
+            had_activity = (stats["jobs_done"] or stats["tasks_done"]
+                            or stats["spent"] > 0 or stats["refunds"])
+            if not had_activity and not stats["paused"]:
+                continue                              # 昨日没动静也没风险,别骚扰
+            spend_part = f"消耗 {stats['spent']:.0f} 点"
+            if stats["refunds"]:
+                spend_part += f"、退回 {stats['refunds']} 笔"
+            summary = (f"昨日完成:内容工单 {stats['jobs_done']} 单、"
+                       f"专家任务 {stats['tasks_done']} 件;{spend_part};"
+                       + (f"{stats['paused']} 个定时任务已暂停;" if stats["paused"] else "")
+                       + f"余额 {stats['balance']:.0f} 点"
+                       + (f"(约可再跑 {stats['days_left']} 天)"
+                          if stats["days_left"] is not None else ""))
+            # 先落幂等标记再推送:宁可极端情况漏一天,也不给老板发两条
+            db.set_setting(f"daily_digest_sent:{tid}", today)
+            notify.push(tid, "daily_digest", {**stats, "summary": summary})
+            log.info("daily digest sent tid=%s", tid)
+        except Exception as exc:
+            log.error(
+                "daily digest tid=%s failed error_type=%s",
+                tid,
+                type(exc).__name__,
+            )
+
+
 def compute_next(s: dict, now: float = None) -> float:
     now = now or time.time()
     if s["kind"] == "interval":
@@ -436,6 +530,14 @@ async def _periodic():
                     tid,
                     type(exc).__name__,
                 )
+    if 8 <= now.hour <= 10:                              # 昨日经营简报:一天一次
+        try:
+            _run_daily_digest(now)
+        except Exception as exc:
+            log.error(
+                "daily digest tick failed error_type=%s",
+                type(exc).__name__,
+            )
     if now.weekday() == 0 and 9 <= now.hour <= 11:      # 周一上午出周报
         for r in db.q("SELECT key FROM app_setting WHERE key LIKE 'bench_watch:%'"):
             tid = int(r["key"].split(":")[1])

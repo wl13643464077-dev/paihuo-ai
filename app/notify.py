@@ -62,6 +62,22 @@ def build_msg(kind: str, payload: dict) -> str:
     if kind == "learn_failed":
         return (f"**🎓 派活 · 员工进修失败**\n「{title}」本次进修没成功,"
                 f"3 点已自动退回,可稍后重试\n[回办公室]({base}/#/)")
+    if kind == "daily_digest":
+        # 老板昨日经营简报:完成/花销/风险/余额,一条看全,不用登录翻后台
+        lines = [f"**📋 派活 · 昨日经营简报({p.get('date', '')})**",
+                 f"✅ 完成:内容工单 {int(p.get('jobs_done') or 0)} 单 · "
+                 f"专家任务 {int(p.get('tasks_done') or 0)} 件",
+                 f"💎 花销:消耗 {float(p.get('spent') or 0):.0f} 点"
+                 + (f" · 失败退回 {int(p.get('refunds') or 0)} 笔" if p.get("refunds") else "")]
+        if p.get("paused"):
+            lines.append(f"⏸️ 风险:{int(p['paused'])} 个定时任务因点数不足暂停,内容断更中")
+        balance_line = f"💰 余额:{float(p.get('balance') or 0):.0f} 点"
+        if p.get("days_left") is not None:
+            balance_line += f",按近 7 天日均消耗约可再跑 {int(p['days_left'])} 天"
+        lines.append(balance_line)
+        lines.append(f"[看账单明细]({base}/#/billing)"
+                     + (f" · [去处理定时任务]({base}/#/schedules)" if p.get("paused") else ""))
+        return "\n".join(lines)
     if kind == "report":
         return (f"**📰 派活 · {p.get('report_name', '报告出炉')}**\n{(p.get('summary') or '')[:180]}\n"
                 f"[查看]({base}/{p.get('link') or '#/knowledge'})")
@@ -90,6 +106,7 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
         "pub": "矩阵发布成功" if p.get("ok") else "矩阵发布失败",
         "learn_done": "员工进修完成",
         "learn_failed": "员工进修失败(已退点)",
+        "daily_digest": f"昨日经营简报({p.get('date', '')})",
     }
     title = str(labels.get(kind) or "派活有新进展")[:80]
     body = str(
@@ -108,6 +125,8 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
         link = "#/tasks"
     elif kind == "pub":
         link = "#/channels"
+    elif kind == "daily_digest":
+        link = "#/billing"
     else:
         link = str(p.get("link") or "#/knowledge")
     if not re.match(r"^#/[A-Za-z0-9_~.%/?=&:+-]*$", link):
