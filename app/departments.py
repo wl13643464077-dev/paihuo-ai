@@ -10,7 +10,7 @@ import logging
 import os
 import re
 
-from . import providers
+from . import industryknowledge, providers
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 CONFIG_DEPT_DIR = os.path.join(_ROOT, "config", "departments")
@@ -167,6 +167,15 @@ def build_task_prompt(e: dict, brief: dict, skills_text: str, knowledge_text: st
             .replace("{industry}", "（读取用户消息中的行业/业态）")
             .replace("{material}", "（读取用户消息中的补充材料）")
         )
+    # 岗位手册是一套通用连锁方法论;真正的行业口径、参考区间与合规要点由知识底座提供,
+    # 按本岗位相关性挑选后注入,让产出说行话、用对公式,而不是通用商业套话。
+    industry_block = industryknowledge.block_for(
+        e.get("dept_key") or "",
+        " ".join(str(x) for x in (
+            e.get("name"), e.get("group"), e.get("duty"), e.get("desc"),
+            caps_txt, (brief or {}).get("direction"),
+        ) if x),
+    )
     system_parts = [
         f"你是「老板的AI集团 · {e['dept_name']} · {e['group']}」的数字员工「{e['name']}」。",
         f"岗位职责:{e['desc']}",
@@ -174,6 +183,7 @@ def build_task_prompt(e: dict, brief: dict, skills_text: str, knowledge_text: st
         "【你的岗位工作手册(必须按其中的必要输入/工作流/交付物执行)】",
         handbook,
         "",
+        industry_block,
         f"【本次启用的工作流步骤】\n{caps_txt}" if caps_txt else "",
         skills_text or "",
         "【交付规则】",
