@@ -94,18 +94,27 @@ def md_to_docx(md: str, title: str = "交付物") -> bytes:
     return buf.getvalue()
 
 
+def _xlsx_safe(value) -> str:
+    """防 CSV/Excel 公式注入:客资、线索等表格含用户可控文本,以 = + - @ 开头的单元格
+    会被 Excel 当公式执行(如 =HYPERLINK(...) 外带数据)。加前导单引号强制文本。"""
+    text = str(value if value is not None else "")
+    if text[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + text
+    return text
+
+
 def rows_to_xlsx(rows: list, headers: list, sheet: str = "数据") -> bytes:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill
     wb = Workbook()
     ws = wb.active
     ws.title = sheet
-    ws.append(headers)
+    ws.append([_xlsx_safe(h) for h in headers])
     for c in ws[1]:
         c.font = Font(bold=True)
         c.fill = PatternFill("solid", fgColor="FFF0D9")
     for r in rows:
-        ws.append([str(r.get(h, "") or "") for h in headers])
+        ws.append([_xlsx_safe(r.get(h, "")) for h in headers])
     for col in ws.columns:
         width = max(len(str(c.value or "")) for c in col)
         ws.column_dimensions[col[0].column_letter].width = min(max(width + 2, 8), 50)

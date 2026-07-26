@@ -5,6 +5,7 @@ PRD 5.1:敏感词、平台规则、事实抽检不通过则阻断发布并强制
 data/gate_rules.json 优先且可热更新，缺失时从 seed 安全初始化。
 """
 import json
+import logging
 import os
 import stat
 import threading
@@ -12,6 +13,8 @@ import time
 import uuid
 
 from . import llm, providers
+
+log = logging.getLogger("gate")
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SEED_RULES_PATH = os.path.join(_ROOT, "config", "gate_rules.default.json")
@@ -196,6 +199,7 @@ async def check(title: str, body: str, platforms: list,
                    + "\n".join(f"- {f}" for f in facts[:20])
                    + ("\n来源:" + ";".join(srcs[:10]) if srcs else ""))
     progress("gate", "第 2 步:AI 质检(广告法/平台规则/事实抽检)…")
+    gate_error = False
     try:
         r = await providers.call_text_json(8, f"""你是内容质检员,今天是 {time.strftime('%Y-%m-%d')}。检查以下待发布内容,目标平台:{'、'.join(platforms)}。
 检查维度:①违反广告法的绝对化/夸大用语 ②平台高危内容(医疗/金融承诺、导流、违禁品)
@@ -212,14 +216,23 @@ async def check(title: str, body: str, platforms: list,
         issues += r["data"].get("issues", [])
         cost, tokens = r["cost_usd"], r["tokens"]
     except (llm.LLMError, providers.ProviderError) as e:
+        # fail-closed:发布前质检是对客户的合规承诺,供应商故障时绝不能"仅凭词库放行"。
+        # 标记为高危拦下,老板可在工单上重检或知情放行。
+        log.warning("gate ai check failed error_type=%s", type(e).__name__)
+        gate_error = True
         issues.append({
-            "type": "质检异常",
-            "severity": "低",
-            "detail": "AI 深度质检暂未完成，仅执行了规则库检查",
+            "type": "质检未完成",
+            "severity": "高",
+            "detail": "AI 深度质检未能完成(模型服务暂时不可用),仅完成规则库检查。"
+                      "为避免未经审查的内容发出,已暂停发布;请稍后重检,或确认无误后手动放行。",
         })
     passed = not any(i.get("severity") == "高" for i in issues)
-    report = ("✅ 质检通过" if passed else "⛔ 存在高风险问题,已阻断发布") \
-             + (f",共 {len(issues)} 条提示" if issues else ",未发现问题")
+    if passed:
+        report = "✅ 质检通过" + (f",共 {len(issues)} 条提示" if issues else ",未发现问题")
+    elif gate_error:
+        report = f"⏸ 质检未完成,已暂停发布(共 {len(issues)} 条提示),可重检或手动放行"
+    else:
+        report = f"⛔ 存在高风险问题,已阻断发布,共 {len(issues)} 条提示"
     progress("done" if passed else "error", report)
     return {"passed": passed, "issues": issues, "cost_usd": cost, "tokens": tokens,
             "report": report}

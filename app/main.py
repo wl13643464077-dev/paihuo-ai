@@ -375,6 +375,15 @@ async def _auth_mw(request: Request, call_next):
         cur_tid = cur["tenant_id"] if cur else None
         if not cur or (not auth.is_root() and cur_tid != owner_tid):
             return JSONResponse({"detail": "无权访问该文件"}, status_code=403)
+        # 演绎师/封面师产出的 HTML/SVG 由不可信输入链驱动生成,同源直开会让其中的
+        # 脚本以登录会话调用 /api/*。用 sandbox CSP 剥夺其同源与脚本能力(iframe 预览
+        # 已带 sandbox,这里堵的是"打开"式顶层导航),并禁止 MIME 嗅探。
+        response = await call_next(request)
+        low = path.lower()
+        if low.endswith((".html", ".htm", ".svg", ".xml", ".xhtml")):
+            response.headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
+            response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
     return await call_next(request)
 
 

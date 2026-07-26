@@ -30,6 +30,28 @@ class Engine:
         self.locks: dict = {}
         self.subscribers: dict = {}   # queue -> (租户id,是否root)，避免租户1普通成员被当平台方
         self._tid_cache: dict = {}     # (table, id) -> tenant_id 记忆,省得每条事件查库
+        self._loop = None              # 引擎所在事件循环,供线程池路由跨线程安全唤醒
+
+    # ---------- 跨线程安全投递 ----------
+    def _dispatch(self, fn, *args):
+        """asyncio.Queue 不是线程安全的:同步路由跑在线程池里,直接 put_nowait 会让
+        等待中的 worker 不被唤醒(工单永久卡 running)或损坏订阅队列内部状态。
+        因此非循环线程一律经 call_soon_threadsafe 投递回引擎循环执行。"""
+        loop = self._loop
+        if loop is None:
+            fn(*args)                  # 引擎尚未启动:仍在单线程装配阶段,直调即可
+            return
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            fn(*args)
+            return
+        try:
+            loop.call_soon_threadsafe(fn, *args)
+        except RuntimeError:
+            pass                        # 循环已关闭(进程退出中),丢弃通知即可
 
     # ---------- 事件推送(SSE) ----------
     _EV_TABLE = {"meeting": ("meeting", "meeting_id"), "task": ("task", "task_id"),
@@ -119,14 +141,20 @@ class Engine:
                 continue   # 找不到归属绝不广播给普通账号，避免删除竞态/未知事件泄露
             if tid is not None and not sub_root and sub_tid != tid:
                 continue
-            try:
-                q_.put_nowait(
-                    self.internal_event(ev)
-                    if sub_root
-                    else self.public_event(ev)
-                )
-            except asyncio.QueueFull:
-                pass
+            payload = (
+                self.internal_event(ev)
+                if sub_root
+                else self.public_event(ev)
+            )
+            # 事件塑形(含 _tid_of 的库查询)留在调用线程,只把入队动作投递回循环。
+            self._dispatch(self._enqueue_event, q_, payload)
+
+    @staticmethod
+    def _enqueue_event(q_, payload):
+        try:
+            q_.put_nowait(payload)
+        except asyncio.QueueFull:
+            pass
 
     def touch(self, job_id):
         self.broadcast({"type": "job_update", "job_id": job_id, "ts": time.time()})
@@ -156,6 +184,7 @@ class Engine:
 
     # ---------- 启动与恢复 ----------
     async def start(self):
+        self._loop = asyncio.get_running_loop()
         # 断点恢复:被重启打断的 running 工位重跑,进行中的工单重新入队
         for r in db.q("SELECT id FROM station_run WHERE status='running'"):
             db.update("station_run", r["id"], {"status": "rejected",
@@ -171,7 +200,7 @@ class Engine:
         log.info("engine started")
 
     def notify(self, job_id: int):
-        self.queue.put_nowait(job_id)
+        self._dispatch(self.queue.put_nowait, job_id)
 
     async def _worker(self):
         while True:
