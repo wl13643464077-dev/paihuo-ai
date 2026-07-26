@@ -77,7 +77,7 @@ button:active{transform:translateY(1px);box-shadow:2px 2px 0 rgba(51,41,31,.2)}
     <button onclick="applyGo(this)">提 交 申 请</button>
     <div class="err" id="a-err"></div><div class="ok" id="a-ok"></div>
   </div>
-  <div class="foot">副账号请联系您的企业主开通 · <span id="forgot-line">忘记密码?联系顾问重置</span> · <a href="/promo">了解产品 →</a></div>
+  <div class="foot">副账号:开通与重置密码都请找您的企业主 · <span id="forgot-line">主账号忘记密码?联系顾问重置</span> · <a href="/promo">了解产品 →</a></div>
 </div>
 <script>
 fetch("/api/support-contact").then(r=>r.json()).then(d=>{

@@ -403,6 +403,7 @@ function pay402(msg){
   if(!b){ b = document.createElement("div"); b.id = "paybar"; document.body.appendChild(b); }
   b.style.cssText = "position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:998;background:#fff6dc;border:2.5px solid var(--ink,#222);border-radius:13px;padding:10px 14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;box-shadow:4px 4px 0 rgba(0,0,0,.18);max-width:92vw";
   b.innerHTML = `<span style="font-weight:700">💎 ${esc(msg||"点数不足")}</span>
+    ${ME?.role==="member"?`<span class="sub">充值请联系贵司主账号(企业主)</span>`:""}
     <a class="btn sm pri" href="#/billing" onclick="$('#paybar')?.remove()">看套餐 / 充值</a>
     <button class="btn sm" onclick="$('#paybar')?.remove()">先不用</button>`;
 }
@@ -508,8 +509,8 @@ function forcedPasswordView(){
     <span style="flex:1"></span>
     <button type="button" class="nav-action navlogout" onclick="logout()">🚪 退出</button>`;
   $("#main").innerHTML=`<div class="card" style="max-width:620px;margin:42px auto">
-    <h2>请先更新登录密码</h2>
-    <div class="notice">平台已升级密码安全策略。这个账号需要完成一次改密，之后才能继续查看任务和使用数字员工。</div>
+    <h2>请先设置您自己的密码</h2>
+    <div class="notice">为了账号安全,初始/旧密码需要换成您自己的新密码(仅需一次),之后就能正常查看任务和使用数字员工。</div>
     <div style="margin-top:14px"><label>当前密码</label>
       <input id="forced-pw-old" type="password" autocomplete="current-password"></div>
     <div class="row" style="margin-top:10px">
@@ -614,8 +615,15 @@ async function render(reuseShell=false){
   }catch(e){
     if(e?.name==="NavigationAbort"||renderSeq!==NAV_SEQ||location.hash!==targetHash) return;
     console.error("page render failed",e);
-    reportClientError("render",e);
     const box=$("#main");
+    if(e?.status===403){
+      // 权限不足是确定性的,不是网络故障:说清原因给出路,不再提供无效的「重新加载」
+      if(box) box.innerHTML=`<div class="card"><h2>这个页面需要更高权限</h2>
+        <div class="sub">${esc(e?.message||"需要主账号权限")}${ME?.role==="member"?"。请联系贵司主账号(企业主)开通对应板块或代为操作":""}</div>
+        <div class="actions"><a class="btn pri" href="#/">← 回办公室</a></div></div>`;
+      return;
+    }
+    reportClientError("render",e);
     if(box) box.innerHTML=`<div class="card"><h2>页面暂时没加载出来</h2>
       <div class="sub">${esc(e?.message||"网络连接异常，请稍后重试")}</div>
       <div class="actions"><button class="btn pri" onclick="render(true)">重新加载</button></div></div>`;
@@ -1091,11 +1099,11 @@ async function dashboard(){
   <div class="card" style="background:linear-gradient(120deg,#fff6dc,#fffaf0 60%)">
     <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
       <div style="flex:1;min-width:240px">
-        <h2 style="font-size:22px">👔 ${esc(META.app?.name||"老板的AI集团")} · 董事长好</h2>
+        <h2 style="font-size:22px">👔 ${esc(META.app?.name||"老板的AI集团")} · ${ME.role==="member"?"同事好":"董事长好"}</h2>
         <div class="sub">${esc(META.app?.slogan||"")}。${11+specN} 位数字员工、${1+DEPTS.length} 个产业部门随时待命:内容部整条流水线+审查官把关出成品,行业专家一人一岗随叫随到。</div>
       </div>
       ${ME.role!=="tour"?`<a class="btn blue" href="#/tasks" style="font-size:15px">📋 我的任务在哪</a>`:""}
-      <a class="btn pri" href="#/new" style="font-size:15px">➕ 下达新任务</a>
+      ${canWork("content")?`<a class="btn pri" href="#/new" style="font-size:15px">➕ 下达新任务</a>`:""}
     </div>
     <div class="kv" style="margin-top:12px">${ME.role!=="root"?`<span><a href="#/billing" style="font-weight:800;text-decoration:underline">💎 余额 ${Math.round(STATE.balance||0)} 点${STATE.plan?` · ${esc(STATE.plan)}`:""}</a></span>`:""}<span>内容工单进行中 ${active} 单</span><span>内容工单累计 ${jobsContract.total??jobs.length} 单</span>
       <span>数字员工 ${11+specN} 人</span>
@@ -1310,7 +1318,14 @@ const TC_KIND_LABEL = {expert:"数字员工任务",content:"内容工单",meetin
   video:"图文成片",tool:"营销工具",publish:"发布任务",wechat:"公众号草稿投递"};
 function tcPill(group){ return group==="done"?"done":group==="failed"?"failed":
   group==="waiting"?"awaiting_review":group==="cancelled"?"cancelled":"running"; }
-function tcFmt(ts){ return ts?new Date(ts*1000).toLocaleString("zh-CN",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"}):"—"; }
+function tcFmt(ts){
+  if(!ts) return "—";
+  const d=new Date(ts*1000);
+  // 跨年记录必须带年份,否则对账时「1/5」不知道是哪年的
+  const opts={month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"};
+  if(d.getFullYear()!==new Date().getFullYear()) opts.year="numeric";
+  return d.toLocaleString("zh-CN",opts);
+}
 async function tasksView(tid){
   if(tid){
     const ref=String(tid);
@@ -2297,7 +2312,7 @@ async function newBrief(){
     </details>
     <div class="actions" style="margin-top:16px"><button class="btn pri" style="font-size:15px" onclick="submitBrief(this)">🚀 提交,让团队开工</button>
       <span class="sub">💎 本单 ${META?.job_points??18} 点 · 余额 ${Math.round(STATE?.balance||0)} 点 · 提交后可看全程直播,随时打断</span></div>
-    ${(STATE&&Math.round(STATE.balance||0)<(META?.job_points??18))?`<div class="notice" style="background:#fff3d6;margin-top:8px">⚠️ 余额不足本单所需 ${META?.job_points??18} 点。<a href="#/billing" style="font-weight:800;text-decoration:underline">先去充值 →</a>(余额不够时提交会直接提示,不会扣费)</div>`:""}
+    ${(STATE&&Math.round(STATE.balance||0)<(META?.job_points??18))?`<div class="notice" style="background:#fff3d6;margin-top:8px">⚠️ 余额不足本单所需 ${META?.job_points??18} 点。${ME?.role==="member"?"充值请联系贵司主账号(企业主)。":`<a href="#/billing" style="font-weight:800;text-decoration:underline">先去充值 →</a>`}(余额不够时提交会直接提示,不会扣费)</div>`:""}
   </div>`;
   const restored=!PRE&&restoreBriefDraft();
   if(restored) $("#brief-draft-notice").innerHTML=`<div class="notice green" role="status">
@@ -2329,7 +2344,7 @@ async function submitBrief(btn){
     clearBriefDraft();
     location.hash = "#/job/"+r.job_id;
   }catch(e){
-    if(e.status===409){ toast(e.message); setTimeout(()=>location.hash="#/tasks", 900); return; }
+    if(e.status===409||e.status===429){ toast(e.message); setTimeout(()=>location.hash="#/tasks", 900); return; }
     toast(e.message); btn.disabled=false; btn.textContent="🚀 提交,让团队开工"; }
 }
 
@@ -2421,7 +2436,7 @@ async function jobView(id){
       ${j.status==="done"?`<a class="btn pri" href="#/delivery/${j.id}">📦 查看交付包</a>`:""}
       ${["failed","cancelled"].includes(j.status)?`<button class="btn pri sm" onclick="rebrief(${j.id})">🔁 复制 Brief 重新开单</button>`:""}
       ${!["done","cancelled"].includes(j.status)?`<button class="btn bad sm" onclick="cancelWholeJob(${j.id})">终止工单</button>`:""}
-      <button class="btn bad sm" onclick="deleteJob(${j.id})" title="彻底删除工单及全部产物">🗑 删除</button>
+      ${isAdmin()?`<button class="btn bad sm" onclick="deleteJob(${j.id})" title="移入回收站,可恢复">🗑 删除</button>`:""}
     </div>
     <div class="kv"><span>Brief:${esc(j.brief.direction)}</span><span>模式:${esc(MODE_LABEL[j.mode]||j.mode)}</span>
       <span>平台:${(j.brief.platforms||[]).map(esc).join("/")}</span>
@@ -2647,12 +2662,12 @@ async function deliveryView(id){
       <h2 style="flex:1;margin:0;min-width:min(100%,220px)">📦 交付包 · ${esc(d.title)}</h2>
       <a class="btn" href="#/job/${id}">← 回工单</a>
       <button class="btn pri" onclick="tvCreate(${id},this)">🎬 一键成片 3点</button>
-      <a class="btn" href="/api/jobs/${id}/export.md" download>⬇️ MD</a>
-      <a class="btn" href="/api/jobs/${id}/export.pdf">⬇️ PDF</a>
-      <a class="btn" href="/api/jobs/${id}/export.docx">⬇️ Word</a>
+      <a class="btn" href="/api/jobs/${id}/export.md" download>⬇️ 纯文本</a>
+      <a class="btn" href="/api/jobs/${id}/export.pdf" download>⬇️ PDF</a>
+      <a class="btn" href="/api/jobs/${id}/export.docx" download>⬇️ Word</a>
       ${d.packs?.length?`<a class="btn pri" href="/api/jobs/${id}/pack.zip" download>🚀 全平台发布包 zip</a>`
         :(d.images?.length?`<a class="btn" href="/api/jobs/${id}/pack.zip" download>🖼 正文+全部配图打包 zip</a>`:"")}</div>
-    <div class="kv"><span>成本:${rmb(d.cost_usd)}</span><span>${((d.tokens||0)/1000).toFixed(1)}k tokens</span></div></div>
+    ${ME.role==="root"?`<div class="kv"><span>成本:${rmb(d.cost_usd)}</span><span>${((d.tokens||0)/1000).toFixed(1)}k tokens</span></div>`:""}</div>
   <div class="row" style="align-items:flex-start">
     <div class="card" style="flex:2;min-width:min(340px,100%)"><h3 style="margin-top:0">终稿正文</h3>
       <div class="actions" style="margin:0 0 10px"><button class="btn sm" onclick="copyText(${cp((d.title||"")+"\n\n"+(d.body||""))})">📋 复制正文</button></div>
@@ -2741,7 +2756,8 @@ function profileForm(p){
     <textarea id="p-corpus" style="min-height:160px" placeholder="把过去的爆款正文直接粘贴进来,多篇用 --- 分隔;或用上面的按钮选文件。注:提炼实际使用前 8000 字,日常写稿注入前 3000 字——放最能代表你风格的几篇即可,不必求多">${esc(s.corpus||"")}</textarea>
     <div class="actions">
       <button class="btn pri" onclick="saveProfile(${p?p.id:"null"})">💾 保存</button>
-      ${p?`<button class="btn" onclick="distill(${p.id},this)">🧬 提炼文风特征(nuwa)</button>`:""}
+      ${p?`<button class="btn" onclick="distill(${p.id},this)">🧬 提炼文风特征</button>`
+         :`<button class="btn" onclick="distill(null,this)">🧬 保存并提炼文风</button>`}
       <button class="btn" onclick="render()">取消</button></div></div>`;
 }
 async function loadProfileFiles(input){
@@ -2771,7 +2787,8 @@ async function saveProfile(id){
   const persona = {positioning:$("#p-pos").value, audience:$("#p-aud").value, tone:$("#p-tone").value,
     taboo:$("#p-taboo").value, visual:$("#p-visual").value, corpus:$("#p-corpus").value};
   const old = id? (STATE.profiles.find(x=>x.id===id)?.persona||{}) : {};
-  const name = $("#p-name").value.trim()||"未命名账号";
+  const name = $("#p-name").value.trim();
+  if(!name) return toast("先给账号起个名字(第一格「账号名称」)");
   try{
     if(id) await api("/profiles/"+id,{method:"PUT",body:{name, persona:{...old,...persona}}});
     else await api("/profiles",{method:"POST",body:{name, persona}});
@@ -2783,7 +2800,8 @@ async function distill(id, btn){
   // 老板会以为"刚粘的语料没了",一分钟里零反馈)
   const persona = {positioning:$("#p-pos").value, audience:$("#p-aud").value, tone:$("#p-tone").value,
     taboo:$("#p-taboo").value, visual:$("#p-visual").value, corpus:$("#p-corpus").value};
-  const name = $("#p-name").value.trim()||"未命名账号";
+  const name = $("#p-name").value.trim();
+  if(!name) return toast("先给账号起个名字(第一格「账号名称」)");
   try{
     if(id){ const old=(STATE.profiles.find(x=>x.id===id)?.persona||{});
       await api("/profiles/"+id,{method:"PUT",body:{name, persona:{...old,...persona}}}); }
@@ -2791,7 +2809,7 @@ async function distill(id, btn){
   }catch(e){ return toast("先保存失败:"+e.message); }
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 提炼中(约1分钟)…`;
   try{ await api(`/profiles/${id}/distill`,{method:"POST",timeout:330000,longRunning:true}); toast("文风特征已写入档案"); render(); }
-  catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🧬 提炼文风特征(nuwa)"; }
+  catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🧬 提炼文风特征"; }
 }
 
 /* ---------- 资产库(V5:多维表格 + 专家报告) ---------- */
@@ -4058,7 +4076,7 @@ async function billingView(){
     ${shown.length?`<div class="dimwrap" style="margin-top:10px"><table class="dimtable" style="min-width:min(520px,100%)"><thead><tr>
       <th>时间</th><th>类型</th><th>项目</th><th>积分变动</th><th>余额</th></tr></thead><tbody>
       ${shown.map(l=>`<tr>
-        <td class="sub" style="white-space:nowrap">${new Date(l.created_at*1000).toLocaleString("zh-CN",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"})}</td>
+        <td class="sub" style="white-space:nowrap">${tcFmt(l.created_at)}</td>
         <td>${l.delta>0?'<span class="tag" style="background:#a7ecc9">充值</span>':'<span class="tag" style="background:#ffd7d9">消耗</span>'}</td>
         <td>${esc(l.reason||"")}</td>
         <td><b style="color:${l.delta<0?"#e5484d":"#2f9e6e"}">${l.delta>0?"+":""}${l.delta}</b></td>
@@ -4068,7 +4086,7 @@ async function billingView(){
     <div class="dimwrap"><table class="dimtable" style="min-width:min(560px,100%)"><thead><tr><th>动作</th><th>消耗</th><th>成本参考</th></tr></thead>
     <tbody>${Object.values(b.prices).map(p=>`<tr><td>${esc(p.label)}</td><td><b>${p.points} 点</b></td><td class="sub">${esc(p.cost||"")}</td></tr>`).join("")}</tbody></table></div></div>
   <div class="card"><h2>📦 套餐(月/季/年)</h2>
-    <div class="sub">季付 9 折,年付 8 折(按活动价再折)。开通请联系平台顾问${META?.support_contact?`:<b style="font-size:15px">${esc(META.support_contact)}</b>(微信/电话均可)`:"(点右下角 💬 留下联系方式,顾问会主动联系您)"}${ME.role==="root"?";root 可在「权限管理→租户管理」给客户开通,并设置对客联系方式":""}。</div>
+    <div class="sub">季付 9 折,年付 8 折(按活动价再折)。${ME.role==="member"?"充值/续费请联系<b>贵司主账号(企业主)</b>操作;":""}开通请联系平台顾问${META?.support_contact?`:<b style="font-size:15px">${esc(META.support_contact)}</b>(微信/电话均可)`:"(点右下角 💬 留下联系方式,顾问会主动联系您)"}${ME.role==="root"?";root 可在「权限管理→租户管理」给客户开通,并设置对客联系方式":""}。</div>
     <div class="grid3" style="grid-template-columns:repeat(auto-fit,minmax(210px,1fr));margin-top:12px">
     ${b.plans.map((p,i)=>`<div class="topic" style="text-align:center;${i===1?"border-color:#ef476f;border-width:3px":""}">
       ${i===1?`<div style="color:#ef476f;font-weight:900;font-size:12px">🔥 最多人选</div>`:""}
@@ -4185,7 +4203,7 @@ async function meetingsView(mid){
   const cur = MT_CUR ? await api("/meetings/"+MT_CUR).catch(optionalResult(null)) : null;
   const pool = [
     ...META.stations.map(s=>({idx:s.idx,label:s.name,color:s.color,emoji:s.emoji,group:"内容生产部"})),
-    ...DEPTS.flatMap(d=>d.employees.map(e=>({idx:e.idx,label:`${e.person||""}${e.person?"·":""}${e.name}`,color:e.color,emoji:e.emoji,group:e.group})))];
+    ...DEPTS.filter(d=>can(d.key)).flatMap(d=>d.employees.map(e=>({idx:e.idx,label:`${e.person||""}${e.person?"·":""}${e.name}`,color:e.color,emoji:e.emoji,group:e.group})))];
   const groups = {};
   pool.forEach(p=>(groups[p.group]=groups[p.group]||[]).push(p));
   $("#main").innerHTML = `
@@ -4434,11 +4452,12 @@ async function mpDeliveryControls(){
     <b>这笔投递不会自动重发。</b>先点“重新对账”，系统只读取草稿箱、不创建新草稿。
     <div class="actions" style="margin-top:8px">
       <button class="btn sm" onclick="mpReconcile(${Number(item.id)})">🔎 重新对账</button>
-      <button class="btn sm" ${item.can_confirm_not_delivered?"":`disabled title="约 ${wait} 秒后可用"`}
+      <button class="btn sm" ${item.can_confirm_not_delivered&&isAdmin()?"":`disabled title="${isAdmin()?`约 ${wait} 秒后可用`:"退点解锁需企业主账号操作"}"`}
         onclick="mpConfirmNoDraft(${Number(item.id)},${cp(item.title||"")})">↩ 确认未送达并退点</button>
       <a class="btn sm" href="https://mp.weixin.qq.com/" target="_blank">↗ 打开公众号草稿箱</a>
     </div>
-    <div class="sub">${item.can_confirm_not_delivered
+    <div class="sub">${!isAdmin()?"退点解锁需企业主账号在公众号后台确认无草稿后操作,请转告主账号。"
+      :item.can_confirm_not_delivered
       ?"只有亲自在公众号后台确认没有这篇草稿，才能执行退点解锁。"
       :`微信仍可能在处理，约 ${wait} 秒后才能人工确认。`}</div>
   </div>`;

@@ -56,6 +56,25 @@ async def _friendly_http_exception(request, exc: HTTPException):
     return JSONResponse({"detail": detail}, status_code=exc.status_code,
                         headers=getattr(exc, "headers", None))
 
+
+@app.exception_handler(Exception)
+async def _unhandled_exception(request, exc: Exception):
+    """没接住的异常不能把英文 Internal Server Error 甩给老板。
+
+    堆栈只进服务端日志;对外只说人话并给出路,绝不回显异常内容。
+    """
+    # 仓库保密口径:journal 只记稳定上下文+异常类型,不落原始堆栈。
+    logging.getLogger("main").error(
+        "unhandled error path=%s error_type=%s",
+        getattr(getattr(request, "url", None), "path", "?"),
+        type(exc).__name__,
+    )
+    return JSONResponse(
+        {"detail": "系统开小差了,这一步没做成。请再试一次;"
+                   "反复失败请点右下角 💬 反馈给我们,会有人跟进"},
+        status_code=500,
+    )
+
 APP_NAME = "派活"
 APP_SLOGAN = "老板会派活，数字员工去干活"
 INDUSTRIES = ["通用", "餐饮", "科技数码", "美妆个护", "教育培训", "母婴亲子", "家居生活",
@@ -388,8 +407,12 @@ async def _auth_mw(request: Request, call_next):
         if tour and any(path == b or path.startswith(b) for b in TOUR_BLOCK):
             return JSONResponse({"detail": "参观模式只能浏览员工展示页;开通账号即可浏览员工介绍并派活"},
                                 status_code=403)
-        if tour and not (request.method == "GET" and any(path == p or path.startswith(p + "/")
-                                                         for p in TOUR_GET_OK)):
+        if tour and path == "/api/feedback" and request.method == "POST":
+            # 游客留资是唯一转化出口:套餐页明示「点右下角 💬 留联系方式」,
+            # 这条必须放行,否则教了一条走不通的路。
+            pass
+        elif tour and not (request.method == "GET" and any(path == p or path.startswith(p + "/")
+                                                           for p in TOUR_GET_OK)):
             return JSONResponse({"detail": "参观模式只能看不能动:开通账号即可派活"}, status_code=403)
     password_change_paths = {
         "/api/auth/me",
@@ -1816,17 +1839,24 @@ def _validated_brief(raw: dict) -> dict:
     if not isinstance(raw, dict):
         raise HTTPException(400, "任务简报格式无效")
 
+    field_cn = {"direction": "内容方向", "template": "内容类型",
+                "industry": "行业/赛道", "material": "附加素材",
+                "ref_link": "参考链接"}
+
     def text(key: str, limit: int, *, required: bool = False) -> str:
         value = raw.get(key, "")
         if value is None:
             value = ""
+        label = field_cn.get(key, key)
         if not isinstance(value, str):
-            raise HTTPException(400, f"{key} 格式无效")
+            raise HTTPException(400, f"「{label}」格式无效")
         value = value.strip()
         if required and not value:
             raise HTTPException(400, "内容方向必填")
         if len(value) > limit:
-            raise HTTPException(400, f"{key} 最多 {limit} 个字符")
+            raise HTTPException(
+                400, f"「{label}」超长:最多 {limit} 字,当前 {len(value)} 字,"
+                     "请删减后再提交")
         return value
 
     brief = {
