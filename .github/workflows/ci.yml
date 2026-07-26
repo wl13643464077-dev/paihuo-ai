@@ -37,6 +37,11 @@ jobs:
       - name: Install browser runtime
         run: python -m playwright install --with-deps chromium
 
+      - name: Prepare owner-controlled test temp root
+        run: |
+          install -d -m 700 "$RUNNER_TEMP/paihuo-tests"
+          echo "TMPDIR=$RUNNER_TEMP/paihuo-tests" >> "$GITHUB_ENV"
+
       - name: Python syntax
         run: python -m compileall -q app deploy
 
