@@ -500,7 +500,7 @@ class Engine:
             if not current:
                 raise ValueError("工单不存在")
             if current["status"] != "cancelled":
-                raise ValueError("工单状态已变化，请刷新后重试")
+                raise ValueError("工单状态刚刚更新了(可能已被他人操作或已推进),刷新页面按最新状态处理")
         self.touch(job_id)
         return bool(refunded or outcome["refunded"])
 
@@ -1190,7 +1190,7 @@ class Engine:
                     ),
                 )
                 if changed.rowcount != 1:
-                    raise ValueError("工位状态已变化，请刷新后重试")
+                    raise ValueError("这个工位的状态刚刚更新了(可能已自动推进或被他人操作),刷新页面看最新状态")
                 self._finalize_station_tx(
                     c,
                     job_id,
@@ -1213,7 +1213,7 @@ class Engine:
                     (comment, now, run["id"]),
                 )
                 if changed.rowcount != 1:
-                    raise ValueError("工位状态已变化，请刷新后重试")
+                    raise ValueError("这个工位的状态刚刚更新了(可能已自动推进或被他人操作),刷新页面看最新状态")
                 self._mark_downstream_stale_tx(c, job_id, idx)
                 target_idx = idx
             else:  # rerun：仅允许仍在进行中的整单重跑已交付/待审批工位。
@@ -1227,7 +1227,7 @@ class Engine:
                     (comment or "老板要求重跑", now, run["id"]),
                 )
                 if changed.rowcount != 1:
-                    raise ValueError("工位状态已变化，请刷新后重试")
+                    raise ValueError("这个工位的状态刚刚更新了(可能已自动推进或被他人操作),刷新页面看最新状态")
                 self._mark_downstream_stale_tx(c, job_id, idx)
                 target_idx = idx
 
@@ -1273,7 +1273,7 @@ class Engine:
                 (now, job_id, job["status"]),
             )
             if changed.rowcount != 1:
-                raise ValueError("工单状态已变化，请刷新后重试")
+                raise ValueError("工单状态刚刚更新了(可能已被他人操作或已推进),刷新页面按最新状态处理")
             c.execute(
                 "UPDATE station_run SET status='interrupted',"
                 "review_comment='老板打断',updated_at=? "
@@ -1313,7 +1313,7 @@ class Engine:
                 (now, job_id),
             )
             if changed.rowcount != 1:
-                raise ValueError("工单状态已变化，请刷新后重试")
+                raise ValueError("工单状态刚刚更新了(可能已被他人操作或已推进),刷新页面按最新状态处理")
         self.notify(job_id)
         self.touch(job_id)
 
@@ -1353,7 +1353,7 @@ class Engine:
             else:
                 raise ValueError("未知动作")
             if changed.rowcount != 1:
-                raise ValueError("工单状态已变化，请刷新后重试")
+                raise ValueError("工单状态刚刚更新了(可能已被他人操作或已推进),刷新页面按最新状态处理")
         self.notify(job_id)
         self.touch(job_id)
 

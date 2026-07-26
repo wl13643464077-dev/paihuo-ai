@@ -307,7 +307,22 @@ function trackPageView(page){
   trackFunnel("page_view",clean);
 }
 
-function toast(msg){ const t=$("#toast"); t.textContent=msg; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),2600); }
+function toast(msg){
+  // 队列化:连续报错不再互相覆盖(最多同屏 3 条);时长随文本长度伸缩,
+  // 长消息开放选中复制(手机上排查类提示此前 2.6 秒就没了,根本读不完)。
+  let host=$("#toast-stack");
+  if(!host){ host=document.createElement("div"); host.id="toast-stack";
+    host.style.cssText="position:fixed;bottom:28px;left:50%;transform:translateX(-50%);z-index:200;display:flex;flex-direction:column;gap:8px;align-items:center;max-width:88vw;pointer-events:none";
+    document.body.appendChild(host); }
+  const text=String(msg??"");
+  const item=document.createElement("div");
+  item.className="toast show"; item.textContent=text;
+  item.style.cssText="position:static;transform:none;opacity:1;pointer-events:"+(text.length>40?"auto":"none")+";user-select:text";
+  host.appendChild(item);
+  while(host.children.length>3) host.firstChild.remove();
+  const ms=Math.min(9000, 2600+Math.max(0,text.length-20)*55);
+  setTimeout(()=>{ item.style.opacity="0"; setTimeout(()=>item.remove(),300); }, ms);
+}
 let UI_DIALOG_RESOLVE=null;
 function closeUiDialog(value=null){
   const box=$("#ui-dialog");
@@ -2617,7 +2632,8 @@ async function deliveryView(id){
       <a class="btn" href="/api/jobs/${id}/export.md" download>⬇️ MD</a>
       <a class="btn" href="/api/jobs/${id}/export.pdf">⬇️ PDF</a>
       <a class="btn" href="/api/jobs/${id}/export.docx">⬇️ Word</a>
-      ${d.packs?.length?`<a class="btn pri" href="/api/jobs/${id}/pack.zip" download>🚀 全平台发布包 zip</a>`:""}</div>
+      ${d.packs?.length?`<a class="btn pri" href="/api/jobs/${id}/pack.zip" download>🚀 全平台发布包 zip</a>`
+        :(d.images?.length?`<a class="btn" href="/api/jobs/${id}/pack.zip" download>🖼 正文+全部配图打包 zip</a>`:"")}</div>
     <div class="kv"><span>成本:${rmb(d.cost_usd)}</span><span>${((d.tokens||0)/1000).toFixed(1)}k tokens</span></div></div>
   <div class="row" style="align-items:flex-start">
     <div class="card" style="flex:2;min-width:min(340px,100%)"><h3 style="margin-top:0">终稿正文</h3>
@@ -3988,7 +4004,9 @@ function mtBody(cur){
   }
   if(cur.status!=="done" || !(cur.summary_md||"").trim()){
     setBoundedState(MT_LIVE,cur.id,true);
-    return msgsBox(true);
+    const eta = ["queued","running"].includes(cur.status)
+      ? `<div class="sub" style="margin-top:8px">⏱ 三轮会议一般 3-8 分钟。可以离开本页办别的,结束会自动提醒;点数只在开会时扣一次。</div>` : "";
+    return eta + msgsBox(true);
   }
   const open = (cur.id in MT_STATE) ? MT_STATE[cur.id] : !!MT_LIVE[cur.id];
   return `<div style="margin-top:10px;background:linear-gradient(120deg,#fff3d6,#ffe7c0);border:2.5px solid var(--ink);border-radius:13px;padding:12px 14px;box-shadow:3px 3px 0 #ffd16699">

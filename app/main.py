@@ -374,7 +374,10 @@ async def _auth_mw(request: Request, call_next):
     TOUR_BLOCK = ("/api/employees/",)
     if (path.startswith("/api/") and not path.startswith("/api/auth/login")
             and not path.startswith("/api/guest/")
-            and path != "/api/funnel/events"):
+            and path != "/api/funnel/events"
+            # 登录页「忘记密码」要在未登录时展示对客联系方式;该接口只回
+            # root 主动配置、本就面向客户公开的联系字符串。
+            and path != "/api/support-contact"):
         if not user and not tour:
             return JSONResponse({"detail": "请先登录"}, status_code=401)
         if tour and any(path == b or path.startswith(b) for b in TOUR_BLOCK):
@@ -941,6 +944,15 @@ async def feishu_sync(body: dict):
         raise HTTPException(502, "飞书服务暂时不可用，请稍后重试") from None
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
+
+
+@app.get("/api/support-contact")
+def get_support_contact():
+    """公开只读:登录页「忘记密码」等场景要在未登录时也能拿到对客联系方式。
+
+    只回联系方式字符串本身(root 主动配置、面向客户公开的信息),不含任何其他数据。
+    """
+    return {"contact": (db.get_setting("support_contact") or "")[:80]}
 
 
 @app.post("/api/team/support-contact")
@@ -2525,7 +2537,7 @@ def _raise_retry_denied(meta: dict):
     ) else 409
     raise HTTPException(
         status_code,
-        meta.get("retry_block_reason") or "当前任务不能安全原单重试，请刷新后查看。",
+        meta.get("retry_block_reason") or "这个任务不能原样重试(可能素材已变或已有新版本),刷新后按最新状态处理;需要重做请重新派活。",
     )
 
 
@@ -2592,7 +2604,7 @@ async def task_center_retry(kind: str, rid: int):
             )
             if changed.rowcount != 1:
                 raise HTTPException(
-                    409, "任务状态刚刚发生变化，请刷新后再重试")
+                    409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
             # 仅复位每个工位的最新失败版本；已完成版本继续作为流水线交接物。
             connection.execute(
                 "UPDATE station_run SET status='rejected',"
@@ -2632,7 +2644,7 @@ async def task_center_retry(kind: str, rid: int):
         )
         if changed != 1:
             raise HTTPException(
-                409, "任务状态刚刚发生变化，请刷新后再重试")
+                409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
         from . import textvideo
         textvideo.cleanup_job_assets(rid, row)
         asyncio.create_task(textvideo.run_job(rid, engine.broadcast))
@@ -2668,7 +2680,7 @@ async def task_center_retry(kind: str, rid: int):
                 409, "这个工具已有任务正在运行，请等它完成后再重试") from exc
         if changed != 1:
             raise HTTPException(
-                409, "任务状态刚刚发生变化，请刷新后再重试")
+                409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
         _spawn_tool_worker(rid)
         _broadcast_tool(TEN(), row.get("kind") or "")
         return {
@@ -2869,7 +2881,7 @@ async def task_retry(tid: int):
         ) or {}
         if (current.get("retry_count") or 0) >= taskrunner.MAX_FREE_RETRIES:
             raise HTTPException(429, "该任务免费重试次数已用完，请新建任务")
-        raise HTTPException(409, "任务状态刚刚发生变化，请刷新后再重试")
+        raise HTTPException(409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
     asyncio.create_task(taskrunner.run_task(tid, engine.broadcast))
     engine.broadcast(
         {"type": "task_update", "task_id": tid, "idx": task["emp_idx"]}
@@ -4566,7 +4578,7 @@ async def avatar_job_retry(jid: int):
         ) or {}
         if (current.get("retry_count") or 0) >= avatar.MAX_FREE_RETRIES:
             raise HTTPException(429, "该任务免费重试次数已用完，请新建任务")
-        raise HTTPException(409, "任务状态刚刚发生变化，请刷新后再重试")
+        raise HTTPException(409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
     asyncio.create_task(avatar.run_job(jid, engine.broadcast))
     engine.broadcast({"type": "avatar_update", "job_id": jid})
     current = db.one(
@@ -4594,7 +4606,7 @@ def avatar_job_cancel(jid: int):
         raise HTTPException(400, "该任务已经结束,不用取消")
     if not avatar.settle_failure(
             jid, "老板已取消", terminal_status="cancelled"):
-        raise HTTPException(409, "任务状态刚刚发生变化，请刷新后查看")
+        raise HTTPException(409, "这个任务的状态刚刚更新了(可能已被重试或删除),刷新页面看最新进度即可")
     llm.kill(f"avatar{jid}:")
     engine.broadcast({"type": "avatar_update", "job_id": jid})
     return {"ok": True}
@@ -6117,7 +6129,7 @@ async def reconcile_wechat_delivery(delivery_id: int):
             "确认确实没有后可使用“确认未送达”解锁",
         )
     if not _mark_wechat_submitted(delivery_id, delivery["op_key"], media_id):
-        raise HTTPException(409, "草稿投递状态已变化，请刷新")
+        raise HTTPException(409, "这篇的发送状态刚刚更新了(可能已送达或已退点),刷新页面看最新结果,别重复点发送")
     delivery = _wechat_delivery_or_404(delivery_id)
     try:
         if not _finalize_wechat_delivery(delivery):
@@ -6165,7 +6177,7 @@ async def confirm_wechat_delivery_not_delivered(delivery_id: int, body: dict):
         if not _mark_wechat_submitted(
             delivery_id, delivery["op_key"], media_id
         ):
-            raise HTTPException(409, "草稿投递状态已变化，请刷新")
+            raise HTTPException(409, "这篇的发送状态刚刚更新了(可能已送达或已退点),刷新页面看最新结果,别重复点发送")
         delivery = _wechat_delivery_or_404(delivery_id)
         try:
             if not _finalize_wechat_delivery(delivery):
@@ -6185,7 +6197,7 @@ async def confirm_wechat_delivery_not_delivered(delivery_id: int, body: dict):
         )
         raise HTTPException(503, "确认操作没有完成(文章不会重复发送),请稍后再点一次") from exc
     if not settled:
-        raise HTTPException(409, "草稿投递状态已变化，请刷新")
+        raise HTTPException(409, "这篇的发送状态刚刚更新了(可能已送达或已退点),刷新页面看最新结果,别重复点发送")
     return {
         "ok": False,
         "status": "failed",
@@ -6261,7 +6273,7 @@ async def job_wechat_draft(job_id: int, body: dict):
             )
         if not _mark_wechat_submitted(
                 existing["id"], existing["op_key"], media_id):
-            raise HTTPException(409, "草稿投递状态已变化，请刷新后重试")
+            raise HTTPException(409, "这篇的发送状态刚刚更新了,刷新页面看最新结果;确实没送达的话再重试,不会重复扣点")
         existing = db.one(
             "SELECT * FROM wechat_draft_delivery WHERE id=?", (existing["id"],)
         )
