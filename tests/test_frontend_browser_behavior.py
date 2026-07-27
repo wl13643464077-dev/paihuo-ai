@@ -338,13 +338,13 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
             await page.route("**/login", login_route)
             await page.goto(f"{self.base}/static/index.html#/tasks")
             await page.wait_for_function(
-                "document.querySelector('#main')?.textContent.includes('请先更新登录密码')"
+                "document.querySelector('#main')?.textContent.includes('请先设置您自己的密码')"
             )
 
             self.assertIn("账号安全升级", await page.locator("#nav").inner_text())
             self.assertNotIn("任务中心", await page.locator("#nav").inner_text())
             main_text = await page.locator("#main").inner_text()
-            self.assertIn("请先更新登录密码", main_text)
+            self.assertIn("请先设置您自己的密码", main_text)
             self.assertIn("之后才能继续查看任务和使用数字员工", main_text)
             self.assertEqual(1, await page.locator("#main .card").count())
             self.assertNotIn("/api/meta", requested_api_paths)

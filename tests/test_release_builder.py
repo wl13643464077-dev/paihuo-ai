@@ -45,6 +45,18 @@ class ReleaseBuilderCase(unittest.TestCase):
             empty_dirs=(),
         )
 
+    def test_default_allowlist_is_self_contained_in_public_checkout(self):
+        checkout = Path(__file__).resolve().parents[1]
+        for relative in build_release.DEFAULT_ROOT_FILES:
+            with self.subTest(kind="file", relative=relative):
+                self.assertTrue((checkout / relative).is_file())
+        for relative in build_release.DEFAULT_ROOT_DIRS:
+            with self.subTest(kind="directory", relative=relative):
+                self.assertTrue((checkout / relative).is_dir())
+        for relative in build_release.DEFAULT_DATA_FILES:
+            with self.subTest(kind="data", relative=relative):
+                self.assertTrue((checkout / relative).exists())
+
     def test_allowlisted_archive_is_reproducible_and_self_verified(self):
         first = self._build(Path(self.tmp.name) / "out-a")
         second = self._build(Path(self.tmp.name) / "out-b")

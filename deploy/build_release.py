@@ -39,18 +39,14 @@ _SCHEMA_IN_RELEASE_ID = re.compile(
 
 DEFAULT_ROOT_FILES = (
     ".gitignore",
-    "PROJECT.md",
     "README.md",
     "requirements.lock.txt",
     "requirements.txt",
     "run.sh",
-    "诊断报告-20260725.md",
-    "诊断报告2-功能与体验-20260725.md",
 )
 DEFAULT_ROOT_DIRS = (
     "app",
     "deploy",
-    "docs",
     "scripts",
     "static",
     "tests",
