@@ -244,4 +244,9 @@ async def learn(station: dict, broadcast=None, *, claimed: bool = False) -> dict
         broadcast({"type": "employee_update", "idx": idx})
         raise
     finally:
-        LEARNING.discard(idx)
+        # A route-level claim covers learning, settlement and notification.
+        # Releasing it here would let a second request claim the same employee
+        # while the first request is still settling, then the first route's
+        # finalizer could erase the second request's claim (ABA race).
+        if not claimed:
+            LEARNING.discard(idx)

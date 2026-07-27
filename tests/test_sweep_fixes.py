@@ -147,6 +147,42 @@ class SweepFixCase(unittest.IsolatedAsyncioTestCase):
             )["n"],
         )
 
+    async def test_learn_claim_covers_settlement_without_aba_release(self):
+        """进修返回后到结算完成前仍须占位，旧任务不能误删新任务的 claim。"""
+        self._as_boss()
+        entered = threading.Event()
+        release = threading.Event()
+        original = billing.complete_operation
+
+        def slow_complete(op_key):
+            entered.set()
+            release.wait(timeout=2)
+            return original(op_key)
+
+        with patch.object(
+            employees,
+            "learn",
+            AsyncMock(return_value={"new": 1, "total": 1, "cost_usd": 0}),
+        ), patch.object(
+            billing,
+            "complete_operation",
+            side_effect=slow_complete,
+        ):
+            self.assertTrue((await main.employee_learn(self.idx))["started"])
+            self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+            self.assertIn(self.idx, employees.LEARNING)
+            with self.assertRaises(HTTPException) as raised:
+                await main.employee_learn(self.idx)
+            self.assertEqual(429, raised.exception.status_code)
+            release.set()
+            for _ in range(50):
+                if self.idx not in employees.LEARNING:
+                    break
+                await asyncio.sleep(0.01)
+
+        self.assertNotIn(self.idx, employees.LEARNING)
+        self.assertEqual(47, self._balance())
+
     async def test_censor_deep_failure_returns_free_scan_and_refunds(self):
         self._as_owner()
         with patch.object(
