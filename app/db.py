@@ -24,6 +24,12 @@ _conn = None
 _conn_path = None
 _connection_generation = 0
 _all_connections: set[sqlite3.Connection] = set()
+# Serializes a DB_PATH generation switch with async-pool selection.  It is
+# deliberately separate from ``_init_lock``: switching drains old workers
+# before taking the schema lock, because a queued worker may still need that
+# schema lock to finish.
+_generation_lock = threading.RLock()
+_generation_switching = threading.Event()
 LATEST_SCHEMA_VERSION = 48
 
 SCHEMA = """
@@ -811,26 +817,9 @@ def _close_all_connections():
     _all_connections.clear()
 
 
-def conn():
-    """Return a connection owned by the current worker thread.
-
-    Schema initialization still happens once on the process anchor.  Afterwards
-    each request-worker thread gets an independent SQLite connection configured
-    for WAL and busy waiting.  This removes the former process-wide ``RLock``
-    bottleneck while keeping ``db.atomic()`` bound to exactly one connection.
-    """
+def _conn_locked(path: str):
+    """Slow connection path; caller holds ``_generation_lock``."""
     global _conn, _conn_path, _connection_generation
-
-    path = os.path.abspath(DB_PATH)
-    local = getattr(_thread, "connection", None)
-    if (
-        _conn is not None
-        and _conn_path == path
-        and local is not None
-        and getattr(_thread, "generation", -1) == _connection_generation
-        and getattr(_thread, "db_path", None) == path
-    ):
-        return local
 
     if (
         (_conn is None or _conn_path not in (None, path))
@@ -841,10 +830,13 @@ def conn():
         # 与主线程互相关闭对方正在使用的连接——那是段错误,不是异常。
         raise StaleWriteError(path)
 
-    # 数据库代际切换(测试/维护工具换 DB_PATH)前,先在锁外排空异步写池:
+    # 数据库代际切换(测试/维护工具换 DB_PATH)前,先在 _init_lock 外排空异步写池:
     # 在途任务可能正拿着旧库连接执行,任何跨线程 close 都会段错误。
-    # 必须在 _init_lock 外等——池任务走慢路径时要拿这把锁,锁内等待会死锁。
-    if _conn is not None and _conn_path not in (None, path):
+    # generation lock 同时挡住新池的创建，避免 drain 期间重新生出旧代 worker。
+    if (
+        _conn_path not in (None, path)
+        or (_conn is None and _conn_path is not None)
+    ):
         _shutdown_async_pool(wait=True)
 
     with _init_lock:
@@ -922,6 +914,58 @@ def conn():
         _thread.db_path = path
         _thread.atomic_depth = 0
         return connection
+
+
+def conn():
+    """Return a connection owned by the current worker thread.
+
+    Schema initialization still happens once on the process anchor. Afterwards
+    each request-worker thread gets an independent SQLite connection configured
+    for WAL and busy waiting. A generation switch is serialized with async-pool
+    selection, so no new strict async call can enter the pool being drained.
+    """
+    path = os.path.abspath(DB_PATH)
+    local = getattr(_thread, "connection", None)
+    if (
+        _conn is not None
+        and _conn_path == path
+        and local is not None
+        and getattr(_thread, "generation", -1) == _connection_generation
+        and getattr(_thread, "db_path", None) == path
+    ):
+        return local
+
+    # DB workers must fail before waiting on the generation lock. The switching
+    # thread may be draining this very worker, so waiting here would deadlock.
+    if (
+        (_conn is None or _conn_path not in (None, path))
+        and threading.current_thread().name.startswith("dbio")
+    ):
+        raise StaleWriteError(path)
+
+    with _generation_lock:
+        # Another non-DB thread may have completed the switch while we waited.
+        path = os.path.abspath(DB_PATH)
+        local = getattr(_thread, "connection", None)
+        if (
+            _conn is not None
+            and _conn_path == path
+            and local is not None
+            and getattr(_thread, "generation", -1) == _connection_generation
+            and getattr(_thread, "db_path", None) == path
+        ):
+            return local
+        switching = (
+            _conn_path not in (None, path)
+            or (_conn is None and _conn_path is not None)
+        )
+        if switching:
+            _generation_switching.set()
+        try:
+            return _conn_locked(path)
+        finally:
+            if switching:
+                _generation_switching.clear()
 
 
 # ---------------- 全局设置(V4) ----------------
@@ -1052,13 +1096,14 @@ _write_pool_lock = threading.Lock()
 
 def _pool():
     global _async_pool
-    if _async_pool is None:
-        with _async_pool_lock:
-            if _async_pool is None:
-                from concurrent.futures import ThreadPoolExecutor
-                _async_pool = ThreadPoolExecutor(
-                    max_workers=4, thread_name_prefix="dbio")
-    return _async_pool
+    with _generation_lock:
+        if _async_pool is None:
+            with _async_pool_lock:
+                if _async_pool is None:
+                    from concurrent.futures import ThreadPoolExecutor
+                    _async_pool = ThreadPoolExecutor(
+                        max_workers=4, thread_name_prefix="dbio")
+        return _async_pool
 
 
 def _ordered_write_pool():
@@ -1070,13 +1115,33 @@ def _ordered_write_pool():
     submission order while ``arun``/``aq`` keep using the concurrent pool.
     """
     global _write_pool
-    if _write_pool is None:
-        with _write_pool_lock:
-            if _write_pool is None:
-                from concurrent.futures import ThreadPoolExecutor
-                _write_pool = ThreadPoolExecutor(
-                    max_workers=1, thread_name_prefix="dbio-write")
-    return _write_pool
+    with _generation_lock:
+        if _write_pool is None:
+            with _write_pool_lock:
+                if _write_pool is None:
+                    from concurrent.futures import ThreadPoolExecutor
+                    _write_pool = ThreadPoolExecutor(
+                        max_workers=1, thread_name_prefix="dbio-write")
+        return _write_pool
+
+
+def _submit_async_call(context, call):
+    """Select/create the DB pool in the same generation critical section.
+
+    This helper runs in asyncio's default executor. Waiting for a maintenance
+    generation switch therefore never blocks the event-loop thread.
+    """
+    with _generation_lock:
+        path = os.path.abspath(DB_PATH)
+        if _conn is None or _conn_path not in (None, path):
+            try:
+                conn()
+            finally:
+                # ``conn`` may give this short-lived default-executor thread a
+                # local connection. It must not become an untracked generation
+                # leak after its sole job (preparing the anchor) is complete.
+                _close_thread_connection()
+        return _pool().submit(context.run, call)
 
 
 async def arun(fn, *args, **kwargs):
@@ -1088,10 +1153,18 @@ async def arun(fn, *args, **kwargs):
     import asyncio
     import contextvars
     import functools
-    loop = asyncio.get_running_loop()
     call = functools.partial(fn, *args, **kwargs) if (args or kwargs) else fn
     context = contextvars.copy_context()
-    return await loop.run_in_executor(_pool(), context.run, call)
+    for attempt in range(2):
+        future = await asyncio.to_thread(_submit_async_call, context, call)
+        try:
+            return await asyncio.wrap_future(future)
+        except StaleWriteError:
+            # DB_PATH can be assigned immediately after pool selection by a
+            # test/maintenance switch. StaleWriteError is raised at conn()'s
+            # side-effect-free top boundary, so one re-submit is safe.
+            if attempt:
+                raise
 
 
 _pending_writes: list = []
@@ -1130,7 +1203,15 @@ def submit_write(fn, *args, **kwargs):
             logging.getLogger("db").warning(
                 "submit_write failed error_type=%s", type(exc).__name__)
 
-    future = _ordered_write_pool().submit(_guarded)
+    # Progress snapshots are intentionally lossy. If a generation switch is in
+    # flight, drop this frame instead of blocking the event loop or recreating
+    # the old write pool while it is being drained.
+    if _generation_switching.is_set():
+        return
+    with _generation_lock:
+        if _generation_switching.is_set():
+            return
+        future = _ordered_write_pool().submit(_guarded)
     with _pending_lock:
         _pending_writes.append(future)
         if len(_pending_writes) > 64:      # 顺手清掉已完成的,防列表无限增长

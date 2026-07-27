@@ -107,6 +107,57 @@ class AsyncFacadeSemanticsTests(_DbCase):
 
         asyncio.run(scenario())
 
+    def test_strict_arun_switches_to_new_database_generation(self):
+        """测试/维护切回 DB_PATH 后，新严格写应落新库而非抛 StaleWriteError。"""
+        new_path = os.path.join(self.tmp.name, "strict-generation.db")
+
+        async def scenario():
+            await db.ainsert("tenants", {"name": "旧代"})
+            db.DB_PATH = new_path
+            tenant_id = await db.ainsert("tenants", {"name": "新代"})
+            row = await db.aone(
+                "SELECT name FROM tenants WHERE id=?", (tenant_id,)
+            )
+            self.assertEqual("新代", row["name"])
+            self.assertEqual(os.path.abspath(new_path), db._conn_path)
+
+        asyncio.run(scenario())
+
+    def test_arun_waits_for_inflight_generation_switch_without_freezing_loop(self):
+        """切库 drain 旧 worker 时，新严格写等待并最终只写入新代。"""
+        entered = threading.Event()
+        release = threading.Event()
+        new_path = os.path.join(self.tmp.name, "concurrent-generation.db")
+
+        def old_generation_work():
+            db.conn()
+            entered.set()
+            release.wait(timeout=5)
+
+        async def scenario():
+            old_task = asyncio.create_task(db.arun(old_generation_work))
+            self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+            db.DB_PATH = new_path
+            strict_write = asyncio.create_task(
+                db.ainsert("tenants", {"name": "切换期间提交"})
+            )
+            # 如果 generation lock 在事件循环上同步等待，这个 sleep 无法返回。
+            await asyncio.wait_for(asyncio.sleep(0.05), timeout=0.5)
+            self.assertFalse(strict_write.done())
+            release.set()
+            await old_task
+            tenant_id = await asyncio.wait_for(strict_write, timeout=5)
+            row = await db.aone(
+                "SELECT name FROM tenants WHERE id=?", (tenant_id,)
+            )
+            self.assertEqual("切换期间提交", row["name"])
+            self.assertEqual(os.path.abspath(new_path), db._conn_path)
+
+        try:
+            asyncio.run(scenario())
+        finally:
+            release.set()
+
     def test_adrain_flushes_all_prior_submit_writes_in_order(self):
         """收尾冲刷后必须是最后快照，不能被较早的慢写反向覆盖。"""
         async def scenario():
