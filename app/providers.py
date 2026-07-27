@@ -392,7 +392,7 @@ async def chat(prompt: str, model: str = DEFAULT_TEXT, timeout: int = 600,
                max_tokens: int = None) -> dict:
     """云雾 chat(流式),返回 {text, cost_usd, tokens}。与 llm.call 同构."""
     model = _api_text_model(model)
-    base, key = yunwu_conf()
+    base, key = await db.arun(yunwu_conf)
     if not key:
         raise ProviderError("未配置云雾API key(管理后台→供应商)")
     progress = progress or (lambda *a: None)
@@ -500,7 +500,7 @@ async def _chat_content(*, model: str, content: list[dict], timeout: int,
                         system_prompt: str = None, max_tokens: int = 1200) -> dict:
     """OpenAI 兼容多模态请求；仅供本模块的已路由视觉网关使用。"""
     model = _api_text_model(model)
-    base, key = yunwu_conf()
+    base, key = await db.arun(yunwu_conf)
     if not key:
         raise ProviderError("未配置云雾API key(管理后台→供应商)")
     try:
@@ -543,7 +543,7 @@ async def call_vision(idx: int | None, prompt: str,
                       token: str = None, system_prompt: str = None,
                       max_tokens: int = 1200) -> dict:
     """统一视觉入口：员工选择优先；``idx=None`` 时服从全局文本模型。"""
-    model = text_model_for(idx)
+    model = await db.arun(text_model_for, idx)
     content = [{"type": "text", "text": str(prompt or "")}]
     if not images or len(images) > 8:
         raise ProviderError("视觉任务需要 1-8 张图片")
@@ -575,7 +575,7 @@ async def image(prompt: str, model: str = DEFAULT_IMAGE, size: str = "1024x1536"
     if not image_model_available(model):
         raise ProviderError(f"生图模型不可用:{str(model)[:80] or '(空)'}")
     max_bytes = 20 * 1024 * 1024
-    base, key = yunwu_conf()
+    base, key = await db.arun(yunwu_conf)
     if not key:
         raise ProviderError("未配置云雾API key")
     try:
@@ -624,9 +624,10 @@ async def image(prompt: str, model: str = DEFAULT_IMAGE, size: str = "1024x1536"
 async def call_image(idx: int | None, prompt: str, size: str = "1024x1536",
                      timeout: int = 300) -> bytes:
     """统一文生图入口：员工选择优先；``idx=None`` 时服从全局生图模型。"""
+    model = await db.arun(image_model_for, idx)
     return await image(
         prompt,
-        model=image_model_for(idx),
+        model=model,
         size=size,
         timeout=timeout,
     )
@@ -637,7 +638,7 @@ async def _image_edit(*, model: str, prompt: str, image_bytes: bytes,
     """OpenAI 兼容图生图请求；模型只能由 ``edit_image`` 路由后传入。"""
     if not image_model_available(model):
         raise ProviderError(f"生图模型不可用:{str(model)[:80] or '(空)'}")
-    base, key = yunwu_conf()
+    base, key = await db.arun(yunwu_conf)
     if not key:
         raise ProviderError("未配置云雾API key")
     max_bytes = 20 * 1024 * 1024
@@ -687,7 +688,7 @@ async def _image_edit(*, model: str, prompt: str, image_bytes: bytes,
 async def edit_image(idx: int | None, prompt: str, image_bytes: bytes,
                      size: str = "1024x1024", timeout: int = 300) -> bytes:
     """统一图生图入口：员工选择优先；``idx=None`` 时服从全局生图模型。"""
-    model = image_model_for(idx)
+    model = await db.arun(image_model_for, idx)
     return await _image_edit(
         model=model,
         prompt=prompt,
@@ -729,8 +730,8 @@ async def call_text(idx: int | None, prompt: str, web: bool = False,
                     research_brief: str = None, sensitive_texts=()) -> dict:
     """统一入口:普通生成走所选模型;联网任务走云雾工具代理后再由所选模型交付."""
     from . import llm
-    model = text_model_for(idx, web_required=web)
-    base, key = yunwu_conf()
+    model = await db.arun(text_model_for, idx, web_required=web)
+    base, key = await db.arun(yunwu_conf)
 
     async def agent_call(agent_prompt: str, agent_token: str = None, *,
                          web_tools: bool, private_system: str = None) -> dict:
@@ -867,7 +868,7 @@ async def call_web_json(prompt: str, timeout: int = 600, retries: int = 1,
     在二次改写时被丢失或改写。调用仍显式注入云雾凭据，绝不读取本地登录态。
     """
     from . import llm
-    base, key = yunwu_conf()
+    base, key = await db.arun(yunwu_conf)
     if not key:
         raise ProviderError("未配置云雾API key,无法启动联网能力网关")
     last = None
@@ -895,7 +896,7 @@ async def call_web_json(prompt: str, timeout: int = 600, retries: int = 1,
                 # 不重新联网跑一遍。它不得新增事实，URL 也必须逐字保留。
                 if progress:
                     progress("retry", "联网材料已找到，正在修复交付格式…")
-                repair_model = text_model_for(1)
+                repair_model = await db.arun(text_model_for, 1)
                 try:
                     allowed_urls = _frozen_web_urls(r.get("text") or "")
                     repaired = await chat(

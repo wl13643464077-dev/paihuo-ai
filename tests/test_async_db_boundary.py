@@ -583,6 +583,17 @@ class ReviewedAsyncCallGraphTests(unittest.TestCase):
         },
         ("expertmatch.py", "match_experts"): {"_visible_specialists"},
         ("expertmatch.py", "preflight_fit"): {"_dept_peers"},
+        ("providers.py", "chat"): {"yunwu_conf"},
+        ("providers.py", "_chat_content"): {"yunwu_conf"},
+        ("providers.py", "call_vision"): {"text_model_for"},
+        ("providers.py", "image"): {"yunwu_conf"},
+        ("providers.py", "call_image"): {"image_model_for"},
+        ("providers.py", "_image_edit"): {"yunwu_conf"},
+        ("providers.py", "edit_image"): {"image_model_for"},
+        ("providers.py", "call_text"): {"text_model_for", "yunwu_conf"},
+        ("providers.py", "call_web_json"): {
+            "text_model_for", "yunwu_conf",
+        },
     }
 
     @staticmethod
