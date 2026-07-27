@@ -455,11 +455,11 @@ def list_items(tenant_id: int, allowed_modules: set[str], limit: int = 300,
     )
     details["meeting"] = _rows_for_ids(
         "id,question,phase,status,billing_status,retry_count,emp_idxs_json,"
-        "execution_task_ids_json,created_at,updated_at",
+        "execution_task_ids_json,created_by,created_at,updated_at",
         "meeting", tenant_id, ids_by_kind.get("meeting", []),
     )
     details["avatar"] = _rows_for_ids(
-        "id,params_json,status,billing_status,retry_count,created_at,updated_at",
+        "id,params_json,status,billing_status,retry_count,created_by,created_at,updated_at",
         "avatar_job", tenant_id, ids_by_kind.get("avatar", []),
         extra_where="deleted_at IS NULL",
     )
@@ -826,7 +826,7 @@ def list_items(tenant_id: int, allowed_modules: set[str], limit: int = 300,
     ]
     # 协作可见:批量把发起人 id 换成用户名(单查询,严格限本租户)
     creator_ids = set()
-    for kind in ("expert", "content"):
+    for kind in ("expert", "content", "meeting", "avatar", "video", "tool"):
         for row in details.get(kind, {}).values():
             if row.get("created_by"):
                 creator_ids.add(int(row["created_by"]))

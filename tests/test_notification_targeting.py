@@ -87,6 +87,13 @@ class NotificationTargetingCase(unittest.TestCase):
                               {"direction": "开业稿"}, ensure_ascii=False)})
         items = taskcenter.list_items(2, {"content"})["items"]
         self.assertEqual("yuangong", items[0].get("creator"))
+        # 补齐轮:数字人任务同样带发起人
+        db.insert("avatar_job", {"tenant_id": 2, "status": "done",
+                                 "created_by": self.member_id,
+                                 "params_json": '{"script":"口播"}'})
+        avatar_items = [i for i in taskcenter.list_items(
+            2, {"content", "avatar"})["items"] if i["kind"] == "avatar"]
+        self.assertEqual("yuangong", avatar_items[0].get("creator"))
 
     def test_member_cannot_read_owner_targeted_notification(self):
         nid = notify.record(2, "schedule_paused", {"title": "日更"})

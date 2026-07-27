@@ -767,6 +767,9 @@ def _initialize_anchor():
         # "这单是哪个副账号开的、这一站是谁批的";历史数据没有操作人,留空即可。
         _add_column(_conn, "job", "created_by", "INTEGER")
         _add_column(_conn, "task", "created_by", "INTEGER")
+        # 协作可见补齐:数字人/会议/成片/工具单也记发起人
+        for tbl in ("avatar_job", "meeting", "tv_job", "tool_job"):
+            _add_column(_conn, tbl, "created_by", "INTEGER")
         _add_column(_conn, "station_run", "reviewed_by", "INTEGER")
         # v47:会话签名密钥只能由 root-owned systemd EnvironmentFile 注入。
         # 清除旧版写入业务库的全局密钥，避免只读数据库泄漏演变为会话伪造。

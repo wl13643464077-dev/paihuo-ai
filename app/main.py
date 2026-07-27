@@ -5261,6 +5261,7 @@ def _create_charged_avatar_job(params: dict, tid: int = None) -> int:
     job_id = db.insert("avatar_job", {
         "params_json": json.dumps(params, ensure_ascii=False),
         "tenant_id": tid,
+        "created_by": int((auth.current() or {}).get("id") or 0) or None,
         "status": "pending_charge",
         "billing_status": "pending",
         "billing_points": points,
@@ -5553,6 +5554,7 @@ def _create_charged_meeting(data: dict, member_count: int) -> int:
         * max(1, member_count))
     meeting_id = db.insert("meeting", {
         **data,
+        "created_by": int((auth.current() or {}).get("id") or 0) or None,
         "status": "pending_charge",
         "billing_status": "pending",
         "billing_points": points,
@@ -6605,7 +6607,11 @@ async def events():
     q_: asyncio.Queue = asyncio.Queue(maxsize=100)
     # 只有唯一超级管理账号 boss 能收到内部步骤明细；其他账号（包括未来新增的
     # root 角色）都走 Engine.public_event 的对外进度契约。
-    engine.subscribers[q_] = (TEN(), _is_boss())
+    user = auth.current() or {}
+    # member 只订阅自己板块相关的事件;owner/root 传 None = 全收
+    modules = (frozenset(user.get("modules") or [])
+               if user.get("role") == "member" else None)
+    engine.subscribers[q_] = (TEN(), _is_boss(), modules)
 
     async def gen():
         try:
@@ -7964,6 +7970,7 @@ def _create_charged_tv_job(params: dict, tenant_id: int = None,
         "tenant_id": tid,
         "job_id": job_id,
         "params_json": json.dumps(params, ensure_ascii=False),
+        "created_by": int((auth.current() or {}).get("id") or 0) or None,
         "status": "pending_charge",
         "billing_status": "pending",
         "billing_points": points,
@@ -8940,6 +8947,7 @@ def _tool_enqueue_record(kind: str, params: dict, note: str = "") -> dict:
         jid = db.insert("tool_job", {
             "tenant_id": tid, "kind": kind,
             "params_json": json.dumps(params, ensure_ascii=False),
+            "created_by": int((auth.current() or {}).get("id") or 0) or None,
             "status": "pending_charge",
             "billing_status": "pending",
             "billing_points": points,

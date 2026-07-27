@@ -147,14 +147,31 @@ class Engine:
             return safe
         return ev
 
+    # 事件类型 → 所需板块:content-only 成员不该收到数字人/发布等事件,
+    # 否则页面为拿不到的数据白白自刷新(SHELL_DIRTY)+白打 /state。
+    EVENT_MODULE = {
+        "avatar_update": "avatar", "talking_photo": "avatar",
+        "tv_done": "content", "tv_step": "content",
+        "job_update": "content", "station_step": "content",
+        "tool_update": "content", "pub_update": "content",
+    }
+
     def broadcast(self, ev: dict):
         tid = self._tid_of(ev)
         for q_, subscriber in list(self.subscribers.items()):
-            sub_tid, sub_root = subscriber if isinstance(subscriber, tuple) else (subscriber, False)
+            if isinstance(subscriber, tuple):
+                sub_tid, sub_root = subscriber[0], subscriber[1]
+                sub_modules = subscriber[2] if len(subscriber) > 2 else None
+            else:
+                sub_tid, sub_root, sub_modules = subscriber, False, None
             if tid is None and not sub_root:
                 continue   # 找不到归属绝不广播给普通账号，避免删除竞态/未知事件泄露
             if tid is not None and not sub_root and sub_tid != tid:
                 continue
+            if sub_modules is not None:
+                need = self.EVENT_MODULE.get(str(ev.get("type") or ""))
+                if need and need not in sub_modules:
+                    continue   # member 无该板块:事件与他无关,不投递
             payload = (
                 self.internal_event(ev)
                 if sub_root
