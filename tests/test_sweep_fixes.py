@@ -183,6 +183,40 @@ class SweepFixCase(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(self.idx, employees.LEARNING)
         self.assertEqual(47, self._balance())
 
+    async def test_cancelled_learn_start_refunds_late_charge_and_claim(self):
+        """开单 worker 已进入后取消请求，晚到的扣点必须收口退款。"""
+        self._as_boss()
+        entered = threading.Event()
+        release = threading.Event()
+        original = billing.start_operation
+
+        def slow_start(*args, **kwargs):
+            entered.set()
+            release.wait(timeout=2)
+            return original(*args, **kwargs)
+
+        with patch.object(
+            billing,
+            "start_operation",
+            side_effect=slow_start,
+        ):
+            request = asyncio.create_task(main.employee_learn(self.idx))
+            self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+            request.cancel()
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await request
+
+        self.assertNotIn(self.idx, employees.LEARNING)
+        self.assertEqual(50, self._balance())
+        self.assertEqual(
+            0,
+            db.one(
+                "SELECT COUNT(*) AS n FROM billing_operation "
+                "WHERE tenant_id=2 AND action='learn' AND status='charged'"
+            )["n"],
+        )
+
     async def test_censor_deep_failure_returns_free_scan_and_refunds(self):
         self._as_owner()
         with patch.object(

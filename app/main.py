@@ -3427,11 +3427,12 @@ async def employee_learn(idx: int):
     if not employees.claim_learning(idx):
         raise HTTPException(429, "该员工正在进修中")
     try:
-        billing_op = await db.arun(
+        billing_op = await _start_billing_operation_safely(
             billing.start_operation,
             "learn",
             tid=TEN(),
             note=f"{s.get('name', '数字员工')}进修",
+            cancel_reason="员工进修请求中断自动退回",
         )
     except billing.InsufficientPoints as e:
         employees.LEARNING.discard(idx)
@@ -3453,7 +3454,7 @@ async def employee_learn(idx: int):
             )
         except BaseException as exc:
             try:
-                await db.arun(
+                await _run_db_safely(
                     billing.fail_operation,
                     billing_op,
                     "员工进修失败自动退回",
@@ -3482,11 +3483,14 @@ async def employee_learn(idx: int):
         else:
             fresh = int((result or {}).get("new") or 0)
             if fresh:
-                await db.arun(billing.complete_operation, billing_op)
+                await _run_db_safely(
+                    billing.complete_operation,
+                    billing_op,
+                )
             else:
                 # 一条新技能都没学到就不收钱,与全站「没产出就退点」口径一致。
                 try:
-                    await db.arun(
+                    await _run_db_safely(
                         billing.fail_operation,
                         billing_op,
                         "进修未学到新技能自动退回",
@@ -3522,7 +3526,7 @@ async def employee_learn(idx: int):
     except BaseException:
         employees.LEARNING.discard(idx)
         try:
-            await db.arun(
+            await _run_db_safely(
                 billing.fail_operation,
                 billing_op,
                 "员工进修未启动自动退回",
