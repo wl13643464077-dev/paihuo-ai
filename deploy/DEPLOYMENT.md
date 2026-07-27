@@ -1,6 +1,6 @@
-# 派活 AI schema47-r6 生产发布与恢复
+# 派活 AI schema48-r7 生产发布与恢复
 
-本文只描述 r6 的正式发布路径。核心边界是：root 只运行服务器上预先固定并验明
+本文只描述 r7 的正式发布路径。核心边界是：root 只运行服务器上预先固定并验明
 身份的控制工具，不运行候选 release 中的脚本、Python 模块、virtualenv、pip 或
 console script。候选代码只有在完整证明、停服最终快照和低权限预检之后，才由
 `paihuo` 服务账号运行。
@@ -65,7 +65,7 @@ sudo -u paihuo-build test ! -r /var/lib/paihuo-upgrade
 
 ```bash
 set -euo pipefail
-release_id=<从未使用过的UTC时间-schema47-r6>
+release_id=<从未使用过的UTC时间-schema48-r7>
 source_date_epoch=<冻结时UTC-epoch>
 output=/private/tmp/paihuo-release-build
 venv/bin/python -m deploy.build_release \
@@ -158,7 +158,7 @@ sudo /usr/bin/env -i \
 receipt。不要直接解包，也不要让 root 执行 archive 内的任何文件：
 
 ```bash
-release_id=<从未使用过的UTC时间-schema47-r6>
+release_id=<从未使用过的UTC时间-schema48-r7>
 incoming="/var/lib/paihuo-upgrade/incoming/$release_id"
 release="/srv/paihuo/releases/$release_id"
 wheelhouse="/var/cache/paihuo-wheelhouse/$release_id"
@@ -467,6 +467,11 @@ cutover commit 之前失败时：
 8. 刷新 root-attested 备份、恢复 timer，最后开放 Caddy；
 9. 根据 wrapper transaction attestation 原子恢复旧控制面。
 
+schema48 会把历史 JSON 凭据字段迁移为绑定字段身份的密文，r6 无法读取迁移后的
+数据库。cutover commit 之前的失败必须同时恢复停服前最终数据库快照和旧代码，
+不得只把代码切回 r6 后继续使用 schema48 数据库；cutover commit 之后则沿用
+本节的前向恢复协议，不自动降级代码或数据库。
+
 一旦 `cutover_committed` 已持久化，不再自动回滚数据库，因为 worker 可能已经
 产生不可逆外部效果。激活失败时保持应用和公网入口关闭，写入
 `cutover_committed_activation_failed`，只允许按原回执继续恢复。
@@ -489,8 +494,9 @@ sudo journalctl -u contentcrew.service --since '-15 minutes' --no-pager
 sudo ss -ltnp
 ```
 
-应用只能监听 `127.0.0.1:8899`，公网只开放 Caddy 80/443。schema47-r6 还必须
-证明数据库 schema ledger/user_version、配置密文、环境密钥副本和新备份一致；
+应用只能监听 `127.0.0.1:8899`，公网只开放 Caddy 80/443。schema48-r7 还必须
+证明数据库 schema ledger/user_version、历史 JSON 凭据已完成密文迁移、配置
+密文、环境密钥副本和新备份一致；
 只输出聚合，不输出业务正文、密钥、Cookie、配置值或供应商响应。
 
 每个新 release 都从升级回执完成时刻重新计算 24 小时观察窗口。旧 release 的
