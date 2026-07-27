@@ -12,7 +12,7 @@
 import asyncio
 import logging
 
-from . import auth, departments, providers
+from . import auth, db, departments, providers
 
 log = logging.getLogger("expertmatch")
 
@@ -22,7 +22,6 @@ ROUTE_IDX = 0
 
 def _disabled_idxs() -> set:
     """已停用员工(一次批量查询,别对420人逐个查)."""
-    from . import db
     return {r["idx"] for r in db.q("SELECT idx FROM employee_config WHERE enabled=0")}
 
 
@@ -82,7 +81,7 @@ async def match_experts(text: str, tid: int, dept_key: str = None) -> list:
     text = (text or "").strip()
     if not text:
         return []
-    emps = _visible_specialists(dept_key)
+    emps = await db.arun(_visible_specialists, dept_key)
     if not emps:
         return []
     by_idx = {e["idx"]: e for e in emps}
@@ -136,7 +135,7 @@ async def preflight_fit(idx: int, direction: str) -> dict:
     e = departments.get(idx)
     if not e or not direction:
         return {"fit": True, "why": "", "suggestions": []}
-    peers = _dept_peers(e["dept_key"], idx)
+    peers = await db.arun(_dept_peers, e["dept_key"], idx)
     selected_private = f"{e['name']}(所属组:{e.get('group', '')})\n职责:{_desc(e)[:120]}"
     peers_private = _peer_text(peers) or "(无)"
     system_prompt = f"""你是「派活」平台的派单质检员，判断任务与所选专家是否对口。

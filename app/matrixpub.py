@@ -18,7 +18,7 @@ import uuid
 
 import httpx
 
-from . import db, notify, pubtrack
+from . import db, notify, pubtrack, secureconfig
 
 log = logging.getLogger("matrixpub")
 _PUB_SEM = None
@@ -42,12 +42,36 @@ PLATFORMS = {
 
 
 # ---------------- 账号管理 ----------------
+COOKIE_FIELD = "matrix_cookie"
+
+
 def accounts(tid: int) -> list:
-    return db.jloads(db.get_setting(f"matrix_accounts:{tid}"), []) or []
+    """返回可直接使用的账号(Cookie 已解密,仅存在于内存)。
+
+    解不开的 Cookie(密钥轮换或数据损坏)不让它把整个账号列表打挂:该账号按
+    「登录态失效」呈现,老板重新绑定即可,发布侧自然走已有的失效分支。
+    """
+    out = []
+    for acc in db.jloads(db.get_setting(f"matrix_accounts:{tid}"), []) or []:
+        if acc.get("cookie"):
+            try:
+                acc = {**acc, "cookie": secureconfig.decrypt_field(
+                    COOKIE_FIELD, acc["cookie"])}
+            except secureconfig.SecureConfigError:
+                log.warning("matrix cookie undecryptable account=%s", acc.get("id"))
+                acc = {**acc, "cookie": "", "status": "expired"}
+        out.append(acc)
+    return out
 
 
 def _save(tid: int, accs: list):
-    db.set_setting(f"matrix_accounts:{tid}", json.dumps(accs, ensure_ascii=False))
+    # 平台登录态等同于账号本身,泄露即被接管;绝不明文落库。
+    stored = [
+        {**a, "cookie": secureconfig.encrypt_field(COOKIE_FIELD, a.get("cookie"))}
+        if a.get("cookie") else a
+        for a in accs
+    ]
+    db.set_setting(f"matrix_accounts:{tid}", json.dumps(stored, ensure_ascii=False))
 
 
 def add_account(tid: int, platform: str, name: str, cookie: str) -> dict:
@@ -111,7 +135,7 @@ async def _probe_login(acc: dict):
 
 async def check_account(tid: int, acc_id: str) -> dict:
     """验证 Cookie 是否还活着(不发内容,只查登录态)."""
-    accs = accounts(tid)
+    accs = await db.arun(accounts, tid)
     acc = next((a for a in accs if a["id"] == acc_id), None)
     if not acc:
         raise ValueError("账号不存在")
@@ -120,7 +144,7 @@ async def check_account(tid: int, acc_id: str) -> dict:
     acc["status"] = "ok" if ok else "expired"
     acc["nickname"] = nickname
     acc["checked_at"] = time.time()
-    _save(tid, accs)
+    await db.arun(_save, tid, accs)
     if not ok:
         raise ValueError("登录态无效或已过期:重新登录该平台后,按向导重新复制 Cookie 绑定")
     return {"ok": True, "nickname": nickname,
@@ -129,9 +153,15 @@ async def check_account(tid: int, acc_id: str) -> dict:
 
 # ---------------- 发布队列 ----------------
 def enqueue(tid: int, platform: str, acc_id: str, payload: dict) -> int:
+    # 入队即校验:平台非法或与账号绑定的平台不一致时,发布协程会在 PLATFORMS[...]
+    # 抛 KeyError,任务永久卡在 running。这里提前拒掉,报错也更像人话。
+    if platform not in PLATFORMS:
+        raise ValueError("暂只支持小红书/抖音(公众号在发布渠道页单独配)")
     acc = next((a for a in accounts(tid) if a["id"] == acc_id), None)
     if not acc:
         raise ValueError("先绑定该平台账号")
+    if acc.get("platform") != platform:
+        raise ValueError("所选账号不属于该平台,请重新选择")
     return db.insert("pub_task", {
         "tenant_id": tid,
         "platform": platform,
@@ -142,9 +172,14 @@ def enqueue(tid: int, platform: str, acc_id: str, payload: dict) -> int:
 
 
 def _log(pid: int, msg: str):
-    r = db.one("SELECT log FROM pub_task WHERE id=?", (pid,))
-    text = ((r or {}).get("log") or "") + f"[{time.strftime('%H:%M:%S')}] {msg}\n"
-    db.update("pub_task", pid, {"log": text[-4000:]})
+    line = f"[{time.strftime('%H:%M:%S')}] {msg}\n"
+    # 追加日志是可追溯业务证据，不是可丢进度快照。异步调用方必须用
+    # ``await db.arun(_log, ...)`` 等待完整事务并接收写失败。
+    with db.atomic() as c:
+        r = c.execute("SELECT log FROM pub_task WHERE id=?", (pid,)).fetchone()
+        text = ((r["log"] if r else "") or "") + line
+        c.execute("UPDATE pub_task SET log=?,updated_at=? WHERE id=?",
+                  (text[-4000:], time.time(), pid))
     # The persisted progress belongs to the current tenant and is shown in the
     # task UI.  The host journal receives only a stable event: account names,
     # content, screenshots and provider text must never be copied there.
@@ -183,7 +218,7 @@ async def _publish_xhs(pg, pid: int, payload: dict):
     await pg.wait_for_timeout(4000)
     if "login" in pg.url or await pg.locator("text=扫码登录").count():
         raise ValueError("登录态失效:重新绑定 Cookie")
-    _log(pid, "已进入发布页,切换到图文…")
+    await db.arun(_log, pid, "已进入发布页,切换到图文…")
     tab = pg.locator("text=上传图文")
     if await tab.count():
         await tab.first.click()
@@ -193,7 +228,7 @@ async def _publish_xhs(pg, pid: int, payload: dict):
         raise ValueError("没有可上传的图片(需要至少1张本地图)")
     inp = pg.locator("input[type=file]")
     await inp.first.set_input_files(imgs)
-    _log(pid, f"已上传 {len(imgs)} 张图,等待处理…")
+    await db.arun(_log, pid, f"已上传 {len(imgs)} 张图,等待处理…")
     await pg.wait_for_timeout(6000)
     title_box = pg.locator("input[placeholder*='标题'], input[placeholder*='填写标题']")
     if await title_box.count():
@@ -202,12 +237,12 @@ async def _publish_xhs(pg, pid: int, payload: dict):
     if await body_box.count():
         await body_box.first.click()
         await pg.keyboard.insert_text((payload.get("body") or "")[:990])
-    _log(pid, "标题正文已填充，准备提交…")
+    await db.arun(_log, pid, "标题正文已填充，准备提交…")
     btn = pg.locator("button:has-text('发布')")
     if not await btn.count():
         raise ValueError("没找到发布按钮(平台可能改版)")
-    _mark_submission_uncertain(pid)
-    _log(pid, "提交发布…")
+    await db.arun(_mark_submission_uncertain, pid)
+    await db.arun(_log, pid, "提交发布…")
     await btn.first.click()
     await pg.wait_for_timeout(6000)
     if await pg.locator("text=发布成功").count() or "success" in pg.url:
@@ -227,7 +262,7 @@ async def _publish_douyin(pg, pid: int, payload: dict):
         raise ValueError("没有可上传的视频文件")
     inp = pg.locator("input[type=file]")
     await inp.first.set_input_files(video)
-    _log(pid, "视频上传中(等转码)…")
+    await db.arun(_log, pid, "视频上传中(等转码)…")
     await pg.wait_for_timeout(20000)
     cap = pg.locator("div[contenteditable='true'], input[placeholder*='标题']")
     if await cap.count():
@@ -236,8 +271,8 @@ async def _publish_douyin(pg, pid: int, payload: dict):
     btn = pg.locator("button:has-text('发布')")
     if not await btn.count():
         raise ValueError("没找到发布按钮(平台可能改版)")
-    _mark_submission_uncertain(pid)
-    _log(pid, "提交发布…")
+    await db.arun(_mark_submission_uncertain, pid)
+    await db.arun(_log, pid, "提交发布…")
     await btn.first.click()
     await pg.wait_for_timeout(8000)
     return "已提交发布(去抖音后台确认状态)"
@@ -309,7 +344,7 @@ async def run_task(pid: int, broadcast=None):
     async with _sem():
         # 必须在 semaphore 内 CAS。否则两个 worker 都可能在排队前读到 queued，
         # 随后依次进入浏览器并真实发布两次。
-        started = db.execute(
+        started = await db.aexecute(
             "UPDATE pub_task SET status='running',updated_at=? "
             "WHERE id=? AND status='queued' "
             "AND submission_state='not_submitted'",
@@ -317,7 +352,7 @@ async def run_task(pid: int, broadcast=None):
         )
         if started != 1:
             return
-        row = db.one("SELECT * FROM pub_task WHERE id=?", (pid,))
+        row = await db.aone("SELECT * FROM pub_task WHERE id=?", (pid,))
         if not row:
             return
         await _run_task_inner(pid, row, broadcast)
@@ -327,7 +362,7 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
     tid = row["tenant_id"]
     payload = db.jloads(row["payload_json"], {})
     p = PLATFORMS[row["platform"]]
-    accs = accounts(tid)
+    accs = await db.arun(accounts, tid)
     acc = next((a for a in accs if a["id"] == row["account"]), None)
     shot_url = ""
     try:
@@ -337,11 +372,13 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
         alive, _ = await _probe_login(acc)
         if alive is False:
             acc["status"] = "expired"
-            _save(tid, accs)
+            await db.arun(_save, tid, accs)
             raise ValueError("登录态失效:重新绑定 Cookie")
         from playwright.async_api import async_playwright
         domain = ".xiaohongshu.com" if row["platform"] == "xhs" else ".douyin.com"
-        _log(pid, f"启动无头浏览器,载入「{acc['name']}」登录态…")
+        await db.arun(
+            _log, pid, f"启动无头浏览器,载入「{acc['name']}」登录态…"
+        )
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(args=["--no-sandbox"])
             ctx = await browser.new_context(viewport={"width": 1440, "height": 900},
@@ -351,8 +388,8 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
             try:
                 note = await (_publish_xhs(pg, pid, payload) if row["platform"] == "xhs"
                               else _publish_douyin(pg, pid, payload))
-                _log(pid, f"✅ {note}")
-                db.update(
+                await db.arun(_log, pid, f"✅ {note}")
+                await db.aupdate(
                     "pub_task",
                     pid,
                     {
@@ -366,16 +403,17 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
                 try:
                     await pg.screenshot(path=os.path.join(shot_dir, f"fail_{pid}.png"))
                     shot_url = f"/files/pub/fail_{pid}.png"
-                    _log(pid, f"失败现场截图:{shot_url}")
                 except Exception:
                     pass
+                else:
+                    await db.arun(_log, pid, f"失败现场截图:{shot_url}")
                 raise
             finally:
                 await browser.close()
     except Exception as e:
         kind = _classify(e)
         why, fix = FAIL_GUIDE[kind]
-        current = db.one(
+        current = await db.aone(
             "SELECT submission_state FROM pub_task WHERE id=?", (pid,)) or {}
         if current.get("submission_state") != "not_submitted":
             fix = (
@@ -383,27 +421,62 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
                 "为避免重复发帖，系统不会自动重试"
             )
         fail = {"kind": kind, "why": why, "fix": fix,
-                "err": "自动发布失败，已安全收口",
+                "err": "自动发布没有成功，内容未发出；可重试，或用「一键复制」手动发布",
                 "shot": shot_url, "home": p["home"]}
-        _log(pid, f"❌ {why} → {fix}")
-        db.update("pub_task", pid, {"status": "failed",
-                                    "fail_json": json.dumps(fail, ensure_ascii=False)})
-        notify.push(tid, "pub", {"ok": False, "platform": p["name"],
-                                 "title": payload.get("title") or "", "why": why, "fix": fix})
+        await db.aupdate(
+            "pub_task",
+            pid,
+            {
+                "status": "failed",
+                "fail_json": json.dumps(fail, ensure_ascii=False),
+            },
+        )
+        await db.arun(_log, pid, f"❌ {why} → {fix}")
+        await asyncio.to_thread(
+            notify.push,
+            tid,
+            "pub",
+            {
+                "job_id": payload.get("job_id"),
+                "ok": False,
+                "platform": p["name"],
+                "title": payload.get("title") or "",
+                "why": why,
+                "fix": fix,
+            },
+        )
     else:
         # 发成功自动登记发布台账:T+1/3/7 审查官自动来复盘,不用老板记着
         try:
-            pubtrack.add_entry(tid, p["name"], payload.get("title") or "",
-                               job_id=payload.get("job_id"), source="matrix")
-            _log(pid, "已自动登记发布台账,T+1/3/7 审查官自动复盘")
+            await db.arun(
+                pubtrack.add_entry,
+                tid,
+                p["name"],
+                payload.get("title") or "",
+                job_id=payload.get("job_id"),
+                source="matrix",
+            )
         except Exception as exc:
             log.debug(
                 "发布台账登记跳过 pub_task=%s error_type=%s",
                 pid,
                 type(exc).__name__,
             )
-        notify.push(tid, "pub", {"ok": True, "platform": p["name"],
-                                 "title": payload.get("title") or ""})
+        else:
+            await db.arun(
+                _log, pid, "已自动登记发布台账,T+1/3/7 审查官自动复盘"
+            )
+        await asyncio.to_thread(
+            notify.push,
+            tid,
+            "pub",
+            {
+                "job_id": payload.get("job_id"),
+                "ok": True,
+                "platform": p["name"],
+                "title": payload.get("title") or "",
+            },
+        )
     finally:
         if broadcast:
             broadcast({"type": "pub_update", "task_id": pid})

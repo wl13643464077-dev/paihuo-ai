@@ -363,6 +363,23 @@ def resolve_clip_path(tid: int, name: str) -> str | None:
     return candidate
 
 
+def owned_clip_path(tid: int, stored: str) -> str | None:
+    """把 params_json 里存下的片段路径重新收敛回本租户素材库。
+
+    入队时已校验过,但执行时不能只信库里的字符串:参数被改写或历史数据被污染,
+    都会让成片混进服务器上的任意视频(含他租户素材)。这里按文件名重新解析,
+    并要求解析结果与存下来的路径一致。
+    """
+    if not isinstance(stored, str) or not stored:
+        return None
+    resolved = resolve_clip_path(tid, os.path.basename(stored))
+    if not resolved:
+        return None
+    if os.path.realpath(resolved) != os.path.realpath(stored):
+        return None
+    return resolved
+
+
 def _bounded_media_command(
     profile: str,
     executable: str,
@@ -1142,6 +1159,8 @@ async def build(tvid: int, tid: int, title: str, script: str, images: list,
                 if not done:
                     log.warning("xfade assembly failed returncode=%s", r.returncode)
                     progress("叠化拼装失败,回退简单拼接")
+            except _Cancelled:
+                raise
             except Exception as exc:
                 log.warning(
                     "xfade assembly error_type=%s", type(exc).__name__
@@ -1240,13 +1259,67 @@ async def _append_ending(td: str, title_file: str, end_text: str, segs: list, le
         lens.append(2.2 + XFADE)
 
 
-def _steps_append(tvid: int, msg: str):
-    r = db.one("SELECT steps_json FROM tv_job WHERE id=?", (tvid,))
-    if not r:
-        return
-    steps = db.jloads((r or {}).get("steps_json"), [])
-    steps.append({"t": time.time(), "msg": msg})
-    db.update("tv_job", tvid, {"steps_json": json.dumps(steps, ensure_ascii=False)})
+def _steps_append(
+    tvid: int, msg: str, allowed_statuses: tuple[str, ...] = ("running",)
+) -> bool:
+    ts = time.time()
+    # 追加语义必须完整等待、失败必须向 worker 传播。调用方用 db.arun 把
+    # 整段读改写事务卸载，不能使用只适合可丢覆盖快照的 submit_write。
+    with db.atomic() as c:
+        r = c.execute(
+            "SELECT steps_json,status,billing_status FROM tv_job WHERE id=?",
+            (tvid,),
+        ).fetchone()
+        if (
+            not r
+            or r["status"] not in allowed_statuses
+            or r["billing_status"] != "charged"
+        ):
+            return False
+        steps = db.jloads(r["steps_json"], [])
+        steps.append({"t": ts, "msg": msg})
+        changed = c.execute(
+            "UPDATE tv_job SET steps_json=?,updated_at=? "
+            "WHERE id=? AND status=? AND billing_status='charged'",
+            (
+                json.dumps(steps, ensure_ascii=False),
+                ts,
+                tvid,
+                r["status"],
+            ),
+        )
+        return changed.rowcount == 1
+
+
+def _deliver_job(tvid: int, produced_file: str, script: str) -> bool:
+    """最后步骤与 done 终态同事务提交，外部永远看不到半个交付。"""
+    now = time.time()
+    with db.atomic() as c:
+        row = c.execute(
+            "SELECT steps_json,status,billing_status FROM tv_job WHERE id=?",
+            (tvid,),
+        ).fetchone()
+        if (
+            not row
+            or row["status"] != "running"
+            or row["billing_status"] != "charged"
+        ):
+            return False
+        steps = db.jloads(row["steps_json"], [])
+        steps.append({"t": now, "msg": "交付完成"})
+        changed = c.execute(
+            "UPDATE tv_job SET status='done',billing_status='succeeded',"
+            "video_file=?,script=?,steps_json=?,error=NULL,updated_at=? "
+            "WHERE id=? AND status='running' AND billing_status='charged'",
+            (
+                produced_file,
+                script,
+                json.dumps(steps, ensure_ascii=False),
+                now,
+                tvid,
+            ),
+        )
+        return changed.rowcount == 1
 
 
 def _active_enter(tvid: int):
@@ -1394,6 +1467,7 @@ def settle_failure(tvid: int, message: str,
         points,
         claim,
         f"退回:{label} · {error[:160]}",
+        job_id=row.get("job_id"),
     )
     if settled:
         cleanup_job_assets(tvid, row)
@@ -1461,26 +1535,37 @@ class _Cancelled(Exception):
     pass
 
 
+def _write_hunt_image(path: str, data: bytes) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.write(data)
+
+
 async def run_job(tvid: int, broadcast=None):
     _active_enter(tvid)
     try:
-        row = db.one("SELECT * FROM tv_job WHERE id=?", (tvid,))
+        row = await db.aone("SELECT * FROM tv_job WHERE id=?", (tvid,))
         if not row or row.get("status") != "queued" \
                 or row.get("billing_status") != "charged":
             return
         if _BUILD_SEM.locked():
-            _steps_append(tvid, "排队中:前面还有别的成片在合成,轮到自动开工…")
+            await db.arun(
+                _steps_append,
+                tvid,
+                "排队中:前面还有别的成片在合成,轮到自动开工…",
+                ("queued",),
+            )
         async with _BUILD_SEM:
             # 只有 queued→running 的 CAS 胜者能执行。重复调度、重启恢复和
             # 两个 worker 同时撞上时，其余调用会在产生供应商成本前退出。
-            started = db.execute(
+            started = await db.aexecute(
                 "UPDATE tv_job SET status='running',updated_at=? "
                 "WHERE id=? AND status='queued' AND billing_status='charged'",
                 (time.time(), tvid),
             )
             if started != 1:
                 return
-            row = db.one("SELECT * FROM tv_job WHERE id=?", (tvid,))
+            row = await db.aone("SELECT * FROM tv_job WHERE id=?", (tvid,))
             if not row:
                 return
             await _run_job_inner(
@@ -1492,26 +1577,80 @@ async def run_job(tvid: int, broadcast=None):
             )
     finally:
         _active_leave(tvid)
-        _finalize_requested_delete(tvid)
+        await asyncio.to_thread(_finalize_requested_delete, tvid)
 
 
 async def _run_job_inner(tvid: int, row: dict, p: dict, tid: int, broadcast):
+    loop = asyncio.get_running_loop()
+    step_tail = loop.create_future()
+    step_tail.set_result(True)
+    cancelled = asyncio.Event()
+
+    async def append_after(previous, msg):
+        try:
+            if not await previous or cancelled.is_set():
+                return False
+            persisted = await db.arun(_steps_append, tvid, msg)
+            if not persisted:
+                cancelled.set()
+            return persisted
+        except BaseException:
+            cancelled.set()
+            raise
+
     def progress(msg):
-        state = db.one(
-            "SELECT status,billing_status FROM tv_job WHERE id=?", (tvid,))
-        if not state or state.get("status") != "running" \
-                or state.get("billing_status") != "charged":
+        nonlocal step_tail
+        # 同步 progress 回调只排一个“必须等待”的协程链，不碰 SQLite。链尾会
+        # 在 checkpoint/finally 被 await，保持步骤顺序并传播真实写异常。
+        if step_tail.done():
+            error = step_tail.exception()
+            if error is not None:
+                raise error
+            if not step_tail.result():
+                cancelled.set()
+        if cancelled.is_set():
             raise _Cancelled()
-        _steps_append(tvid, msg)
+        previous = step_tail
+        step_tail = asyncio.create_task(append_after(previous, str(msg)))
         _safe_broadcast(
             broadcast,
             {"type": "tv_step", "tv_id": tvid, "tenant_id": tid, "msg": msg},
         )
 
+    async def checkpoint():
+        if not await step_tail or cancelled.is_set():
+            raise _Cancelled()
+        current = await db.aone(
+            "SELECT status,billing_status FROM tv_job WHERE id=?", (tvid,)
+        )
+        if (
+            not current
+            or current.get("status") != "running"
+            or current.get("billing_status") != "charged"
+        ):
+            cancelled.set()
+            raise _Cancelled()
+
+    async def watch_cancellation():
+        while not cancelled.is_set():
+            await asyncio.sleep(0.5)
+            current = await db.aone(
+                "SELECT status,billing_status FROM tv_job WHERE id=?", (tvid,)
+            )
+            if (
+                not current
+                or current.get("status") != "running"
+                or current.get("billing_status") != "charged"
+            ):
+                cancelled.set()
+                return
+
+    cancellation_watch = asyncio.create_task(watch_cancellation())
     produced_file = None
     try:
         title = (p.get("title") or "").strip()[:40] or "派活出品"
         progress("开工:整理口播稿…")
+        await checkpoint()
         if p.get("topic") and not p.get("script"):
             r = await providers.call_text(
                 3,
@@ -1520,11 +1659,17 @@ async def _run_job_inner(tvid: int, row: dict, p: dict, tid: int, broadcast):
                 timeout=180)
             p["script"] = r["text"].strip().strip("「」\"“”")
         script = p.get("script") or await make_script(title, p.get("body") or "")
+        await checkpoint()
         # V25.3:混剪模式——用户自己的 vlog 片段当画面(原图文成片模式原样保留)
         if p.get("mode") == "clips":
-            clips = [{"path": c} for c in (p.get("clips") or []) if os.path.isfile(c)]
+            clips = []
+            for stored in p.get("clips") or []:
+                owned = owned_clip_path(tid, stored)
+                if owned:
+                    clips.append({"path": owned})
             if not clips:
                 raise ValueError("没有可用的视频片段,先在混剪页上传")
+            await checkpoint()
             out_dir = "tv"
             file = await build_from_clips(tvid, tid, title, script, clips,
                                           p.get("voice_id") or DEFAULT_VOICE, out_dir, progress,
@@ -1551,14 +1696,13 @@ async def _run_job_inner(tvid: int, row: dict, p: dict, tid: int, broadcast):
                     got = await imagehunt._grab_first_ok(cands, 4)
                     for i, (data, _c) in enumerate(got):
                         lp = os.path.join(ASSET_DIR, "tv", f"hunt_{tvid}_{i}.jpg")
-                        os.makedirs(os.path.dirname(lp), exist_ok=True)
-                        with open(lp, "wb") as f:
-                            f.write(data)
+                        await asyncio.to_thread(_write_hunt_image, lp, data)
                         images.append(lp)
                     progress(f"抓到 {len(images)} 张真实图")
                 except Exception:
                     progress("抓图失败，改用纯色底")
             out_dir = f"job{row['job_id']}" if row.get("job_id") else "tv"
+            await checkpoint()
             produced_file = await build(
                 tvid,
                 tid,
@@ -1572,22 +1716,30 @@ async def _run_job_inner(tvid: int, row: dict, p: dict, tid: int, broadcast):
                 end_text=p.get("end_text") or "",
             )
 
-        delivered = db.execute(
-            "UPDATE tv_job SET status='done',billing_status='succeeded',"
-            "video_file=?,script=?,error=NULL,updated_at=? "
-            "WHERE id=? AND status='running' AND billing_status='charged'",
-            (produced_file, script, time.time(), tvid),
-        )
-        if delivered != 1:
-            cleanup_job_assets(tvid, row, produced_file)
+        # build 的最后一个 progress 必须先可靠落库；随后最后步骤与 done 在
+        # 同一事务提交，不能出现“任务已完成但步骤还没写完”的可见窗口。
+        await checkpoint()
+        if not await db.arun(_deliver_job, tvid, produced_file, script):
+            await asyncio.to_thread(
+                cleanup_job_assets, tvid, row, produced_file
+            )
             raise _Cancelled()
-        _cleanup_hunt_assets(tvid)
+        await asyncio.to_thread(_cleanup_hunt_assets, tvid)
 
         # 通知、WebSocket 推送是旁路。数据库中的交付与计费终态已经在上面的
         # 单条条件 UPDATE 中同时提交，旁路故障只能记日志，不能触发退款。
         from . import notify
         try:
-            notify.push(tid, "video", {"title": title, "file": produced_file})
+            await asyncio.to_thread(
+                notify.push,
+                tid,
+                "video",
+                {
+                    "job_id": row.get("job_id"),
+                    "title": title,
+                    "file": produced_file,
+                },
+            )
         except Exception as exc:
             log.error(
                 "tv_job %s notification failed error_type=%s",
@@ -1595,7 +1747,9 @@ async def _run_job_inner(tvid: int, row: dict, p: dict, tid: int, broadcast):
                 type(exc).__name__,
             )
     except _Cancelled:
-        cleanup_job_assets(tvid, row, produced_file)
+        await asyncio.to_thread(
+            cleanup_job_assets, tvid, row, produced_file
+        )
         log.info("tv_job %s cancelled before delivery commit", tvid)
     except Exception as e:
         log.error(
@@ -1603,13 +1757,20 @@ async def _run_job_inner(tvid: int, row: dict, p: dict, tid: int, broadcast):
             tvid,
             type(e).__name__,
         )
-        cleanup_job_assets(tvid, row, produced_file)
+        await asyncio.to_thread(
+            cleanup_job_assets, tvid, row, produced_file
+        )
         public_error = providers.public_failure_message(
             e,
-            "成片任务处理失败，已安全收口，可从原任务免费重试",
+            "成片生成失败，点数已自动退回；可从原任务免费重试",
         )
         try:
-            settle_failure(tvid, public_error, terminal_status="failed")
+            await db.arun(
+                settle_failure,
+                tvid,
+                public_error,
+                terminal_status="failed",
+            )
         except Exception as settlement_exc:
             log.error(
                 "tv_job %s failure settlement failed error_type=%s",
@@ -1617,10 +1778,15 @@ async def _run_job_inner(tvid: int, row: dict, p: dict, tid: int, broadcast):
                 type(settlement_exc).__name__,
             )
     finally:
-        _safe_broadcast(
-            broadcast,
-            {"type": "tv_done", "tv_id": tvid, "tenant_id": tid},
-        )
+        cancellation_watch.cancel()
+        await asyncio.gather(cancellation_watch, return_exceptions=True)
+        try:
+            await step_tail
+        finally:
+            _safe_broadcast(
+                broadcast,
+                {"type": "tv_done", "tv_id": tvid, "tenant_id": tid},
+            )
 
 
 def resume_pending(broadcast):

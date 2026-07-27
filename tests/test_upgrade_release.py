@@ -194,6 +194,44 @@ class UpgradeReleaseCase(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_bootstrap_evidence_comparison_accepts_unicode_paths(self):
+        current = {
+            "bootstrap_stage_attestation_path": (
+                "/var/lib/paihuo-upgrade/派活/attestation.json"
+            ),
+            "bootstrap_stage_attestation_sha256": "a" * 64,
+        }
+        receipt = {"release": str(self.release), **current}
+        with patch.object(
+            upgrade_release,
+            "_bootstrap_stage_evidence",
+            return_value=current,
+        ):
+            verified = upgrade_release._assert_receipt_bootstrap_evidence(
+                receipt=receipt,
+                state=self.state,
+                control_dir=self.control,
+                bootstrap_verifier=lambda _release_id: {},
+            )
+        self.assertEqual(current, verified)
+
+        receipt["bootstrap_stage_attestation_path"] += ".changed"
+        with patch.object(
+            upgrade_release,
+            "_bootstrap_stage_evidence",
+            return_value=current,
+        ):
+            with self.assertRaisesRegex(
+                upgrade_release.UpgradeError,
+                "bootstrap stage evidence changed",
+            ):
+                upgrade_release._assert_receipt_bootstrap_evidence(
+                    receipt=receipt,
+                    state=self.state,
+                    control_dir=self.control,
+                    bootstrap_verifier=lambda _release_id: {},
+                )
+
     def _release(self, name: str, marker: str) -> Path:
         release = self.base / name
         (release / "app").mkdir(parents=True)

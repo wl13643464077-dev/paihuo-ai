@@ -39,18 +39,14 @@ _SCHEMA_IN_RELEASE_ID = re.compile(
 
 DEFAULT_ROOT_FILES = (
     ".gitignore",
-    "PROJECT.md",
     "README.md",
     "requirements.lock.txt",
     "requirements.txt",
     "run.sh",
-    "诊断报告-20260725.md",
-    "诊断报告2-功能与体验-20260725.md",
 )
 DEFAULT_ROOT_DIRS = (
     "app",
     "deploy",
-    "docs",
     "scripts",
     "static",
     "tests",
@@ -58,13 +54,17 @@ DEFAULT_ROOT_DIRS = (
 DEFAULT_DATA_FILES = (
     "data/gate_rules.json",
     "data/departments",
+    "data/industry_knowledge",
 )
 DEFAULT_EMPTY_DIRS = ()
 
 _IMMUTABLE_SEED_PATHS = (
     ("data/departments", "config/departments"),
+    ("data/industry_knowledge", "config/industry_knowledge"),
     ("data/gate_rules.json", "config/gate_rules.default.json"),
 )
+# 与部门配置同构的扁平 JSON 目录:发布制品里必须是不可变种子,不能混入子目录或脚本。
+_FLAT_JSON_SEED_PREFIXES = ("data/departments/", "data/industry_knowledge/")
 _IGNORED_DEPARTMENT_SEED_SOURCES = frozenset(
     {"data/departments/_source_ten.csv"}
 )
@@ -693,15 +693,18 @@ def _map_immutable_seed_entries(entries: Sequence[_Entry]) -> list[_Entry]:
     for entry in entries:
         if entry.path in _IGNORED_DEPARTMENT_SEED_SOURCES:
             continue
-        if entry.path.startswith("data/departments/"):
-            child = entry.path.removeprefix("data/departments/")
+        for prefix in _FLAT_JSON_SEED_PREFIXES:
+            if not entry.path.startswith(prefix):
+                continue
+            child = entry.path.removeprefix(prefix)
             if (
                 "/" in child
                 or entry.kind != "file"
                 or not child.endswith(".json")
             ):
+                seed_name = prefix.removeprefix("data/").rstrip("/")
                 raise ReleaseBuildError(
-                    "department release seed contains an unexpected entry: "
+                    f"{seed_name} release seed contains an unexpected entry: "
                     f"{entry.path}"
                 )
         target = _immutable_payload_path(entry.path)

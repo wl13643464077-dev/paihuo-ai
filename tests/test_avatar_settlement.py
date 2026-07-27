@@ -1,7 +1,9 @@
 import asyncio
+import inspect
 import json
 import os
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -112,6 +114,63 @@ class AvatarSettlementCase(unittest.TestCase):
             )["n"],
         )
 
+    def test_concurrent_heygen_photo_registration_keeps_both_owners(self):
+        """平台级照片登记必须是单事务 RMW，并发租户不能互相覆盖。"""
+        original_registry = avatar._hg_registry
+        old_code_read_barrier = threading.Barrier(2)
+
+        def synchronized_registry_read():
+            # 若实现退回“先读后写”，强制两条 worker 都读到同一旧快照，
+            # 让丢更新稳定复现；事务实现不会调用这个旧 helper。
+            old_code_read_barrier.wait(timeout=2)
+            return original_registry()
+
+        async def scenario():
+            with mock.patch.object(
+                avatar,
+                "_hg_registry",
+                side_effect=synchronized_registry_read,
+            ):
+                await asyncio.gather(
+                    db.arun(avatar.hg_register_photo, "photo-A", 2, 101),
+                    db.arun(avatar.hg_register_photo, "photo-B", 3, 202),
+                )
+
+        asyncio.run(scenario())
+        entries = avatar._hg_registry()
+        self.assertEqual(
+            {"photo-A", "photo-B"},
+            {entry["id"] for entry in entries},
+        )
+        self.assertEqual(2, len(entries))
+
+    def test_cleanup_registry_transaction_preserves_concurrent_upload(self):
+        """清理旧照片与登记新照片并发时，新归属不能被旧快照覆盖。"""
+        avatar.hg_register_photo("photo-old", 2, 101)
+        start = threading.Barrier(2)
+
+        def remove_old():
+            start.wait(timeout=2)
+            avatar._hg_remove_registered_photos({"photo-old"})
+
+        def register_new():
+            start.wait(timeout=2)
+            avatar.hg_register_photo("photo-new", 3, 202)
+
+        async def scenario():
+            await asyncio.gather(
+                db.arun(remove_old),
+                db.arun(register_new),
+            )
+
+        asyncio.run(scenario())
+        entries = avatar._hg_registry()
+        self.assertEqual(["photo-new"], [entry["id"] for entry in entries])
+
+        cleanup_source = inspect.getsource(avatar.hg_cleanup_photos)
+        self.assertIn("_hg_remove_registered_photos", cleanup_source)
+        self.assertNotIn("aset_setting", cleanup_source)
+
     def test_insufficient_balance_does_not_leave_job_or_partial_debit(self):
         from app import main
 
@@ -169,6 +228,39 @@ class AvatarSettlementCase(unittest.TestCase):
             ),
         )
         self.assertEqual(30, billing.balance(2))
+
+    def test_basic_engine_does_not_read_unrelated_heygen_secret(self):
+        """Basic/Kling paths must not depend on decrypting HeyGen credentials."""
+        from app import main, runninghub
+
+        photo = self._asset(2, "photo", ".jpg")
+        voice = self._asset(2, "voice", ".mp3")
+        self._as_tenant(2)
+        job_id = main._create_charged_avatar_job(
+            self._params(
+                engine="basic",
+                photo_name=photo,
+                own_audio_name=voice,
+            ),
+            2,
+        )
+
+        with mock.patch.object(
+            avatar.secureconfig,
+            "get_secret",
+            side_effect=AssertionError("Basic 不应读取 HeyGen 密钥"),
+        ) as read_secret, mock.patch.object(
+            runninghub,
+            "synth",
+            new=mock.AsyncMock(side_effect=avatar.Cancelled()),
+        ), mock.patch.object(
+            avatar,
+            "_cap_audio",
+            side_effect=lambda path, _seconds: path,
+        ):
+            asyncio.run(avatar.run_job(job_id, lambda _event: None))
+
+        read_secret.assert_not_called()
 
     def test_cancel_while_worker_runs_cannot_finish_or_refund_twice(self):
         from app import main

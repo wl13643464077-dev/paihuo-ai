@@ -1,6 +1,7 @@
 """Resource-contained document text extractor. Invoked only as a child process."""
 from __future__ import annotations
 
+import itertools
 import json
 from pathlib import Path
 import sys
@@ -103,9 +104,13 @@ def extract(path: Path, ext: str) -> str:
         presentation = Presentation(str(path))
         if len(presentation.slides) > 200:
             raise ValueError("幻灯片页数超过限制")
-        for number, slide in enumerate(presentation.slides[:100], 1):
+        # python-pptx 的 Slides/Shapes 不支持切片(会抛 AttributeError),必须用
+        # islice 逐项取,否则任何 .pptx 解析都 100% 失败。
+        for number, slide in enumerate(
+            itertools.islice(presentation.slides, 100), 1
+        ):
             _append(parts, f"【第{number}页】")
-            for shape in slide.shapes[:1000]:
+            for shape in itertools.islice(slide.shapes, 1000):
                 if (
                     getattr(shape, "has_text_frame", False)
                     and not _append(parts, shape.text_frame.text)

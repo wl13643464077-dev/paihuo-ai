@@ -88,6 +88,14 @@ PHASES = (
     "normal_healthy",
     "proxy_starting",
 )
+
+
+def _constant_time_text_equal(left: object, right: object) -> bool:
+    """Compare arbitrary Unicode evidence values without leaking contents."""
+    return hmac.compare_digest(
+        str(left).encode("utf-8"),
+        str(right).encode("utf-8"),
+    )
 SAFE_PREFLIGHT_ENV = {
     "CONTENTCREW_PUBLIC_DIR",
     "CONTENTCREW_DB_PATH",
@@ -796,10 +804,7 @@ def _assert_receipt_bootstrap_evidence(
     except (KeyError, OSError, ValueError) as exc:
         raise UpgradeError("committed bootstrap evidence is incomplete") from exc
     for key, value in current.items():
-        if not hmac.compare_digest(
-            str(receipt.get(key) or ""),
-            str(value),
-        ):
+        if not _constant_time_text_equal(receipt.get(key) or "", value):
             raise UpgradeError("committed bootstrap stage evidence changed")
     return current
 

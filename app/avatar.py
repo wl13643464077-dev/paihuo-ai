@@ -81,6 +81,11 @@ def rh_ready() -> bool:
     return runninghub.ready()
 
 
+def _read_bytes(path: str) -> bytes:
+    with open(path, "rb") as handle:
+        return handle.read()
+
+
 def _cap_audio(path: str, max_sec: int) -> str:
     """在提交任一供应商前把音频硬截到已计费时长档（最长 60 秒）。"""
     cap = max(1, min(int(max_sec), 60))
@@ -190,58 +195,159 @@ def _hg_headers():
     return {"X-Api-Key": secureconfig.get_secret("heygen_key")}
 
 
-async def hg_cleanup_photos():
-    """HeyGen 只允许存 3 个照片数字人(photo avatar group),满了就清掉旧组释放槽位.
-    实测有效端点:GET /v2/avatar_group.list?include_public=false 列自己的组,
-    DELETE /v2/photo_avatar/{id}(有look的组)或 /v2/avatar_group/{id}(空组)."""
+HG_PHOTO_REGISTRY = "heygen_photo_registry"
+HG_REGISTRY_MAX = 60
+
+
+def _hg_registry() -> list:
+    return db.jloads(db.get_setting(HG_PHOTO_REGISTRY), []) or []
+
+
+def hg_register_photo(photo_id: str, tenant_id, job_id) -> None:
+    """记下我们上传的照片数字人属于哪个租户的哪个任务。
+
+    HeyGen 的 API key 是平台级的,所有租户共用同一批照片槽位。没有这份归属登记,
+    清理时就分不清哪个组是谁的——那正是此前"清理即删光全平台数字人"的根因。
+    """
+    if not photo_id:
+        return
+    with db.atomic() as connection:
+        row = connection.execute(
+            "SELECT value FROM app_setting WHERE key=?",
+            (HG_PHOTO_REGISTRY,),
+        ).fetchone()
+        entries = db.jloads(row["value"] if row else None, []) or []
+        entries = [
+            entry for entry in entries
+            if isinstance(entry, dict) and entry.get("id") != photo_id
+        ]
+        entries.append({
+            "id": str(photo_id),
+            "tenant_id": tenant_id,
+            "job_id": job_id,
+            "ts": time.time(),
+        })
+        connection.execute(
+            "INSERT INTO app_setting(key,value,updated_at) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
+            "updated_at=excluded.updated_at",
+            (
+                HG_PHOTO_REGISTRY,
+                json.dumps(entries[-HG_REGISTRY_MAX:], ensure_ascii=False),
+                time.time(),
+            ),
+        )
+
+
+def _hg_active_job_ids() -> set:
+    rows = db.q(
+        "SELECT id FROM avatar_job WHERE status IN ('queued','running')"
+    )
+    return {r["id"] for r in rows}
+
+
+def _hg_remove_registered_photos(photo_ids) -> None:
+    """Remove only confirmed supplier deletions from the latest registry."""
+    removed = {str(photo_id) for photo_id in photo_ids if photo_id}
+    if not removed:
+        return
+    with db.atomic() as connection:
+        row = connection.execute(
+            "SELECT value FROM app_setting WHERE key=?",
+            (HG_PHOTO_REGISTRY,),
+        ).fetchone()
+        entries = db.jloads(row["value"] if row else None, []) or []
+        remaining = [
+            entry for entry in entries
+            if not isinstance(entry, dict)
+            or str(entry.get("id") or "") not in removed
+        ]
+        connection.execute(
+            "INSERT INTO app_setting(key,value,updated_at) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
+            "updated_at=excluded.updated_at",
+            (
+                HG_PHOTO_REGISTRY,
+                json.dumps(remaining[-HG_REGISTRY_MAX:], ensure_ascii=False),
+                time.time(),
+            ),
+        )
+
+
+async def hg_cleanup_photos() -> int:
+    """释放照片槽位:只删我们登记过、且其任务已结束的旧组。
+
+    绝不碰未登记的组——它们可能属于其他租户正在使用的数字人,或是老板在 HeyGen
+    后台手工创建的形象。没有可安全删除的对象时返回 0,由调用方给出明确提示,
+    而不是靠删别人的东西来腾位置。
+    """
+    registry = await db.arun(_hg_registry)
+    if not registry:
+        log.info("heygen cleanup skipped: no owned photo avatars recorded")
+        return 0
+    active = await db.arun(_hg_active_job_ids)
+    # 任务仍在排队/执行中的照片不能删,否则会打断在途成片。
+    candidates = [e for e in registry if e.get("job_id") not in active]
+    if not candidates:
+        log.info("heygen cleanup skipped: all owned photo avatars are in use")
+        return 0
+    candidates.sort(key=lambda e: e.get("ts") or 0)     # 最旧的先释放
+    removed: set = set()
+    headers = await db.arun(_hg_headers)
     try:
         async with httpx.AsyncClient(timeout=60) as cli:
-            r = await cli.get(f"{HEYGEN_API}/v2/avatar_group.list",
-                              params={"include_public": "false"}, headers=_hg_headers())
-            groups = ((r.json().get("data") or {}).get("avatar_group_list")) or []
-            n = 0
-            for g in groups:
-                gid = g.get("id")
+            for entry in candidates:
+                gid = entry.get("id")
                 if not gid:
                     continue
                 for path in (f"{HEYGEN_API}/v2/photo_avatar/{gid}",
                              f"{HEYGEN_API}/v2/avatar_group/{gid}"):
                     try:
-                        rr = await cli.delete(path, headers=_hg_headers())
+                        rr = await cli.delete(path, headers=headers)
                         if rr.status_code == 200 and (rr.json().get("code") == 100):
-                            n += 1
+                            removed.add(gid)
                             break
                     except Exception:
                         pass
-            log.info("heygen cleaned %d/%d old photo avatar groups", n, len(groups))
+                if removed:
+                    break                    # 腾出一个槽位就够本次使用
     except Exception as exc:
-        log.warning(
-            "heygen cleanup failed error_type=%s", type(exc).__name__
-        )
+        log.warning("heygen cleanup failed error_type=%s", type(exc).__name__)
+    if removed:
+        await db.arun(_hg_remove_registered_photos, removed)
+    log.info("heygen released %d owned photo avatar slot(s)", len(removed))
+    return len(removed)
 
 
-async def hg_upload_talking_photo(photo_path: str, _retry: bool = True) -> str:
+async def hg_upload_talking_photo(photo_path: str, tenant_id=None, job_id=None,
+                                  _retry: bool = True) -> str:
     ext = os.path.splitext(photo_path)[1].lower()
     ctype = "image/png" if ext == ".png" else "image/jpeg"
-    with open(photo_path, "rb") as f:
-        data = f.read()
+    data = await asyncio.to_thread(_read_bytes, photo_path)
+    headers = await db.arun(_hg_headers)
     async with httpx.AsyncClient(timeout=120) as cli:
         r = await cli.post(f"{HEYGEN_UPLOAD}/v1/talking_photo",
-                           headers={**_hg_headers(), "Content-Type": ctype}, content=data)
+                           headers={**headers, "Content-Type": ctype}, content=data)
         d = r.json()
         tid = ((d.get("data") or {}).get("talking_photo_id")) or ((d.get("data") or {}).get("id"))
         if tid:
+            await db.arun(hg_register_photo, tid, tenant_id, job_id)
             return tid
         blob = json.dumps(d).lower()
         if "exceeded" in blob or "limit" in blob or "401028" in blob:
-            # 照片槽位满(HeyGen 只允许3个照片数字人)——清旧组重试一次,不是余额问题
-            if _retry:
-                await hg_cleanup_photos()
-                return await hg_upload_talking_photo(photo_path, _retry=False)
-            raise providers.ProviderError("HeyGen 照片槽位已满且清理无效,请到 app.heygen.com 手动删除旧照片数字人")
+            # 照片槽位满(HeyGen 只允许3个照片数字人)——只回收我们自己且已结束任务的组。
+            if _retry and await hg_cleanup_photos():
+                return await hg_upload_talking_photo(
+                    photo_path, tenant_id, job_id, _retry=False
+                )
+            raise providers.ProviderError(
+                "HeyGen 照片槽位已满,且没有可安全回收的旧数字人"
+                "(其余槽位仍被进行中的任务占用)。请稍后重试,"
+                "或到 app.heygen.com 手动删除不再需要的照片数字人"
+            )
         if "credit" in blob or "insufficient" in blob:
             # 真·余额不足才标记耗尽,走可灵兜底
-            db.set_setting("heygen_exhausted", "1")
+            await db.aset_setting("heygen_exhausted", "1")
             raise providers.ProviderError("HeyGen 余额不足,请充值")
         raise providers.ProviderError("HeyGen 照片上传失败，请稍后重试")
 
@@ -249,11 +355,11 @@ async def hg_upload_talking_photo(photo_path: str, _retry: bool = True) -> str:
 async def hg_upload_audio(audio_path: str) -> str:
     ext = os.path.splitext(audio_path)[1].lower()
     ctype = {"mp3": "audio/mpeg", "m4a": "audio/mp4", "wav": "audio/wav"}.get(ext.lstrip("."), "audio/mpeg")
-    with open(audio_path, "rb") as f:
-        data = f.read()
+    data = await asyncio.to_thread(_read_bytes, audio_path)
+    headers = await db.arun(_hg_headers)
     async with httpx.AsyncClient(timeout=180) as cli:
         r = await cli.post(f"{HEYGEN_UPLOAD}/v1/asset",
-                           headers={**_hg_headers(), "Content-Type": ctype}, content=data)
+                           headers={**headers, "Content-Type": ctype}, content=data)
         d = r.json()
         aid = ((d.get("data") or {}).get("id")) or ((d.get("data") or {}).get("asset_id"))
         if not aid:
@@ -263,11 +369,12 @@ async def hg_upload_audio(audio_path: str) -> str:
 
 async def hg_voice_id() -> str:
     """默认中文音色:老板可在设置 heygen_voice_id 覆盖;否则取声音列表里第一个中文音色."""
-    vid = db.get_setting("heygen_voice_id")
+    vid = await db.aget_setting("heygen_voice_id")
     if vid:
         return vid
+    headers = await db.arun(_hg_headers)
     async with httpx.AsyncClient(timeout=60) as cli:
-        r = await cli.get(f"{HEYGEN_API}/v2/voices", headers=_hg_headers())
+        r = await cli.get(f"{HEYGEN_API}/v2/voices", headers=headers)
         for v in ((r.json().get("data") or {}).get("voices")) or []:
             lang = (v.get("language") or "").lower()
             if "chinese" in lang or "zh" in lang or "mandarin" in lang:
@@ -286,9 +393,10 @@ async def hg_generate(talking_photo_id: str, script: str, audio_asset_id: str = 
             "dimension": {"width": 720, "height": 1280} if portrait
             else {"width": 1280, "height": 720},
             "use_avatar_iv_model": True, "title": "BossAI 数字人"}
+    headers = await db.arun(_hg_headers)
     async with httpx.AsyncClient(timeout=120) as cli:
         r = await cli.post(f"{HEYGEN_API}/v2/video/generate",
-                           headers={**_hg_headers(), "Content-Type": "application/json"},
+                           headers={**headers, "Content-Type": "application/json"},
                            json=body)
         d = r.json()
         vid = (d.get("data") or {}).get("video_id")
@@ -299,13 +407,14 @@ async def hg_generate(talking_photo_id: str, script: str, audio_asset_id: str = 
 
 async def hg_poll(video_id: str, progress, timeout: int = 1800, job_id: int = None) -> str:
     t0 = time.time()
+    headers = await db.arun(_hg_headers)
     async with httpx.AsyncClient(timeout=60) as cli:
         while time.time() - t0 < timeout:
             await asyncio.sleep(15)
-            if job_id and cancelled(job_id):
+            if job_id and await db.arun(cancelled, job_id):
                 raise Cancelled()
             r = await cli.get(f"{HEYGEN_API}/v1/video_status.get",
-                              headers=_hg_headers(), params={"video_id": video_id})
+                              headers=headers, params={"video_id": video_id})
             d = (r.json().get("data") or {})
             st = d.get("status", "")
             if st == "completed":
@@ -1901,6 +2010,27 @@ def save_cloned_voices(voices: list):
                    json.dumps(voices[:10], ensure_ascii=False))
 
 
+def _prepend_cloned_voice(tenant_id: int, voice: dict):
+    """原子追加克隆声音，避免两个并发成功结果互相覆盖。"""
+    key = f"cloned_voices:{int(tenant_id)}"
+    now = time.time()
+    with db.atomic() as connection:
+        row = connection.execute(
+            "SELECT value FROM app_setting WHERE key=?", (key,)
+        ).fetchone()
+        voices = db.jloads(row["value"] if row else None, []) or []
+        voice_id = voice.get("id")
+        voices = [voice] + [
+            item for item in voices if item.get("id") != voice_id
+        ]
+        connection.execute(
+            "INSERT INTO app_setting(key,value,updated_at) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
+            "updated_at=excluded.updated_at",
+            (key, json.dumps(voices[:10], ensure_ascii=False), now),
+        )
+
+
 # ---------- 照片卡槽(按租户存,用户可随意增删) ----------
 
 def saved_photos() -> list:
@@ -1983,13 +2113,23 @@ async def clone_voice(sample_path: str, label: str, save: bool = True) -> dict:
     """
     import re
     import uuid as _uuid
-    base, key = providers.yunwu_conf()
+    from . import auth
+    tenant_id = auth.tenant_id()
+    base, key = await db.arun(providers.yunwu_conf)
+    sample = await asyncio.to_thread(_read_bytes, sample_path)
     async with httpx.AsyncClient(timeout=180) as cli:
-        with open(sample_path, "rb") as f:
-            r = await cli.post(f"{base}/minimax/v1/files",
-                               headers={"Authorization": f"Bearer {key}"},
-                               files={"file": (os.path.basename(sample_path), f, "audio/mpeg")},
-                               data={"purpose": "voice_clone"})
+        r = await cli.post(
+            f"{base}/minimax/v1/files",
+            headers={"Authorization": f"Bearer {key}"},
+            files={
+                "file": (
+                    os.path.basename(sample_path),
+                    sample,
+                    "audio/mpeg",
+                )
+            },
+            data={"purpose": "voice_clone"},
+        )
         d = r.json()
         fid = ((d.get("file") or {}).get("file_id"))
         if not fid:
@@ -2012,15 +2152,13 @@ async def clone_voice(sample_path: str, label: str, save: bool = True) -> dict:
         "created_at": time.time(),
     }
     if save:
-        voices = cloned_voices()
-        voices.insert(0, voice)
-        save_cloned_voices(voices)
+        await db.arun(_prepend_cloned_voice, tenant_id, voice)
     return voice
 
 
 async def tts(text: str, voice_id: str) -> str:
     """海螺配音,返回 https 音频 URL(可灵只认 https 音频)."""
-    base, key = providers.yunwu_conf()
+    base, key = await db.arun(providers.yunwu_conf)
     async with httpx.AsyncClient(timeout=300) as cli:
         r = await cli.post(f"{base}/minimax/v1/t2a_v2",
                            headers={"Authorization": f"Bearer {key}"},
@@ -2036,9 +2174,9 @@ async def tts(text: str, voice_id: str) -> str:
 
 async def kling_avatar(image_url: str, audio_url: str, prompt: str = "") -> str:
     """提交可灵数字人任务,返回 task_id。pro 模式口型/画面同步更准."""
-    base, key = providers.yunwu_conf()
+    base, key = await db.arun(providers.yunwu_conf)
     body = {"image": image_url, "sound_file": audio_url,
-            "mode": db.get_setting("kling_mode") or "pro"}
+            "mode": await db.aget_setting("kling_mode") or "pro"}
     if prompt:
         body["prompt"] = prompt[:200]
     async with httpx.AsyncClient(timeout=120) as cli:
@@ -2053,12 +2191,12 @@ async def kling_avatar(image_url: str, audio_url: str, prompt: str = "") -> str:
 
 async def kling_poll(task_id: str, progress, timeout: int = 1500, job_id: int = None) -> str:
     """轮询直到成片,返回视频 URL."""
-    base, key = providers.yunwu_conf()
+    base, key = await db.arun(providers.yunwu_conf)
     t0 = time.time()
     async with httpx.AsyncClient(timeout=60) as cli:
         while time.time() - t0 < timeout:
             await asyncio.sleep(12)
-            if job_id and cancelled(job_id):
+            if job_id and await db.arun(cancelled, job_id):
                 raise Cancelled()
             r = await cli.get(f"{base}/kling/v1/videos/avatar/image2video/{task_id}",
                               headers={"Authorization": f"Bearer {key}"})
@@ -2158,14 +2296,14 @@ def prepare_retry(job_id: int, tenant_id: int) -> bool:
 
 
 async def run_job(job_id: int, broadcast):
-    j = db.one(
+    j = await db.aone(
         "SELECT * FROM avatar_job WHERE id=? AND deleted_at IS NULL", (job_id,)
     )
     if not j:
         return
     # 只有 queued→running 的 CAS 胜者可以开工。取消接口与 worker 同时撞上时，
     # cancelled 不会再被普通 UPDATE 覆盖回 running。
-    started = db.execute(
+    started = await db.aexecute(
         "UPDATE avatar_job SET status='running',updated_at=? "
         "WHERE id=? AND status='queued' "
         "AND billing_status IN ('charged','included') AND deleted_at IS NULL",
@@ -2173,7 +2311,7 @@ async def run_job(job_id: int, broadcast):
     )
     if started != 1:
         return
-    j = db.one(
+    j = await db.aone(
         "SELECT * FROM avatar_job WHERE id=? AND deleted_at IS NULL", (job_id,)
     )
     if not j:
@@ -2182,73 +2320,118 @@ async def run_job(job_id: int, broadcast):
     steps = []
     temporary_audio_paths: list[str] = []
 
-    def cap_for_job(source: str) -> str:
-        capped = _cap_audio(source, int(p.get("duration") or 30))
+    async def cap_for_job(source: str) -> str:
+        capped = await asyncio.to_thread(
+            _cap_audio, source, int(p.get("duration") or 30)
+        )
         if os.path.realpath(capped) != os.path.realpath(source):
             temporary_audio_paths.append(capped)
         return capped
 
     def progress(kind, label=""):
         steps.append({"k": kind, "l": str(label)[:300], "ts": time.time()})
-        db.update("avatar_job", job_id, {"steps_json": json.dumps(steps, ensure_ascii=False)})
-        broadcast({"type": "avatar_step", "job_id": job_id, "step": steps[-1], "n": len(steps)})
+        # 在事件循环上被调用;写锁竞争时同步写库会冻结全部协程,故进 db 线程池。
+        # 快照先序列化(steps 之后还会被改),整体重写语义下丢一帧无碍。
+        snapshot = json.dumps(steps, ensure_ascii=False)
+        db.submit_write(db.update, "avatar_job", job_id, {"steps_json": snapshot})
+        broadcast({
+            "type": "avatar_step",
+            "tenant_id": j.get("tenant_id") or 1,
+            "job_id": job_id,
+            "step": steps[-1],
+            "n": len(steps),
+        })
 
-    broadcast({"type": "avatar_update", "job_id": job_id})
+    broadcast({
+        "type": "avatar_update",
+        "tenant_id": j.get("tenant_id") or 1,
+        "job_id": job_id,
+    })
     try:
-        if cancelled(job_id):
+        if await db.arun(cancelled, job_id):
             raise Cancelled()
         picked = p.get("engine") if p.get("engine") in ("heygen", "kling", "basic") else ""
-        eng = picked or engine_name()
-        if eng == "heygen" and not secureconfig.get_secret("heygen_key"):
-            eng = "kling"
-        elif eng == "heygen" and db.get_setting("heygen_exhausted"):
-            if picked == "heygen":
-                db.set_setting("heygen_exhausted", None)  # 明确点了就再试一次(可能已充值)
-                progress("start", "尝试 HeyGen(若仍提示额度用完,请充值或改基础版/可灵)…")
-            else:
+        eng = picked or await db.arun(engine_name)
+        if eng == "heygen":
+            heygen_ready = await db.arun(secureconfig.get_secret, "heygen_key")
+            if not heygen_ready:
                 eng = "kling"
-        photo_path = asset_path(p["photo_name"], {"photo"}, j.get("tenant_id") or 1)
+            elif await db.aget_setting("heygen_exhausted"):
+                if picked == "heygen":
+                    # 明确点了就再试一次(可能已充值)
+                    await db.aset_setting("heygen_exhausted", None)
+                    progress("start", "尝试 HeyGen(若仍提示额度用完,请充值或改基础版/可灵)…")
+                else:
+                    eng = "kling"
+        photo_path = await db.arun(
+            asset_path, p["photo_name"], {"photo"}, j.get("tenant_id") or 1
+        )
         own_audio = p.get("own_audio_name")
         if eng == "basic":
             from . import runninghub
             if own_audio:
-                audio_path = asset_path(own_audio, {"voice"}, j.get("tenant_id") or 1)
-                db.update("avatar_job", job_id, {"audio_file": f"/files/avatar-public/{own_audio}"})
+                audio_path = await db.arun(
+                    asset_path, own_audio, {"voice"}, j.get("tenant_id") or 1
+                )
+                await db.aupdate(
+                    "avatar_job",
+                    job_id,
+                    {"audio_file": f"/files/avatar-public/{own_audio}"},
+                )
             else:
                 progress("start", f"配音中(音色:{p.get('voice_label', '')})…")
                 audio_url = await tts(p["script"], p["voice_id"])
-                pub = save_public(
-                    await _download_supplier_audio(audio_url), ".mp3"
+                pub = await asyncio.to_thread(
+                    save_public,
+                    await _download_supplier_audio(audio_url),
+                    ".mp3",
                 )
                 audio_path = os.path.join(PUBLIC_DIR, pub["name"])
-                db.update("avatar_job", job_id, {"audio_file": f"/files/avatar-public/{pub['name']}"})
-            audio_path = cap_for_job(audio_path)
+                await db.aupdate(
+                    "avatar_job",
+                    job_id,
+                    {"audio_file": f"/files/avatar-public/{pub['name']}"},
+                )
+            audio_path = await cap_for_job(audio_path)
             url = await runninghub.synth(photo_path, audio_path, progress)
         elif eng == "heygen":
             try:
                 progress("start", "HeyGen 引擎:上传数字人照片…")
-                tp_id = await hg_upload_talking_photo(photo_path)
+                tp_id = await hg_upload_talking_photo(
+                    photo_path, tenant_id=j.get("tenant_id"), job_id=job_id
+                )
                 audio_asset = None
                 if own_audio:
                     progress("start", "上传您的原声录音(成片就是您本人的声音)…")
-                    audio_path = cap_for_job(
-                        asset_path(
-                            own_audio, {"voice"}, j.get("tenant_id") or 1
+                    audio_path = await cap_for_job(
+                        await db.arun(
+                            asset_path,
+                            own_audio,
+                            {"voice"},
+                            j.get("tenant_id") or 1,
                         )
                     )
                     audio_asset = await hg_upload_audio(audio_path)
-                    db.update("avatar_job", job_id,
-                              {"audio_file": f"/files/avatar-public/{own_audio}"})
+                    await db.aupdate(
+                        "avatar_job",
+                        job_id,
+                        {"audio_file": f"/files/avatar-public/{own_audio}"},
+                    )
                 else:
                     progress("start", f"海螺配音中(音色:{p.get('voice_label', '')})…")
                     audio_url = await tts(p["script"], p["voice_id"])
-                    pub = save_public(
-                        await _download_supplier_audio(audio_url), ".mp3"
+                    pub = await asyncio.to_thread(
+                        save_public,
+                        await _download_supplier_audio(audio_url),
+                        ".mp3",
                     )
-                    db.update("avatar_job", job_id,
-                              {"audio_file": f"/files/avatar-public/{pub['name']}"})
+                    await db.aupdate(
+                        "avatar_job",
+                        job_id,
+                        {"audio_file": f"/files/avatar-public/{pub['name']}"},
+                    )
                     progress("start", "配音上传 HeyGen…")
-                    audio_path = cap_for_job(
+                    audio_path = await cap_for_job(
                         os.path.join(PUBLIC_DIR, pub["name"])
                     )
                     audio_asset = await hg_upload_audio(audio_path)
@@ -2265,29 +2448,44 @@ async def run_job(job_id: int, broadcast):
             if own_audio:
                 # 本人原声:直接用上传的录音作为可灵的音源(公网URL,可灵会驱动口型)
                 progress("start", "用您上传的原声驱动口型…")
-                audio_path = cap_for_job(
-                    asset_path(
-                        own_audio, {"voice"}, j.get("tenant_id") or 1
+                audio_path = await cap_for_job(
+                    await db.arun(
+                        asset_path,
+                        own_audio,
+                        {"voice"},
+                        j.get("tenant_id") or 1,
                     )
                 )
-                audio_url = f"{public_base()}/{os.path.basename(audio_path)}"
-                db.update("avatar_job", job_id,
-                          {"audio_file": f"/files/avatar-public/{own_audio}"})
+                audio_url = (
+                    f"{await db.arun(public_base)}/{os.path.basename(audio_path)}"
+                )
+                await db.aupdate(
+                    "avatar_job",
+                    job_id,
+                    {"audio_file": f"/files/avatar-public/{own_audio}"},
+                )
             else:
                 # 系统/克隆音色配音(海螺返回 https URL)
                 progress("start", f"海螺配音中(音色:{p.get('voice_label', p.get('voice_id'))})…")
                 audio_url = await tts(p["script"], p["voice_id"])
-                pub = save_public(
-                    await _download_supplier_audio(audio_url), ".mp3"
+                pub = await asyncio.to_thread(
+                    save_public,
+                    await _download_supplier_audio(audio_url),
+                    ".mp3",
                 )
-                audio_path = cap_for_job(
+                audio_path = await cap_for_job(
                     os.path.join(PUBLIC_DIR, pub["name"])
                 )
-                audio_url = f"{public_base()}/{os.path.basename(audio_path)}"
-                db.update("avatar_job", job_id,
-                          {"audio_file": f"/files/avatar-public/{pub['name']}"})
+                audio_url = (
+                    f"{await db.arun(public_base)}/{os.path.basename(audio_path)}"
+                )
+                await db.aupdate(
+                    "avatar_job",
+                    job_id,
+                    {"audio_file": f"/files/avatar-public/{pub['name']}"},
+                )
                 progress("done", "配音完成")
-            photo_url = f"{public_base()}/{p['photo_name']}"
+            photo_url = f"{await db.arun(public_base)}/{p['photo_name']}"
             # 2) 提交可灵数字人
             progress("start", "提交可灵数字人任务(照片+配音→对口型)…")
             tid = await kling_avatar(photo_url, audio_url, p.get("prompt", ""))
@@ -2306,7 +2504,7 @@ async def run_job(job_id: int, broadcast):
             )
         except (ValueError, httpx.HTTPError) as exc:
             raise providers.ProviderError("供应商成片下载失败，请稍后重试") from exc
-        delivered = db.execute(
+        delivered = await db.aexecute(
             "UPDATE avatar_job SET status='done',"
             "billing_status=CASE WHEN billing_status='charged' "
             "THEN 'succeeded' ELSE 'included' END,"
@@ -2322,15 +2520,31 @@ async def run_job(job_id: int, broadcast):
             except OSError:
                 pass
             raise Cancelled()
-        db.insert("asset", {"type": "avatar_video", "tenant_id": j.get("tenant_id") or 1,
-                            "payload_json": json.dumps(
-            {"title": (p.get("script") or "")[:30], "job_id": job_id,
-             "file": f"/files/avatar/avatar_{job_id}.mp4"}, ensure_ascii=False)})
+        await db.ainsert(
+            "asset",
+            {
+                "type": "avatar_video",
+                "tenant_id": j.get("tenant_id") or 1,
+                "payload_json": json.dumps(
+                    {
+                        "title": (p.get("script") or "")[:30],
+                        "job_id": job_id,
+                        "file": f"/files/avatar/avatar_{job_id}.mp4",
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        )
         progress("done", "🎬 数字人视频交付!")
     except Cancelled:
         log.info("avatar job %s cancelled by user", job_id)
         try:
-            settle_failure(job_id, "老板已取消", terminal_status="cancelled")
+            await db.arun(
+                settle_failure,
+                job_id,
+                "老板已取消",
+                terminal_status="cancelled",
+            )
         except Exception as exc:
             log.error(
                 "avatar job %s cancellation settlement failed error_type=%s",
@@ -2345,10 +2559,15 @@ async def run_job(job_id: int, broadcast):
         )
         public_error = providers.public_failure_message(
             e,
-            "数字人任务处理失败，已安全收口，可从原任务免费重试",
+            "数字人视频生成失败，点数已自动退回；可从原任务免费重试",
         )
         try:
-            settle_failure(job_id, public_error, terminal_status="failed")
+            await db.arun(
+                settle_failure,
+                job_id,
+                public_error,
+                terminal_status="failed",
+            )
         except Exception as exc:
             log.error(
                 "avatar job %s failure settlement failed error_type=%s",
@@ -2374,7 +2593,13 @@ async def run_job(job_id: int, broadcast):
                     "avatar temporary audio cleanup failed job=%s",
                     job_id,
                 )
-        broadcast({"type": "avatar_update", "job_id": job_id})
+        # 进度是异步落库的;结束前冲刷,保证终态可见时步骤记录已完整。
+        await db.adrain()
+        broadcast({
+            "type": "avatar_update",
+            "tenant_id": j.get("tenant_id") or 1,
+            "job_id": job_id,
+        })
 
 
 def resume_pending(broadcast):

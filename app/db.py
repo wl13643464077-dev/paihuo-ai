@@ -10,6 +10,10 @@ DB_PATH = os.environ.get(
     "CONTENTCREW_DB_PATH",
     os.path.join(os.path.dirname(__file__), "..", "data", "contentcrew.db"),
 )
+class StaleWriteError(RuntimeError):
+    """异步写池发现目标库已被切换;该快照写应被丢弃而非执行代际切换。"""
+
+
 _init_lock = threading.RLock()
 _thread = threading.local()
 # ``_conn`` remains the process anchor for backward-compatible lifecycle checks
@@ -20,7 +24,13 @@ _conn = None
 _conn_path = None
 _connection_generation = 0
 _all_connections: set[sqlite3.Connection] = set()
-LATEST_SCHEMA_VERSION = 47
+# Serializes a DB_PATH generation switch with async-pool selection.  It is
+# deliberately separate from ``_init_lock``: switching drains old workers
+# before taking the schema lock, because a queued worker may still need that
+# schema lock to finish.
+_generation_lock = threading.RLock()
+_generation_switching = threading.Event()
+LATEST_SCHEMA_VERSION = 50
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version(
@@ -163,28 +173,44 @@ def _validate_migrated_database(c) -> None:
         "job": {
             "id", "brief_json", "mode", "status", "current_idx", "tenant_id",
             "billing_status", "billing_points", "retry_count", "deleted_at",
+            "deleted_by", "delete_reason", "created_by",
             "created_at", "updated_at",
         },
         "task": {
             "id", "emp_idx", "brief_json", "status", "tenant_id",
             "billing_status", "billing_points", "retry_count", "deleted_at",
+            "deleted_by", "delete_reason", "created_by",
+        },
+        "station_run": {
+            "id", "job_id", "station_idx", "status", "reviewed_by",
+        },
+        "account_profile": {
+            "id", "tenant_id", "name", "deleted_at", "deleted_by",
+            "delete_reason",
+        },
+        "asset": {
+            "id", "tenant_id", "type", "deleted_at", "deleted_by",
+            "delete_reason",
+        },
+        "schedule": {
+            "id", "tenant_id", "name", "enabled", "fail_streak",
         },
         "knowledge": {"id", "tenant_id", "title", "content", "deleted_at"},
         "avatar_job": {
             "id", "tenant_id", "params_json", "status", "billing_status",
-            "retry_count", "deleted_at",
+            "retry_count", "deleted_at", "created_by",
         },
         "meeting": {
             "id", "tenant_id", "question", "status", "phase",
-            "billing_status", "retry_count",
+            "billing_status", "retry_count", "created_by",
         },
         "tv_job": {
             "id", "tenant_id", "params_json", "status", "billing_status",
-            "retry_count",
+            "retry_count", "created_by",
         },
         "tool_job": {
             "id", "tenant_id", "kind", "status", "billing_status",
-            "retry_count", "retry_started_at",
+            "retry_count", "retry_started_at", "created_by",
         },
         "pub_task": {
             "id", "tenant_id", "platform", "status", "retry_count",
@@ -192,14 +218,28 @@ def _validate_migrated_database(c) -> None:
         },
         "notification": {
             "id", "tenant_id", "kind", "title", "body", "link",
-            "read_at", "created_at",
+            "job_id", "user_id", "read_by", "read_at", "created_at",
         },
         "funnel_event": {
             "day", "event", "dimension", "tenant_id", "actor_hash", "hits",
             "first_at", "last_at",
         },
         "billing_operation": {
-            "op_key", "tenant_id", "action", "points", "status",
+            "op_key", "tenant_id", "job_id", "action", "points", "status",
+        },
+        "billing_log": {
+            "id", "tenant_id", "job_id", "delta", "balance", "reason",
+        },
+        "censor_log": {
+            "id", "tenant_id", "job_id", "kind", "title", "report",
+        },
+        "purchase_intent": {
+            "id", "tenant_id", "created_by", "request_key",
+            "plan_key", "period_key", "plan_name", "period_label",
+            "quoted_price", "quoted_points", "contact", "customer_note",
+            "status", "handler_note", "handled_by", "contacted_at",
+            "lost_at", "paid_at", "subscription_op_key", "receipt_json",
+            "created_at", "updated_at",
         },
         "wechat_draft_delivery": {
             "id", "tenant_id", "job_id", "request_hash", "status",
@@ -216,6 +256,24 @@ def _validate_migrated_database(c) -> None:
         if table not in tables:
             raise RuntimeError(f"数据库迁移后结构不完整：缺少核心表 {table}")
         _require_columns(c, table, required, "迁移后")
+    indexes = {
+        str(row["name"])
+        for row in c.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        )
+    }
+    required_indexes = {
+        "idx_purchase_intent_request",
+        "idx_purchase_intent_owner_created",
+        "idx_purchase_intent_admin_status",
+        "idx_purchase_intent_subscription_op",
+    }
+    missing_indexes = sorted(required_indexes - indexes)
+    if missing_indexes:
+        raise RuntimeError(
+            "数据库迁移后结构不完整：purchase_intent 缺少索引 "
+            + ",".join(missing_indexes)
+        )
 
 
 def _initialize_anchor():
@@ -273,6 +331,7 @@ def _initialize_anchor():
         CREATE TABLE IF NOT EXISTS notification(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           tenant_id INTEGER NOT NULL,
+          job_id INTEGER,
           kind TEXT NOT NULL,
           title TEXT NOT NULL,
           body TEXT NOT NULL DEFAULT '',
@@ -349,6 +408,13 @@ def _initialize_anchor():
         _add_column(_conn, "avatar_job", "billing_points", "REAL")
         _add_column(_conn, "employee_config", "enabled", "INTEGER NOT NULL DEFAULT 1")
         _add_column(_conn, "schedule", "claim_until", "REAL")
+        # 连续非计费失败要累计,静默 10 分钟重试一天 144 次老板却毫不知情
+        _add_column(_conn, "schedule", "fail_streak",
+                    "INTEGER NOT NULL DEFAULT 0")
+        # 通知定向:user_id 为空=租户广播;read_by 存广播的按人已读集合
+        # (逗号包裹串,如 ",5,20,",instr 即可判含),财务类通知只发企业主。
+        _add_column(_conn, "notification", "user_id", "INTEGER")
+        _add_column(_conn, "notification", "read_by", "TEXT")
         _add_column(_conn, "schedule", "claim_token", "TEXT")
         for col in ("model_text", "model_image"):  # v6 迁移:员工级模型路由
             _add_column(_conn, "employee_config", col, "TEXT")
@@ -442,12 +508,14 @@ def _initialize_anchor():
         CREATE TABLE IF NOT EXISTS billing_log(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           tenant_id INTEGER NOT NULL,
+          job_id INTEGER,
           delta REAL NOT NULL, balance REAL NOT NULL,
           reason TEXT, created_at REAL, updated_at REAL
         );
         CREATE TABLE IF NOT EXISTS billing_operation(
           op_key TEXT PRIMARY KEY,
           tenant_id INTEGER NOT NULL,
+          job_id INTEGER,
           action TEXT NOT NULL,
           units INTEGER NOT NULL DEFAULT 1,
           points REAL NOT NULL DEFAULT 0,
@@ -458,6 +526,40 @@ def _initialize_anchor():
         );
         CREATE INDEX IF NOT EXISTS idx_billing_operation_status
           ON billing_operation(status, created_at);
+        CREATE TABLE IF NOT EXISTS purchase_intent(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tenant_id INTEGER NOT NULL,
+          created_by INTEGER NOT NULL,
+          request_key TEXT NOT NULL,
+          plan_key TEXT NOT NULL,
+          period_key TEXT NOT NULL,
+          plan_name TEXT NOT NULL,
+          period_label TEXT NOT NULL,
+          quoted_price REAL NOT NULL,
+          quoted_points REAL NOT NULL,
+          contact TEXT NOT NULL,
+          customer_note TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'requested'
+            CHECK(status IN ('requested','contacted','lost','paid')),
+          handler_note TEXT,
+          handled_by INTEGER,
+          contacted_at REAL,
+          lost_at REAL,
+          paid_at REAL,
+          subscription_op_key TEXT,
+          receipt_json TEXT,
+          created_at REAL,
+          updated_at REAL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_purchase_intent_request
+          ON purchase_intent(tenant_id,request_key);
+        CREATE INDEX IF NOT EXISTS idx_purchase_intent_owner_created
+          ON purchase_intent(tenant_id,created_by,id DESC);
+        CREATE INDEX IF NOT EXISTS idx_purchase_intent_admin_status
+          ON purchase_intent(status,tenant_id,id DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_purchase_intent_subscription_op
+          ON purchase_intent(subscription_op_key)
+          WHERE subscription_op_key IS NOT NULL;
         CREATE TABLE IF NOT EXISTS wechat_draft_delivery(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           tenant_id INTEGER NOT NULL,
@@ -512,6 +614,7 @@ def _initialize_anchor():
         CREATE TABLE IF NOT EXISTS censor_log(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           tenant_id INTEGER NOT NULL,
+          job_id INTEGER,
           kind TEXT NOT NULL DEFAULT 'pre',      -- pre:发前审查 / retro:发后复盘
           platform TEXT, title TEXT,
           verdict TEXT, score REAL,
@@ -682,7 +785,9 @@ def _initialize_anchor():
             _add_column(_conn, "task", col, typ)
         # v42:核心业务对象进入可恢复回收站。删除只隐藏/终止，不再摧毁计费锚点
         # 或交付文件；重试次数也持久化，避免失败重试被并发提交多次。
-        for table in ("job", "task", "knowledge", "avatar_job"):
+        # (人设档案与资产库后续也纳入同一回收站,老板误删可自行找回。)
+        for table in ("job", "task", "knowledge", "avatar_job",
+                      "account_profile", "asset"):
             for col, typ in (
                 ("deleted_at", "REAL"),
                 ("deleted_by", "INTEGER"),
@@ -718,7 +823,8 @@ def _initialize_anchor():
                       "ON task(tenant_id, emp_idx, id DESC)")
         _conn.execute("CREATE INDEX IF NOT EXISTS idx_job_tenant_created "
                       "ON job(tenant_id, id DESC)")
-        for table in ("job", "task", "knowledge", "avatar_job"):
+        for table in ("job", "task", "knowledge", "avatar_job",
+                      "account_profile", "asset"):
             _conn.execute(
                 f"CREATE INDEX IF NOT EXISTS idx_{table}_tenant_deleted "
                 f"ON {table}(tenant_id, deleted_at, id DESC)"
@@ -727,24 +833,54 @@ def _initialize_anchor():
             "CREATE INDEX IF NOT EXISTS idx_notification_tenant_unread "
             "ON notification(tenant_id, read_at, id DESC)"
         )
+        # 副账号协作可见:工单/任务记录发起人,工位记录拍板人。老板事后可追溯
+        # "这单是哪个副账号开的、这一站是谁批的";历史数据没有操作人,留空即可。
+        _add_column(_conn, "job", "created_by", "INTEGER")
+        _add_column(_conn, "task", "created_by", "INTEGER")
+        # 协作可见补齐:数字人/会议/成片/工具单也记发起人
+        for tbl in ("avatar_job", "meeting", "tv_job", "tool_job"):
+            _add_column(_conn, tbl, "created_by", "INTEGER")
+        _add_column(_conn, "station_run", "reviewed_by", "INTEGER")
+        # v50:工单派生的通知、审查与账务记录必须显式归因。历史记录留空，
+        # 硬删时只接受显式 job_id 或可证明的旧版锚点，绝不再按标题猜关联。
+        for table in (
+                "notification", "censor_log", "billing_log",
+                "billing_operation"):
+            _add_column(_conn, table, "job_id", "INTEGER")
+            _conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{table}_tenant_job "
+                f"ON {table}(tenant_id, job_id)"
+            )
         # v47:会话签名密钥只能由 root-owned systemd EnvironmentFile 注入。
         # 清除旧版写入业务库的全局密钥，避免只读数据库泄漏演变为会话伪造。
         _conn.execute(
             "DELETE FROM app_setting WHERE key='session_secret'"
+        )
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(47,'environment-only-session-secret-migration',?)",
+            (time.time(),),
         )
         # 旧会议没有 V28 决策字段；只做展示态回填，绝不把历史会议重新跑一遍。
         _conn.execute("UPDATE meeting SET phase='completed' "
                       "WHERE status='done' AND phase='queued' AND decision IS NULL")
         _conn.execute("UPDATE meeting SET phase='failed' "
                       "WHERE status='failed' AND phase='queued'")
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(48,'collaboration-soft-delete-schedule-fail-streak',?)",
+            (time.time(),),
+        )
         _validate_migrated_database(_conn)
         _conn.execute(
-            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) VALUES(?,?,?)",
-            (
-                LATEST_SCHEMA_VERSION,
-                "environment-only-session-secret-migration",
-                time.time(),
-            ),
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(49,'purchase-intent-commercial-loop',?)",
+            (time.time(),),
+        )
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(50,'explicit-job-attribution-for-safe-purge',?)",
+            (time.time(),),
         )
         _conn.execute(f"PRAGMA user_version={LATEST_SCHEMA_VERSION}")
         _conn.commit()
@@ -775,38 +911,42 @@ def _close_all_connections():
     _all_connections.clear()
 
 
-def conn():
-    """Return a connection owned by the current worker thread.
-
-    Schema initialization still happens once on the process anchor.  Afterwards
-    each request-worker thread gets an independent SQLite connection configured
-    for WAL and busy waiting.  This removes the former process-wide ``RLock``
-    bottleneck while keeping ``db.atomic()`` bound to exactly one connection.
-    """
+def _conn_locked(path: str):
+    """Slow connection path; caller holds ``_generation_lock``."""
     global _conn, _conn_path, _connection_generation
 
-    path = os.path.abspath(DB_PATH)
-    local = getattr(_thread, "connection", None)
     if (
-        _conn is not None
-        and _conn_path == path
-        and local is not None
-        and getattr(_thread, "generation", -1) == _connection_generation
-        and getattr(_thread, "db_path", None) == path
+        (_conn is None or _conn_path not in (None, path))
+        and threading.current_thread().name.startswith("dbio")
     ):
-        return local
+        # 异步写池线程绝不执行代际切换:走到这里说明库已被换走(测试/维护),
+        # 这笔快照写属于已死的库,丢弃即正确语义。若允许池线程做切换,它会
+        # 与主线程互相关闭对方正在使用的连接——那是段错误,不是异常。
+        raise StaleWriteError(path)
+
+    # 数据库代际切换(测试/维护工具换 DB_PATH)前,先在 _init_lock 外排空异步写池:
+    # 在途任务可能正拿着旧库连接执行,任何跨线程 close 都会段错误。
+    # generation lock 同时挡住新池的创建，避免 drain 期间重新生出旧代 worker。
+    if (
+        _conn_path not in (None, path)
+        or (_conn is None and _conn_path is not None)
+    ):
+        _shutdown_async_pool(wait=True)
 
     with _init_lock:
         # Tests/maintenance tools intentionally switch DB_PATH after closing the
         # anchor.  Treat either signal as a new database generation.
         if _conn is None or _conn_path not in (None, path):
             _close_thread_connection()
-            _close_all_connections()
+            # 不做跨线程关闭:其它线程的旧代连接由各自线程在下次 conn() 的
+            # 代际检查里自行关闭(_close_thread_connection),这里只关自己的
+            # 与锚点。跨线程 close 一个可能正在执行的连接是段错误之源。
             if _conn is not None:
                 try:
                     _conn.close()
                 except sqlite3.Error:
                     pass
+                _all_connections.discard(_conn)
                 _conn = None
             try:
                 anchor = _initialize_anchor()
@@ -822,6 +962,22 @@ def conn():
                 raise
             _conn_path = path
             _connection_generation += 1
+            if threading.current_thread().name.startswith("dbio"):
+                # 异步写池线程绝不领养锚点:锚点(_conn)会被测试/维护工具从主线程
+                # 直接 close,若此刻池线程正用它执行就是段错误。池线程一律用
+                # 自己的独立连接,让"谁的连接谁关"始终成立。
+                connection = sqlite3.connect(
+                    path, timeout=30, check_same_thread=False
+                )
+                _all_connections.add(connection)
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA busy_timeout=30000")
+                connection.execute("PRAGMA synchronous=NORMAL")
+                _thread.connection = connection
+                _thread.generation = _connection_generation
+                _thread.db_path = path
+                _thread.atomic_depth = 0
+                return connection
             _thread.connection = anchor
             _thread.generation = _connection_generation
             _thread.db_path = path
@@ -852,6 +1008,58 @@ def conn():
         _thread.db_path = path
         _thread.atomic_depth = 0
         return connection
+
+
+def conn():
+    """Return a connection owned by the current worker thread.
+
+    Schema initialization still happens once on the process anchor. Afterwards
+    each request-worker thread gets an independent SQLite connection configured
+    for WAL and busy waiting. A generation switch is serialized with async-pool
+    selection, so no new strict async call can enter the pool being drained.
+    """
+    path = os.path.abspath(DB_PATH)
+    local = getattr(_thread, "connection", None)
+    if (
+        _conn is not None
+        and _conn_path == path
+        and local is not None
+        and getattr(_thread, "generation", -1) == _connection_generation
+        and getattr(_thread, "db_path", None) == path
+    ):
+        return local
+
+    # DB workers must fail before waiting on the generation lock. The switching
+    # thread may be draining this very worker, so waiting here would deadlock.
+    if (
+        (_conn is None or _conn_path not in (None, path))
+        and threading.current_thread().name.startswith("dbio")
+    ):
+        raise StaleWriteError(path)
+
+    with _generation_lock:
+        # Another non-DB thread may have completed the switch while we waited.
+        path = os.path.abspath(DB_PATH)
+        local = getattr(_thread, "connection", None)
+        if (
+            _conn is not None
+            and _conn_path == path
+            and local is not None
+            and getattr(_thread, "generation", -1) == _connection_generation
+            and getattr(_thread, "db_path", None) == path
+        ):
+            return local
+        switching = (
+            _conn_path not in (None, path)
+            or (_conn is None and _conn_path is not None)
+        )
+        if switching:
+            _generation_switching.set()
+        try:
+            return _conn_locked(path)
+        finally:
+            if switching:
+                _generation_switching.clear()
 
 
 # ---------------- 全局设置(V4) ----------------
@@ -966,4 +1174,242 @@ def jloads(s, default=None):
         return default if default is not None else {}
 
 
-atexit.register(_close_all_connections)
+# ---------------- 异步门面 ----------------
+# SQLite 是同步库,busy_timeout=30s。事件循环上的协程(引擎流水线、SSE 周边、
+# async 路由)直接调 db 时,任何一次写锁等待都会把整个循环冻住——所有租户的
+# SSE、所有请求一起停。异步侧必须经由这里的门面把 db 调用卸载到专用线程池:
+# 连接本就是线程本地的(见 conn()),每个池线程各持一条连接,WAL 下并发安全。
+#
+# 池子刻意有界:SQLite 同时只有一个写者,更多线程只会排队占内存;4 条足够
+# 覆盖「读 + 写 + 看门狗 + 后台任务」的并发形态。
+_async_pool = None
+_async_pool_lock = threading.Lock()
+_write_pool = None
+_write_pool_lock = threading.Lock()
+
+
+def _pool():
+    global _async_pool
+    with _generation_lock:
+        if _async_pool is None:
+            with _async_pool_lock:
+                if _async_pool is None:
+                    from concurrent.futures import ThreadPoolExecutor
+                    _async_pool = ThreadPoolExecutor(
+                        max_workers=4, thread_name_prefix="dbio")
+        return _async_pool
+
+
+def _ordered_write_pool():
+    """Return the FIFO executor used exclusively by ``submit_write``.
+
+    SQLite can commit only one writer at a time.  Sending progress snapshots to
+    the four-worker read pool let a newer snapshot commit first and an older
+    snapshot overwrite it afterwards.  A dedicated single worker preserves
+    submission order while ``arun``/``aq`` keep using the concurrent pool.
+    """
+    global _write_pool
+    with _generation_lock:
+        if _write_pool is None:
+            with _write_pool_lock:
+                if _write_pool is None:
+                    from concurrent.futures import ThreadPoolExecutor
+                    _write_pool = ThreadPoolExecutor(
+                        max_workers=1, thread_name_prefix="dbio-write")
+        return _write_pool
+
+
+def _submit_async_call(context, call):
+    """Select/create the DB pool in the same generation critical section.
+
+    This helper runs in asyncio's default executor. Waiting for a maintenance
+    generation switch therefore never blocks the event-loop thread.
+    """
+    with _generation_lock:
+        path = os.path.abspath(DB_PATH)
+        if _conn is None or _conn_path not in (None, path):
+            try:
+                conn()
+            finally:
+                # ``conn`` may give this short-lived default-executor thread a
+                # local connection. It must not become an untracked generation
+                # leak after its sole job (preparing the anchor) is complete.
+                _close_thread_connection()
+        return _pool().submit(context.run, call)
+
+
+async def arun(fn, *args, **kwargs):
+    """在 db 线程池里执行任意同步函数(含整段 with atomic() 的事务体)。
+
+    这是异步侧访问数据库的唯一正道:事务必须整体进池(不能在持有 BEGIN 的
+    情况下 await),所以传入的是完整的同步函数而非单条语句。
+    """
+    import asyncio
+    import contextvars
+    import functools
+    call = functools.partial(fn, *args, **kwargs) if (args or kwargs) else fn
+    context = contextvars.copy_context()
+    for attempt in range(2):
+        future = await asyncio.to_thread(_submit_async_call, context, call)
+        try:
+            return await asyncio.wrap_future(future)
+        except StaleWriteError:
+            # DB_PATH can be assigned immediately after pool selection by a
+            # test/maintenance switch. StaleWriteError is raised at conn()'s
+            # side-effect-free top boundary, so one re-submit is safe.
+            if attempt:
+                raise
+
+
+_pending_writes: list = []
+_pending_lock = threading.Lock()
+
+
+def submit_write(fn, *args, **kwargs):
+    """不等待结果地把一次写操作投给 FIFO 单写队列(节流型进度落库用)。
+
+    只适用于「丢了也无碍、下次会整体重写」的快照类写入;需要结果或需要
+    返回值的写仍然要走 arun。提交到本门面的快照严格按调用顺序执行，
+    因而同一实体的旧进度不可能在新进度之后反向覆盖。异常在单写线程里
+    记日志,不向上冒泡。
+    需要「先前的异步写都已落地」时,用 adrain() 冲刷。
+    """
+    import functools
+    import logging
+    call = functools.partial(fn, *args, **kwargs) if (args or kwargs) else fn
+    submitted_path = os.path.abspath(DB_PATH)
+    submitted_generation = _connection_generation
+
+    def _guarded():
+        try:
+            # 数据库在提交后被切换(测试/维护)时,这笔写属于已死的库,直接丢弃;
+            # 快照类写入的语义本就允许丢帧,写进错误的库反而是事故。
+            # 同时比对代际:路径字符串在切换瞬间可能仍相同(TOCTOU),代际不会。
+            if (os.path.abspath(DB_PATH) != submitted_path
+                    or _connection_generation != submitted_generation):
+                return
+            call()
+        except StaleWriteError:
+            pass       # conn() 在执行中发现库被切换,静默丢弃这笔快照写
+        except sqlite3.ProgrammingError:
+            pass       # 连接在执行间隙被回收(库已切换),同样按过期快照丢弃
+        except Exception as exc:
+            logging.getLogger("db").warning(
+                "submit_write failed error_type=%s", type(exc).__name__)
+
+    # Progress snapshots are intentionally lossy. If a generation switch is in
+    # flight, drop this frame instead of blocking the event loop or recreating
+    # the old write pool while it is being drained.
+    if _generation_switching.is_set():
+        return
+    with _generation_lock:
+        if _generation_switching.is_set():
+            return
+        future = _ordered_write_pool().submit(_guarded)
+    with _pending_lock:
+        _pending_writes.append(future)
+        if len(_pending_writes) > 64:      # 顺手清掉已完成的,防列表无限增长
+            _pending_writes[:] = [f for f in _pending_writes if not f.done()]
+
+
+async def adrain():
+    """等待此刻之前提交的全部 submit_write 落地(收尾处保证「返回即持久」)。"""
+    import asyncio
+    with _pending_lock:
+        snapshot = [f for f in _pending_writes if not f.done()]
+        _pending_writes[:] = snapshot
+    for future in snapshot:
+        await asyncio.wrap_future(future)
+
+
+async def aq(sql, args=()):
+    return await arun(q, sql, args)
+
+
+async def aone(sql, args=()):
+    return await arun(one, sql, args)
+
+
+async def ainsert(table, data):
+    return await arun(insert, table, data)
+
+
+async def aupdate(table, id_, data):
+    return await arun(update, table, id_, data)
+
+
+async def aexecute(sql, args=()):
+    return await arun(execute, sql, args)
+
+
+async def aget_setting(key, default=None):
+    return await arun(get_setting, key, default)
+
+
+async def aset_setting(key, value):
+    return await arun(set_setting, key, value)
+
+
+def _shutdown_async_pool(wait: bool = True):
+    """停掉异步 DB 池。默认等在途任务收尾——不等就关连接会段错误。"""
+    global _async_pool, _write_pool
+    pool = write_pool = None
+    with _write_pool_lock:
+        write_pool = _write_pool
+        _write_pool = None
+    with _async_pool_lock:
+        pool = _async_pool
+        _async_pool = None
+    def reclaim_worker_connections(executor):
+        """让每个 executor 线程亲自关闭它拥有的 SQLite 连接。
+
+        SQLite 连接不能在另一个仍可能执行语句的线程里强关。把与现存线程数
+        相同的 barrier 任务排到队尾，可以保证所有旧工作完成后每个 worker
+        各领取一个清理任务，再由连接所属线程执行 close。
+        """
+        workers = len(getattr(executor, "_threads", ()))
+        # Python 的 ThreadPoolExecutor 退出钩子早于普通 atexit 回调；解释器
+        # 收尾时池可能已被标准库关闭，此时线程已经停止，后续 _close_all_connections
+        # 可安全回收注册表，无需再向已 shutdown 的池提交任务。
+        if (
+            not wait
+            or workers <= 0
+            or getattr(executor, "_shutdown", False)
+        ):
+            return
+        barrier = threading.Barrier(workers)
+
+        def close_owned_connection():
+            try:
+                barrier.wait(timeout=30)
+            finally:
+                _close_thread_connection()
+
+        futures = [
+            executor.submit(close_owned_connection) for _ in range(workers)
+        ]
+        for future in futures:
+            future.result()
+
+    # submit_write 可能正使用自己的线程本地连接，必须先等它排空；随后让池线程
+    # 自己回收连接，避免每次测试/维护切换 DB_PATH 都泄漏整代连接。
+    if write_pool is not None:
+        reclaim_worker_connections(write_pool)
+        write_pool.shutdown(wait=wait)
+    if pool is not None:
+        reclaim_worker_connections(pool)
+        pool.shutdown(wait=wait)
+    if wait:
+        with _pending_lock:
+            _pending_writes[:] = [
+                future for future in _pending_writes if not future.done()
+            ]
+
+
+def _shutdown_all():
+    # 顺序是安全性的一部分:必须先等池里的在途任务结束,再关闭连接。
+    _shutdown_async_pool(wait=True)
+    _close_all_connections()
+
+
+atexit.register(_shutdown_all)

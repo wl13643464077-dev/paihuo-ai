@@ -309,6 +309,7 @@ def check_layout(
         department_files,
         f"immutable department configuration is empty: {departments}",
     )
+    department_keys: set[str] = set()
     for department_file in department_files:
         _require(
             department_file.suffix == ".json",
@@ -322,6 +323,78 @@ def check_layout(
             isinstance(department.get("employees"), list),
             f"department configuration employees must be a list: {department_file}",
         )
+        department_key = str(department.get("key") or "").strip()
+        _require(
+            bool(department_key),
+            f"department configuration key is missing: {department_file}",
+        )
+        _require(
+            department_key not in department_keys,
+            f"duplicate department configuration key: {department_key}",
+        )
+        department_keys.add(department_key)
+    industry_knowledge = config_root / "industry_knowledge"
+    _require(
+        industry_knowledge.is_dir() and not industry_knowledge.is_symlink(),
+        f"immutable industry knowledge missing: {industry_knowledge}",
+    )
+    industry_knowledge_files = sorted(industry_knowledge.iterdir())
+    _require(
+        industry_knowledge_files,
+        f"immutable industry knowledge is empty: {industry_knowledge}",
+    )
+    industry_keys: set[str] = set()
+    for knowledge_file in industry_knowledge_files:
+        _require(
+            knowledge_file.suffix == ".json",
+            "immutable industry knowledge contains an unexpected entry",
+        )
+        knowledge = _read_release_json(
+            knowledge_file,
+            label="industry knowledge",
+        )
+        knowledge_key = str(knowledge.get("key") or "").strip()
+        _require(
+            bool(knowledge_key) and bool(str(knowledge.get("name") or "").strip()),
+            f"industry knowledge identity is invalid: {knowledge_file}",
+        )
+        _require(
+            knowledge_key not in industry_keys,
+            f"duplicate industry knowledge key: {knowledge_key}",
+        )
+        for section in (
+            "metrics", "benchmarks", "glossary", "practices",
+            "compliance", "pitfalls",
+        ):
+            _require(
+                isinstance(knowledge.get(section), list),
+                f"industry knowledge {section} must be a list: {knowledge_file}",
+            )
+        _require(
+            all(
+                isinstance(metric, dict)
+                and bool(str(metric.get("name") or "").strip())
+                and bool(str(metric.get("formula") or "").strip())
+                for metric in knowledge["metrics"]
+            ),
+            f"industry knowledge metrics are invalid: {knowledge_file}",
+        )
+        _require(
+            all(
+                isinstance(benchmark, dict)
+                and all(
+                    bool(str(benchmark.get(field) or "").strip())
+                    for field in ("metric", "range", "source", "scope", "as_of")
+                )
+                for benchmark in knowledge["benchmarks"]
+            ),
+            f"industry knowledge benchmarks are invalid: {knowledge_file}",
+        )
+        industry_keys.add(knowledge_key)
+    _require(
+        industry_keys == department_keys,
+        "industry knowledge keys do not match department configuration",
+    )
     gate_seed = _read_release_json(
         config_root / "gate_rules.default.json",
         label="immutable gate seed",
@@ -552,6 +625,7 @@ def check_layout(
         "sqlite_user_version": user_version,
         "app_schema_version": LATEST_SCHEMA_VERSION,
         "department_files": len(department_files),
+        "industry_knowledge_files": len(industry_knowledge_files),
         "ffmpeg": str(ffmpeg),
         "api_tool_runner": str(claude),
         "api_tool_runner_capabilities": (

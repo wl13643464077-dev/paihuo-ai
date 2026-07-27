@@ -37,7 +37,7 @@ class FeishuSyncPaginationTests(unittest.IsolatedAsyncioTestCase):
         db.DB_PATH = self.old_db_path
         self.tmp.cleanup()
 
-    async def _sync_with_fake_feishu(self, kind: str):
+    async def _sync_with_fake_feishu(self, kind: str, already: set = None):
         batch_create = AsyncMock()
         with (
             patch.object(
@@ -50,6 +50,11 @@ class FeishuSyncPaginationTests(unittest.IsolatedAsyncioTestCase):
                 feishu,
                 "_ensure_table",
                 new=AsyncMock(return_value="table-id"),
+            ),
+            patch.object(
+                feishu,
+                "existing_sync_keys",
+                new=AsyncMock(return_value=set(already or ())),
             ),
             patch.object(feishu, "_batch_create", new=batch_create),
         ):
@@ -160,6 +165,11 @@ class FeishuSyncPaginationTests(unittest.IsolatedAsyncioTestCase):
                 "_ensure_table",
                 new=AsyncMock(return_value="table-id"),
             ),
+            patch.object(
+                feishu,
+                "existing_sync_keys",
+                new=AsyncMock(return_value=set()),
+            ),
             patch.object(feishu, "_batch_create", new=batch_create),
         ):
             with self.assertRaises(feishu.FeishuProviderError) as caught:
@@ -167,3 +177,42 @@ class FeishuSyncPaginationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(expected, caught.exception)
         self.assertEqual(2, batch_create.await_count)
+
+    async def test_repeat_sync_does_not_duplicate_existing_rows(self):
+        """飞书侧只能追加写:同步过的记录必须跳过,否则每点一次就多一整份。"""
+        for index in range(5):
+            db.insert("knowledge", {
+                "tenant_id": 2,
+                "title": f"知识-{index}",
+                "content": "正文",
+                "tags_json": "[]",
+                "source": "manual",
+                "pinned": 0,
+                "meta_json": "{}",
+            })
+
+        first, batches = await self._sync_with_fake_feishu("knowledge")
+        self.assertEqual(5, first["synced"])
+        written = [record for batch in batches for record in batch]
+        keys = {record[feishu.SYNC_KEY_FIELD] for record in written}
+        self.assertEqual(5, len(keys))
+
+        # 第二次同步:表里已有这 5 条,应当一条都不再写。
+        second, second_batches = await self._sync_with_fake_feishu(
+            "knowledge", already=keys
+        )
+        self.assertEqual(0, second["synced"])
+        self.assertEqual([], [r for b in second_batches for r in b])
+
+        # 新增一条后,只补写这一条。
+        db.insert("knowledge", {
+            "tenant_id": 2, "title": "新知识", "content": "正文",
+            "tags_json": "[]", "source": "manual", "pinned": 0,
+            "meta_json": "{}",
+        })
+        third, third_batches = await self._sync_with_fake_feishu(
+            "knowledge", already=keys
+        )
+        self.assertEqual(1, third["synced"])
+        added = [r for b in third_batches for r in b]
+        self.assertEqual(["新知识"], [r["标题"] for r in added])

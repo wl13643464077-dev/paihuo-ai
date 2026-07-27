@@ -350,19 +350,39 @@ class JournalPrivacyTests(unittest.TestCase):
         smtp.sendmail.assert_called_once()
 
     def test_publish_progress_journal_does_not_emit_user_facing_message(self):
+        # _log 现在把「读-改-写」整事务投给 db 线程池(防止事件循环被写锁冻结)。
+        # 这里把提交的事务同步执行在假连接上:约束不变——消息只进库,不进日志。
+        executed = {}
+
+        class _FakeCursor:
+            @staticmethod
+            def fetchone():
+                return {"log": ""}
+
+        class _FakeConn:
+            def execute(self, sql, args=()):
+                if sql.strip().upper().startswith("UPDATE"):
+                    executed["sql"], executed["args"] = sql, args
+                return _FakeCursor()
+
+        class _FakeAtomic:
+            def __enter__(self):
+                return _FakeConn()
+
+            def __exit__(self, *exc):
+                return False
+
         with (
-            patch.object(matrixpub.db, "one", return_value={"log": ""}),
-            patch.object(matrixpub.db, "update") as update,
+            patch.object(matrixpub.db, "atomic", _FakeAtomic),
+            patch.object(matrixpub.db, "submit_write",
+                         side_effect=lambda fn, *a, **k: fn(*a, **k)),
             self.assertLogs("matrixpub", level="INFO") as captured,
         ):
             matrixpub._log(17, SECRET_SENTINEL)
 
         output = "\n".join(captured.output)
         self.assertNotIn(SECRET_SENTINEL, output)
-        self.assertIn(
-            SECRET_SENTINEL,
-            update.call_args.args[2]["log"],
-        )
+        self.assertIn(SECRET_SENTINEL, executed["args"][0])
 
 
 class RuntimeLoggingStaticTests(unittest.TestCase):

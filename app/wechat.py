@@ -19,7 +19,7 @@ import time
 
 import httpx
 
-from . import db
+from . import db, secureconfig
 
 log = logging.getLogger("wechat")
 
@@ -33,7 +33,8 @@ ERR_HINTS = {
     40001: "AppSecret 错误或已失效,重新生成后再试",
     40164: (
         "服务器 IP 不在公众号白名单：去「基本配置→IP白名单」添加部署服务器的"
-        + (f"出口 IP {SERVER_IP}" if SERVER_IP else "出口 IP")
+        + (f"出口 IP {SERVER_IP}" if SERVER_IP
+           else "出口 IP(平台未配置该 IP 的展示,请点右下角 💬 联系平台顾问索取)")
         + " 再试"
     ),
     48001: "该公众号没有草稿箱接口权限:未认证的个人订阅号不支持,需要完成微信认证",
@@ -53,8 +54,15 @@ class WeChatError(Exception):
         super().__init__(f"{detail}(errcode {code})")
 
 
+SECRET_FIELD = "wechat_mp_secret"
+
+
 def get_conf(tid: int) -> dict:
-    return db.jloads(db.get_setting(f"wechat_mp:{tid}"), {}) or {}
+    """返回可直接使用的配置;AppSecret 在库里是密文,这里解密后只存在于内存。"""
+    conf = db.jloads(db.get_setting(f"wechat_mp:{tid}"), {}) or {}
+    if conf.get("secret"):
+        conf["secret"] = secureconfig.decrypt_field(SECRET_FIELD, conf["secret"])
+    return conf
 
 
 def set_conf(tid: int, appid: str, secret: str):
@@ -63,7 +71,11 @@ def set_conf(tid: int, appid: str, secret: str):
         cur["appid"] = appid.strip()
     if secret:                      # 前端回存打码值时不覆盖
         cur["secret"] = secret.strip()
-    db.set_setting(f"wechat_mp:{tid}", json.dumps(cur))
+    stored = dict(cur)
+    # AppSecret 能代表公众号做任何事,不能与备份一起明文流出。
+    if stored.get("secret"):
+        stored["secret"] = secureconfig.encrypt_field(SECRET_FIELD, stored["secret"])
+    db.set_setting(f"wechat_mp:{tid}", json.dumps(stored))
     db.set_setting(f"wechat_token:{tid}", None)   # 换号后旧 token 作废
 
 
@@ -73,14 +85,16 @@ def _raise_if_err(d: dict):
 
 
 async def token(tid: int, force: bool = False) -> str:
-    conf = get_conf(tid)
+    conf = await db.arun(get_conf, tid)
     if not (conf.get("appid") and conf.get("secret")):
         raise WeChatError(
             0,
             "还没配置公众号 AppID/AppSecret(发布渠道页配置)",
             public=True,
         )
-    cache = db.jloads(db.get_setting(f"wechat_token:{tid}"), {}) or {}
+    cache = db.jloads(
+        await db.aget_setting(f"wechat_token:{tid}"), {}
+    ) or {}
     if not force and cache.get("token") and cache.get("exp", 0) > time.time() + 120:
         return cache["token"]
     async with httpx.AsyncClient(timeout=30) as cli:
@@ -93,8 +107,15 @@ async def token(tid: int, force: bool = False) -> str:
     tok = d.get("access_token")
     if not tok:
         raise WeChatError(0)
-    db.set_setting(f"wechat_token:{tid}",
-                   json.dumps({"token": tok, "exp": time.time() + int(d.get("expires_in", 7200))}))
+    await db.aset_setting(
+        f"wechat_token:{tid}",
+        json.dumps(
+            {
+                "token": tok,
+                "exp": time.time() + int(d.get("expires_in", 7200)),
+            }
+        ),
+    )
     return tok
 
 

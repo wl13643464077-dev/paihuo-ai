@@ -11,10 +11,24 @@ import json
 import logging
 import time
 
-from . import billing, db, gate, llm, providers
+from . import auth, billing, db, gate, llm, providers
 from .skills import registry
 
 log = logging.getLogger("engine")
+
+STATUS_CN = {
+    "queued": "排队中", "running": "执行中", "awaiting_review": "等您审批",
+    "gate_blocked": "被质检拦截", "failed": "已失败", "done": "已完成",
+    "cancelled": "已终止", "paused": "已暂停", "rejected": "重做中",
+    "stale": "待重算", "skipped": "已跳过", "interrupted": "被打断",
+    "pending_charge": "待扣费",
+}
+
+
+def status_cn(value) -> str:
+    """把内部状态枚举翻成老板能懂的词;未知值原样返回。"""
+    return STATUS_CN.get(str(value or ""), str(value or "未知"))
+
 
 MAX_RETRY = 2
 LAST_IDX = 9
@@ -30,31 +44,121 @@ class Engine:
         self.locks: dict = {}
         self.subscribers: dict = {}   # queue -> (租户id,是否root)，避免租户1普通成员被当平台方
         self._tid_cache: dict = {}     # (table, id) -> tenant_id 记忆,省得每条事件查库
+        self._tid_waiting: dict = {}   # 首次解析期间按记录合并事件，避免高频进度重复查库
+        self._loop = None              # 引擎所在事件循环,供线程池路由跨线程安全唤醒
+
+    # ---------- 跨线程安全投递 ----------
+    def _dispatch(self, fn, *args):
+        """asyncio.Queue 不是线程安全的:同步路由跑在线程池里,直接 put_nowait 会让
+        等待中的 worker 不被唤醒(工单永久卡 running)或损坏订阅队列内部状态。
+        因此非循环线程一律经 call_soon_threadsafe 投递回引擎循环执行。"""
+        loop = self._loop
+        if loop is None:
+            fn(*args)                  # 引擎尚未启动:仍在单线程装配阶段,直调即可
+            return
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            fn(*args)
+            return
+        try:
+            loop.call_soon_threadsafe(fn, *args)
+        except RuntimeError:
+            pass                        # 循环已关闭(进程退出中),丢弃通知即可
 
     # ---------- 事件推送(SSE) ----------
     _EV_TABLE = {"meeting": ("meeting", "meeting_id"), "task": ("task", "task_id"),
                  "avatar": ("avatar_job", "job_id"), "pub": ("pub_task", "task_id")}
 
-    def _tid_of(self, ev: dict):
-        """按事件归属解析租户 id；解析不出时返回 None，仅平台 root 可接收。"""
-        typ = ev.get("type") or ""
-        if ev.get("tenant_id") is not None:
-            return int(ev["tenant_id"])
+    def _event_identity(self, ev: dict):
+        """返回事件对应的租户表与记录 id；不做任何 I/O。"""
+        typ = str(ev.get("type") or "")
         table, idkey = "job", "job_id"
-        for pre, (t, k) in self._EV_TABLE.items():
-            if typ.startswith(pre):
-                table, idkey = t, k
+        for prefix, (candidate, candidate_key) in self._EV_TABLE.items():
+            if typ.startswith(prefix):
+                table, idkey = candidate, candidate_key
                 break
         rid = ev.get(idkey)
         if rid is None:
             return None
-        ck = (table, rid)
-        if ck not in self._tid_cache:
-            if len(self._tid_cache) > 4000:
-                self._tid_cache.clear()
-            r = db.one(f"SELECT tenant_id FROM {table} WHERE id=?", (rid,))
-            self._tid_cache[ck] = (r or {}).get("tenant_id") if r else None
-        return self._tid_cache[ck]
+        return table, rid
+
+    def _tid_of(self, ev: dict):
+        """只读显式归属/内存缓存；禁止在调用线程同步访问 SQLite。"""
+        if ev.get("tenant_id") is not None:
+            try:
+                return int(ev["tenant_id"])
+            except (TypeError, ValueError):
+                return None
+        identity = self._event_identity(ev)
+        if identity is None:
+            return None
+        return self._tid_cache.get(identity)
+
+    @staticmethod
+    def _lookup_tid(identity):
+        """同步兼容查询；只能由 DB 线程池或无事件循环的装配阶段调用。"""
+        table, rid = identity
+        row = db.one(f"SELECT tenant_id FROM {table} WHERE id=?", (rid,))
+        return int(row["tenant_id"]) if row and row.get("tenant_id") is not None else None
+
+    def _remember_tid(self, identity, tenant_id):
+        if len(self._tid_cache) > 4000:
+            self._tid_cache.clear()
+        self._tid_cache[identity] = tenant_id
+
+    def _defer_tenant_resolution(self, ev: dict, identity):
+        """在引擎循环合并缓存未命中的事件，并异步卸载租户查询。"""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # 引擎尚未启动且当前也没有事件循环：允许同步装配/旧测试路径查询。
+            # 生产协程和 worker 线程在 start 后都会由 _dispatch 投回引擎循环。
+            try:
+                tenant_id = self._lookup_tid(identity)
+            except Exception as exc:
+                log.warning(
+                    "event tenant lookup failed error_type=%s",
+                    type(exc).__name__,
+                )
+                self._broadcast_now(ev, None)
+                return
+            self._remember_tid(identity, tenant_id)
+            self._broadcast_now(ev, tenant_id)
+            return
+
+        waiting = self._tid_waiting.setdefault(identity, [])
+        waiting.append(ev)
+        if len(waiting) == 1:
+            asyncio.create_task(self._resolve_waiting_events(identity))
+
+    async def _resolve_waiting_events(self, identity):
+        try:
+            tenant_id = await db.arun(self._lookup_tid, identity)
+        except Exception as exc:
+            log.warning(
+                "event tenant lookup failed error_type=%s",
+                type(exc).__name__,
+            )
+            waiting = self._tid_waiting.pop(identity, [])
+            for event in waiting:
+                self._broadcast_now(event, None)
+            return
+        self._remember_tid(identity, tenant_id)
+        waiting = self._tid_waiting.pop(identity, [])
+        for event in waiting:
+            self._broadcast_now(event, tenant_id)
+
+    @staticmethod
+    def _client_event(ev: dict) -> dict:
+        """剥离仅供服务端授权使用的事件元数据。"""
+        return {
+            key: value
+            for key, value in ev.items()
+            if not str(key).startswith("_")
+        }
 
     @staticmethod
     def _public_step(step: dict) -> dict:
@@ -74,6 +178,7 @@ class Engine:
     @classmethod
     def public_event(cls, ev: dict) -> dict:
         """把实时事件降级为对外契约；未知 ``*_step`` 同样默认去掉明细。"""
+        ev = cls._client_event(ev)
         typ = str(ev.get("type") or "")
         if typ in {"station_step", "task_step", "avatar_step", "employee_step"} \
                 or typ.endswith("_step"):
@@ -97,6 +202,7 @@ class Engine:
     @classmethod
     def internal_event(cls, ev: dict) -> dict:
         """Boss keeps operational detail, but never receives raw error text."""
+        ev = cls._client_event(ev)
         typ = str(ev.get("type") or "")
         step = ev.get("step")
         if (
@@ -111,27 +217,101 @@ class Engine:
             return safe
         return ev
 
+    # 事件类型 → 所需板块:content-only 成员不该收到数字人/发布等事件,
+    # 否则页面为拿不到的数据白白自刷新(SHELL_DIRTY)+白打 /state。
+    EVENT_MODULE = {
+        "avatar_update": "avatar", "avatar_step": "avatar",
+        "talking_photo": "avatar",
+        "tv_done": "content", "tv_step": "content",
+        "job_update": "content", "station_step": "content",
+        "task_update": "content", "task_step": "content",
+        "tool_update": "content", "pub_update": "content",
+        "gate_running": "content",
+    }
+
     def broadcast(self, ev: dict):
         tid = self._tid_of(ev)
+        identity = self._event_identity(ev)
+        if (
+            tid is None
+            and ev.get("tenant_id") is None
+            and identity is not None
+            and identity not in self._tid_cache
+        ):
+            # 缓存未命中时绝不在事件循环直接查 SQLite。跨线程调用同样先投回
+            # 引擎循环，再由 db.arun 卸载；同一记录的并发事件会在循环内合并。
+            self._dispatch(
+                self._defer_tenant_resolution,
+                dict(ev),
+                identity,
+            )
+            return
+        self._broadcast_now(ev, tid)
+
+    def _broadcast_now(self, ev: dict, tid):
         for q_, subscriber in list(self.subscribers.items()):
-            sub_tid, sub_root = subscriber if isinstance(subscriber, tuple) else (subscriber, False)
+            if isinstance(subscriber, tuple):
+                sub_tid, sub_root = subscriber[0], subscriber[1]
+                sub_modules = subscriber[2] if len(subscriber) > 2 else None
+                sub_role = subscriber[3] if len(subscriber) > 3 else None
+            else:
+                sub_tid, sub_root, sub_modules, sub_role = (
+                    subscriber,
+                    False,
+                    None,
+                    None,
+                )
             if tid is None and not sub_root:
                 continue   # 找不到归属绝不广播给普通账号，避免删除竞态/未知事件泄露
             if tid is not None and not sub_root and sub_tid != tid:
                 continue
-            try:
-                q_.put_nowait(
-                    self.internal_event(ev)
-                    if sub_root
-                    else self.public_event(ev)
+            member = (
+                sub_role == "member"
+                or (
+                    sub_role is None
+                    and sub_modules is not None
+                    and not sub_root
                 )
-            except asyncio.QueueFull:
-                pass
+            )
+            privileged = sub_root or sub_role in {"root", "owner"}
+            if member and not privileged:
+                granted = frozenset(sub_modules or ())
+                if "_required_modules" in ev:
+                    required = frozenset(
+                        str(module)
+                        for module in (ev.get("_required_modules") or ())
+                        if str(module)
+                    )
+                    if not required or not required.issubset(granted):
+                        continue
+                else:
+                    need = self.EVENT_MODULE.get(str(ev.get("type") or ""))
+                    if not need or need not in granted:
+                        # 新增业务事件若忘了声明板块，普通 member 默认拒绝；
+                        # owner/root 仍按租户边界接收，避免安全默认值变成泄露。
+                        continue
+            payload = (
+                self.internal_event(ev)
+                if sub_root
+                else self.public_event(ev)
+            )
+            # 授权与塑形不做 I/O；只把 asyncio.Queue 入队投递回所属循环。
+            self._dispatch(self._enqueue_event, q_, payload)
 
-    def touch(self, job_id):
-        self.broadcast({"type": "job_update", "job_id": job_id, "ts": time.time()})
+    @staticmethod
+    def _enqueue_event(q_, payload):
+        try:
+            q_.put_nowait(payload)
+        except asyncio.QueueFull:
+            pass
 
-    def _recorder(self, job_id, idx, run_id=None):
+    def touch(self, job_id, tenant_id=None):
+        event = {"type": "job_update", "job_id": job_id, "ts": time.time()}
+        if tenant_id is not None:
+            event["tenant_id"] = tenant_id
+        self.broadcast(event)
+
+    def _recorder(self, job_id, idx, run_id=None, tenant_id=None):
         """工位步骤记录器:每一步实时 SSE 广播 + 落库(steps_json),供前端可视化.
         返回 (progress回调, steps列表)。idx 传 "gate" 表示质检关卡。"""
         steps = []
@@ -146,32 +326,48 @@ class Engine:
             else:
                 steps.append({"k": kind, "l": str(label)[:300], "ts": now})
             st["cast"] = now
-            self.broadcast({"type": "station_step", "job_id": job_id, "idx": idx,
-                            "n": len(steps), "step": steps[-1]})
+            event = {"type": "station_step", "job_id": job_id, "idx": idx,
+                     "n": len(steps), "step": steps[-1]}
+            if tenant_id is not None:
+                event["tenant_id"] = tenant_id
+            self.broadcast(event)
             if run_id and (kind != "typing" or now - st["save"] > 3):
-                db.update("station_run", run_id,
-                          {"steps_json": json.dumps(steps, ensure_ascii=False)})
+                # 进度回调常在事件循环上被 provider 协程调用;这里的落库是一次
+                # 写操作,写锁竞争时会把整个循环冻住,必须投给 db 线程池。
+                # 快照在提交前序列化(steps 随后还会被循环线程改),丢一帧无碍——
+                # 下一次保存会整体重写。
+                snapshot = json.dumps(steps, ensure_ascii=False)
+                db.submit_write(db.update, "station_run", run_id,
+                                {"steps_json": snapshot})
                 st["save"] = now
         return progress, steps
 
     # ---------- 启动与恢复 ----------
     async def start(self):
-        # 断点恢复:被重启打断的 running 工位重跑,进行中的工单重新入队
-        for r in db.q("SELECT id FROM station_run WHERE status='running'"):
-            db.update("station_run", r["id"], {"status": "rejected",
-                                               "review_comment": "服务重启,自动重跑"})
-        for j in db.q("SELECT id FROM job WHERE status IN ('running')"):
-            self.notify(j["id"])
-        # 兼容旧版本“先标失败、来不及退款”的窗口；CAS 保证多次启动也只退一次。
-        for j in db.q("SELECT id FROM job WHERE status='failed' "
-                      "AND billing_status='charged'"):
-            self.settle_failure(j["id"], "服务启动补做失败结算")
+        self._loop = asyncio.get_running_loop()
+
+        def _recover():
+            # 断点恢复:被重启打断的 running 工位重跑,进行中的工单重新入队
+            for r in db.q("SELECT id FROM station_run WHERE status='running'"):
+                db.update("station_run", r["id"], {"status": "rejected",
+                                                   "review_comment": "服务重启,自动重跑"})
+            running = [j["id"] for j in db.q(
+                "SELECT id FROM job WHERE status IN ('running')")]
+            # 兼容旧版本“先标失败、来不及退款”的窗口；CAS 保证多次启动也只退一次。
+            for j in db.q("SELECT id FROM job WHERE status='failed' "
+                          "AND billing_status='charged'"):
+                self.settle_failure(j["id"], "服务启动补做失败结算")
+            return running
+
+        # 恢复扫描含批量写与退款事务,放 db 线程池,启动期就不阻塞事件循环。
+        for job_id in await db.arun(_recover):
+            self.notify(job_id)
         for _ in range(4):
             asyncio.create_task(self._worker())
         log.info("engine started")
 
     def notify(self, job_id: int):
-        self.queue.put_nowait(job_id)
+        self._dispatch(self.queue.put_nowait, job_id)
 
     async def _worker(self):
         while True:
@@ -185,11 +381,13 @@ class Engine:
                 try:
                     await self._advance(job_id)
                 except Exception as e:
-                    self.settle_failure(
+                    # 失败结算含退款事务(写),放 db 线程池执行。
+                    await db.arun(
+                        self.settle_failure,
                         job_id,
                         providers.public_failure_message(
                             e,
-                            "内容流水线处理失败，已安全收口，可从原工单重试",
+                            "内容流水线执行失败。未产出可用正文时整单点数自动退回(账单可查)；可复制 Brief 重新开单",
                         ),
                     )
                     log.error(
@@ -198,7 +396,9 @@ class Engine:
                         type(e).__name__,
                     )
             # 工单进入终态后回收它的锁,别让 self.locks 随历史工单无限增长(内存泄漏)
-            j = db.one("SELECT status FROM job WHERE id=?", (job_id,))
+            j = await db.aone(
+                "SELECT status FROM job WHERE id=?", (job_id,)
+            )
             if (not j or j["status"] in ("done", "cancelled", "failed")) and not lock.locked():
                 self.locks.pop(job_id, None)
 
@@ -246,6 +446,8 @@ class Engine:
 
     def settle_failure(self, job_id: int, reason: str) -> bool:
         """收口工单与运行工位；无可用正文时按实际扣点金额幂等退款。"""
+        from . import obs
+        obs.count("job_settle_failure")
         job = db.one(
             "SELECT id,tenant_id,status,billing_status,billing_points FROM job WHERE id=?",
             (job_id,),
@@ -297,6 +499,7 @@ class Engine:
                 float(amount or 0),
                 claim,
                 f"退回:内容流水线整单 · {reason[:120]}",
+                job_id=job_id,
             )
         except Exception as exc:
             # 结算故障也不能留下“永远运行中”；保留 charged 供启动对账补退。
@@ -393,7 +596,7 @@ class Engine:
                 return False
             if status != "cancelled" and status not in JOB_WORKING_STATUSES:
                 outcome["invalid"] = (
-                    f"当前状态 {status} 不能取消；请新建工单")
+                    f"工单{status_cn(status)},不能取消；请新建工单")
                 return False
 
             # 兼容升级前留下的 cancelled+charged：仅在确实没有可用交付时补退。
@@ -432,6 +635,7 @@ class Engine:
             float(amount or 0),
             claim,
             f"退回:内容流水线整单 · {reason[:120]}",
+            job_id=job_id,
         )
         if outcome["invalid"]:
             raise ValueError(outcome["invalid"])
@@ -441,7 +645,7 @@ class Engine:
             if not current:
                 raise ValueError("工单不存在")
             if current["status"] != "cancelled":
-                raise ValueError("工单状态已变化，请刷新后重试")
+                raise ValueError("工单状态刚刚更新了(可能已被他人操作或已推进),刷新页面按最新状态处理")
         self.touch(job_id)
         return bool(refunded or outcome["refunded"])
 
@@ -454,27 +658,29 @@ class Engine:
     async def _advance_once(self, job_id: int) -> bool:
         """从工位0重扫描一遍,处理第一个可推进的工位。
         返回 True 表示本轮无需继续(等待用户/失败/全部完成)。"""
-        job = db.one("SELECT * FROM job WHERE id=?", (job_id,))
+        job = await db.aone("SELECT * FROM job WHERE id=?", (job_id,))
         if not job or job["status"] in ("done", "cancelled", "failed", "paused"):
             return True
         brief = db.jloads(job["brief_json"])
         profile = None
         if job["profile_id"]:
-            p = db.one("SELECT * FROM account_profile WHERE id=? AND tenant_id=?",
-                       (job["profile_id"], job.get("tenant_id") or 1))
+            p = await db.aone(
+                "SELECT * FROM account_profile WHERE id=? AND tenant_id=?",
+                (job["profile_id"], job.get("tenant_id") or 1),
+            )
             if p:
                 profile = {"name": p["name"], "persona": db.jloads(p["persona_json"])}
 
         idx = 0
         while idx <= LAST_IDX:
             cfg = registry.BY_IDX[idx]
-            run = self._latest_run(job_id, idx)
+            run = await db.arun(self._latest_run, job_id, idx)
 
             if run and run["status"] in ("done", "skipped"):
                 idx += 1
                 continue
             if run and run["status"] == "awaiting_review":
-                changed = db.execute(
+                changed = await db.aexecute(
                     "UPDATE job SET status='awaiting_review',current_idx=?,updated_at=? "
                     "WHERE id=? AND billing_status='charged' "
                     "AND status IN ('running','awaiting_review','gate_blocked')",
@@ -484,29 +690,31 @@ class Engine:
                     self.touch(job_id)
                 return True
             if run and run["status"] == "failed":
-                self.settle_failure(
+                await db.arun(
+                    self.settle_failure,
                     job_id, run.get("review_comment") or f"工位{idx + 1}执行失败")
                 return True
 
             # 需要跳过的可选工位(演绎师默认关闭)
             if cfg.get("optional") and not brief.get("enable_deck"):
                 if not run:
-                    inserted = False
-                    with db.atomic() as c:
-                        current = c.execute(
-                            "SELECT status,billing_status FROM job WHERE id=?",
-                            (job_id,),
-                        ).fetchone()
-                        if self._job_row_executable(current):
+                    def _skip_tx(station_idx=idx, skill=cfg["skill"]):
+                        with db.atomic() as c:
+                            current = c.execute(
+                                "SELECT status,billing_status FROM job WHERE id=?",
+                                (job_id,),
+                            ).fetchone()
+                            if not self._job_row_executable(current):
+                                return False
                             now = time.time()
                             c.execute(
                                 "INSERT INTO station_run"
                                 "(job_id,station_idx,skill_id,status,created_at,updated_at) "
                                 "VALUES(?,?,?,'skipped',?,?)",
-                                (job_id, idx, cfg["skill"], now, now),
+                                (job_id, station_idx, skill, now, now),
                             )
-                            inserted = True
-                    if not inserted:
+                            return True
+                    if not await db.arun(_skip_tx):
                         return True
                 idx += 1
                 continue
@@ -542,82 +750,97 @@ class Engine:
             if res == "interrupted":
                 return True   # 老板打断,工单已暂停,等恢复
             if not res:
-                self.settle_failure(job_id, f"工位{idx + 1}重试后仍失败")
+                await db.arun(self.settle_failure, job_id, f"工位{idx + 1}重试后仍失败")
                 return True
 
-            run = self._latest_run(job_id, idx)
+            run = await db.arun(self._latest_run, job_id, idx)
             if not run:  # 删除请求可能在 provider 返回后已清掉全部工位。
                 return True
             if self._needs_review(cfg, job["mode"]):
-                transitioned = False
-                with db.atomic() as c:
-                    current_job = c.execute(
-                        "SELECT status,billing_status FROM job WHERE id=?",
-                        (job_id,),
-                    ).fetchone()
-                    current_run = c.execute(
-                        "SELECT status FROM station_run WHERE id=?",
-                        (run["id"],),
-                    ).fetchone() if run else None
-                    if (self._job_row_executable(current_job)
-                            and current_run
-                            and current_run["status"] == "running"):
+                def _review_tx(run_id=run["id"], station_idx=idx):
+                    with db.atomic() as c:
+                        current_job = c.execute(
+                            "SELECT status,billing_status FROM job WHERE id=?",
+                            (job_id,),
+                        ).fetchone()
+                        current_run = c.execute(
+                            "SELECT status FROM station_run WHERE id=?",
+                            (run_id,),
+                        ).fetchone()
+                        if not (self._job_row_executable(current_job)
+                                and current_run
+                                and current_run["status"] == "running"):
+                            return False
                         now = time.time()
                         c.execute(
                             "UPDATE station_run SET status='awaiting_review',"
                             "updated_at=? WHERE id=? AND status='running'",
-                            (now, run["id"]),
+                            (now, run_id),
                         )
                         c.execute(
                             "UPDATE job SET status='awaiting_review',current_idx=?,"
                             "updated_at=? WHERE id=? AND billing_status='charged' "
                             "AND status IN ('running','awaiting_review','gate_blocked')",
-                            (idx, now, job_id),
+                            (station_idx, now, job_id),
                         )
-                        transitioned = True
+                        return True
+                transitioned = await db.arun(_review_tx)
                 if not transitioned:
                     return True
                 self.touch(job_id)
                 from . import notify
-                notify.push(self._job_tenant(job_id), "awaiting",
-                            {"job_id": job_id, "title": self._job_title(job_id),
-                             "station": f"工位{idx + 1}·{cfg['name']}"})
+                notice_tenant, notice_title = await db.arun(
+                    self._job_notification_meta, job_id
+                )
+                await asyncio.to_thread(
+                    notify.push,
+                    notice_tenant,
+                    "awaiting",
+                    {
+                        "job_id": job_id,
+                        "title": notice_title,
+                        "station": f"工位{idx + 1}·{cfg['name']}",
+                    },
+                )
                 return True
             # 自动放行:挑选类工位自动取推荐首选
             out = db.jloads(run["output_json"], {})
             if cfg["approval"] == registry.APPROVAL_PICK:
                 out.setdefault("selected", 0)
-            transition = "terminal"
-            with db.atomic() as c:
-                current_job = c.execute(
-                    "SELECT * FROM job WHERE id=?", (job_id,)).fetchone()
-                current_run = c.execute(
-                    "SELECT status FROM station_run WHERE id=?",
-                    (run["id"],),
-                ).fetchone() if run else None
-                if self._job_row_executable(current_job) and current_run:
+            def _autopass_tx(run_id=run["id"], station_idx=idx, out=out):
+                with db.atomic() as c:
+                    current_job = c.execute(
+                        "SELECT * FROM job WHERE id=?", (job_id,)).fetchone()
+                    current_run = c.execute(
+                        "SELECT status FROM station_run WHERE id=?",
+                        (run_id,),
+                    ).fetchone()
+                    if not (self._job_row_executable(current_job) and current_run):
+                        return "terminal"
                     if current_run["status"] == "stale":
-                        transition = "stale"
-                    elif current_run["status"] == "interrupted":
-                        transition = "interrupted"
-                    elif current_run["status"] == "running":
-                        now = time.time()
-                        c.execute(
-                            "UPDATE station_run SET status='done',output_json=?,"
-                            "updated_at=? WHERE id=? AND status='running'",
-                            (json.dumps(out, ensure_ascii=False), now, run["id"]),
-                        )
-                        self._finalize_station_tx(
-                            c, job_id, idx, out,
-                            int(current_job["tenant_id"] or 1),
-                        )
-                        c.execute(
-                            "UPDATE job SET status='running',current_idx=?,updated_at=? "
-                            "WHERE id=? AND billing_status='charged' "
-                            "AND status IN ('running','awaiting_review','gate_blocked')",
-                            (min(idx + 1, LAST_IDX), now, job_id),
-                        )
-                        transition = "done"
+                        return "stale"
+                    if current_run["status"] == "interrupted":
+                        return "interrupted"
+                    if current_run["status"] != "running":
+                        return "terminal"
+                    now = time.time()
+                    c.execute(
+                        "UPDATE station_run SET status='done',output_json=?,"
+                        "updated_at=? WHERE id=? AND status='running'",
+                        (json.dumps(out, ensure_ascii=False), now, run_id),
+                    )
+                    self._finalize_station_tx(
+                        c, job_id, station_idx, out,
+                        int(current_job["tenant_id"] or 1),
+                    )
+                    c.execute(
+                        "UPDATE job SET status='running',current_idx=?,updated_at=? "
+                        "WHERE id=? AND billing_status='charged' "
+                        "AND status IN ('running','awaiting_review','gate_blocked')",
+                        (min(station_idx + 1, LAST_IDX), now, job_id),
+                    )
+                    return "done"
+            transition = await db.arun(_autopass_tx)
             if transition == "stale":
                 return False
             if transition in ("interrupted", "terminal"):
@@ -626,14 +849,16 @@ class Engine:
             return False  # 本工位完成,重扫描推进下一步
 
         # 全部工位完成
-        title = self._job_title(job_id)
-        completed = False
-        with db.atomic() as c:
-            current = c.execute(
-                "SELECT tenant_id,status,billing_status FROM job WHERE id=?",
-                (job_id,),
-            ).fetchone()
-            if self._job_row_executable(current):
+        title = await db.arun(self._job_title, job_id)
+
+        def _complete_tx():
+            with db.atomic() as c:
+                current = c.execute(
+                    "SELECT tenant_id,status,billing_status FROM job WHERE id=?",
+                    (job_id,),
+                ).fetchone()
+                if not self._job_row_executable(current):
+                    return False
                 now = time.time()
                 cur = c.execute(
                     "UPDATE job SET status='done',current_idx=?,updated_at=? "
@@ -641,29 +866,37 @@ class Engine:
                     "AND status IN ('running','awaiting_review','gate_blocked')",
                     (LAST_IDX, now, job_id),
                 )
-                if cur.rowcount == 1:
-                    c.execute(
-                        "INSERT INTO asset"
-                        "(type,job_id,tenant_id,payload_json,created_at,updated_at) "
-                        "VALUES('final',?,?,?,?,?)",
-                        (
-                            job_id,
-                            int(current["tenant_id"] or 1),
-                            json.dumps(
-                                {"title": title,
-                                 "brief": brief.get("direction")},
-                                ensure_ascii=False,
-                            ),
-                            now,
-                            now,
+                if cur.rowcount != 1:
+                    return False
+                c.execute(
+                    "INSERT INTO asset"
+                    "(type,job_id,tenant_id,payload_json,created_at,updated_at) "
+                    "VALUES('final',?,?,?,?,?)",
+                    (
+                        job_id,
+                        int(current["tenant_id"] or 1),
+                        json.dumps(
+                            {"title": title,
+                             "brief": brief.get("direction")},
+                            ensure_ascii=False,
                         ),
-                    )
-                    completed = True
-        if not completed:
+                        now,
+                        now,
+                    ),
+                )
+                return int(current["tenant_id"] or 1)
+
+        completed_tenant = await db.arun(_complete_tx)
+        if not completed_tenant:
             return True
         from . import notify
-        notify.push(self._job_tenant(job_id), "done", {"job_id": job_id, "title": title})
-        self._distill_knowledge(job_id, title)
+        await asyncio.to_thread(
+            notify.push,
+            completed_tenant,
+            "done",
+            {"job_id": job_id, "title": title},
+        )
+        await db.arun(self._distill_knowledge, job_id, title)
         self.touch(job_id)
         return True
 
@@ -739,10 +972,14 @@ class Engine:
                     return tc[o.get("selected_title", 0) if o.get("selected_title", 0) < len(tc) else 0]
         return "(未产出标题)"
 
+    def _job_notification_meta(self, job_id) -> tuple[int, str]:
+        """通知所需 DB 数据一次在线程池读取，调用方再回事件循环发旁路通知。"""
+        return self._job_tenant(job_id), self._job_title(job_id)
+
     async def _run_gate(self, job_id, brief) -> bool:
         """质检;不通过则 gate_blocked 并返回 False."""
         self.broadcast({"type": "gate_running", "job_id": job_id})
-        outputs = self.collect_outputs(job_id)
+        outputs = await db.arun(self.collect_outputs, job_id)
         title, body = "", ""
         o4, o3 = outputs.get(4) or {}, outputs.get(3) or {}
         body = o4.get("body") or o3.get("body") or ""
@@ -755,16 +992,16 @@ class Engine:
         g["steps"] = steps
         gate_cost = float(g.pop("cost_usd", 0) or 0)
         gate_tokens = int(g.pop("tokens", 0) or 0)
-        persisted = False
-        paused = False
-        with db.atomic() as c:
-            job = c.execute(
-                "SELECT status,billing_status FROM job WHERE id=?",
-                (job_id,),
-            ).fetchone()
-            if job and job["status"] == "paused":
-                paused = True
-            elif self._job_row_executable(job):
+        def _gate_tx():
+            with db.atomic() as c:
+                job = c.execute(
+                    "SELECT status,billing_status FROM job WHERE id=?",
+                    (job_id,),
+                ).fetchone()
+                if job and job["status"] == "paused":
+                    return "paused"
+                if not self._job_row_executable(job):
+                    return "gone"
                 cur = c.execute(
                     "UPDATE job SET gate_json=?,cost_usd=cost_usd+?,"
                     "tokens=tokens+?,status=?,updated_at=? "
@@ -779,7 +1016,11 @@ class Engine:
                         job_id,
                     ),
                 )
-                persisted = cur.rowcount == 1
+                return "persisted" if cur.rowcount == 1 else "gone"
+
+        outcome = await db.arun(_gate_tx)
+        paused = outcome == "paused"
+        persisted = outcome == "persisted"
         if paused:   # 质检期间被老板打断：不落结论，恢复后重检。
             self.touch(job_id)
             return False
@@ -788,42 +1029,59 @@ class Engine:
         self.touch(job_id)
         if not g["passed"]:
             from . import notify
-            notify.push(self._job_tenant(job_id), "gate",
-                        {"job_id": job_id, "title": self._job_title(job_id)})
+            notice_tenant, notice_title = await db.arun(
+                self._job_notification_meta, job_id
+            )
+            await asyncio.to_thread(
+                notify.push,
+                notice_tenant,
+                "gate",
+                {"job_id": job_id, "title": notice_title},
+            )
         return g["passed"]
 
     async def _execute(self, job_id, idx, cfg, brief, profile, version,
                        revision_note, prev_output) -> bool:
-        run_id = None
-        tenant_id = 1
-        with db.atomic() as c:
-            job = c.execute("SELECT * FROM job WHERE id=?", (job_id,)).fetchone()
-            if not self._job_row_executable(job):
-                return "deleted" if not job else "cancelled"
-            tenant_id = int(job["tenant_id"] or 1)
-            now = time.time()
-            cur = c.execute(
-                "INSERT INTO station_run"
-                "(job_id,station_idx,skill_id,version,status,created_at,updated_at) "
-                "VALUES(?,?,?,?, 'running',?,?)",
-                (job_id, idx, cfg["skill"], version, now, now),
-            )
-            run_id = cur.lastrowid
-            changed = c.execute(
-                "UPDATE job SET status='running',current_idx=?,updated_at=? "
-                "WHERE id=? AND billing_status='charged' "
-                "AND status IN ('running','awaiting_review','gate_blocked')",
-                (idx, now, job_id),
-            )
-            if changed.rowcount != 1:
-                raise RuntimeError("工单状态已变化，停止创建工位")
-        self.touch(job_id)
-        progress, steps = self._recorder(job_id, idx, run_id)
+        def _open_tx():
+            with db.atomic() as c:
+                job = c.execute(
+                    "SELECT * FROM job WHERE id=?", (job_id,)).fetchone()
+                if not self._job_row_executable(job):
+                    return ("deleted" if not job else "cancelled"), None, 1
+                tenant = int(job["tenant_id"] or 1)
+                now = time.time()
+                cur = c.execute(
+                    "INSERT INTO station_run"
+                    "(job_id,station_idx,skill_id,version,status,created_at,updated_at) "
+                    "VALUES(?,?,?,?, 'running',?,?)",
+                    (job_id, idx, cfg["skill"], version, now, now),
+                )
+                rid = cur.lastrowid
+                changed = c.execute(
+                    "UPDATE job SET status='running',current_idx=?,updated_at=? "
+                    "WHERE id=? AND billing_status='charged' "
+                    "AND status IN ('running','awaiting_review','gate_blocked')",
+                    (idx, now, job_id),
+                )
+                if changed.rowcount != 1:
+                    raise RuntimeError("工单状态已变化，停止创建工位")
+                return None, rid, tenant
+
+        early, run_id, tenant_id = await db.arun(_open_tx)
+        if early:
+            return early
+        self.touch(job_id, tenant_id)
+        progress, steps = self._recorder(
+            job_id,
+            idx,
+            run_id,
+            tenant_id=tenant_id,
+        )
         ctx = {
             "job_id": job_id, "tenant_id": tenant_id,
             "brief": brief, "profile": profile,
-            "outputs": self.collect_outputs(job_id),
-            "model": providers.text_model_for(idx),
+            "outputs": await db.arun(self.collect_outputs, job_id),
+            "model": await db.arun(providers.text_model_for, idx),
             "version": version, "today": time.strftime("%Y-%m-%d"),
             "revision_note": revision_note, "prev_output": prev_output,
             "progress": progress, "token": f"job{job_id}:{idx}",
@@ -835,10 +1093,10 @@ class Engine:
         else:
             progress("start", f"v{version} 开始执行(岗位:{cfg['name']} / Skill:{cfg['skill']})")
         for attempt in range(MAX_RETRY + 1):
-            before = db.one(
+            before = await db.aone(
                 "SELECT status,billing_status FROM job WHERE id=?", (job_id,))
             if not self._job_row_executable(before):
-                db.execute(
+                await db.aexecute(
                     "UPDATE station_run SET status='cancelled',"
                     "review_comment='工单已取消',updated_at=? "
                     "WHERE id=? AND status IN ('running','queued')",
@@ -851,10 +1109,10 @@ class Engine:
                 r = await cfg["run"](ctx)
 
                 # provider 可能不响应 kill；返回后先重新确认业务终态，再读取/落库结果。
-                after_provider = db.one(
+                after_provider = await db.aone(
                     "SELECT status,billing_status FROM job WHERE id=?", (job_id,))
                 if not self._job_row_executable(after_provider):
-                    db.execute(
+                    await db.aexecute(
                         "UPDATE station_run SET status='cancelled',output_json=NULL,"
                         "review_comment='工单已取消，在途结果已丢弃',updated_at=? "
                         "WHERE id=? AND status IN ('running','queued')",
@@ -864,35 +1122,36 @@ class Engine:
 
                 progress("done", f"产出完成 · 用时 {int(time.time() - t0)}s · "
                                  f"{r['tokens']} tokens · ${r['cost_usd']:.3f}")
-                result_state = "terminal"
-                with db.atomic() as c:
-                    current_job = c.execute(
-                        "SELECT status,billing_status FROM job WHERE id=?",
-                        (job_id,),
-                    ).fetchone()
-                    current_run = c.execute(
-                        "SELECT status FROM station_run WHERE id=?",
-                        (run_id,),
-                    ).fetchone()
-                    if not current_job:
-                        result_state = "deleted"
-                    elif not self._job_row_executable(current_job):
-                        if current_run and current_run["status"] in (
-                                "running", "queued"):
-                            c.execute(
-                                "UPDATE station_run SET status='cancelled',"
-                                "output_json=NULL,"
-                                "review_comment='工单已取消，在途结果已丢弃',"
-                                "updated_at=? WHERE id=? "
-                                "AND status IN ('running','queued')",
-                                (time.time(), run_id),
-                            )
-                        result_state = "cancelled"
-                    elif not current_run:
-                        result_state = "deleted"
-                    elif current_run["status"] in ("stale", "interrupted"):
-                        result_state = current_run["status"]
-                    elif current_run["status"] == "running":
+                def _save_tx(r=r, steps_snapshot=json.dumps(steps, ensure_ascii=False)):
+                    with db.atomic() as c:
+                        current_job = c.execute(
+                            "SELECT status,billing_status FROM job WHERE id=?",
+                            (job_id,),
+                        ).fetchone()
+                        current_run = c.execute(
+                            "SELECT status FROM station_run WHERE id=?",
+                            (run_id,),
+                        ).fetchone()
+                        if not current_job:
+                            return "deleted"
+                        if not self._job_row_executable(current_job):
+                            if current_run and current_run["status"] in (
+                                    "running", "queued"):
+                                c.execute(
+                                    "UPDATE station_run SET status='cancelled',"
+                                    "output_json=NULL,"
+                                    "review_comment='工单已取消，在途结果已丢弃',"
+                                    "updated_at=? WHERE id=? "
+                                    "AND status IN ('running','queued')",
+                                    (time.time(), run_id),
+                                )
+                            return "cancelled"
+                        if not current_run:
+                            return "deleted"
+                        if current_run["status"] in ("stale", "interrupted"):
+                            return current_run["status"]
+                        if current_run["status"] != "running":
+                            return "terminal"
                         now = time.time()
                         c.execute(
                             "UPDATE station_run SET output_json=?,latency_ms=?,"
@@ -901,7 +1160,7 @@ class Engine:
                             (
                                 json.dumps(r["data"], ensure_ascii=False),
                                 int((time.time() - t0) * 1000),
-                                json.dumps(steps, ensure_ascii=False),
+                                steps_snapshot,
                                 r["tokens"],
                                 r["cost_usd"],
                                 now,
@@ -916,8 +1175,9 @@ class Engine:
                             "('running','awaiting_review','gate_blocked')",
                             (r["cost_usd"], r["tokens"], now, job_id),
                         )
-                        result_state = (
-                            "success" if updated.rowcount == 1 else "cancelled")
+                        return "success" if updated.rowcount == 1 else "cancelled"
+
+                result_state = await db.arun(_save_tx)
                 if result_state == "stale":
                     return "stale"  # 执行期间上游被打回,本次产出作废待重算
                 if result_state == "interrupted":
@@ -926,12 +1186,12 @@ class Engine:
                     return result_state
                 return True
             except (llm.LLMError, KeyError, TypeError, ValueError) as e:
-                jnow = db.one(
+                jnow = await db.aone(
                     "SELECT status,billing_status FROM job WHERE id=?", (job_id,))
                 if not jnow or jnow["status"] in (
                         "cancelled", "done", "failed") or (
                         jnow["billing_status"] != "charged"):
-                    db.execute(
+                    await db.aexecute(
                         "UPDATE station_run SET status='cancelled',output_json=NULL,"
                         "review_comment='工单已结束，停止重试',updated_at=? "
                         "WHERE id=? AND status IN ('running','queued')",
@@ -940,7 +1200,7 @@ class Engine:
                     return "deleted" if not jnow else "cancelled"
                 if jnow and jnow["status"] == "paused":
                     progress("error", "⏸ 老板按下打断,本工位停工(恢复后自动重跑)")
-                    db.execute(
+                    await db.aexecute(
                         "UPDATE station_run SET status='interrupted',steps_json=?,"
                         "review_comment='老板打断',updated_at=? "
                         "WHERE id=? AND status='running'",
@@ -962,34 +1222,35 @@ class Engine:
                     type(e).__name__,
                 )
         progress("error", f"重试 {MAX_RETRY} 次后仍失败,工位挂起等老板处理")
-        failed = False
-        terminal = None
-        with db.atomic() as c:
-            current_job = c.execute(
-                "SELECT status,billing_status FROM job WHERE id=?",
-                (job_id,),
-            ).fetchone()
-            if not current_job:
-                terminal = "deleted"
-            elif not self._job_row_executable(current_job):
-                terminal = "cancelled"
-            else:
+
+        def _fail_tx(steps_snapshot=json.dumps(steps, ensure_ascii=False)):
+            with db.atomic() as c:
+                current_job = c.execute(
+                    "SELECT status,billing_status FROM job WHERE id=?",
+                    (job_id,),
+                ).fetchone()
+                if not current_job:
+                    return "deleted"
+                if not self._job_row_executable(current_job):
+                    return "cancelled"
                 cur = c.execute(
                     "UPDATE station_run SET status='failed',latency_ms=?,"
                     "steps_json=?,review_comment=?,updated_at=? "
                     "WHERE id=? AND status='running'",
                     (
                         int((time.time() - t0) * 1000),
-                        json.dumps(steps, ensure_ascii=False),
+                        steps_snapshot,
                         providers.public_failure_message(last_err),
                         time.time(),
                         run_id,
                     ),
                 )
-                failed = cur.rowcount == 1
-        if terminal:
-            return terminal
-        if not failed:
+                return "failed" if cur.rowcount == 1 else "raced"
+
+        outcome = await db.arun(_fail_tx)
+        if outcome in ("deleted", "cancelled"):
+            return outcome
+        if outcome != "failed":
             return "cancelled"
         return False
 
@@ -1061,6 +1322,9 @@ class Engine:
         payload = payload or {}
         if action not in ("approve", "edit", "reject", "rerun"):
             raise ValueError(f"未知动作 {action}")
+        # 拍板人:HTTP 线程池会拷贝请求 contextvars,这里能拿到操作者;
+        # 系统内部无会话路径(恢复/调度)不走本方法,拿不到时留空即可。
+        reviewer_id = (auth.current() or {}).get("id")
 
         with db.atomic() as c:
             job_row = c.execute(
@@ -1089,7 +1353,7 @@ class Engine:
             if action in ("approve", "edit"):
                 if run["status"] != "awaiting_review":
                     raise ValueError(
-                        f"当前状态 {run['status']} 不可审批；请刷新工单状态")
+                        f"该工位{status_cn(run['status'])},现在不需要审批；请刷新页面看最新状态")
                 edits = payload.get("edits") or {}
                 out.update(edits)
                 if "selected" in payload:
@@ -1098,17 +1362,18 @@ class Engine:
                     out["selected_title"] = payload["selected_title"]
                 changed = c.execute(
                     "UPDATE station_run SET status='done',output_json=?,"
-                    "review_comment=?,updated_at=? "
+                    "review_comment=?,reviewed_by=?,updated_at=? "
                     "WHERE id=? AND status='awaiting_review'",
                     (
                         json.dumps(out, ensure_ascii=False),
                         payload.get("comment"),
+                        reviewer_id,
                         now,
                         run["id"],
                     ),
                 )
                 if changed.rowcount != 1:
-                    raise ValueError("工位状态已变化，请刷新后重试")
+                    raise ValueError("这个工位的状态刚刚更新了(可能已自动推进或被他人操作),刷新页面看最新状态")
                 self._finalize_station_tx(
                     c,
                     job_id,
@@ -1121,31 +1386,33 @@ class Engine:
             elif action == "reject":
                 if run["status"] != "awaiting_review":
                     raise ValueError(
-                        f"当前状态 {run['status']} 不可打回；请刷新工单状态")
+                        f"该工位{status_cn(run['status'])},现在不能打回；请刷新页面看最新状态")
                 comment = (payload.get("comment") or "").strip()
                 if not comment:
                     raise ValueError("打回必须填写修改意见")
                 changed = c.execute(
                     "UPDATE station_run SET status='rejected',review_comment=?,"
-                    "updated_at=? WHERE id=? AND status='awaiting_review'",
-                    (comment, now, run["id"]),
+                    "reviewed_by=?,updated_at=? "
+                    "WHERE id=? AND status='awaiting_review'",
+                    (comment, reviewer_id, now, run["id"]),
                 )
                 if changed.rowcount != 1:
-                    raise ValueError("工位状态已变化，请刷新后重试")
+                    raise ValueError("这个工位的状态刚刚更新了(可能已自动推进或被他人操作),刷新页面看最新状态")
                 self._mark_downstream_stale_tx(c, job_id, idx)
                 target_idx = idx
             else:  # rerun：仅允许仍在进行中的整单重跑已交付/待审批工位。
                 if run["status"] not in ("done", "awaiting_review"):
                     raise ValueError(
-                        f"当前状态 {run['status']} 不可重跑；失败工单请新建工单")
+                        f"该工位{status_cn(run['status'])},不能重跑；失败的工单请重新开单")
                 comment = (payload.get("comment") or "").strip()
                 changed = c.execute(
                     "UPDATE station_run SET status='rejected',review_comment=?,"
-                    "updated_at=? WHERE id=? AND status IN ('done','awaiting_review')",
-                    (comment or "老板要求重跑", now, run["id"]),
+                    "reviewed_by=?,updated_at=? "
+                    "WHERE id=? AND status IN ('done','awaiting_review')",
+                    (comment or "老板要求重跑", reviewer_id, now, run["id"]),
                 )
                 if changed.rowcount != 1:
-                    raise ValueError("工位状态已变化，请刷新后重试")
+                    raise ValueError("这个工位的状态刚刚更新了(可能已自动推进或被他人操作),刷新页面看最新状态")
                 self._mark_downstream_stale_tx(c, job_id, idx)
                 target_idx = idx
 
@@ -1183,7 +1450,7 @@ class Engine:
                 raise ValueError("工单不存在")
             if (job["billing_status"] != "charged"
                     or job["status"] not in JOB_EXECUTABLE_STATUSES):
-                raise ValueError(f"当前状态 {job['status']} 无需打断")
+                raise ValueError(f"工单{status_cn(job['status'])},不需要打断")
             now = time.time()
             changed = c.execute(
                 "UPDATE job SET status='paused',updated_at=? "
@@ -1191,7 +1458,7 @@ class Engine:
                 (now, job_id, job["status"]),
             )
             if changed.rowcount != 1:
-                raise ValueError("工单状态已变化，请刷新后重试")
+                raise ValueError("工单状态刚刚更新了(可能已被他人操作或已推进),刷新页面按最新状态处理")
             c.execute(
                 "UPDATE station_run SET status='interrupted',"
                 "review_comment='老板打断',updated_at=? "
@@ -1231,7 +1498,7 @@ class Engine:
                 (now, job_id),
             )
             if changed.rowcount != 1:
-                raise ValueError("工单状态已变化，请刷新后重试")
+                raise ValueError("工单状态刚刚更新了(可能已被他人操作或已推进),刷新页面按最新状态处理")
         self.notify(job_id)
         self.touch(job_id)
 
@@ -1271,7 +1538,7 @@ class Engine:
             else:
                 raise ValueError("未知动作")
             if changed.rowcount != 1:
-                raise ValueError("工单状态已变化，请刷新后重试")
+                raise ValueError("工单状态刚刚更新了(可能已被他人操作或已推进),刷新页面按最新状态处理")
         self.notify(job_id)
         self.touch(job_id)
 

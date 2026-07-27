@@ -34,20 +34,26 @@ async def _run_billed(
     副作用放在 after_success，失败只记日志，不能把已经交付的结果再退款。
     """
     from . import billing
-    op_key = billing.start_operation(action, tid=tid, note=note)
+    op_key = await db.arun(
+        billing.start_operation, action, tid=tid, note=note
+    )
     try:
         result = await runner()
         if commit is None:
-            completed = billing.complete_operation(op_key)
+            completed = await db.arun(billing.complete_operation, op_key)
         else:
-            completed = billing.complete_operation_if_claimed(
-                op_key, lambda connection: bool(commit(connection, result))
+            completed = await db.arun(
+                billing.complete_operation_if_claimed,
+                op_key,
+                lambda connection: bool(commit(connection, result)),
             )
         if not completed:
             raise RuntimeError("周期任务结算状态冲突")
     except BaseException as exc:
         try:
-            billing.fail_operation(op_key, "周期任务失败自动退回")
+            await db.arun(
+                billing.fail_operation, op_key, "周期任务失败自动退回"
+            )
         except Exception as settlement_exc:
             log.error(
                 "periodic billing settlement failed op=%s error_type=%s",
@@ -57,7 +63,7 @@ async def _run_billed(
         raise
     if after_success is not None:
         try:
-            after_success(result)
+            await asyncio.to_thread(after_success, result)
         except Exception as exc:
             log.error(
                 "periodic post-commit notification failed action=%s tid=%s "
@@ -176,6 +182,114 @@ async def _run_bench_weekly(tid: int):
     )
 
 
+def _digest_stats(tid: int, balance: float, day_start: datetime) -> dict:
+    """汇总某租户「昨日」(北京时区自然日)的经营数字,纯查询不写库."""
+    y_start = (day_start - timedelta(days=1)).timestamp()
+    y_end = day_start.timestamp()
+    week_start = (day_start - timedelta(days=7)).timestamp()
+    jobs_done = db.one(
+        "SELECT COUNT(*) n FROM job WHERE tenant_id=? AND status='done' "
+        "AND updated_at>=? AND updated_at<?",
+        (tid, y_start, y_end),
+    )["n"]
+    tasks_done = db.one(
+        "SELECT COUNT(*) n FROM task WHERE tenant_id=? AND status='done' "
+        "AND deleted_at IS NULL AND updated_at>=? AND updated_at<?",
+        (tid, y_start, y_end),
+    )["n"]
+    spent = float(db.one(
+        "SELECT COALESCE(SUM(-delta),0) s FROM billing_log "
+        "WHERE tenant_id=? AND delta<0 AND created_at>=? AND created_at<?",
+        (tid, y_start, y_end),
+    )["s"] or 0)
+    # 退点口径:所有退款路径(操作退款/工单失败退款)都会写一条
+    # reason 以「退回」开头的正向流水;billing_operation 只覆盖走操作记录的
+    # 退款,漏掉 refund_if_claimed 等直退路径,故以流水为准。
+    refunds = db.one(
+        "SELECT COUNT(*) n FROM billing_log WHERE tenant_id=? AND delta>0 "
+        "AND reason LIKE '退回%' AND created_at>=? AND created_at<?",
+        (tid, y_start, y_end),
+    )["n"]
+    paused = db.one(
+        "SELECT COUNT(*) n FROM schedule WHERE tenant_id=? AND enabled=0 "
+        "AND last_note LIKE '已暂停%'",
+        (tid,),
+    )["n"]
+    week_spent = float(db.one(
+        "SELECT COALESCE(SUM(-delta),0) s FROM billing_log "
+        "WHERE tenant_id=? AND delta<0 AND created_at>=? AND created_at<?",
+        (tid, week_start, y_end),
+    )["s"] or 0)
+    daily_avg = week_spent / 7
+    days_left = int(balance // daily_avg) if daily_avg > 0 and balance > 0 else None
+    return {
+        "date": (day_start - timedelta(days=1)).strftime("%m-%d"),
+        "jobs_done": int(jobs_done or 0),
+        "tasks_done": int(tasks_done or 0),
+        "spent": spent,
+        "refunds": int(refunds or 0),
+        "paused": int(paused or 0),
+        "balance": float(balance or 0),
+        "days_left": days_left,
+    }
+
+
+def _run_daily_digest(now: datetime):
+    """老板「昨日经营简报」:每天早上一次,被动推给不天天登录的老板。
+
+    幂等靠 app_setting ``daily_digest_sent:{tid}`` 记最近已发日期(北京时区),
+    同日再 tick 直接跳过,重启后也不重发;昨日完全无活动且无暂停风险则不打扰。
+    """
+    from . import notify
+    today = now.strftime("%Y-%m-%d")
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    for t in db.q("SELECT id,balance,plan,plan_expires FROM tenants "
+                  "WHERE enabled=1 AND id!=1"):
+        tid = int(t["id"])
+        try:
+            if db.get_setting(f"daily_digest_off:{tid}"):
+                continue                              # 老板关了开关,不发
+            if db.get_setting(f"daily_digest_sent:{tid}") == today:
+                continue                              # 今天已发过,不重发
+            stats = _digest_stats(tid, float(t["balance"] or 0), day_start)
+            # 套餐临期是必须叫醒老板的风险:即使昨日无活动也要提醒
+            plan_days_left = None
+            if t.get("plan_expires"):
+                plan_days_left = int(
+                    (float(t["plan_expires"]) - now.timestamp()) // 86400)
+            # 只在临期窗口 [-3,7] 内叫醒:流失租户过期几百天还每天推,
+            # 就成了永动骚扰,与"没动静别打扰"的原则矛盾。
+            expiring = (plan_days_left is not None
+                        and -3 <= plan_days_left <= 7)
+            had_activity = (stats["jobs_done"] or stats["tasks_done"]
+                            or stats["spent"] > 0 or stats["refunds"])
+            if not had_activity and not stats["paused"] and not expiring:
+                continue                              # 昨日没动静也没风险,别骚扰
+            spend_part = f"消耗 {stats['spent']:.0f} 点"
+            if stats["refunds"]:
+                spend_part += f"、退回 {stats['refunds']} 笔"
+            summary = (f"昨日完成:内容工单 {stats['jobs_done']} 单、"
+                       f"专家任务 {stats['tasks_done']} 件;{spend_part};"
+                       + (f"{stats['paused']} 个定时任务已暂停;" if stats["paused"] else "")
+                       + f"余额 {stats['balance']:.0f} 点"
+                       + (f"(约可再跑 {stats['days_left']} 天)"
+                          if stats["days_left"] is not None else "")
+                       + (("" if not expiring else
+                           ";套餐已到期,请尽快续费" if plan_days_left < 0
+                           else f";套餐还有 {plan_days_left} 天到期")))
+            stats["plan_days_left"] = plan_days_left
+            # 先落幂等标记再推送:宁可极端情况漏一天,也不给老板发两条
+            db.set_setting(f"daily_digest_sent:{tid}", today)
+            notify.push(tid, "daily_digest", {**stats, "summary": summary})
+            log.info("daily digest sent tid=%s", tid)
+        except Exception as exc:
+            log.error(
+                "daily digest tid=%s failed error_type=%s",
+                tid,
+                type(exc).__name__,
+            )
+
+
 def compute_next(s: dict, now: float = None) -> float:
     now = now or time.time()
     if s["kind"] == "interval":
@@ -238,7 +352,8 @@ def fire(s: dict, engine, occurrence: str | None = None) -> int:
             raise ValueError("并行工单已满(3)")
         profile_id = s.get("profile_id")
         if profile_id and not db.one(
-                "SELECT id FROM account_profile WHERE id=? AND tenant_id=?",
+                "SELECT id FROM account_profile WHERE id=? AND tenant_id=? "
+                "AND deleted_at IS NULL",
                 (profile_id, tid)):
             # 兼容旧版本可能留下的越租户引用：不读取、不传播，按未选人设安全执行。
             profile_id = None
@@ -309,7 +424,8 @@ def fire(s: dict, engine, occurrence: str | None = None) -> int:
         try:
             charged = billing.charge_if_claimed(
                 "content_job", tid, claim,
-                note=f"定时·{s.get('name', '')[:12]}", points=points)
+                note=f"定时·{s.get('name', '')[:12]}", points=points,
+                job_id=job_id)
         except Exception:
             db.q(
                 "DELETE FROM job WHERE id=? AND billing_status='pending'",
@@ -345,7 +461,8 @@ def _claim_due(schedule_id: int, now: float) -> str | None:
 
 
 def _finish_claim(schedule_id: int, token: str, **fields) -> bool:
-    allowed = {"last_run_at", "next_run_at", "last_note", "enabled"}
+    allowed = {"last_run_at", "next_run_at", "last_note", "enabled",
+               "fail_streak"}
     data = {key: value for key, value in fields.items() if key in allowed}
     data.update({"claim_token": None, "claim_until": None, "updated_at": time.time()})
     sets = ",".join(f"{key}=?" for key in data)
@@ -373,6 +490,7 @@ def _tick(engine):
                 last_run_at=now,
                 next_run_at=compute_next(s, now),
                 last_note=f"已按时开工 → 工单 #{job_id}",
+                fail_streak=0,
             )
             log.info("schedule %s fired -> job %s", s["id"], job_id)
         except Exception as e:
@@ -382,7 +500,16 @@ def _tick(engine):
                     s["id"], claim_token,
                     enabled=0,
                     last_note=f"已暂停:{str(e)[:60]}",
+                    fail_streak=0,   # 暂停不是开工失败;复通后告警计数从头算
                 )
+                # 自动日更是老板买这套系统的核心理由;静默停更等于让他两周后
+                # 才发现断更。站内必达,配了企微立刻推手机。
+                try:
+                    from . import notify
+                    notify.push(s.get("tenant_id") or 1, "schedule_paused",
+                                {"title": s.get("name") or "定时任务"})
+                except Exception:
+                    log.warning("schedule pause notify failed id=%s", s["id"])
             elif isinstance(e, ValueError):
                 _finish_claim(
                     s["id"], claim_token,
@@ -395,11 +522,24 @@ def _tick(engine):
                     s["id"],
                     type(e).__name__,
                 )
+                streak = int(s.get("fail_streak") or 0) + 1
                 _finish_claim(
                     s["id"], claim_token,
                     next_run_at=now + 600,
-                    last_note="开工出错，10分钟后重试",
+                    last_note=f"开工出错,10分钟后重试(已连续失败 {streak} 次)",
+                    fail_streak=streak,
                 )
+                # 静默重试一整天老板毫不知情是最伤的:连续 3 次就告警一次,
+                # 之后每 12 次(约 2 小时)再提醒,直到某次成功清零。
+                if streak == 3 or (streak > 3 and streak % 12 == 0):
+                    try:
+                        from . import notify
+                        notify.push(s.get("tenant_id") or 1, "schedule_failed",
+                                    {"title": s.get("name") or "定时任务",
+                                     "streak": streak})
+                    except Exception:
+                        log.warning(
+                            "schedule fail notify failed id=%s", s["id"])
 
 
 async def _periodic():
@@ -409,9 +549,10 @@ async def _periodic():
     now = datetime.now(TZ)
     if 7 <= now.hour <= 9:                                # 每日必发:一天一次
         today = now.strftime("%Y-%m-%d")
-        for r in db.q("SELECT key FROM app_setting WHERE key LIKE 'hot_daily:%'"):
+        for r in await db.aq(
+                "SELECT key FROM app_setting WHERE key LIKE 'hot_daily:%'"):
             tid = int(r["key"].split(":")[1])
-            conf = growth.hot_daily_conf(tid)
+            conf = await db.arun(growth.hot_daily_conf, tid)
             if not conf.get("enabled") or conf.get("last_ymd") == today:
                 continue
             try:
@@ -420,17 +561,29 @@ async def _periodic():
             except billing.InsufficientPoints:
                 conf["enabled"] = False
                 conf["note"] = "点数不足已暂停"
-                db.set_setting(f"hot_daily:{tid}", __import__("json").dumps(conf, ensure_ascii=False))
+                await db.aset_setting(
+                    f"hot_daily:{tid}",
+                    __import__("json").dumps(conf, ensure_ascii=False),
+                )
             except Exception as exc:
                 log.error(
                     "hot daily tid=%s failed error_type=%s",
                     tid,
                     type(exc).__name__,
                 )
+    if 8 <= now.hour <= 10:                              # 昨日经营简报:一天一次
+        try:
+            await asyncio.to_thread(_run_daily_digest, now)
+        except Exception as exc:
+            log.error(
+                "daily digest tick failed error_type=%s",
+                type(exc).__name__,
+            )
     if now.weekday() == 0 and 9 <= now.hour <= 11:      # 周一上午出周报
-        for r in db.q("SELECT key FROM app_setting WHERE key LIKE 'bench_watch:%'"):
+        for r in await db.aq(
+                "SELECT key FROM app_setting WHERE key LIKE 'bench_watch:%'"):
             tid = int(r["key"].split(":")[1])
-            conf = growth.watch_conf(tid)
+            conf = await db.arun(growth.watch_conf, tid)
             if not (conf.get("enabled") and conf.get("targets")):
                 continue
             if conf.get("last_run") and time.time() - conf["last_run"] < 3 * 86400:
@@ -440,7 +593,10 @@ async def _periodic():
                 log.info("bench weekly report done tid=%s", tid)
             except billing.InsufficientPoints:
                 conf["enabled"] = False
-                db.set_setting(f"bench_watch:{tid}", __import__("json").dumps(conf, ensure_ascii=False))
+                await db.aset_setting(
+                    f"bench_watch:{tid}",
+                    __import__("json").dumps(conf, ensure_ascii=False),
+                )
             except Exception as exc:
                 log.error(
                     "bench weekly tid=%s failed error_type=%s",
@@ -454,7 +610,7 @@ async def loop(engine):
     last_periodic = 0.0
     while True:
         try:
-            _tick(engine)
+            await asyncio.to_thread(_tick, engine)
         except Exception as exc:
             log.error(
                 "scheduler tick failed error_type=%s",

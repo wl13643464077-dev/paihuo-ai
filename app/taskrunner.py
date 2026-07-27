@@ -418,7 +418,7 @@ async def run_task(task_id: int, broadcast):
     from .skills import registry
     if task_id in RUNNING:
         return
-    t = db.one(
+    t = await db.aone(
         "SELECT * FROM task WHERE id=? AND deleted_at IS NULL", (task_id,)
     )
     if not t or t["status"] != "queued":
@@ -427,12 +427,17 @@ async def run_task(task_id: int, broadcast):
     e = departments.get(idx)
     solo_content = e is None and idx in registry.BY_IDX
     if not e and not solo_content:
-        settle_failure(task_id, "员工不存在")
+        await db.arun(settle_failure, task_id, "员工不存在")
         return
     if solo_content:
         s = registry.BY_IDX[idx]
         e = {"name": s["name"], "dept_name": "内容生产部", "group": s["dept"]}
-    t = _claim_task(task_id)
+    required_modules = (
+        (str(e.get("dept_key") or "content"),)
+        if e
+        else ("content",)
+    )
+    t = await db.arun(_claim_task, task_id)
     if not t:
         return
     RUNNING.add(task_id)
@@ -447,21 +452,30 @@ async def run_task(task_id: int, broadcast):
             steps.append({"k": kind, "l": str(label)[:300], "ts": now})
         _broadcast_safely(
             broadcast,
-            {"type": "task_step", "task_id": task_id, "idx": t["emp_idx"],
-             "n": len(steps), "step": steps[-1]},
+            {
+                "type": "task_step",
+                "tenant_id": t.get("tenant_id") or 1,
+                "_required_modules": required_modules,
+                "task_id": task_id,
+                "idx": t["emp_idx"],
+                "n": len(steps),
+                "step": steps[-1],
+            },
         )
         if kind != "typing" or now - st["save"] > 3:
-            db.execute(
+            # 事件循环上的进度落库进 db 线程池,避免写锁竞争冻结全部协程。
+            db.submit_write(
+                db.execute,
                 "UPDATE task SET steps_json=?,updated_at=? "
                 "WHERE id=? AND status='running' AND deleted_at IS NULL",
                 (json.dumps(steps, ensure_ascii=False), now, task_id),
             )
             st["save"] = now
 
-    def cleanup():
+    async def cleanup():
         RUNNING.discard(task_id)
         try:
-            sync_meeting_delivery_for_task(task_id)
+            await db.arun(sync_meeting_delivery_for_task, task_id)
         except Exception as exc:
             log.error(
                 "task %s meeting delivery sync failed error_type=%s",
@@ -470,18 +484,31 @@ async def run_task(task_id: int, broadcast):
             )
         _broadcast_safely(
             broadcast,
-            {"type": "task_update", "task_id": task_id, "idx": t["emp_idx"]},
+            {
+                "type": "task_update",
+                "tenant_id": t.get("tenant_id") or 1,
+                "_required_modules": required_modules,
+                "task_id": task_id,
+                "idx": t["emp_idx"],
+            },
         )
 
     _broadcast_safely(
         broadcast,
-        {"type": "task_update", "task_id": task_id, "idx": t["emp_idx"]},
+        {
+            "type": "task_update",
+            "tenant_id": t.get("tenant_id") or 1,
+            "_required_modules": required_modules,
+            "task_id": task_id,
+            "idx": t["emp_idx"],
+        },
     )
     md_done = None
     try:
         brief = normalize_brief(db.jloads(t["brief_json"], None))
         cfg = employees.get_config(idx)
-        ctx_text, recall = _context_text(
+        ctx_text, recall = await db.arun(
+            _context_text,
             t.get("tenant_id") or 1,
             "\n".join(str(value or "") for value in (
                 brief.get("direction"),
@@ -518,10 +545,10 @@ async def run_task(task_id: int, broadcast):
         )
         public_error = providers.public_failure_message(exc)
         try:
-            settle_failure(task_id, public_error)
+            await db.arun(settle_failure, task_id, public_error)
             progress("error", public_error)
         finally:
-            cleanup()
+            await cleanup()
         return
     try:
         r = await providers.call_text(
@@ -540,45 +567,55 @@ async def run_task(task_id: int, broadcast):
         title = next((ln.lstrip("# ").strip() for ln in md.splitlines()
                       if ln.startswith("#")), brief.get("direction", "")[:30])
         now = time.time()
-        with db.atomic() as connection:
-            changed = connection.execute(
-                "UPDATE task SET status='done',output_md=?,cost_usd=?,tokens=?,"
-                "steps_json=?,billing_status=CASE WHEN billing_status='charged' "
-                "THEN 'succeeded' ELSE billing_status END,updated_at=? "
-                "WHERE id=? AND status='running' "
-                "AND billing_status IN ('charged','included') "
-                "AND deleted_at IS NULL",
-                (
-                    md,
-                    r["cost_usd"] + extra_cost,
-                    r["tokens"],
-                    json.dumps(steps, ensure_ascii=False),
-                    now,
-                    task_id,
-                ),
-            )
-            if changed.rowcount == 1:
+        def _commit_delivery():
+            with db.atomic() as connection:
+                changed = connection.execute(
+                    "UPDATE task SET status='done',output_md=?,cost_usd=?,tokens=?,"
+                    "steps_json=?,billing_status=CASE WHEN billing_status='charged' "
+                    "THEN 'succeeded' ELSE billing_status END,updated_at=? "
+                    "WHERE id=? AND status='running' "
+                    "AND billing_status IN ('charged','included') "
+                    "AND deleted_at IS NULL",
+                    (
+                        md,
+                        r["cost_usd"] + extra_cost,
+                        r["tokens"],
+                        json.dumps(steps, ensure_ascii=False),
+                        now,
+                        task_id,
+                    ),
+                )
+                if changed.rowcount != 1:
+                    return False
                 connection.execute(
                     "INSERT INTO asset(type,tenant_id,payload_json,created_at,updated_at) "
                     "VALUES('report',?,?,?,?)",
                     (
                         t.get("tenant_id") or 1,
                         json.dumps(
-                            {"title": title, "emp": e["name"], "dept": e["dept_name"],
-                             "group": e["group"], "task_id": task_id,
-                             "brief": brief.get("direction", "")},
+                            {
+                                "title": title,
+                                "emp": e["name"],
+                                "dept": e["dept_name"],
+                                "group": e["group"],
+                                "task_id": task_id,
+                                "brief": brief.get("direction", ""),
+                            },
                             ensure_ascii=False,
                         ),
                         now,
                         now,
                     ),
                 )
-                md_done = md
+                return True
+
+        if await db.arun(_commit_delivery):
+            md_done = md
         if md_done:
             progress("done", f"交付完成 · ${r['cost_usd']:.3f}")
     except llm.LLMError as ex:
         public_error = providers.public_failure_message(ex)
-        settle_failure(task_id, public_error)
+        await db.arun(settle_failure, task_id, public_error)
         progress("error", public_error)
     except Exception as exc:
         log.error(
@@ -587,10 +624,10 @@ async def run_task(task_id: int, broadcast):
             type(exc).__name__,
         )
         public_error = providers.public_failure_message(exc)
-        settle_failure(task_id, public_error)
+        await db.arun(settle_failure, task_id, public_error)
         progress("error", public_error)
     finally:
-        cleanup()
+        await cleanup()
     # 任务已交付(done)后再补「老板速览」——绝不拖慢交付感知,失败也不回退状态
     if md_done and len(md_done) > DIGEST_MIN_CHARS:
         await _gen_summary(task_id, md_done, t["emp_idx"], t.get("tenant_id") or 1, broadcast)
@@ -663,13 +700,32 @@ async def _gen_summary(task_id: int, md: str, idx: int, tid: int, broadcast):
         if action:
             lines.append(f"- 👉 **一句话行动建议**:{action}")
         # 生成期间(~几十秒)老板可能已手动编辑过正文:重读比对,变了就放弃,不给编辑后的正文盖旧速览
-        cur = db.one("SELECT output_md, cost_usd FROM task WHERE id=?", (task_id,))
+        cur = await db.aone(
+            "SELECT output_md, cost_usd FROM task WHERE id=?", (task_id,)
+        )
         if not cur or (cur.get("output_md") or "").strip() != md.strip():
             return
-        db.update("task", task_id, {"summary_md": "\n".join(lines),
-                                    "cost_usd": (cur.get("cost_usd") or 0) + (r.get("cost_usd") or 0)})
-        sync_meeting_delivery_for_task(task_id)
-        broadcast({"type": "task_update", "task_id": task_id, "idx": idx})
+        await db.aupdate(
+            "task",
+            task_id,
+            {
+                "summary_md": "\n".join(lines),
+                "cost_usd": (
+                    (cur.get("cost_usd") or 0) + (r.get("cost_usd") or 0)
+                ),
+            },
+        )
+        await db.arun(sync_meeting_delivery_for_task, task_id)
+        expert = departments.get(idx)
+        broadcast({
+            "type": "task_update",
+            "tenant_id": tid,
+            "_required_modules": (
+                str((expert or {}).get("dept_key") or "content"),
+            ),
+            "task_id": task_id,
+            "idx": idx,
+        })
     except Exception as exc:
         log.debug(
             "老板速览生成跳过 task=%s error_type=%s",

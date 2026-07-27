@@ -341,7 +341,12 @@ class FailureConfidentialityApiTests(unittest.IsolatedAsyncioTestCase):
         row = db.one("SELECT status,error FROM tool_job WHERE id=?", (job_id,))
         self.assertEqual("failed", row["status"])
         self.assertNotIn(SECRET_SENTINEL, row["error"])
-        self.assertEqual(providers.PUBLIC_TASK_FAILURE, row["error"])
+        # 失败文案现按异常类型分类,但仍必须是与异常内容无关的固定安全文案:
+        # 换一个哨兵,产出的文案必须一字不差。
+        self.assertEqual(
+            providers.public_failure_message(llm.LLMError("另一个哨兵")),
+            row["error"],
+        )
         response = await self._get_json(self.member_id, "/api/tools/jobs")
         self.assertNotIn(SECRET_SENTINEL, response.text)
 

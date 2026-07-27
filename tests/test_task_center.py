@@ -87,6 +87,131 @@ class TaskCenterDatabaseCase(unittest.TestCase):
         self.assertEqual(result["counts"]["done"], 8)
         self.assertTrue(result["truncated"])
 
+    def test_server_filters_before_pagination_and_keeps_global_counts(self):
+        for i in range(101):
+            self._task(
+                f"进行中任务{i}",
+                status="running",
+                at=200 + i,
+            )
+        done = self._task("历史已完成任务", status="done", at=1)
+        video = db.insert(
+            "tv_job",
+            {
+                "tenant_id": 1,
+                "params_json": json.dumps({"title": "历史图文成片"}),
+                "status": "done",
+                "created_at": 2,
+                "updated_at": 2,
+            },
+        )
+
+        page = taskcenter.list_items(
+            1,
+            {"content"},
+            limit=100,
+            offset=0,
+            status="done",
+            kind="expert",
+        )
+        self.assertEqual(101, page["counts"]["open"])
+        self.assertEqual(2, page["counts"]["done"])
+        self.assertEqual(103, page["counts"]["all"])
+        self.assertEqual(102, page["kind_counts"]["expert"])
+        self.assertEqual(1, page["kind_counts"]["video"])
+        self.assertEqual(1, page["filtered_total"])
+        self.assertEqual([done], [
+            item["record_id"] for item in page["items"]
+        ])
+        self.assertFalse(page["has_more"])
+
+        video_page = taskcenter.list_items(
+            1,
+            {"content"},
+            limit=100,
+            offset=0,
+            status="all",
+            kind="video",
+        )
+        self.assertEqual(1, video_page["filtered_total"])
+        self.assertEqual([video], [
+            item["record_id"] for item in video_page["items"]
+        ])
+
+    def test_global_search_survives_corrupt_json_in_every_json_backed_branch(self):
+        """一条历史坏载荷不能让老板的整张任务总账报 malformed JSON。"""
+        corrupt_rows = {
+            "expert": db.insert("task", {
+                "tenant_id": 1,
+                "emp_idx": 0,
+                "brief_json": "损坏专家检索片段{",
+                "status": "done",
+                "created_at": 11,
+                "updated_at": 11,
+            }),
+            "content": db.insert("job", {
+                "tenant_id": 1,
+                "brief_json": "损坏内容检索片段{",
+                "status": "done",
+                "created_at": 12,
+                "updated_at": 12,
+            }),
+            "video": db.insert("tv_job", {
+                "tenant_id": 1,
+                "params_json": "损坏视频检索片段{",
+                "status": "done",
+                "created_at": 13,
+                "updated_at": 13,
+            }),
+            "tool": db.insert("tool_job", {
+                "tenant_id": 1,
+                "kind": "leads",
+                "params_json": "损坏工具检索片段{",
+                "status": "done",
+                "created_at": 14,
+                "updated_at": 14,
+            }),
+            "publish": db.insert("pub_task", {
+                "tenant_id": 1,
+                "platform": "小红书",
+                "payload_json": "损坏发布检索片段{",
+                "status": "done",
+                "created_at": 15,
+                "updated_at": 15,
+            }),
+            "avatar": db.insert("avatar_job", {
+                "tenant_id": 1,
+                "params_json": "损坏数字人检索片段{",
+                "status": "done",
+                "created_at": 16,
+                "updated_at": 16,
+            }),
+        }
+        queries = {
+            "expert": "损坏专家检索片段",
+            "content": "损坏内容检索片段",
+            "video": "损坏视频检索片段",
+            "tool": "损坏工具检索片段",
+            "publish": "损坏发布检索片段",
+            "avatar": "损坏数字人检索片段",
+        }
+
+        for kind, token in queries.items():
+            with self.subTest(kind=kind):
+                result = taskcenter.list_items(
+                    1,
+                    {"content", "avatar"},
+                    limit=100,
+                    offset=0,
+                    q=token,
+                )
+                self.assertEqual(result["counts"]["all"], 1)
+                self.assertEqual(result["filtered_total"], 1)
+                self.assertEqual(
+                    [item["key"] for item in result["items"]],
+                    [f"{kind}:{corrupt_rows[kind]}"],
+                )
+
     def test_stable_offset_pages_do_not_repeat_or_skip_existing_tasks(self):
         self._task("早期进行中", status="running", at=1)
         self._task("较新进行中", status="running", at=2)
@@ -205,10 +330,22 @@ class TaskCenterDatabaseCase(unittest.TestCase):
         with open(path, encoding="utf-8") as handle:
             source = handle.read()
 
-        self.assertIn('/task-center?limit=500&offset=0', source)
+        self.assertIn("const TC_PAGE_SIZE=100", source)
+        self.assertIn(
+            "function tcApiUrl(offset=0,snapshot=tcFilterSnapshot())", source
+        )
+        self.assertIn("status:snapshot.status", source)
+        self.assertIn("kind:snapshot.kind", source)
+        self.assertIn("function tcFilterSnapshot()", source)
+        self.assertIn("request.seq===TC_REQUEST_SEQ", source)
+        self.assertIn("tcFilterMatches(request.snapshot)", source)
+        self.assertIn("api(tcApiUrl(0,snapshot))", source)
+        self.assertIn("api(tcApiUrl(offset,snapshot))", source)
+        self.assertIn("if(!tcRequestIsCurrent(request)||TC_DATA!==baseData) return", source)
         self.assertIn("TC_DATA.next_offset", source)
         self.assertIn("page.next_offset", source)
-        self.assertIn("new Set(TC_DATA.items.map", source)
+        self.assertIn("new Set(baseData.items.map", source)
+        self.assertNotIn("limit=500&offset=0", source)
         self.assertNotIn('api("/task-center?limit=5000")', source)
 
     def test_every_replayable_task_table_has_persistent_retry_state(self):
@@ -558,9 +695,7 @@ class TaskCenterDatabaseCase(unittest.TestCase):
             "modules": ["auto"],
         })
 
-        with patch.object(
-            main.asyncio, "create_task", side_effect=self._discard_coro
-        ):
+        with patch.object(main, "_start_meeting_worker"):
             retried = asyncio.run(
                 main.task_center_retry("meeting", visible_meeting)
             )
@@ -747,9 +882,10 @@ class TaskCenterDatabaseCase(unittest.TestCase):
             "SELECT COUNT(*) n FROM billing_log WHERE tenant_id=2"
         )["n"]
 
-        with patch.object(
-                main.asyncio, "create_task", side_effect=self._discard_coro
-        ) as create_task, patch.object(main, "_spawn_tool_worker") as spawn_tool:
+        with patch.object(main, "_start_text_video_worker") as start_video, \
+                patch.object(main, "_spawn_tool_worker") as spawn_tool, \
+                patch.object(main, "_start_meeting_worker") as start_meeting, \
+                patch.object(main, "_start_publish_worker") as start_publish:
             video = asyncio.run(main.task_center_retry("video", video_id))
             tool = asyncio.run(main.task_center_retry("tool", tool_id))
             meeting_result = asyncio.run(
@@ -763,8 +899,10 @@ class TaskCenterDatabaseCase(unittest.TestCase):
             item["free_retry"]
             for item in (video, tool, meeting_result, publish)
         ))
-        self.assertEqual(create_task.call_count, 3)
+        start_video.assert_called_once_with(video_id)
         spawn_tool.assert_called_once_with(tool_id)
+        start_meeting.assert_called_once_with(meeting_id)
+        start_publish.assert_called_once_with(publish_id)
         self.assertEqual(
             db.one(
                 "SELECT status,billing_status,billing_points,retry_count,"
@@ -1266,10 +1404,6 @@ class TaskCenterDatabaseCase(unittest.TestCase):
         auth.set_current({"id": 8, "tenant_id": 1, "role": "member",
                           "modules": ["content"]})
 
-        def discard(coro):
-            coro.close()
-            return None
-
         body = {
             "emp_idx": 0,
             "brief": {"direction": "客户端正常活"},
@@ -1278,7 +1412,11 @@ class TaskCenterDatabaseCase(unittest.TestCase):
             "source_task_id": 88882,
         }
         with patch.object(main, "_charge"), \
-                patch.object(main.asyncio, "create_task", side_effect=discard):
+                patch.object(
+                    main,
+                    "_start_expert_task_worker",
+                    return_value=None,
+                ):
             result = asyncio.run(main.task_create(body))
 
         row = db.one("SELECT source_meeting_id, source_action_key, source_task_id "

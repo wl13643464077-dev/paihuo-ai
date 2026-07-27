@@ -104,6 +104,20 @@ class FunnelObservabilityTests(unittest.TestCase):
         row = db.one("SELECT event,dimension FROM funnel_event")
         self.assertEqual({"event": "page_view", "dimension": "other"}, row)
 
+    def test_all_current_frontend_routes_keep_their_page_dimension(self):
+        current_routes = {
+            "office", "new", "job", "profiles", "assets", "delivery",
+            "knowledge", "schedules", "settings", "avatar", "admin", "team",
+            "billing", "meetings", "tasks", "company", "production", "censor",
+            "channels", "tools", "trash", "guide", "notifications",
+        }
+        for route in current_routes:
+            with self.subTest(route=route):
+                self.assertEqual(
+                    ("page_view", route),
+                    funnel.normalize("page_view", route),
+                )
+
     def test_actor_identifiers_and_extra_client_fields_are_never_persisted(self):
         from app import main
 

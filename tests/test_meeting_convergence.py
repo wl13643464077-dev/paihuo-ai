@@ -364,6 +364,7 @@ class MeetingDatabaseCase(unittest.IsolatedAsyncioTestCase):
         mid = db.insert("meeting", {"tenant_id": 7, "question": "是否进入市场",
                                     "emp_idxs_json": "[0,1]", "status": "done",
                                     "phase": "awaiting_execution", "decision": "GO",
+                                    "created_by": 701,
                                     "actions_json": json.dumps(actions, ensure_ascii=False),
                                     "consensus_md": "# 会议共识\n\n## Next Action\n开始执行"})
         self.assertTrue(meeting.claim_execution(mid))
@@ -378,6 +379,17 @@ class MeetingDatabaseCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first, second)
         self.assertEqual(len(first), 2)
         self.assertEqual(db.one("SELECT COUNT(*) n FROM task WHERE source_meeting_id=?", (mid,))["n"], 2)
+        self.assertEqual(
+            {701},
+            {
+                row["created_by"]
+                for row in db.q(
+                    "SELECT created_by FROM task WHERE source_meeting_id=?",
+                    (mid,),
+                )
+            },
+            "会议生成的真实任务必须继承发起人，供任务中心审计",
+        )
         self.assertEqual(runner.await_count, 2)
         row = db.one("SELECT status, phase, consensus_md FROM meeting WHERE id=?", (mid,))
         self.assertEqual((row["status"], row["phase"]), ("done", "completed"))

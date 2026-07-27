@@ -45,11 +45,21 @@ def add_entry(tid: int, platform: str, title: str, job_id=None, url: str = "",
         "retro_json": json.dumps(retro)})
 
 
-def entries(tid: int) -> list:
-    rows = db.q("SELECT * FROM publish_log WHERE tenant_id=? ORDER BY id DESC LIMIT 60", (tid,))
+def entries(tid: int, limit: int = 60, offset: int = 0) -> list:
+    rows = db.q(
+        "SELECT * FROM publish_log WHERE tenant_id=? "
+        "ORDER BY id DESC LIMIT ? OFFSET ?",
+        (tid, limit, offset),
+    )
     for r in rows:
         r["retro"] = db.jloads(r.pop("retro_json"), {})
     return rows
+
+
+def entries_total(tid: int) -> int:
+    return int(db.one(
+        "SELECT COUNT(*) n FROM publish_log WHERE tenant_id=?", (tid,)
+    )["n"] or 0)
 
 
 def mark_published(tid: int, pid: int):
@@ -133,7 +143,7 @@ async def _auto_retro_result(tid: int, row: dict, day: int) -> str:
     """返回 done/no_data/retryable，让调度器区分缺数据与临时故障。"""
     if row["platform"] != "公众号":
         return RETRO_NO_DATA
-    conf = wechat.get_conf(tid)
+    conf = await db.arun(wechat.get_conf, tid)
     if not (conf.get("appid") and conf.get("secret")):
         return RETRO_NO_DATA
     try:
@@ -144,8 +154,13 @@ async def _auto_retro_result(tid: int, row: dict, day: int) -> str:
             tid,
             type(exc).__name__,
         )
-        _mark_retryable_pending(
-            tid, int(row["id"]), day, row.get("published_at"), "公众号数据接口临时失败"
+        await db.arun(
+            _mark_retryable_pending,
+            tid,
+            int(row["id"]),
+            day,
+            row.get("published_at"),
+            "公众号数据接口临时失败",
         )
         return RETRO_RETRYABLE
     if not stats:
@@ -185,28 +200,40 @@ async def _auto_retro_result(tid: int, row: dict, day: int) -> str:
         return changed.rowcount == 1
 
     try:
-        started = billing.start_operation_if_claimed(
+        started = await db.arun(
+            billing.start_operation_if_claimed,
             "censor_retro",
             tid,
             claim_start,
-            note=f"自动复盘T+{day}",
+            note=f"自动复盘T+{day}·《{(row.get('title') or '')[:14]}》",
             op_key=op_key,
+            job_id=row.get("job_id"),
         )
     except billing.InsufficientPoints:
-        _mark_retryable_pending(
-            tid, row_id, day, row.get("published_at"), "点数不足，等待充值后重试"
+        await db.arun(
+            _mark_retryable_pending,
+            tid,
+            row_id,
+            day,
+            row.get("published_at"),
+            "点数不足，等待充值后重试",
         )
         return RETRO_RETRYABLE
     if not started:
-        current = db.one(
+        current = await db.aone(
             "SELECT retro_json FROM publish_log WHERE id=? AND tenant_id=?",
             (row_id, tid),
         )
         state = (db.jloads((current or {}).get("retro_json"), {}).get(str(day)) or {})
         if state.get("state") == "done":
             return RETRO_DONE
-        _mark_retryable_pending(
-            tid, row_id, day, row.get("published_at"), "复盘状态冲突，稍后重试"
+        await db.arun(
+            _mark_retryable_pending,
+            tid,
+            row_id,
+            day,
+            row.get("published_at"),
+            "复盘状态冲突，稍后重试",
         )
         return RETRO_RETRYABLE
     data_text = (f"发布 {day} 天(数据来自公众号后台 API):阅读 {stats.get('read_user', '?')} 人 / "
@@ -268,6 +295,7 @@ async def _auto_retro_result(tid: int, row: dict, day: int) -> str:
             values = censor.retro_log_values(
                 tid, "公众号", row["title"], result
             )
+            values["job_id"] = row.get("job_id")
             columns = ",".join(values)
             placeholders = ",".join("?" for _ in values)
             connection.execute(
@@ -282,14 +310,23 @@ async def _auto_retro_result(tid: int, row: dict, day: int) -> str:
             )
             return changed.rowcount == 1
 
-        if not billing.complete_operation_if_claimed(op_key, complete_claim):
+        if not await db.arun(
+                billing.complete_operation_if_claimed, op_key, complete_claim):
             raise RuntimeError("自动复盘结算状态冲突")
         try:
-            notify.push(tid, "report", {
-                "report_name": f"《{row['title'][:20]}》T+{day} 自动复盘",
-                "summary": f"{data_text};评级:{result.get('grade', '—')}",
-                "link": "#/censor",
-            })
+            await asyncio.to_thread(
+                notify.push,
+                tid,
+                "report",
+                {
+                    "job_id": row.get("job_id"),
+                    "report_name": f"《{row['title'][:20]}》T+{day} 自动复盘",
+                    "summary": (
+                        f"{data_text};评级:{result.get('grade', '—')}"
+                    ),
+                    "link": "#/censor",
+                },
+            )
         except Exception as exc:
             log.info(
                 "自动复盘通知失败 tid=%s error_type=%s",
@@ -299,8 +336,11 @@ async def _auto_retro_result(tid: int, row: dict, day: int) -> str:
         return RETRO_DONE
     except Exception as exc:
         try:
-            billing.fail_operation_if_claimed(
-                op_key, "自动复盘失败", restore_claim
+            await db.arun(
+                billing.fail_operation_if_claimed,
+                op_key,
+                "自动复盘失败",
+                restore_claim,
             )
         except Exception as settlement_exc:
             log.error(
@@ -414,13 +454,32 @@ def recover_interrupted() -> int:
     return recovered
 
 
+def auto_enabled(tid: int) -> bool:
+    """租户级自动复盘总开关;默认开启,关掉后既不扣点跑复盘也不发到期提醒。"""
+    return not db.get_setting(f"retro_auto_off:{tid}")
+
+
+def set_auto_enabled(tid: int, enabled: bool):
+    db.set_setting(f"retro_auto_off:{tid}", None if enabled else "1")
+
+
 async def tick():
     """调度器定期调用:处理到期的 T+1/3/7."""
     hour = datetime.now(TZ).hour
     if not (9 <= hour <= 22):     # 别半夜打扰老板
         return
     now = time.time()
-    for row in db.q("SELECT * FROM publish_log WHERE created_at > ?", (now - 40 * 86400,)):
+    paused_tenants: dict = {}
+    rows = await db.aq(
+        "SELECT * FROM publish_log WHERE created_at > ?",
+        (now - 40 * 86400,),
+    )
+    for row in rows:
+        tenant = row["tenant_id"]
+        if tenant not in paused_tenants:
+            paused_tenants[tenant] = not await db.arun(auto_enabled, tenant)
+        if paused_tenants[tenant]:
+            continue
         retro = db.jloads(row["retro_json"], {})
         changed = False
         for d in RETRO_DAYS:
@@ -434,15 +493,21 @@ async def tick():
                 outcome = await _auto_retro_result(tid, row, d)
                 if (
                     outcome == RETRO_NO_DATA
-                    and _mark_notified_if_pending(
-                        tid, row["id"], d, row.get("published_at")
+                    and await db.arun(
+                        _mark_notified_if_pending,
+                        tid,
+                        row["id"],
+                        d,
+                        row.get("published_at"),
                     )
                 ):
                     try:
-                        notify.push(
+                        await asyncio.to_thread(
+                            notify.push,
                             tid,
                             "retro_due",
                             {
+                                "job_id": row.get("job_id"),
                                 "title": row["title"],
                                 "platform": row["platform"],
                                 "day": f"T+{d}",

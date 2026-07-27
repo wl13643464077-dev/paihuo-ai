@@ -76,6 +76,51 @@ class BillingOperationCase(unittest.TestCase):
             db.one("SELECT status FROM billing_operation WHERE op_key='weekly:1'")["status"],
         )
 
+    def test_legacy_successful_subscription_is_settled_without_balance_change(self):
+        now = 123456.0
+        with db.atomic() as connection:
+            connection.execute(
+                "UPDATE tenants SET balance=170,plan='体验版·月付',"
+                "plan_expires=?,updated_at=? WHERE id=2",
+                (now + 31 * 86400, now),
+            )
+            connection.execute(
+                "INSERT INTO billing_log"
+                "(tenant_id,delta,balance,reason,created_at,updated_at) "
+                "VALUES(2,150,170,'旧版套餐入账',?,?)",
+                (now, now),
+            )
+            connection.execute(
+                "INSERT INTO billing_operation"
+                "(op_key,tenant_id,action,units,points,note,status,"
+                "created_at,updated_at) "
+                "VALUES('legacy-subscribe',2,'subscribe',1,150,'旧版回执',"
+                "'charged',?,?)",
+                (now, now),
+            )
+        before_balance = billing.balance(2)
+        before_logs = db.one(
+            "SELECT COUNT(*) n FROM billing_log WHERE tenant_id=2"
+        )["n"]
+
+        self.assertEqual(1, billing.settle_legacy_subscriptions())
+        self.assertEqual(0, billing.recover_interrupted_operations())
+
+        self.assertEqual(before_balance, billing.balance(2))
+        self.assertEqual(
+            before_logs,
+            db.one(
+                "SELECT COUNT(*) n FROM billing_log WHERE tenant_id=2"
+            )["n"],
+        )
+        self.assertEqual(
+            "succeeded",
+            db.one(
+                "SELECT status FROM billing_operation "
+                "WHERE op_key='legacy-subscribe'"
+            )["status"],
+        )
+
 
 class ScheduledBillingOperationCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -298,13 +343,14 @@ class ScheduledBillingOperationCase(unittest.IsolatedAsyncioTestCase):
             "call_text_json",
             new=AsyncMock(side_effect=RuntimeError("provider down")),
         ):
-            with self.assertRaises(HTTPException) as failed:
-                await main.censor_check_api({
-                    "title": "待审内容",
-                    "body": "这是一段需要深度审查的正文。",
-                    "platform": "公众号",
-                })
-        self.assertEqual(503, failed.exception.status_code)
+            # 深审失败退点后降级为免费规则扫描结果,而不是把整个响应变成报错。
+            report = await main.censor_check_api({
+                "title": "待审内容",
+                "body": "这是一段需要深度审查的正文。",
+                "platform": "公众号",
+            })
+        self.assertTrue(report["degraded"])
+        self.assertIn("退回", report["summary"])
         self.assertEqual(20, billing.balance(2))
         self.assertEqual(0, db.one("SELECT COUNT(*) n FROM censor_log")["n"])
         self.assertEqual(
@@ -430,6 +476,29 @@ class ScheduledBillingOperationCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(work_samples))
         self.assertFalse(os.path.exists(work_samples[0]))
         self.assertTrue(os.path.isfile(sample))
+
+    async def test_concurrent_voice_list_updates_do_not_lose_entries(self):
+        """声音列表的读改写必须在一个原子事务中完成。"""
+        from app import avatar
+
+        voices = [
+            {
+                "id": f"voice-{index}",
+                "label": f"声音{index}",
+                "cloned": True,
+                "created_at": float(index),
+            }
+            for index in range(8)
+        ]
+        await asyncio.gather(*(
+            db.arun(avatar._prepend_cloned_voice, 2, voice)
+            for voice in voices
+        ))
+        saved = json.loads(db.get_setting("cloned_voices:2"))
+        self.assertEqual(
+            {voice["id"] for voice in voices},
+            {voice["id"] for voice in saved},
+        )
 
     async def test_voice_clone_failure_and_cancellation_refund_without_visibility(self):
         from app import main

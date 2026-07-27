@@ -39,7 +39,10 @@ class FrontendNavigationContractTests(unittest.TestCase):
             r"function closeModal\(\)\{\s*stopSoloWatch\(\);",
         )
         self.assertIn("SOLO_TIMER=null", self.app_js)
-        self.assertIn("setTimeout(tick, 60000)", self.app_js)
+        # 12s:轮询兜底 SSE(实时步骤流已挂 data-tasksteps),又不至于打爆后端。
+        self.assertIn("setTimeout(tick, 12000)", self.app_js)
+        # 单人任务的实时步骤流挂载点:没有它,老板派完活要干等一个轮询周期。
+        self.assertIn('data-tasksteps="${t.id}"', self.app_js)
         self.assertIn('window.addEventListener("pagehide"', self.app_js)
 
     def test_optional_route_data_does_not_swallow_abort_or_permission(self):
@@ -260,8 +263,73 @@ class FrontendNavigationContractTests(unittest.TestCase):
         self.assertIn('listPath("/matrix/tasks","publish",MATRIX_FILTER)', self.app_js)
 
     def test_frontend_change_has_a_new_script_version(self):
-        self.assertIn("/static/app.js?v=42", self.index_html)
-        self.assertIn('release:"web-v38"', self.app_js)
+        self.assertIn("/static/app.js?v=45", self.index_html)
+        self.assertIn('release:"web-v40"', self.app_js)
+
+    def test_employee_task_forms_use_role_and_industry_specific_guidance(self):
+        self.assertIn("const CONTENT_TASK_GUIDE_FALLBACK = {", self.app_js)
+        self.assertIn("function taskGuideFor(", self.app_js)
+        self.assertIn("function taskGuideCard(", self.app_js)
+        for station in (
+            "trend", "research", "benchmark", "draft", "style",
+            "media", "cover", "deck", "publish", "retro",
+        ):
+            self.assertIn(f"  {station}:{{", self.app_js)
+        self.assertGreaterEqual(
+            self.app_js.count("taskGuideFor("),
+            3,  # helper + 内容部派活 + 产业专家派活
+        )
+        self.assertIn(
+            'placeholder="${esc(guide.task_placeholder)}"',
+            self.app_js,
+        )
+        self.assertIn(
+            'placeholder="${esc(guide.industry_placeholder)}"',
+            self.app_js,
+        )
+        self.assertIn(
+            'placeholder="${esc(guide.material_placeholder)}"',
+            self.app_js,
+        )
+        self.assertIn("const TASK_DATA_PRIVACY_NOTE =", self.app_js)
+        self.assertIn("姓名、手机号、证件号等个人标识", self.app_js)
+        guide_card = self.app_js.split(
+            "function taskGuideCard(", 1
+        )[1].split(
+            "const TASK_DATA_PRIVACY_NOTE", 1
+        )[0]
+        self.assertIn('class="tag"', guide_card)
+        self.assertNotIn('class="chip on"', guide_card)
+        self.assertGreaterEqual(
+            self.app_js.count("${esc(TASK_DATA_PRIVACY_NOTE)}"),
+            2,
+        )
+        # 这些曾经写死在所有 400+ 员工的共用表单里，绝不能回归。
+        for restaurant_only_template in (
+            'placeholder="如:餐饮"',
+            "如:川菜正餐 / 咖啡快闪 / 茶饮连锁",
+            "粘贴数据、地址、菜单;或直接传文件",
+        ):
+            self.assertNotIn(restaurant_only_template, self.app_js)
+
+    def test_employee_dispatch_buttons_open_the_guided_task_form(self):
+        self.assertIn("async function openSpec(idx,initialTab)", self.app_js)
+        self.assertIn(
+            '(initialTab==="task"?"task":"intro")',
+            self.app_js,
+        )
+        self.assertIn(
+            "event.stopPropagation();openSpec(${e.idx},'task')",
+            self.app_js,
+        )
+        self.assertIn(
+            'function pickExpert(idx){ EXP_PREFILL = EXP_LAST_QUERY; openSpec(idx,"task"); }',
+            self.app_js,
+        )
+        self.assertIn(
+            'ME&&ME.role==="tour" ? "intro"',
+            self.app_js,
+        )
 
     def test_dynamic_urls_and_inline_arguments_are_closed_at_the_sink(self):
         for helper in ("safeExternalUrl", "safeAssetUrl", "safeRouteUrl"):

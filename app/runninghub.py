@@ -48,14 +48,14 @@ async def _create(cli, key, wf, img, aud):
              {"nodeId": "474", "fieldName": "audio", "fieldValue": aud},
              {"nodeId": "484", "fieldName": "audio", "fieldValue": aud}]
     body = {"apiKey": key, "workflowId": wf, "nodeInfoList": nodes,
-            "instanceType": db.get_setting("runninghub_instance") or "plus"}
+            "instanceType": await db.aget_setting("runninghub_instance") or "plus"}
     r = await cli.post(f"{BASE}/task/openapi/create", json=body)
     return r.json()
 
 
 async def synth(photo_path: str, audio_path: str, progress) -> str:
     """照片+音频 → RunningHub 数字人视频 URL(高画质)."""
-    key, wf = conf()
+    key, wf = await db.arun(conf)
     if not key:
         raise RHError("未配置 RunningHub key(管理后台→数字人引擎)")
     async with httpx.AsyncClient(timeout=180) as cli:

@@ -45,6 +45,18 @@ class ReleaseBuilderCase(unittest.TestCase):
             empty_dirs=(),
         )
 
+    def test_default_allowlist_is_self_contained_in_public_checkout(self):
+        checkout = Path(__file__).resolve().parents[1]
+        for relative in build_release.DEFAULT_ROOT_FILES:
+            with self.subTest(kind="file", relative=relative):
+                self.assertTrue((checkout / relative).is_file())
+        for relative in build_release.DEFAULT_ROOT_DIRS:
+            with self.subTest(kind="directory", relative=relative):
+                self.assertTrue((checkout / relative).is_dir())
+        for relative in build_release.DEFAULT_DATA_FILES:
+            with self.subTest(kind="data", relative=relative):
+                self.assertTrue((checkout / relative).exists())
+
     def test_allowlisted_archive_is_reproducible_and_self_verified(self):
         first = self._build(Path(self.tmp.name) / "out-a")
         second = self._build(Path(self.tmp.name) / "out-b")
@@ -94,6 +106,12 @@ class ReleaseBuilderCase(unittest.TestCase):
             "build,source,only\n",
             encoding="utf-8",
         )
+        knowledge = self.root / "data" / "industry_knowledge"
+        knowledge.mkdir(parents=True)
+        (knowledge / "industry.json").write_text(
+            '{"key":"industry","name":"行业","metrics":[]}\n',
+            encoding="utf-8",
+        )
         (self.root / "data" / "gate_rules.json").write_text(
             '{"sensitive_words":["fixture"]}\n',
             encoding="utf-8",
@@ -115,6 +133,7 @@ class ReleaseBuilderCase(unittest.TestCase):
             self.assertIsNotNone(manifest_file)
             manifest = json.loads(manifest_file.read().decode("utf-8"))
         self.assertIn("./config/departments/industry.json", names)
+        self.assertIn("./config/industry_knowledge/industry.json", names)
         self.assertIn("./config/gate_rules.default.json", names)
         self.assertNotIn("./config/departments/_source_ten.csv", names)
         self.assertFalse(any(name == "./data" or name.startswith("./data/") for name in names))
@@ -133,6 +152,12 @@ class ReleaseBuilderCase(unittest.TestCase):
             '{"key":"industry","employees":[]}\n',
             encoding="utf-8",
         )
+        knowledge = self.root / "data" / "industry_knowledge"
+        knowledge.mkdir(parents=True)
+        (knowledge / "industry.json").write_text(
+            '{"key":"industry","name":"行业","metrics":[]}\n',
+            encoding="utf-8",
+        )
         (departments / "unexpected.csv").write_text(
             "not,runtime,config\n",
             encoding="utf-8",
@@ -144,7 +169,7 @@ class ReleaseBuilderCase(unittest.TestCase):
 
         with self.assertRaisesRegex(
             build_release.ReleaseBuildError,
-            "department release seed",
+            "departments release seed",
         ):
             build_release.build_release(
                 source=self.root,

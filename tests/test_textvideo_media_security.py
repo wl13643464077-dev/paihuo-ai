@@ -166,9 +166,8 @@ class TextVideoBgmSecurityCase(unittest.TestCase):
             "_create_charged_tv_job",
             side_effect=create,
         ), mock.patch.object(
-            main.asyncio,
-            "create_task",
-            side_effect=self._discard_task,
+            main,
+            "_start_text_video_worker",
         ):
             for mood in ("warm", "up", "calm", "none"):
                 result = asyncio.run(main.text_video_create({

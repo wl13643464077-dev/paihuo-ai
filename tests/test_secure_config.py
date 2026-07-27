@@ -1,5 +1,6 @@
 """Supplier credentials are authenticated at rest under a root-owned key."""
 import base64
+import json
 import os
 import secrets
 import tempfile
@@ -73,6 +74,168 @@ class SecureConfigTests(unittest.TestCase):
                 self.assertTrue(stored.startswith(secureconfig.ENCRYPTED_PREFIX))
                 self.assertNotIn(value, stored)
                 self.assertEqual(value, secureconfig.get_secret(name))
+
+    def test_startup_migration_encrypts_tenant_json_credentials_once(self):
+        wechat_secret = "legacy-wechat-secret"
+        matrix_cookie = "sessionid=" + "m" * 64
+        with self._env():
+            already_encrypted = secureconfig.encrypt_field(
+                "matrix_cookie", "sessionid=" + "e" * 64
+            )
+            db.set_setting(
+                "wechat_mp:2",
+                json.dumps({"appid": "wx-public-id", "secret": wechat_secret}),
+            )
+            db.set_setting(
+                "matrix_accounts:2",
+                json.dumps(
+                    [
+                        {"id": "plain", "cookie": matrix_cookie},
+                        {"id": "encrypted", "cookie": already_encrypted},
+                    ]
+                ),
+            )
+
+            report = secureconfig.migrate_legacy_secrets()
+            self.assertEqual(2, report["field_rows_scanned"])
+            self.assertEqual(2, report["field_rows_updated"])
+            self.assertEqual(2, report["fields_encrypted"])
+            self.assertEqual(1, report["fields_verified"])
+            self.assertEqual(0, report["field_rows_failed"])
+            self.assertTrue(report["field_migration_complete"])
+            self.assertFalse(report["field_migration_skipped"])
+
+            raw_wechat = str(db.get_setting("wechat_mp:2"))
+            raw_matrix = str(db.get_setting("matrix_accounts:2"))
+            self.assertNotIn(wechat_secret, raw_wechat)
+            self.assertNotIn(matrix_cookie, raw_matrix)
+            self.assertEqual(
+                wechat_secret,
+                secureconfig.decrypt_field(
+                    "wechat_mp_secret", json.loads(raw_wechat)["secret"]
+                ),
+            )
+            self.assertEqual(
+                matrix_cookie,
+                secureconfig.decrypt_field(
+                    "matrix_cookie", json.loads(raw_matrix)[0]["cookie"]
+                ),
+            )
+
+            second = secureconfig.migrate_legacy_secrets()
+            self.assertTrue(second["field_migration_skipped"])
+            self.assertEqual(0, second["field_rows_scanned"])
+            marker = str(db.get_setting(secureconfig._FIELD_MIGRATION_MARKER))
+            self.assertNotIn(wechat_secret, marker)
+            self.assertNotIn(matrix_cookie, marker)
+
+            # 旧版本短暂回滚后若又写入明文，updated_at 会使完成标记自动失效。
+            rollback_secret = "written-by-legacy-release"
+            db.set_setting(
+                "wechat_mp:2",
+                json.dumps({"appid": "wx-public-id", "secret": rollback_secret}),
+            )
+            after_rollback = secureconfig.migrate_legacy_secrets()
+            self.assertFalse(after_rollback["field_migration_skipped"])
+            self.assertEqual(1, after_rollback["fields_encrypted"])
+            self.assertNotIn(rollback_secret, str(db.get_setting("wechat_mp:2")))
+
+    def test_json_field_migration_preserves_bad_ciphertext_and_reports_aggregates(self):
+        corrupt = secureconfig.ENCRYPTED_PREFIX + "not-a-valid-token"
+        plaintext = "sessionid=" + "p" * 64
+        db.set_setting(
+            "wechat_mp:2",
+            json.dumps({"appid": "wx-public-id", "secret": corrupt}),
+        )
+        db.set_setting(
+            "matrix_accounts:2",
+            json.dumps([{"id": "plain", "cookie": plaintext}]),
+        )
+
+        with self._env(), self.assertRaises(
+            secureconfig.SecureConfigError
+        ) as ctx:
+            secureconfig.migrate_legacy_secrets()
+
+        public_error = str(ctx.exception)
+        self.assertIn("failed_rows=1", public_error)
+        for forbidden in (
+            corrupt,
+            plaintext,
+            "wechat_mp:2",
+            "matrix_accounts:2",
+        ):
+            self.assertNotIn(forbidden, public_error)
+        self.assertEqual(
+            corrupt,
+            json.loads(str(db.get_setting("wechat_mp:2")))["secret"],
+        )
+        self.assertNotIn(plaintext, str(db.get_setting("matrix_accounts:2")))
+        marker = str(db.get_setting(secureconfig._FIELD_MIGRATION_MARKER))
+        marker_payload = json.loads(marker)
+        self.assertFalse(marker_payload["complete"])
+        self.assertEqual(1, marker_payload["rows_failed"])
+        self.assertNotIn(corrupt, marker)
+        self.assertNotIn(plaintext, marker)
+
+    def test_encrypt_field_authenticates_ciphertext_and_domain(self):
+        with self._env():
+            ciphertext = secureconfig.encrypt_field(
+                "matrix_cookie", "sessionid=" + "s" * 64
+            )
+            self.assertEqual(
+                ciphertext,
+                secureconfig.encrypt_field("matrix_cookie", ciphertext),
+            )
+            with self.assertRaisesRegex(
+                secureconfig.SecureConfigError, "binding"
+            ):
+                secureconfig.encrypt_field("wechat_mp_secret", ciphertext)
+            with self.assertRaisesRegex(
+                secureconfig.SecureConfigError, "invalid"
+            ):
+                secureconfig.encrypt_field(
+                    "matrix_cookie",
+                    secureconfig.ENCRYPTED_PREFIX + "forged-token",
+                )
+
+        with patch.dict(
+            os.environ,
+            {
+                secureconfig.CONFIG_KEY_ENV: "",
+                secureconfig.REQUIRE_CONFIG_KEY_ENV: "",
+            },
+            clear=False,
+        ), self.assertRaisesRegex(
+            secureconfig.SecureConfigError, "required"
+        ):
+            secureconfig.encrypt_field("matrix_cookie", ciphertext)
+
+    def test_json_field_migration_rolls_back_all_rows_on_write_failure(self):
+        matrix_raw = json.dumps(
+            [{"id": "plain", "cookie": "sessionid=" + "m" * 64}]
+        )
+        wechat_raw = json.dumps(
+            {"appid": "wx-public-id", "secret": "legacy-wechat-secret"}
+        )
+        db.set_setting("matrix_accounts:2", matrix_raw)
+        db.set_setting("wechat_mp:2", wechat_raw)
+        original_encrypt = secureconfig._encrypt
+
+        def fail_second_domain(domain, value, cipher):
+            if domain == "wechat_mp_secret":
+                raise RuntimeError("simulated write preparation failure")
+            return original_encrypt(domain, value, cipher)
+
+        with self._env(), patch.object(
+            secureconfig, "_encrypt", side_effect=fail_second_domain
+        ):
+            with self.assertRaisesRegex(RuntimeError, "simulated"):
+                secureconfig.migrate_legacy_secrets()
+
+        self.assertEqual(matrix_raw, db.get_setting("matrix_accounts:2"))
+        self.assertEqual(wechat_raw, db.get_setting("wechat_mp:2"))
+        self.assertIsNone(db.get_setting(secureconfig._FIELD_MIGRATION_MARKER))
 
     def test_missing_or_weak_production_key_fails_closed(self):
         clean = {

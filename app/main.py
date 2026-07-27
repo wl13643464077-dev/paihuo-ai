@@ -7,6 +7,7 @@ import logging
 import os
 import posixpath
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -23,8 +24,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Str
 from fastapi.staticfiles import StaticFiles
 
 from . import (analyzer, assetfiles, auth, billing, db, departments, employees, expertmatch,
-               export, feishu, funnel, llm, meeting, providers, scheduler,
-               secureconfig, taskcenter, taskrunner)
+               export, feishu, funnel, llm, meeting, obs, providers, scheduler,
+               purchases, secureconfig, taskcenter, taskrunner)
 from .engine import engine
 from .skills import registry
 
@@ -34,6 +35,50 @@ logging.basicConfig(
 )
 log = logging.getLogger("main")
 app = FastAPI(title="派活 PaiHuo — 老板会派活，数字员工去干活")
+
+
+def _read_file_bytes(path: str) -> bytes:
+    with open(path, "rb") as handle:
+        return handle.read()
+
+# 全站 55 处 raise HTTPException(404) 之类的裸状态码,默认 detail 是英文
+# ("Not Found"/"Forbidden"…),前端会原样弹给老板。统一在出口翻译成人话;
+# 带自定义中文 detail 的异常原样放行。
+_BARE_DETAIL_CN = {
+    "Not Found": "没有找到这条内容,可能已被删除或不属于当前账号",
+    "Forbidden": "没有权限执行这个操作",
+    "Unauthorized": "请先登录",
+    "Method Not Allowed": "请求方式不对,请刷新页面后重试",
+    "Bad Request": "请求内容有误,请刷新页面后重试",
+}
+
+
+@app.exception_handler(HTTPException)
+async def _friendly_http_exception(request, exc: HTTPException):
+    detail = exc.detail
+    if isinstance(detail, str) and detail in _BARE_DETAIL_CN:
+        detail = _BARE_DETAIL_CN[detail]
+    return JSONResponse({"detail": detail}, status_code=exc.status_code,
+                        headers=getattr(exc, "headers", None))
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception(request, exc: Exception):
+    """没接住的异常不能把英文 Internal Server Error 甩给老板。
+
+    堆栈只进服务端日志;对外只说人话并给出路,绝不回显异常内容。
+    """
+    # 仓库保密口径:journal 只记稳定上下文+异常类型,不落原始堆栈。
+    logging.getLogger("main").error(
+        "unhandled error path=%s error_type=%s",
+        getattr(getattr(request, "url", None), "path", "?"),
+        type(exc).__name__,
+    )
+    return JSONResponse(
+        {"detail": "系统开小差了,这一步没做成。请再试一次;"
+                   "反复失败请点右下角 💬 反馈给我们,会有人跟进"},
+        status_code=500,
+    )
 
 APP_NAME = "派活"
 APP_SLOGAN = "老板会派活，数字员工去干活"
@@ -84,6 +129,11 @@ _TRANSIENT_UPLOAD_ROUTES = {
         "content",
         8 * 1024 * 1024 + _UPLOAD_MULTIPART_OVERHEAD_BYTES,
     ),
+    ("POST", "/api/tools/photo-factory"): (
+        "photo-factory",
+        "content",
+        8 * 1024 * 1024 + _UPLOAD_MULTIPART_OVERHEAD_BYTES,
+    ),
 }
 
 
@@ -100,6 +150,42 @@ def _upload_permission_allowed(module: str) -> bool:
     )
 
 
+@app.middleware("http")
+async def _metrics_mw(request: Request, call_next):
+    """请求级指标:路由模板 + 状态分类 + 耗时。只记聚合,绝不记参数与正文。"""
+    t0 = time.perf_counter()
+    status = 500                      # 抛异常未产生响应时按 5xx 计
+    try:
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            # 必须在这里拦下:交给 Starlette 的 ServerErrorMiddleware 会在
+            # 发送响应后无条件 re-raise,uvicorn 随即把完整堆栈打进 journal,
+            # 违反「日志只记异常类型」的保密口径。中文文案与 _unhandled_exception 一致。
+            logging.getLogger("main").error(
+                "unhandled error path=%s error_type=%s",
+                request.url.path, type(exc).__name__,
+            )
+            response = JSONResponse(
+                {"detail": "系统开小差了,这一步没做成。请再试一次;"
+                           "反复失败请点右下角 💬 反馈给我们,会有人跟进"},
+                status_code=500,
+            )
+        status = response.status_code
+        return response
+    finally:
+        route = request.scope.get("route")
+        template = getattr(route, "path", None)
+        if template is None:
+            # 未匹配到路由:已知静态挂载各占一桶,其余任意路径一律并入
+            # 单一 unmatched 桶——外部扫描器的随机路径不能撑爆聚合表。
+            head = request.url.path.split("/", 2)[1] if "/" in request.url.path else ""
+            template = (f"/{head}/*" if head in ("files", "static", "pub")
+                        else "/_unmatched")
+        obs.observe_request(
+            template, status, (time.perf_counter() - t0) * 1000.0)
+
+
 @app.get("/healthz", include_in_schema=False)
 def healthz():
     """供反向代理/守护进程探活；响应不暴露版本、路径、配置或异常内容。"""
@@ -113,12 +199,122 @@ def healthz():
     return {"status": "ok"}
 
 
+@app.get("/api/ops/health")
+async def ops_health():
+    """深度健康检查(仅平台管理员):逐组件报 ok/degraded/down 与原因。
+
+    /healthz 保持毫秒级浅探活给反向代理;这里才做会花时间的事:
+    数据库写探针、异步写池往返、引擎队列、磁盘余量、最近错误率。
+    """
+    _need_root()
+    checks: dict = {}
+    overall = "ok"
+
+    def _worse(level):
+        nonlocal overall
+        order = {"ok": 0, "degraded": 1, "down": 2}
+        if order[level] > order[overall]:
+            overall = level
+
+    # 数据库读+写探针(经异步门面,同时验证 db 线程池活着)
+    t0 = time.perf_counter()
+    try:
+        await db.aget_setting("_ops_probe")
+        await db.aset_setting("_ops_probe", str(int(time.time())))
+        checks["database"] = {
+            "status": "ok",
+            "roundtrip_ms": round((time.perf_counter() - t0) * 1000, 1),
+        }
+    except Exception as exc:
+        checks["database"] = {"status": "down",
+                              "error_type": type(exc).__name__}
+        _worse("down")
+
+    # 引擎:工作协程是否已启动、队列是否堆积
+    try:
+        depth = engine.queue.qsize()
+        started = engine._loop is not None
+        status = "ok" if started and depth < 50 else (
+            "degraded" if started else "down")
+        checks["engine"] = {"status": status, "queue_depth": depth,
+                            "started": started}
+        _worse(status)
+    except Exception as exc:
+        checks["engine"] = {"status": "down", "error_type": type(exc).__name__}
+        _worse("down")
+
+    # 磁盘余量(数据目录):低于 512MB 降级、低于 128MB 视为事故
+    try:
+        usage = shutil.disk_usage(os.path.join(ROOT, "data"))
+        free_mb = usage.free // (1024 * 1024)
+        status = ("ok" if free_mb >= 512
+                  else "degraded" if free_mb >= 128 else "down")
+        checks["disk"] = {"status": status, "free_mb": free_mb}
+        _worse(status)
+    except OSError as exc:
+        checks["disk"] = {"status": "down", "error_type": type(exc).__name__}
+        _worse("down")
+
+    # 最近 5 分钟错误率:>5% 降级、>20% 视为事故(样本不足 20 不判)
+    recent = obs.recent_window(5)
+    if recent["requests"] >= 20:
+        rate = recent["error_rate"]
+        status = "ok" if rate <= 0.05 else (
+            "degraded" if rate <= 0.20 else "down")
+        _worse(status)
+    else:
+        status = "ok"
+    checks["traffic"] = {"status": status, **recent}
+
+    # 供应商配置在位性(只报布尔,不报值)
+    checks["providers"] = {
+        "status": "ok",
+        "yunwu_configured": bool(secureconfig.get_secret("yunwu_key")),
+    }
+
+    return {"status": overall, "checks": checks,
+            "uptime_seconds": round(time.time() - obs._started_at, 1)}
+
+
+@app.get("/api/ops/metrics")
+def ops_metrics():
+    """指标快照(仅平台管理员):路由延迟/错误、业务计数器、组件量规。"""
+    _need_root()
+    return obs.snapshot()
+
+
 @app.on_event("startup")
 async def _startup():
-    db.conn()
-    secureconfig.migrate_legacy_secrets()
-    auth.bootstrap()
-    recovered_asset_transactions = avatar.recover_asset_transactions(
+    await asyncio.to_thread(db.conn)
+    secret_migration = await db.arun(secureconfig.migrate_legacy_secrets)
+    if isinstance(secret_migration, dict):
+        # 只记录聚合计数，绝不把 key、租户、密文或原始凭据写进 journal。
+        log.info(
+            "secure configuration migration settings_encrypted=%d "
+            "settings_verified=%d field_rows_scanned=%d field_rows_updated=%d "
+            "fields_encrypted=%d fields_verified=%d field_rows_failed=%d "
+            "field_migration_complete=%s field_migration_skipped=%s",
+            int(secret_migration.get("encrypted") or 0),
+            int(secret_migration.get("verified") or 0),
+            int(secret_migration.get("field_rows_scanned") or 0),
+            int(secret_migration.get("field_rows_updated") or 0),
+            int(secret_migration.get("fields_encrypted") or 0),
+            int(secret_migration.get("fields_verified") or 0),
+            int(secret_migration.get("field_rows_failed") or 0),
+            bool(secret_migration.get("field_migration_complete")),
+            bool(secret_migration.get("field_migration_skipped")),
+        )
+    await db.arun(auth.bootstrap)
+    # 组件量规:读取时惰性求值,记录侧零开销。
+    obs.register_gauge("engine_queue_depth", lambda: engine.queue.qsize())
+    obs.register_gauge("engine_job_locks", lambda: len(engine.locks))
+    obs.register_gauge("sse_subscribers", lambda: len(engine.subscribers))
+    obs.register_gauge(
+        "db_pool_backlog",
+        lambda: db._pool()._work_queue.qsize(),
+    )
+    recovered_asset_transactions = await asyncio.to_thread(
+        avatar.recover_asset_transactions,
         raise_on_blocked=True,
     )
     if recovered_asset_transactions["recovered"]:
@@ -133,7 +329,7 @@ async def _startup():
         log.warning("candidate running without background workers")
         return
     draft_conflicts = db.jloads(
-        db.get_setting("wechat_delivery_migration_conflicts"), []
+        await db.aget_setting("wechat_delivery_migration_conflicts"), []
     ) or []
     if draft_conflicts:
         log.error(
@@ -141,20 +337,31 @@ async def _startup():
             "review /api/admin/wechat-delivery-alerts before clearing them",
             len(draft_conflicts),
         )
-    recovered_interventions = meeting.recover_interventions()
+    recovered_interventions = await db.arun(meeting.recover_interventions)
     if recovered_interventions:
         log.warning(
             "recovered %d interrupted meeting interventions",
             recovered_interventions,
         )
-    recovered_retros = pubtrack.recover_interrupted()
+    recovered_retros = await db.arun(pubtrack.recover_interrupted)
     if recovered_retros:
         log.warning("recovered %d interrupted publication retros", recovered_retros)
-    recovered_drafts, protected_draft_ops = _recover_wechat_deliveries()
+    recovered_drafts, protected_draft_ops = await db.arun(
+        _recover_wechat_deliveries
+    )
     if recovered_drafts:
         log.warning("recovered %d interrupted wechat deliveries", recovered_drafts)
-    recovered_billing = billing.recover_interrupted_operations(
-        exclude_op_keys=protected_draft_ops
+    settled_subscriptions = await db.arun(
+        billing.settle_legacy_subscriptions
+    )
+    if settled_subscriptions:
+        log.info(
+            "settled %d legacy successful subscription operations",
+            settled_subscriptions,
+        )
+    recovered_billing = await db.arun(
+        billing.recover_interrupted_operations,
+        exclude_op_keys=protected_draft_ops,
     )
     if recovered_billing:
         log.warning("recovered %d interrupted billed operations", recovered_billing)
@@ -218,8 +425,10 @@ async def _auth_mw(request: Request, call_next):
             headers={"Retry-After": "30"},
         )
     auth.set_current(None)
-    uid = auth.parse_session(request.cookies.get("cc_sess") or "")
-    user = auth.get_user(uid) if uid else None
+    uid = await db.arun(
+        auth.parse_session, request.cookies.get("cc_sess") or ""
+    )
+    user = await db.arun(auth.get_user, uid) if uid else None
     auth.set_current(user)
     tour = False
     if not user:
@@ -235,18 +444,30 @@ async def _auth_mw(request: Request, call_next):
     TOUR_GET_OK = ("/api/meta", "/api/depts", "/api/employees", "/api/state",
                    "/api/auth/me", "/api/knowledge", "/api/billing", "/api/meetings",
                    "/api/avatar/meta", "/api/avatar/jobs", "/api/assets", "/api/schedules")
+    public_purchase_catalog = (
+        request.method.upper() == "GET"
+        and path == "/api/purchases/catalog"
+    )
     # 游客可点开员工公开介绍；员工配置写接口继续统一拦截。
     TOUR_BLOCK = ("/api/employees/",)
     if (path.startswith("/api/") and not path.startswith("/api/auth/login")
             and not path.startswith("/api/guest/")
-            and path != "/api/funnel/events"):
+            and path != "/api/funnel/events"
+            and not public_purchase_catalog
+            # 登录页「忘记密码」要在未登录时展示对客联系方式;该接口只回
+            # root 主动配置、本就面向客户公开的联系字符串。
+            and path != "/api/support-contact"):
         if not user and not tour:
             return JSONResponse({"detail": "请先登录"}, status_code=401)
         if tour and any(path == b or path.startswith(b) for b in TOUR_BLOCK):
             return JSONResponse({"detail": "参观模式只能浏览员工展示页;开通账号即可浏览员工介绍并派活"},
                                 status_code=403)
-        if tour and not (request.method == "GET" and any(path == p or path.startswith(p + "/")
-                                                         for p in TOUR_GET_OK)):
+        if tour and path == "/api/feedback" and request.method == "POST":
+            # 游客留资是唯一转化出口:套餐页明示「点右下角 💬 留联系方式」,
+            # 这条必须放行,否则教了一条走不通的路。
+            pass
+        elif tour and not (request.method == "GET" and any(path == p or path.startswith(p + "/")
+                                                           for p in TOUR_GET_OK)):
             return JSONResponse({"detail": "参观模式只能看不能动:开通账号即可派活"}, status_code=403)
     password_change_paths = {
         "/api/auth/me",
@@ -277,7 +498,7 @@ async def _auth_mw(request: Request, call_next):
         upload_kind = "transient"
     if upload_policy:
         action, module, request_limit = upload_policy
-        if not _upload_permission_allowed(module):
+        if not await db.arun(_upload_permission_allowed, module):
             return JSONResponse(
                 {"detail": "您的账号没有该板块权限,请联系企业主账号开通"},
                 status_code=403,
@@ -370,11 +591,20 @@ async def _auth_mw(request: Request, call_next):
             path = _canonical_file_path(raw.decode("latin-1"))
         except (HTTPException, UnicodeDecodeError):
             return JSONResponse({"detail": "路径非法"}, status_code=400)
-        owner_tid = _file_owner_tid(path)
+        owner_tid = await db.arun(_file_owner_tid, path)
         cur = auth.current()
         cur_tid = cur["tenant_id"] if cur else None
         if not cur or (not auth.is_root() and cur_tid != owner_tid):
             return JSONResponse({"detail": "无权访问该文件"}, status_code=403)
+        # 演绎师/封面师产出的 HTML/SVG 由不可信输入链驱动生成,同源直开会让其中的
+        # 脚本以登录会话调用 /api/*。用 sandbox CSP 剥夺其同源与脚本能力(iframe 预览
+        # 已带 sandbox,这里堵的是"打开"式顶层导航),并禁止 MIME 嗅探。
+        response = await call_next(request)
+        low = path.lower()
+        if low.endswith((".html", ".htm", ".svg", ".xml", ".xhtml")):
+            response.headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
+            response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
     return await call_next(request)
 
 
@@ -394,18 +624,103 @@ def _is_boss() -> bool:
     return u.get("role") == "root" and u.get("username") == "boss"
 
 
+def _is_tour() -> bool:
+    return (auth.current() or {}).get("role") == "tour"
+
+
 def _need_boss():
     """Enforce the named super-account boundary, not merely a database role."""
     if not _is_boss():
         raise HTTPException(403, "仅超级管理账号 boss 可访问数字员工内部资料")
 
 
-def _public_station(s: dict) -> dict:
+_PUBLIC_STATION_TASK_GUIDES = {
+    "trend": {
+        "task_placeholder": "例如：追踪[行业/品牌]最近[时间范围]的市场变化，筛出适合我们跟进的内容机会。",
+        "material_placeholder": "可补充品牌定位、目标客群、近期活动和重点关注的平台；没有现成材料也可直接说明业务目标。",
+        "input_tips": ["关注的行业、品牌或人群", "希望覆盖的平台和时间范围", "本次选题要服务的业务目标"],
+        "output_hint": "得到经过筛选的趋势判断、选题优先级和建议跟进时点",
+    },
+    "research": {
+        "task_placeholder": "例如：围绕[具体主题]核实关键事实、数据与案例，为后续内容准备可靠素材。",
+        "material_placeholder": "可粘贴待核实的说法、已有链接、数据口径和优先来源；请标明哪些信息仍不确定。",
+        "input_tips": ["要核实的主题和核心问题", "优先关注的地区、时间或来源", "已有链接、说法或待验证数据"],
+        "output_hint": "得到带来源的事实摘要、证据强弱和仍待核验的问题",
+    },
+    "benchmark": {
+        "task_placeholder": "例如：拆解[主题/账号/作品]为什么有效，并提炼适合我们借鉴的表达方式。",
+        "material_placeholder": "可粘贴对标账号、帖子链接、截图文字和希望重点拆解的维度。",
+        "input_tips": ["要研究的主题或对标对象", "目标平台与目标受众", "最关心的内容、结构或转化问题"],
+        "output_hint": "得到对标差异、可借鉴做法、不可照搬风险和验证建议",
+    },
+    "draft": {
+        "task_placeholder": "例如：为[目标人群]撰写一篇关于[主题]的[平台/文体]初稿，重点传达[核心观点]。",
+        "material_placeholder": "可粘贴产品卖点、事实素材、活动规则、品牌口吻和参考文章。",
+        "input_tips": ["主题、核心观点和目标读者", "发布平台与内容形式", "必须包含或不能出现的信息"],
+        "output_hint": "得到结构完整、可继续修改或直接评审的内容初稿",
+    },
+    "style": {
+        "task_placeholder": "例如：把这份内容调整为[品牌/个人]的表达风格，保持观点不变并提升辨识度。",
+        "material_placeholder": "请粘贴待改原文，并补充品牌语气、常用表达、禁用词和必须保留的事实。",
+        "input_tips": ["需要改写的原文", "希望接近的语气与风格", "品牌常用词、禁用词或参考作品"],
+        "output_hint": "得到语气统一、自然且符合账号人设的定稿建议",
+    },
+    "media": {
+        "task_placeholder": "例如：为[主题内容]规划适合[目标平台]的视觉素材和画面表达。",
+        "material_placeholder": "可粘贴正文、视觉参考、品牌色、图片尺寸、已有素材和版权限制。",
+        "input_tips": ["正文、主题或重点信息", "目标平台和画面尺寸", "品牌视觉、素材来源与版权限制"],
+        "output_hint": "得到与正文对应的视觉方案、素材需求和使用位置",
+    },
+    "cover": {
+        "task_placeholder": "例如：为[内容主题]设计适合[目标平台]的封面方向，突出[第一眼卖点]。",
+        "material_placeholder": "可粘贴标题、品牌色、参考风格、封面尺寸，以及必须出现的文字或图片说明。",
+        "input_tips": ["标题、主题和核心卖点", "目标平台与目标人群", "品牌视觉或必须保留的元素"],
+        "output_hint": "得到可比较的封面方向、关键信息层级和视觉建议",
+    },
+    "deck": {
+        "task_placeholder": "例如：把[现有内容]整理成面向[听众/场景]的演示结构，突出[核心结论]。",
+        "material_placeholder": "可粘贴原始正文、关键数据、汇报对象、演示时长和已有页面结构。",
+        "input_tips": ["现有正文、报告或要点", "听众、使用场景和演示时长", "必须讲清的结论与行动要求"],
+        "output_hint": "得到清晰的演示结构、页面重点和讲解顺序",
+    },
+    "publish": {
+        "task_placeholder": "例如：把这份成品适配到[目标平台]，整理发布文案、标签和发布节奏。",
+        "material_placeholder": "可粘贴已确认的定稿、账号信息、发布时间限制和各平台审核注意事项。",
+        "input_tips": ["已经确认的内容成品", "目标平台与发布时间要求", "账号限制、审核要求和运营节奏"],
+        "output_hint": "得到各平台可直接审核的发布包和发布检查项",
+    },
+    "retro": {
+        "task_placeholder": "例如：复盘[内容/活动]在[时间范围]的表现，找出有效做法和下一轮调整重点。",
+        "material_placeholder": "可粘贴曝光、点击、互动、转化等汇总数据，以及评论摘要、发布时间和异常事件。",
+        "input_tips": ["要复盘的内容与发布时间", "曝光、互动、转化等可用数据", "原定目标、异常事件与用户反馈"],
+        "output_hint": "得到表现诊断、原因假设、复用项和下一轮改进动作",
+    },
+}
+
+
+def _public_station_task_guide(s: dict) -> dict:
+    """内容部的公开派活提示；与内部模板、能力和模型配置完全隔离。"""
+    guide = _PUBLIC_STATION_TASK_GUIDES.get(s.get("key")) or {
+        "task_placeholder": f"例如：请「{s.get('name') or '数字员工'}」围绕[具体目标]完成[具体任务]。",
+        "material_placeholder": "可粘贴与当前任务直接相关的资料、数据和参考链接。",
+        "input_tips": ["具体目标和使用场景", "已有材料与限制条件", "期望完成时间"],
+        "output_hint": "得到一份围绕当前目标的可执行结果",
+    }
+    return {
+        **guide,
+        "industry_placeholder": "例如：所属行业、产品类别、目标人群或具体业务场景",
+    }
+
+
+def _public_station(s: dict, *, include_task_guide: bool = False) -> dict:
     """内容部员工的对外名片：只含展示信息，不含岗位实现与模型配置。"""
-    return {k: s[k] for k in ("idx", "key", "name", "dept", "emoji", "color", "intro")}
+    public = {k: s[k] for k in ("idx", "key", "name", "dept", "emoji", "color", "intro")}
+    if include_task_guide:
+        public["task_guide"] = _public_station_task_guide(s)
+    return public
 
 
-def _public_expert(e: dict) -> dict:
+def _public_expert(e: dict, *, include_task_guide: bool = False) -> dict:
     """产业专家的对外名片：文字介绍优先，绝不透出岗位手册结构。"""
     intro = (e.get("intro") or "").strip()
     if not intro:
@@ -420,9 +735,12 @@ def _public_expert(e: dict) -> dict:
     topic = (e.get("name") or "相关业务").strip()
     intro += (f" TA在团队中担任{role}，适合处理与“{topic}”相关的经营问题。"
               "您只需说明当前背景、目标和已有材料，TA就能围绕实际业务给出清晰、专业、可落地的建议。")
-    return {k: e.get(k) for k in ("idx", "name", "emoji", "color", "person", "dept_name")} | {
+    public = {k: e.get(k) for k in ("idx", "name", "emoji", "color", "person", "dept_name")} | {
         "intro": intro,
     }
+    if include_task_guide:
+        public["task_guide"] = departments.public_task_guide(e)
+    return public
 
 
 def _need_module(module: str):
@@ -526,6 +844,101 @@ def _start_billed_operation(action: str, note: str = "") -> str:
         raise HTTPException(402, str(exc)) from exc
 
 
+async def _drain_task_despite_cancellation(task: asyncio.Task):
+    """Wait for an already-submitted task through any outer cancellations.
+
+    Executors cannot revoke a SQLite write that has already started.  Repeated
+    request cancellation therefore must not cancel the child task or let the
+    caller guess whether it committed.  Child failures are deliberately read
+    from ``task.result()`` and propagated unchanged.
+    """
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+    return task.result()
+
+
+async def _run_db_safely(fn, *args, **kwargs):
+    """Linearize an already-submitted DB mutation through request cancellation.
+
+    Once a billing/status commit reaches the executor, its caller must observe
+    the real result.  Otherwise the worker can commit after cancellation while
+    the handler concurrently refunds or deletes the committed artifact.
+    """
+    operation = asyncio.create_task(db.arun(fn, *args, **kwargs))
+    return await _drain_task_despite_cancellation(operation)
+
+
+async def _run_db_then_start_worker_safely(
+    fn,
+    *args,
+    start_worker,
+    should_start=None,
+    settle_unstarted=None,
+    **kwargs,
+):
+    """Linearize a durable queue mutation with its in-process worker start.
+
+    ``db.arun`` runs work in an executor, so cancelling the request cannot
+    reliably cancel a SQLite transaction that has already begun.  The caller
+    must therefore observe the final DB result and, when it committed a queued
+    record, schedule its worker before propagating cancellation.  If scheduling
+    itself fails, the optional settlement callback closes/refunds the durable
+    record instead of leaving a charged orphan.
+    """
+    operation = asyncio.create_task(db.arun(fn, *args, **kwargs))
+    cancellation = None
+    try:
+        result = await asyncio.shield(operation)
+    except asyncio.CancelledError as exc:
+        cancellation = exc
+        result = await _drain_task_despite_cancellation(operation)
+
+    must_start = should_start(result) if should_start else True
+    if must_start:
+        try:
+            start_worker(result)
+        except Exception:
+            if settle_unstarted:
+                await _run_db_safely(settle_unstarted, result)
+            raise
+
+    if cancellation is not None:
+        raise cancellation
+    return result
+
+
+async def _start_billing_operation_safely(
+    fn,
+    *args,
+    cancel_reason: str,
+    **kwargs,
+) -> str:
+    """Start durable billing off-loop without leaving a cancelled charge."""
+    start_task = asyncio.create_task(db.arun(fn, *args, **kwargs))
+    try:
+        return await asyncio.shield(start_task)
+    except asyncio.CancelledError:
+        op_key = await _drain_task_despite_cancellation(start_task)
+        if op_key:
+            try:
+                await _run_db_safely(
+                    billing.fail_operation,
+                    op_key,
+                    cancel_reason,
+                )
+            except Exception as exc:
+                log.error(
+                    "cancelled billing start refund failed op=%s error_type=%s",
+                    op_key,
+                    type(exc).__name__,
+                )
+                raise
+        raise
+
+
 @app.get("/api/billing")
 def billing_get():
     t = db.one("SELECT * FROM tenants WHERE id=?", (TEN(),))
@@ -537,26 +950,309 @@ def billing_get():
         }
     log_rows = db.q("SELECT delta, balance, reason, created_at FROM billing_log "
                     "WHERE tenant_id=? ORDER BY id DESC LIMIT 300", (TEN(),))
-    agg = db.one("SELECT COALESCE(SUM(CASE WHEN delta>0 THEN delta END),0) recharged, "
-                 "COALESCE(-SUM(CASE WHEN delta<0 THEN delta END),0) spent, COUNT(*) n "
-                 "FROM billing_log WHERE tenant_id=?", (TEN(),)) or {}
+    # 退点也是正向流水,但把它计成「充值」会让累计充值虚高、月度两列同抬:
+    # 失败一单先计消耗再计充值。按 reason「退回」前缀单列。
+    agg = db.one(
+        "SELECT COALESCE(SUM(CASE WHEN delta>0 AND reason NOT LIKE '退回%' "
+        "THEN delta END),0) recharged, "
+        "COALESCE(SUM(CASE WHEN delta>0 AND reason LIKE '退回%' "
+        "THEN delta END),0) refunded, "
+        "COALESCE(-SUM(CASE WHEN delta<0 THEN delta END),0) spent, COUNT(*) n "
+        "FROM billing_log WHERE tenant_id=?", (TEN(),)) or {}
+    # 近30天按动作聚合消耗:必须从 billing_log 流水算——核心扣点路径
+    # (内容工单/专家任务/会议/成片/工具/定时)走 charge_if_claimed,
+    # 只写流水不写 billing_operation;此前从后者聚合会把大头全部漏掉。
+    # 口径:扣款按 reason 的价目 label 归类,「退回:」流水按 label 冲抵。
+    label_to_action = {
+        (row.get("label") or act): act
+        for act, row in billing.prices().items()
+    }
+    spend_map: dict = {}
+    for flow in db.q(
+            "SELECT delta, reason FROM billing_log "
+            "WHERE tenant_id=? AND created_at>?",
+            (TEN(), time.time() - 30 * 86400)):
+        reason = flow.get("reason") or ""
+        delta = float(flow.get("delta") or 0)
+        is_refund = reason.startswith("退回:")
+        core = reason[3:] if is_refund else reason
+        action = label_to_action.get(core.split(" · ", 1)[0].strip())
+        if not action:
+            continue
+        entry = spend_map.setdefault(
+            action, {"action": action, "n": 0, "points": 0.0})
+        if delta < 0 and not is_refund:
+            entry["n"] += 1
+            entry["points"] += -delta
+        elif delta > 0 and is_refund:
+            entry["n"] -= 1
+            entry["points"] -= delta
+    spend_by_action = sorted(
+        ({**e, "n": max(1, e["n"]), "points": round(e["points"], 1)}
+         for e in spend_map.values() if e["points"] > 0.01),
+        key=lambda e: -e["points"])
+    # 按月对账(北京时区自然月,近6个月):老板问"这个月花了多少"要有答案
+    monthly = db.q(
+        "SELECT strftime('%Y-%m', created_at, 'unixepoch', '+8 hours') AS ym, "
+        "COALESCE(SUM(CASE WHEN delta>0 AND reason NOT LIKE '退回%' "
+        "THEN delta END),0) AS recharged, "
+        "COALESCE(SUM(CASE WHEN delta>0 AND reason LIKE '退回%' "
+        "THEN delta END),0) AS refunded, "
+        "COALESCE(-SUM(CASE WHEN delta<0 THEN delta END),0) AS spent "
+        "FROM billing_log WHERE tenant_id=? AND created_at>? "
+        "GROUP BY ym ORDER BY ym DESC LIMIT 6",
+        (TEN(), time.time() - 200 * 86400))
     return {"balance": (t or {}).get("balance") or 0,
             "plan": (t or {}).get("plan") or "",
             "plan_expires": (t or {}).get("plan_expires"),
             "is_platform": TEN() == 1,
             "recharged": agg.get("recharged") or 0, "spent": agg.get("spent") or 0,
+            "refunded_total": agg.get("refunded") or 0,
             "txn_n": agg.get("n") or 0,
             "prices": price_rows, "plans": billing.PLANS,
-            "periods": billing.PERIODS, "log": log_rows}
+            "periods": billing.PERIODS, "log": log_rows,
+            "log_limit": 300,
+            "log_truncated": int(agg.get("n") or 0) > len(log_rows),
+            "spend_by_action": spend_by_action,
+            "monthly": monthly}
+
+
+def _raise_purchase_error(exc: Exception):
+    if isinstance(exc, purchases.PurchaseNotFound):
+        status_code = 404
+    elif isinstance(exc, purchases.PurchaseForbidden):
+        status_code = 403
+    elif isinstance(exc, purchases.PurchaseConflict):
+        status_code = 409
+    else:
+        status_code = 400
+    raise HTTPException(status_code, str(exc)) from None
+
+
+@app.get("/api/purchases/catalog")
+def purchase_catalog():
+    """Authoritative catalogue; this is an offline application, not checkout."""
+    return purchases.catalog()
+
+
+@app.post("/api/purchases")
+def purchase_create(body: dict):
+    user = auth.current() or {}
+    if user.get("role") not in {"root", "owner"}:
+        raise HTTPException(403, "仅企业主账号可以提交购买申请")
+    if any(
+        key in body
+        for key in ("price", "points", "amount", "quoted_price", "quoted_points")
+    ):
+        raise HTTPException(400, "价格和点数由服务器计算，请勿自行传入")
+    try:
+        return purchases.create_intent(
+            int(user["tenant_id"]),
+            int(user["id"]),
+            request_key=body.get("request_id"),
+            plan_key=body.get("plan"),
+            period_key=body.get("period"),
+            contact=body.get("contact"),
+            note=body.get("note") or "",
+            source=body.get("source") or "billing",
+        )
+    except (purchases.PurchaseError, ValueError) as exc:
+        _raise_purchase_error(exc)
+
+
+@app.get("/api/purchases")
+def purchase_list(
+        status: str | None = None,
+        limit: int = 20,
+        offset: int = 0):
+    user = auth.current() or {}
+    if user.get("role") not in {"root", "owner"}:
+        raise HTTPException(403, "仅企业主账号可以查看购买申请")
+    try:
+        return purchases.list_own(
+            int(user["tenant_id"]),
+            int(user["id"]),
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+    except purchases.PurchaseError as exc:
+        _raise_purchase_error(exc)
+
+
+def _purchase_admin_scope() -> int | None:
+    _need_admin()
+    return None if auth.is_root() else TEN()
+
+
+@app.get("/api/admin/purchases")
+def purchase_admin_list(
+        tenant_id: int | None = None,
+        status: str | None = None,
+        plan: str | None = None,
+        period: str | None = None,
+        limit: int = 50,
+        offset: int = 0):
+    try:
+        return purchases.list_admin(
+            scope_tid=_purchase_admin_scope(),
+            tenant_id=tenant_id,
+            status=status,
+            plan=plan,
+            period=period,
+            limit=limit,
+            offset=offset,
+        )
+    except purchases.PurchaseError as exc:
+        _raise_purchase_error(exc)
+
+
+@app.get("/api/admin/purchases/stats")
+def purchase_admin_stats(
+        tenant_id: int | None = None,
+        status: str | None = None,
+        plan: str | None = None,
+        period: str | None = None):
+    try:
+        return purchases.stats(
+            scope_tid=_purchase_admin_scope(),
+            tenant_id=tenant_id,
+            status=status,
+            plan=plan,
+            period=period,
+        )
+    except purchases.PurchaseError as exc:
+        _raise_purchase_error(exc)
+
+
+@app.patch("/api/admin/purchases/{intent_id}")
+def purchase_admin_transition(intent_id: int, body: dict):
+    _need_root()
+    user = auth.current() or {}
+    try:
+        return purchases.transition(
+            intent_id,
+            expected_status=body.get("expected_status"),
+            target_status=body.get("status"),
+            actor_id=int(user["id"]),
+            note=body.get("note") or "",
+        )
+    except purchases.PurchaseError as exc:
+        _raise_purchase_error(exc)
+
+
+@app.get("/api/records/export.xlsx")
+def records_export(kind: str = "billing"):
+    """租户级数据带走:积分流水/发布台账/审查记录/人设档案。
+
+    此前只有沉淀/资产两类能批量导出,"我的数据我能带走"缺了一大半。
+    财务与人设(含语料心血)归主账号,台账与审查记录随 content 板块。
+    """
+    def ts(v):
+        return (time.strftime("%Y-%m-%d %H:%M", time.localtime(v))
+                if v else "")
+
+    if kind == "billing":
+        _need_admin()
+        rows = db.q("SELECT delta,balance,reason,created_at FROM billing_log "
+                    "WHERE tenant_id=? ORDER BY id DESC", (TEN(),))
+        out = [{"时间": ts(r["created_at"]),
+                "类型": ("退回" if (r["delta"] > 0
+                                    and str(r.get("reason") or "")
+                                    .startswith("退回"))
+                         else "充值" if r["delta"] > 0 else "消耗"),
+                "项目": r.get("reason") or "",
+                "积分变动": r["delta"],
+                "余额": r["balance"]} for r in rows]
+        headers, name = ["时间", "类型", "项目", "积分变动", "余额"], "积分流水"
+    elif kind == "publog":
+        _need_module("content")
+        state_cn = {"pending": "待复盘", "notified": "已提醒",
+                    "done": "已复盘", "processing": "复盘中"}
+        rows = db.q("SELECT * FROM publish_log WHERE tenant_id=? "
+                    "ORDER BY id DESC", (TEN(),))
+        out = []
+        for r in rows:
+            retro = db.jloads(r.get("retro_json"), {}) or {}
+            day = lambda d: state_cn.get(
+                (retro.get(d) or {}).get("state") or "", "—")
+            out.append({"平台": r.get("platform") or "",
+                        "标题": r.get("title") or "",
+                        "链接": r.get("url") or "",
+                        "发布时间": ts(r.get("published_at")),
+                        "登记来源": "草稿箱自动" if r.get("source") == "draft"
+                                    else "手动登记",
+                        "T+1": day("1"), "T+3": day("3"), "T+7": day("7"),
+                        "登记时间": ts(r.get("created_at"))})
+        headers = ["平台", "标题", "链接", "发布时间", "登记来源",
+                   "T+1", "T+3", "T+7", "登记时间"]
+        name = "发布台账"
+    elif kind == "censor":
+        _need_module("content")
+        rows = db.q("SELECT * FROM censor_log WHERE tenant_id=? "
+                    "ORDER BY id DESC", (TEN(),))
+        out = [{"类型": "发前审查" if r.get("kind") == "pre" else "发后复盘",
+                "平台": r.get("platform") or "",
+                "标题": r.get("title") or "",
+                "结论": r.get("verdict") or "",
+                "合规分": r.get("score"),
+                "问题数": len(db.jloads(r.get("issues_json"), []) or []),
+                # Excel 单元格上限 32767 字,报告留足余量
+                "完整报告": (r.get("report") or "")[:30000],
+                "时间": ts(r.get("created_at"))} for r in rows]
+        headers = ["类型", "平台", "标题", "结论", "合规分", "问题数",
+                   "完整报告", "时间"]
+        name = "审查记录"
+    elif kind == "profiles":
+        _need_admin()
+        rows = db.q("SELECT * FROM account_profile WHERE tenant_id=? "
+                    "AND deleted_at IS NULL ORDER BY id", (TEN(),))
+        out = []
+        for r in rows:
+            p = db.jloads(r.get("persona_json"), {}) or {}
+            out.append({"名称": r.get("name") or "",
+                        "定位": p.get("positioning") or "",
+                        "受众": p.get("audience") or "",
+                        "语气": p.get("tone") or "",
+                        "禁忌": p.get("taboo") or "",
+                        "视觉规范": p.get("visual") or "",
+                        "口头禅": p.get("catchphrases") or "",
+                        "文风特征": p.get("style_notes") or "",
+                        "历史语料": (p.get("corpus") or "")[:30000],
+                        "创建时间": ts(r.get("created_at"))})
+        headers = ["名称", "定位", "受众", "语气", "禁忌", "视觉规范",
+                   "口头禅", "文风特征", "历史语料", "创建时间"]
+        name = "人设档案"
+    else:
+        raise HTTPException(400, "kind 支持 billing/publog/censor/profiles")
+    return Response(
+        export.rows_to_xlsx(out, headers, name),
+        media_type=("application/vnd.openxmlformats-officedocument"
+                    ".spreadsheetml.sheet"),
+        headers={"Content-Disposition": f'attachment; filename="{kind}.xlsx"'})
+
+
+_feedback_ips: dict = {}   # ip -> (当天已提交条数, 日序号);重启即清,轻量防灌
 
 
 @app.post("/api/feedback")
-async def feedback_submit(body: dict):
-    txt = (body.get("text") or "").strip()
+async def feedback_submit(request: Request, body: dict):
+    txt = (body.get("text") or "").strip()[:2000]
     if not txt:
         raise HTTPException(400, "反馈内容不能为空")
+    # 游客也能留资(转化出口),但要挡住无限灌邮箱:每 IP 每天限 10 条
+    client_ip = (request.client.host if request.client else "") or "?"
+    day_no = int(time.time() // 86400)
+    used, marker = _feedback_ips.get(client_ip, (0, day_no))
+    if marker != day_no:
+        used = 0
+    if used >= 10:
+        raise HTTPException(429, "今天反馈次数已达上限,明天再来或直接联系顾问")
+    _feedback_ips[client_ip] = (used + 1, day_no)
     u = auth.current() or {}
-    t = db.one("SELECT name FROM tenants WHERE id=?", (u.get("tenant_id", 1),)) or {}
+    t = await db.aone(
+        "SELECT name FROM tenants WHERE id=?", (u.get("tenant_id", 1),)
+    ) or {}
     who = f"{t.get('name','')}·{u.get('username','?')}({u.get('role','')})"
     try:
         from . import mailer
@@ -799,11 +1495,37 @@ async def feishu_sync(body: dict):
         raise HTTPException(400, str(e)) from None
 
 
+@app.get("/api/support-contact")
+def get_support_contact():
+    """公开只读:登录页「忘记密码」等场景要在未登录时也能拿到对客联系方式。
+
+    只回联系方式字符串本身(root 主动配置、面向客户公开的信息),不含任何其他数据。
+    """
+    return {"contact": (db.get_setting("support_contact") or "")[:80]}
+
+
+@app.post("/api/team/support-contact")
+def set_support_contact(body: dict):
+    """root 配置对客联系方式(微信号/电话);套餐页与点数不足提示会展示它。"""
+    _need_root()
+    value = str(body.get("contact") or "").strip()[:80]
+    db.set_setting("support_contact", value or None)
+    return {"ok": True, "contact": value}
+
+
 @app.post("/api/team/tenants/{tid}/subscribe")
 def tenant_subscribe(tid: int, body: dict):
     _need_root()
     try:
-        return billing.subscribe(tid, body.get("plan"), body.get("period"))
+        # order_id 是当前协议；op_key 仅为已接入早期预览版的客户端保留。
+        # 两者都缺失时 billing.subscribe 会明确拒绝，绝不临时造随机键伪装幂等。
+        order_id = body.get("order_id") or body.get("op_key")
+        return billing.subscribe(
+            tid,
+            body.get("plan"),
+            body.get("period"),
+            op_key=str(order_id or "").strip(),
+        )
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -1474,6 +2196,12 @@ def meta():
               "stations": stations,
               "modes": {"fullauto": "完全托管", "autopilot": "全自动", "copilot": "关键审批",
                         "manual": "逐站审批"},
+              # 老板派活前必须能看到这单要花多少点(明码标价);价格可被 root 调整,
+              # 所以从价目表读,不许前端写死。
+              "job_points": (billing.prices().get("content_job") or {}).get("points", 18),
+              "voice_clone_points": (billing.prices().get("voice_clone") or {}).get("points", 9),
+              # 对客联系方式(root 配置):没有它,「点数不足→看套餐→联系顾问」是死胡同。
+              "support_contact": (db.get_setting("support_contact") or "")[:80],
               "brief_templates": ["蹭热点", "日更选题", "产品软文", "观点输出", "教程干货", "二创改写"],
               "platforms": list(registry.PLATFORM_SPECS),
               "platform_specs": registry.PLATFORM_SPECS,
@@ -1525,7 +2253,8 @@ def state(limit: int | None = None, offset: int = 0):
         j["brief"] = {k: brief.get(k) for k in ("direction", "template", "platforms")}
         j["title"] = engine._job_title(j["id"])
         j["stations"] = [stn.get(j["id"], {}).get(i) for i in range(10)]
-    profiles = (db.q("SELECT * FROM account_profile WHERE tenant_id=? ORDER BY id", (TEN(),))
+    profiles = (db.q("SELECT * FROM account_profile WHERE tenant_id=? "
+                     "AND deleted_at IS NULL ORDER BY id", (TEN(),))
                 if can_content else [])
     for p in profiles:
         persona = db.jloads(p.pop("persona_json")) or {}
@@ -1534,15 +2263,13 @@ def state(limit: int | None = None, offset: int = 0):
         p["persona"] = persona
         p["has_corpus"] = bool(corpus)
     inbox = [j for j in jobs if j["status"] in ("awaiting_review", "gate_blocked", "failed")]
-    notifications = db.q(
-        "SELECT id,kind,title,body,link,created_at "
-        "FROM notification WHERE tenant_id=? AND read_at IS NULL "
-        "ORDER BY id DESC LIMIT 30",
-        (TEN(),),
-    )
+    # 通知标题/摘要/链接本身也是业务数据。查询与 mark-read 统一经过
+    # notify 的角色 + 板块白名单，不能先把跨模块广播取出来再交给前端隐藏。
+    from . import notify as _nt
+    notifications = _nt.unread_for_user(TEN(), auth.current(), limit=30)
     # V26:余额+新手引导进度(首页头卡与开工清单用)
     ten_row = db.one("SELECT balance, plan FROM tenants WHERE id=?", (TEN(),)) or {}
-    from . import wechat as _wc, notify as _nt
+    from . import wechat as _wc
     setup = {"profile": len(profiles) > 0,
              "first_job": (jobs_total > 0 if paged else len(jobs) > 0),
              "wechat": bool(_wc.get_conf(TEN()).get("appid")) or bool(_nt.get_webhook(TEN())),
@@ -1567,11 +2294,11 @@ def state(limit: int | None = None, offset: int = 0):
 def notifications_read(body: dict):
     raw_ids = body.get("ids")
     if raw_ids is None:
-        changed = db.execute(
-            "UPDATE notification SET read_at=?,updated_at=? "
-            "WHERE tenant_id=? AND read_at IS NULL",
-            (time.time(), time.time(), TEN()),
-        )
+        # 通知是租户级共享的:一键全读会替企业主清掉「等拍板/发布失败/该复盘」等待办,
+        # 所以只允许主账号操作;成员对自己看过的单条点已读不受限。
+        if not auth.is_admin():
+            raise HTTPException(403, "一键全读会替企业主清掉待办,请单条已读或让主账号操作")
+        changed = notify.mark_all_read(TEN(), auth.current())
         return {"ok": True, "updated": changed}
     if not isinstance(raw_ids, list) or len(raw_ids) > 100:
         raise HTTPException(400, "通知编号格式无效")
@@ -1587,14 +2314,30 @@ def notifications_read(body: dict):
             ids.append(item_id)
     if not ids:
         return {"ok": True, "updated": 0}
-    marks = ",".join("?" for _ in ids)
-    now = time.time()
-    changed = db.execute(
-        f"UPDATE notification SET read_at=?,updated_at=? "
-        f"WHERE tenant_id=? AND read_at IS NULL AND id IN ({marks})",
-        (now, now, TEN(), *ids),
-    )
+    changed = notify.mark_read(TEN(), auth.current(), ids)
     return {"ok": True, "updated": changed}
+
+
+@app.get("/api/notifications")
+def notifications_list(
+        limit: int = 40,
+        offset: int = 0,
+        unread: bool = False):
+    page_limit, page_offset, _ = _pagination(limit, offset, 40)
+    result = notify.history_for_user(
+        TEN(),
+        auth.current(),
+        limit=page_limit,
+        offset=page_offset,
+        unread_only=bool(unread),
+    )
+    return _page_result(
+        result["items"],
+        result["total"],
+        page_limit,
+        page_offset,
+        unread=bool(unread),
+    )
 
 
 def _profile_id_for_tenant(value):
@@ -1607,7 +2350,8 @@ def _profile_id_for_tenant(value):
         profile_id = int(value)
     except (TypeError, ValueError):
         raise HTTPException(400, "人设档案参数无效")
-    if not db.one("SELECT id FROM account_profile WHERE id=? AND tenant_id=?",
+    if not db.one("SELECT id FROM account_profile WHERE id=? AND tenant_id=? "
+                  "AND deleted_at IS NULL",
                   (profile_id, TEN())):
         raise HTTPException(400, "人设档案不存在或无权使用")
     return profile_id
@@ -1628,17 +2372,24 @@ def _validated_brief(raw: dict) -> dict:
     if not isinstance(raw, dict):
         raise HTTPException(400, "任务简报格式无效")
 
+    field_cn = {"direction": "内容方向", "template": "内容类型",
+                "industry": "行业/赛道", "material": "附加素材",
+                "ref_link": "参考链接"}
+
     def text(key: str, limit: int, *, required: bool = False) -> str:
         value = raw.get(key, "")
         if value is None:
             value = ""
+        label = field_cn.get(key, key)
         if not isinstance(value, str):
-            raise HTTPException(400, f"{key} 格式无效")
+            raise HTTPException(400, f"「{label}」格式无效")
         value = value.strip()
         if required and not value:
             raise HTTPException(400, "内容方向必填")
         if len(value) > limit:
-            raise HTTPException(400, f"{key} 最多 {limit} 个字符")
+            raise HTTPException(
+                400, f"「{label}」超长:最多 {limit} 字,当前 {len(value)} 字,"
+                     "请删减后再提交")
         return value
 
     brief = {
@@ -1720,6 +2471,8 @@ def _create_charged_content_job(data: dict, note: str) -> int:
         "status": "pending_charge",
         "billing_status": "pending",
         "billing_points": points,
+        # 发起人:副账号开的单老板事后能查到;系统内部路径(如定时任务)无会话则留空
+        "created_by": (auth.current() or {}).get("id"),
     })
     job_id = db.insert("job", job_data)
 
@@ -1733,7 +2486,9 @@ def _create_charged_content_job(data: dict, note: str) -> int:
 
     try:
         charged = billing.charge_if_claimed(
-            "content_job", tid, claim, note=note, points=points)
+            "content_job", tid, claim,
+            note=f"工单#{job_id}·{note}"[:160], points=points,
+            job_id=job_id)
     except billing.InsufficientPoints as e:
         db.q("DELETE FROM job WHERE id=? AND billing_status='pending'", (job_id,))
         raise HTTPException(402, str(e)) from e
@@ -1742,27 +2497,51 @@ def _create_charged_content_job(data: dict, note: str) -> int:
         raise
     if not charged:
         db.q("DELETE FROM job WHERE id=? AND billing_status='pending'", (job_id,))
-        raise HTTPException(409, "工单已提交，请到任务中心查看")
+        raise HTTPException(409, "这单刚刚已经提交过了,原单正在执行,没有重复扣点;正在带您去任务中心查看")
     return job_id
+
+
+def _start_content_job_worker(job_id: int) -> None:
+    engine.notify(job_id)
+    engine.touch(job_id)
+
+
+def _settle_unstarted_content_job(job_id: int) -> bool:
+    return engine.settle_failure(
+        job_id,
+        "内容工单启动失败，系统已安全终止并退回本次点数",
+    )
 
 
 @app.post("/api/jobs")
 async def create_job(body: dict):
     _need_module("content")
     brief = _validated_brief(body.get("brief"))
-    running = db.q("SELECT id FROM job WHERE tenant_id=? AND deleted_at IS NULL AND "
-                   "status NOT IN ('done','cancelled','failed')", (TEN(),))
+    running = await db.aq(
+        "SELECT id FROM job WHERE tenant_id=? AND deleted_at IS NULL AND "
+        "status NOT IN ('done','cancelled','failed')",
+        (TEN(),),
+    )
     if len(running) >= 3:
         raise HTTPException(429, "并行工单已达上限(3),请先处理进行中的工单")
-    profile_id = _profile_id_for_tenant(body.get("profile_id"))
-    job_id = _create_charged_content_job({
-        "brief_json": json.dumps(brief, ensure_ascii=False),
-        "profile_id": profile_id, "tenant_id": TEN(),
-        "mode": _validated_mode(body.get("mode")),
-    }, note=brief["direction"][:20])
-    engine.notify(job_id)
-    engine.touch(job_id)
-    funnel.record_first_work(TEN(), "content")
+    profile_id = await db.arun(
+        _profile_id_for_tenant, body.get("profile_id")
+    )
+    job_id = await _run_db_then_start_worker_safely(
+        _create_charged_content_job,
+        {
+            "brief_json": json.dumps(brief, ensure_ascii=False),
+            "profile_id": profile_id,
+            "tenant_id": TEN(),
+            "mode": _validated_mode(body.get("mode")),
+        },
+        note=brief["direction"][:20],
+        start_worker=_start_content_job_worker,
+        settle_unstarted=_settle_unstarted_content_job,
+    )
+    asyncio.create_task(
+        _record_first_work_best_effort(TEN(), "content")
+    )
     return {"job_id": job_id}
 
 
@@ -1772,6 +2551,41 @@ def _job_or_404(job_id: int) -> dict:
     if not j or j.get("tenant_id", 1) != TEN():
         raise HTTPException(404)
     return j
+
+
+def _tenant_username(uid) -> str | None:
+    """按当前租户查用户名做展示;跨租户/已删除账号一律返回 None,不泄露别家用户。"""
+    try:
+        uid = int(uid or 0)
+    except (TypeError, ValueError):
+        return None
+    if uid <= 0:
+        return None
+    row = db.one(
+        "SELECT username FROM users WHERE id=? AND tenant_id=?",
+        (uid, TEN()),
+    )
+    return row["username"] if row else None
+
+
+def _notify_member_review(job: dict, idx: int, action) -> None:
+    """member 代老板拍板(通过/打回)后推送 member_reviewed,老板不再毫不知情。
+
+    放在 HTTP 层而非 engine:审批事务已提交、操作者会话上下文确定,
+    且"按角色决定要不要惊动老板"属于账号策略,不属于流水线状态机。
+    """
+    u = auth.current() or {}
+    if u.get("role") != "member" or action not in ("approve", "edit", "reject"):
+        return
+    station = registry.BY_IDX.get(idx) or {}
+    from . import notify
+    notify.push(int(job.get("tenant_id") or TEN()), "member_reviewed", {
+        "job_id": int(job["id"]),
+        "user": u.get("username") or "",
+        "station": station.get("name") or f"{idx + 1}",
+        "approved": action != "reject",
+        "title": engine._job_title(job["id"]),
+    })
 
 
 def _public_failure_for_view(status, value, internal: bool):
@@ -1817,6 +2631,8 @@ def _public_publish_failure(status, value):
 def _serialize_station_run(row: dict, internal: bool) -> dict:
     item = dict(row)
     item["output"] = db.jloads(item.pop("output_json", None), {})
+    # 拍板人用户名不是内部资料:member 也应看到某工位是谁批的(限同租户)。
+    item["reviewed_by_name"] = _tenant_username(item.get("reviewed_by"))
     if internal:
         item["steps"] = _steps_for_view(
             item.pop("steps_json", None),
@@ -1841,6 +2657,7 @@ def _serialize_station_run(row: dict, internal: bool) -> dict:
             "created_at",
             "updated_at",
             "output",
+            "reviewed_by_name",
         )
     }
     public["review_comment"] = _public_failure_for_view(
@@ -1892,6 +2709,8 @@ def job_detail(job_id: int):
     j["brief"] = db.jloads(j.pop("brief_json"))
     j["gate"] = db.jloads(j.pop("gate_json"), None)
     j["title"] = engine._job_title(job_id)
+    # 发起人:副账号开的单,老板在详情页一眼可见;查不到(历史单/跨租户)为 None
+    j["created_by_name"] = _tenant_username(j.get("created_by"))
     runs = {}
     hist = {}
     for r in db.q("SELECT * FROM station_run WHERE job_id=? ORDER BY station_idx, version", (job_id,)):
@@ -1928,16 +2747,30 @@ def station_action(job_id: int, idx: int, body: dict):
         engine.user_action(job_id, idx, body.get("action"), body.get("payload"))
     except ValueError as e:
         raise HTTPException(400, str(e))
+    # 审批已成功提交;若是副账号代拍板,同步告知老板(站内必达,配企微再外推)
+    _notify_member_review(job, idx, body.get("action"))
     return {"ok": True}
 
 
 @app.post("/api/jobs/{job_id}/gate")
 def gate_action(job_id: int, body: dict):
-    _job_or_404(job_id)
+    job = _job_or_404(job_id)
+    action = body.get("action")
     try:
-        engine.gate_action(job_id, body.get("action"))
+        engine.gate_action(job_id, action)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    # 审查拦截被 member 放行/重检是合规场景,比普通拍板更需要老板知情
+    u = auth.current() or {}
+    if u.get("role") == "member":
+        from . import notify
+        notify.push(int(job.get("tenant_id") or TEN()), "member_reviewed", {
+            "job_id": int(job_id),
+            "user": u.get("username") or "",
+            "station": "审查关卡",
+            "approved": action == "override",
+            "title": engine._job_title(job_id),
+        })
     return {"ok": True}
 
 
@@ -1994,7 +2827,7 @@ def delete_job(job_id: int):
                 and settled["billing_status"] == "charged"
                 and not engine._has_usable_delivery(job_id))):
         # 退款系统故障时保留业务锚点，禁止用 DELETE 绕过下次对账恢复。
-        raise HTTPException(503, "工单结算尚未完成，请稍后重试删除")
+        raise HTTPException(503, "这单的退点还在处理中(约几秒),稍等片刻再删除")
 
     deleted_at = time.time()
     with db.atomic() as c:
@@ -2070,7 +2903,9 @@ def depts_list():
         for e in d["employees"]:
             cfg = cfgs.get(e["idx"]) or employees.get_config(e["idx"])
             st = stats.get(e["idx"]) or {}
-            public = _public_expert({**e, "dept_name": d["name"]}) | {
+            public = _public_expert(
+                {**e, "dept_key": d["key"], "dept_name": d["name"]},
+            ) | {
                 "group": e["group"], "enabled": cfg.get("enabled", True),
                 "tasks_n": st.get("n", 0), "running_n": st.get("run", 0) or 0,
             }
@@ -2105,7 +2940,9 @@ def dept_emp(idx: int):
     stats = db.one("SELECT COUNT(*) n, SUM(cost_usd) cost FROM task WHERE emp_idx=? "
                    "AND status='done' AND tenant_id=? AND deleted_at IS NULL",
                    (idx, TEN())) or {}
-    public = _public_expert(e) | {"tasks": tasks}
+    public = _public_expert(
+        e, include_task_guide=not _is_tour()
+    ) | {"tasks": tasks}
     if not _is_boss():
         return public
     return {**public,
@@ -2128,6 +2965,8 @@ def _create_charged_expert_task(task_data: dict, note: str = "") -> int:
         "status": "pending_charge",
         "billing_status": "pending",
         "billing_points": points,
+        # 发起人:记录是哪个账号派的活;无会话的内部路径留空
+        "created_by": (auth.current() or {}).get("id"),
     })
 
     def claim(connection):
@@ -2140,7 +2979,8 @@ def _create_charged_expert_task(task_data: dict, note: str = "") -> int:
 
     try:
         charged = billing.charge_if_claimed(
-            "expert_task", tid, claim, note=note, points=points)
+            "expert_task", tid, claim,
+            note=f"任务#{task_id}·{note}"[:160], points=points)
     except Exception:
         db.q(
             "DELETE FROM task WHERE id=? AND status='pending_charge' "
@@ -2153,6 +2993,32 @@ def _create_charged_expert_task(task_data: dict, note: str = "") -> int:
     return task_id
 
 
+def _start_expert_task_worker(task_id: int):
+    return asyncio.create_task(
+        taskrunner.run_task(task_id, engine.broadcast)
+    )
+
+
+def _settle_unstarted_expert_task(task_id: int) -> bool:
+    return taskrunner.settle_failure(
+        task_id,
+        "任务启动失败，系统已安全终止并退回本次点数",
+    )
+
+
+async def _record_first_work_best_effort(tid: int, kind: str) -> None:
+    try:
+        await db.arun(funnel.record_first_work, tid, kind)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.warning(
+            "first-work funnel record skipped kind=%s error_type=%s",
+            kind,
+            type(exc).__name__,
+        )
+
+
 @app.post("/api/tasks")
 async def task_create(body: dict):
     idx = body.get("emp_idx")
@@ -2163,10 +3029,10 @@ async def task_create(body: dict):
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if departments.get(idx):
-        _need_module(departments.get(idx)["dept_key"])
+        await db.arun(_need_module, departments.get(idx)["dept_key"])
     else:
-        _need_module("content")
-    if not employees.is_enabled(idx):
+        await db.arun(_need_module, "content")
+    if not await db.arun(employees.is_enabled, idx):
         raise HTTPException(400, "该员工已被停用(后台可重新启用)")
     # 派单预检:仅产业部专家(idx>=100)且未强制派单时,先判断任务书是否对口。
     # 不对口→直接返回引导,不扣点不建任务;LLM 异常/超时一律放行(降级可用,绝不拦死派单)。
@@ -2189,12 +3055,18 @@ async def task_create(body: dict):
     task_data = {"emp_idx": idx, "tenant_id": TEN(),
                  "brief_json": json.dumps(brief, ensure_ascii=False)}
     try:
-        tid = _create_charged_expert_task(
-            task_data, note=(brief.get("direction") or "")[:20])
+        tid = await _run_db_then_start_worker_safely(
+            _create_charged_expert_task,
+            task_data,
+            note=(brief.get("direction") or "")[:20],
+            start_worker=_start_expert_task_worker,
+            settle_unstarted=_settle_unstarted_expert_task,
+        )
     except billing.InsufficientPoints as e:
         raise HTTPException(402, str(e))
-    asyncio.create_task(taskrunner.run_task(tid, engine.broadcast))
-    funnel.record_first_work(TEN(), "expert")
+    asyncio.create_task(
+        _record_first_work_best_effort(TEN(), "expert")
+    )
     return {"task_id": tid}
 
 
@@ -2236,10 +3108,27 @@ async def experts_match(body: dict):
 
 
 @app.get("/api/task-center")
-def task_center(limit: int = 300, offset: int = 0):
+def task_center(
+    limit: int = 300,
+    offset: int = 0,
+    q: str = "",
+    status: str = "all",
+    kind: str = "all",
+):
     """老板任务总账：聚合真实业务表，不复制状态，也不跨租户/越板块展示。"""
     modules = {m["key"] for m in auth.all_modules() if auth.allowed(m["key"])}
-    return taskcenter.list_items(TEN(), modules, limit=limit, offset=offset)
+    try:
+        return taskcenter.list_items(
+            TEN(),
+            modules,
+            limit=limit,
+            offset=offset,
+            q=(q or "").strip()[:100],
+            status=status,
+            kind=kind,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
 
 
 @app.get("/api/task-center/{kind}/{rid}")
@@ -2365,7 +3254,7 @@ def _raise_retry_denied(meta: dict):
     ) else 409
     raise HTTPException(
         status_code,
-        meta.get("retry_block_reason") or "当前任务不能安全原单重试，请刷新后查看。",
+        meta.get("retry_block_reason") or "这个任务不能原样重试(可能素材已变或已有新版本),刷新后按最新状态处理;需要重做请重新派活。",
     )
 
 
@@ -2391,8 +3280,8 @@ async def task_center_retry(kind: str, rid: int):
     now = time.time()
 
     if kind == "content":
-        row = _job_or_404(rid)
-        usable = engine._has_usable_delivery(rid)
+        row = await db.arun(_job_or_404, rid)
+        usable = await db.arun(engine._has_usable_delivery, rid)
         meta = taskcenter.retry_meta(
             kind, row, usable_delivery=usable)
         if not meta["retryable"]:
@@ -2403,56 +3292,65 @@ async def task_center_retry(kind: str, rid: int):
             if row.get("billing_status") == "charged"
             else 0
         )
-        with db.atomic() as connection:
-            if connection.execute(
-                "SELECT id FROM wechat_draft_delivery "
-                "WHERE tenant_id=? AND job_id=? AND status IN "
-                "('pending_charge','processing','submitting','submitted') "
-                "LIMIT 1",
-                (TEN(), rid),
-            ).fetchone():
-                raise HTTPException(
-                    409,
-                    "该工单的公众号草稿仍在投递或对账，"
-                    "收口前不能重跑内容。",
+        tenant_id = TEN()
+
+        def _retry_content():
+            with db.atomic() as connection:
+                if connection.execute(
+                    "SELECT id FROM wechat_draft_delivery "
+                    "WHERE tenant_id=? AND job_id=? AND status IN "
+                    "('pending_charge','processing','submitting','submitted') "
+                    "LIMIT 1",
+                    (tenant_id, rid),
+                ).fetchone():
+                    raise HTTPException(
+                        409,
+                        "该工单的公众号草稿仍在投递或对账，"
+                        "收口前不能重跑内容。",
+                    )
+                changed = connection.execute(
+                    "UPDATE job SET status='running',billing_status='charged',"
+                    "billing_points=?,retry_count=retry_count+1,gate_json=NULL,"
+                    "updated_at=? WHERE id=? AND tenant_id=? AND deleted_at IS NULL "
+                    "AND status='failed' AND billing_status=? AND retry_count=?",
+                    (
+                        next_points,
+                        now,
+                        rid,
+                        tenant_id,
+                        row.get("billing_status"),
+                        retries,
+                    ),
                 )
-            changed = connection.execute(
-                "UPDATE job SET status='running',billing_status='charged',"
-                "billing_points=?,retry_count=retry_count+1,gate_json=NULL,"
-                "updated_at=? WHERE id=? AND tenant_id=? AND deleted_at IS NULL "
-                "AND status='failed' AND billing_status=? AND retry_count=?",
-                (
-                    next_points,
-                    now,
-                    rid,
-                    TEN(),
-                    row.get("billing_status"),
-                    retries,
-                ),
-            )
-            if changed.rowcount != 1:
-                raise HTTPException(
-                    409, "任务状态刚刚发生变化，请刷新后再重试")
-            # 仅复位每个工位的最新失败版本；已完成版本继续作为流水线交接物。
-            connection.execute(
-                "UPDATE station_run SET status='rejected',"
-                "review_comment='免费重试：沿用原工单重新执行',updated_at=? "
-                "WHERE job_id=? AND status='failed' AND NOT EXISTS ("
-                "SELECT 1 FROM station_run newer "
-                "WHERE newer.job_id=station_run.job_id "
-                "AND newer.station_idx=station_run.station_idx "
-                "AND newer.version>station_run.version)",
-                (now, rid),
-            )
-        engine.notify(rid)
-        engine.touch(rid)
+                if changed.rowcount != 1:
+                    raise HTTPException(
+                        409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
+                # 仅复位每个工位的最新失败版本；已完成版本继续作为流水线交接物。
+                connection.execute(
+                    "UPDATE station_run SET status='rejected',"
+                    "review_comment='免费重试：沿用原工单重新执行',updated_at=? "
+                    "WHERE job_id=? AND status='failed' AND NOT EXISTS ("
+                    "SELECT 1 FROM station_run newer "
+                    "WHERE newer.job_id=station_run.job_id "
+                    "AND newer.station_idx=station_run.station_idx "
+                    "AND newer.version>station_run.version)",
+                    (now, rid),
+                )
+
+        await _run_db_then_start_worker_safely(
+            _retry_content,
+            start_worker=lambda _result: _start_content_job_worker(rid),
+            settle_unstarted=(
+                lambda _result: _settle_unstarted_content_job(rid)
+            ),
+        )
         return {
             "ok": True, "kind": kind, "job_id": rid, "record_id": rid,
             "free_retry": True, "retry_count": retries + 1,
         }
 
     if kind == "video":
-        row = db.one(
+        row = await db.aone(
             "SELECT * FROM tv_job WHERE id=? AND tenant_id=?", (rid, TEN()))
         if not row:
             raise HTTPException(404)
@@ -2460,22 +3358,42 @@ async def task_center_retry(kind: str, rid: int):
         if not meta["retryable"]:
             _raise_retry_denied(meta)
         retries = int(row.get("retry_count") or 0)
-        changed = db.execute(
-            "UPDATE tv_job SET status='queued',billing_status='charged',"
-            "billing_points=0,retry_count=retry_count+1,steps_json='[]',"
-            "script=NULL,video_file=NULL,error=NULL,updated_at=? "
-            "WHERE id=? AND tenant_id=? AND status='failed' "
-            "AND billing_status=? AND retry_count=?",
-            (
-                now, rid, TEN(), row.get("billing_status"), retries,
+        from . import textvideo
+
+        def _retry_video():
+            changed = db.execute(
+                "UPDATE tv_job SET status='queued',billing_status='charged',"
+                "billing_points=0,retry_count=retry_count+1,steps_json='[]',"
+                "script=NULL,video_file=NULL,error=NULL,updated_at=? "
+                "WHERE id=? AND tenant_id=? AND status='failed' "
+                "AND billing_status=? AND retry_count=?",
+                (
+                    now, rid, TEN(), row.get("billing_status"), retries,
+                ),
+            )
+            if changed == 1:
+                try:
+                    textvideo.cleanup_job_assets(rid, row)
+                except Exception:
+                    textvideo.settle_failure(
+                        rid,
+                        "成片任务重试准备失败，已安全终止",
+                    )
+                    raise
+            return changed
+
+        changed = await _run_db_then_start_worker_safely(
+            _retry_video,
+            start_worker=lambda _changed: _start_text_video_worker(rid),
+            should_start=lambda value: value == 1,
+            settle_unstarted=lambda _changed: textvideo.settle_failure(
+                rid,
+                "成片任务启动失败，已安全终止",
             ),
         )
         if changed != 1:
             raise HTTPException(
-                409, "任务状态刚刚发生变化，请刷新后再重试")
-        from . import textvideo
-        textvideo.cleanup_job_assets(rid, row)
-        asyncio.create_task(textvideo.run_job(rid, engine.broadcast))
+                409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
         engine.broadcast({"type": "tv_done", "tv_id": rid, "tenant_id": TEN()})
         return {
             "ok": True, "kind": kind, "record_id": rid,
@@ -2483,7 +3401,7 @@ async def task_center_retry(kind: str, rid: int):
         }
 
     if kind == "tool":
-        row = db.one(
+        row = await db.aone(
             "SELECT * FROM tool_job WHERE id=? AND tenant_id=?", (rid, TEN()))
         if not row:
             raise HTTPException(404)
@@ -2491,8 +3409,8 @@ async def task_center_retry(kind: str, rid: int):
         if not meta["retryable"]:
             _raise_retry_denied(meta)
         retries = int(row.get("retry_count") or 0)
-        try:
-            changed = db.execute(
+        def _retry_tool():
+            return db.execute(
                 "UPDATE tool_job SET status='running',billing_status='charged',"
                 "billing_points=0,retry_count=retry_count+1,"
                 "retry_started_at=?,result_json=NULL,error=NULL,"
@@ -2503,13 +3421,31 @@ async def task_center_retry(kind: str, rid: int):
                     now, now, rid, TEN(), row.get("billing_status"), retries,
                 ),
             )
+
+        def _settle_unstarted_tool(_changed):
+            current = db.one(
+                "SELECT * FROM tool_job WHERE id=? AND tenant_id=?",
+                (rid, TEN()),
+            )
+            return bool(current) and _settle_tool_failure(
+                current,
+                "工具任务启动失败，已安全终止",
+                "启动失败退回",
+            )
+
+        try:
+            changed = await _run_db_then_start_worker_safely(
+                _retry_tool,
+                start_worker=lambda _changed: _spawn_tool_worker(rid),
+                should_start=lambda value: value == 1,
+                settle_unstarted=_settle_unstarted_tool,
+            )
         except sqlite3.IntegrityError as exc:
             raise HTTPException(
                 409, "这个工具已有任务正在运行，请等它完成后再重试") from exc
         if changed != 1:
             raise HTTPException(
-                409, "任务状态刚刚发生变化，请刷新后再重试")
-        _spawn_tool_worker(rid)
+                409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
         _broadcast_tool(TEN(), row.get("kind") or "")
         return {
             "ok": True, "kind": kind, "record_id": rid,
@@ -2517,60 +3453,80 @@ async def task_center_retry(kind: str, rid: int):
         }
 
     if kind == "meeting":
-        row = _meeting_row_or_404(rid)
+        row = await db.arun(_meeting_row_or_404, rid)
         meta = taskcenter.retry_meta(kind, row)
         if not meta["retryable"]:
             _raise_retry_denied(meta)
         retries = int(row.get("retry_count") or 0)
-        with db.atomic() as connection:
-            current = connection.execute(
-                "SELECT execution_task_ids_json FROM meeting "
-                "WHERE id=? AND tenant_id=?",
-                (rid, TEN()),
-            ).fetchone()
-            execution_ids = db.jloads(
-                current["execution_task_ids_json"] if current else None,
-                [],
-            ) or []
-            has_derived = bool(execution_ids) or bool(connection.execute(
-                "SELECT id FROM task WHERE tenant_id=? "
-                "AND source_meeting_id=? AND deleted_at IS NULL LIMIT 1",
-                (TEN(), rid),
-            ).fetchone())
-            if has_derived:
-                raise HTTPException(
-                    409,
-                    "会议已经生成执行任务，不能重开整场会议；"
-                    "请到任务中心重试具体失败任务。",
+        tenant_id = TEN()
+
+        def _retry_meeting():
+            with db.atomic() as connection:
+                current = connection.execute(
+                    "SELECT execution_task_ids_json FROM meeting "
+                    "WHERE id=? AND tenant_id=?",
+                    (rid, tenant_id),
+                ).fetchone()
+                execution_ids = db.jloads(
+                    current["execution_task_ids_json"] if current else None,
+                    [],
+                ) or []
+                has_derived = bool(execution_ids) or bool(connection.execute(
+                    "SELECT id FROM task WHERE tenant_id=? "
+                    "AND source_meeting_id=? AND deleted_at IS NULL LIMIT 1",
+                    (tenant_id, rid),
+                ).fetchone())
+                if has_derived:
+                    raise HTTPException(
+                        409,
+                        "会议已经生成执行任务，不能重开整场会议；"
+                        "请到任务中心重试具体失败任务。",
+                    )
+                changed = connection.execute(
+                    "UPDATE meeting SET status='queued',phase='queued',round_no=0,"
+                    "messages_json='[]',actions_json=NULL,summary_md=NULL,"
+                    "decision=NULL,consensus_md=NULL,next_action=NULL,"
+                    "proposals_json='[]',validations_json='[]',"
+                    "execution_task_ids_json='[]',intervention_count=0,"
+                    "intervention_state=NULL,intervention_op_key=NULL,"
+                    "intervention_snapshot_json=NULL,intervention_question=NULL,"
+                    "intervention_started_at=NULL,billing_status='included',"
+                    "retry_count=retry_count+1,updated_at=? "
+                    "WHERE id=? AND tenant_id=? AND status='failed' "
+                    "AND phase='failed' AND billing_status=? AND retry_count=?",
+                    (
+                        now,
+                        rid,
+                        tenant_id,
+                        row.get("billing_status"),
+                        retries,
+                    ),
                 )
-            changed = connection.execute(
-                "UPDATE meeting SET status='queued',phase='queued',round_no=0,"
-                "messages_json='[]',actions_json=NULL,summary_md=NULL,"
-                "decision=NULL,consensus_md=NULL,next_action=NULL,"
-                "proposals_json='[]',validations_json='[]',"
-                "execution_task_ids_json='[]',intervention_count=0,"
-                "intervention_state=NULL,intervention_op_key=NULL,"
-                "intervention_snapshot_json=NULL,intervention_question=NULL,"
-                "intervention_started_at=NULL,billing_status='included',"
-                "retry_count=retry_count+1,updated_at=? "
-                "WHERE id=? AND tenant_id=? AND status='failed' "
-                "AND phase='failed' AND billing_status=? AND retry_count=?",
-                (
-                    now, rid, TEN(), row.get("billing_status"), retries,
-                ),
-            )
-            if changed.rowcount != 1:
-                raise HTTPException(
-                    409, "会议状态刚刚发生变化，请刷新后再重试")
-        asyncio.create_task(meeting.run(rid, engine.broadcast))
-        engine.broadcast({"type": "meeting_update", "meeting_id": rid})
+                if changed.rowcount != 1:
+                    raise HTTPException(
+                        409, "会议状态刚刚发生变化，请刷新后再重试")
+
+        await _run_db_then_start_worker_safely(
+            _retry_meeting,
+            start_worker=lambda _result: _start_meeting_worker(rid),
+            settle_unstarted=lambda _result: meeting.settle_failure(
+                rid,
+                "会议重试启动失败，已安全终止",
+            ),
+        )
+        engine.broadcast({
+            "type": "meeting_update",
+            "tenant_id": tenant_id,
+            "_required_modules": meeting._event_scope(row)[1],
+            "meeting_id": rid,
+        })
         return {
             "ok": True, "kind": kind, "record_id": rid,
             "free_retry": True, "retry_count": retries + 1,
         }
 
     if kind == "publish":
-        row = db.one(
+        row = await db.aone(
             "SELECT * FROM pub_task WHERE id=? AND tenant_id=?", (rid, TEN()))
         if not row:
             raise HTTPException(404)
@@ -2578,25 +3534,59 @@ async def task_center_retry(kind: str, rid: int):
         if not meta["retryable"]:
             _raise_retry_denied(meta)
         retries = int(row.get("retry_count") or 0)
-        changed = db.execute(
-            "UPDATE pub_task SET status='queued',fail_json=NULL,"
-            "retry_count=retry_count+1,submit_started_at=NULL,updated_at=? "
-            "WHERE id=? AND tenant_id=? AND status='failed' "
-            "AND submission_state='not_submitted' AND retry_count=?",
-            (now, rid, TEN(), retries),
+        tenant_id = TEN()
+
+        def _retry_publish():
+            return db.execute(
+                "UPDATE pub_task SET status='queued',fail_json=NULL,"
+                "retry_count=retry_count+1,submit_started_at=NULL,updated_at=? "
+                "WHERE id=? AND tenant_id=? AND status='failed' "
+                "AND submission_state='not_submitted' AND retry_count=?",
+                (now, rid, tenant_id, retries),
+            )
+
+        def _settle_unstarted_publish(_changed):
+            fail = {
+                "kind": "unknown",
+                "why": "发布任务未能启动",
+                "fix": "可点击免费重试重新排队",
+                "err": "自动发布未开始，内容未发出",
+                "shot": "",
+                "home": "",
+            }
+            return db.execute(
+                "UPDATE pub_task SET status='failed',fail_json=?,updated_at=? "
+                "WHERE id=? AND tenant_id=? AND status='queued' "
+                "AND submission_state='not_submitted'",
+                (
+                    json.dumps(fail, ensure_ascii=False),
+                    time.time(),
+                    rid,
+                    tenant_id,
+                ),
+            ) == 1
+
+        changed = await _run_db_then_start_worker_safely(
+            _retry_publish,
+            start_worker=lambda _changed: _start_publish_worker(rid),
+            should_start=lambda value: value == 1,
+            settle_unstarted=_settle_unstarted_publish,
         )
         if changed != 1:
             raise HTTPException(
                 409, "发布任务状态刚刚发生变化，请刷新后再重试")
-        asyncio.create_task(matrixpub.run_task(rid, engine.broadcast))
-        engine.broadcast({"type": "pub_update", "task_id": rid})
+        engine.broadcast({
+            "type": "pub_update",
+            "tenant_id": tenant_id,
+            "task_id": rid,
+        })
         return {
             "ok": True, "kind": kind, "record_id": rid,
             "free_retry": True, "retry_count": retries + 1,
             "note": "已按原发布单免费重新排队",
         }
 
-    row = db.one(
+    row = await db.aone(
         "SELECT * FROM wechat_draft_delivery WHERE id=? AND tenant_id=?",
         (rid, TEN()),
     )
@@ -2627,6 +3617,8 @@ def task_get(tid: int):
     e = departments.get(t["emp_idx"]) or registry.BY_IDX.get(t["emp_idx"]) or {}
     t["emp_name"] = e.get("name", "")
     t["dept_name"] = e.get("dept_name") or e.get("dept") or "内容生产部"
+    # 发起人:是哪个账号派的活;查不到(历史任务/跨租户)为 None
+    t["created_by_name"] = _tenant_username(t.get("created_by"))
     retries = int(t.get("retry_count") or 0)
     t["free_retries_remaining"] = max(
         0, taskrunner.MAX_FREE_RETRIES - retries
@@ -2670,7 +3662,7 @@ def task_get(tid: int):
 
 @app.post("/api/tasks/{tid}/redo")
 async def task_redo(tid: int, body: dict):
-    t = _task_row_or_404(tid)
+    t = await db.arun(_task_row_or_404, tid)
     feedback = body.get("feedback", "")
     if not isinstance(feedback, str):
         raise HTTPException(400, "feedback 格式无效")
@@ -2684,37 +3676,57 @@ async def task_redo(tid: int, body: dict):
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     try:
-        nid = _create_charged_expert_task(
+        nid = await _run_db_then_start_worker_safely(
+            _create_charged_expert_task,
             {"emp_idx": t["emp_idx"], "tenant_id": TEN(),
              "source_task_id": tid,
              "brief_json": json.dumps(brief, ensure_ascii=False)},
             note="重做",
+            start_worker=_start_expert_task_worker,
+            settle_unstarted=_settle_unstarted_expert_task,
         )
     except billing.InsufficientPoints as e:
         raise HTTPException(402, str(e))
-    asyncio.create_task(taskrunner.run_task(nid, engine.broadcast))
     return {"task_id": nid}
 
 
 @app.post("/api/tasks/{tid}/retry")
 async def task_retry(tid: int):
     """失败任务原单免费重试；用 CAS 防止双击或并发重复开工。"""
-    task = _task_row_or_404(tid)
+    task = await db.arun(_task_row_or_404, tid)
     if task.get("status") != "failed":
         raise HTTPException(409, "只有失败任务可以免费重试")
-    if not taskrunner.prepare_retry(tid, TEN()):
-        current = db.one(
+    prepared = await _run_db_then_start_worker_safely(
+        taskrunner.prepare_retry,
+        tid,
+        TEN(),
+        start_worker=lambda _prepared: _start_expert_task_worker(tid),
+        should_start=bool,
+        settle_unstarted=lambda _prepared: _settle_unstarted_expert_task(tid),
+    )
+    if not prepared:
+        current = await db.aone(
             "SELECT retry_count FROM task WHERE id=? AND tenant_id=?",
             (tid, TEN()),
         ) or {}
         if (current.get("retry_count") or 0) >= taskrunner.MAX_FREE_RETRIES:
             raise HTTPException(429, "该任务免费重试次数已用完，请新建任务")
-        raise HTTPException(409, "任务状态刚刚发生变化，请刷新后再重试")
-    asyncio.create_task(taskrunner.run_task(tid, engine.broadcast))
+        raise HTTPException(409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
+    expert = departments.get(task["emp_idx"])
     engine.broadcast(
-        {"type": "task_update", "task_id": tid, "idx": task["emp_idx"]}
+        {
+            "type": "task_update",
+            "tenant_id": TEN(),
+            "_required_modules": (
+                str((expert or {}).get("dept_key") or "content"),
+            ),
+            "task_id": tid,
+            "idx": task["emp_idx"],
+        }
     )
-    row = db.one("SELECT retry_count FROM task WHERE id=?", (tid,)) or {}
+    row = await db.aone(
+        "SELECT retry_count FROM task WHERE id=?", (tid,)
+    ) or {}
     return {
         "ok": True,
         "task_id": tid,
@@ -2745,7 +3757,7 @@ def task_delete(tid: int):
     if not row:
         raise HTTPException(404)
     if row["status"] not in ("done", "failed"):
-        raise HTTPException(503, "任务结算尚未完成，请稍后重试删除")
+        raise HTTPException(503, "这个任务的退点还在处理中(约几秒),稍等片刻再删除")
     if row["status"] == "failed" and row["billing_status"] == "charged":
         raise HTTPException(503, "任务退款尚未完成，请稍后重试删除")
     deleted_at = time.time()
@@ -2788,7 +3800,9 @@ def employees_list():
         cfg = employees.get_config(s["idx"])
         st = stats.get(s["idx"]) or {}
         if not internal:
-            out.append(_public_station(s))
+            out.append(
+                _public_station(s, include_task_guide=not _is_tour())
+            )
             continue
         model_id = providers.text_model_for(s["idx"])
         out.append({
@@ -2804,6 +3818,7 @@ def employees_list():
             "settings": registry.station_settings(s["key"]),
             "settings_custom": bool(cfg["settings"]),
             "learning": s["idx"] in employees.LEARNING,
+            "task_guide": _public_station_task_guide(s),
             "stats": {"runs": st.get("runs", 0), "cost_usd": st.get("cost") or 0,
                       "tokens": st.get("tokens") or 0, "avg_ms": st.get("avg_ms") or 0},
         })
@@ -2884,20 +3899,41 @@ async def employee_learn(idx: int):
     s = registry.BY_IDX.get(idx) or (departments.get(idx) and departments.learn_station(idx))
     if not s:
         raise HTTPException(404)
-    if idx in employees.LEARNING:
+    if not employees.claim_learning(idx):
         raise HTTPException(429, "该员工正在进修中")
     try:
-        billing_op = billing.start_operation(
-            "learn", tid=TEN(), note=f"{s.get('name', '数字员工')}进修")
+        billing_op = await _start_billing_operation_safely(
+            billing.start_operation,
+            "learn",
+            tid=TEN(),
+            note=f"{s.get('name', '数字员工')}进修",
+            cancel_reason="员工进修请求中断自动退回",
+        )
     except billing.InsufficientPoints as e:
+        employees.LEARNING.discard(idx)
         raise HTTPException(402, str(e))
+    except BaseException:
+        employees.LEARNING.discard(idx)
+        raise
+
+    tid = TEN()
+    emp_name = s.get("name", "数字员工")
 
     async def _bg():
+        from . import notify
         try:
-            await employees.learn(s, broadcast=engine.broadcast)
+            result = await employees.learn(
+                s,
+                broadcast=engine.broadcast,
+                claimed=True,
+            )
         except BaseException as exc:
             try:
-                billing.fail_operation(billing_op, "员工进修失败自动退回")
+                await _run_db_safely(
+                    billing.fail_operation,
+                    billing_op,
+                    "员工进修失败自动退回",
+                )
             except Exception as refund_exc:
                 logging.getLogger("employees").error(
                     "employee %s learning refund failed error_type=%s",
@@ -2909,10 +3945,74 @@ async def employee_learn(idx: int):
                 idx,
                 type(exc).__name__,
             )
+            # 后台失败不能只写服务端日志:老板盯着面板等结果,必须站内告知。
+            try:
+                await notify.push_async(
+                    tid,
+                    "learn_failed",
+                    {"title": emp_name},
+                )
+            except Exception:
+                logging.getLogger("employees").warning(
+                    "employee %s learn-failed notify failed", idx)
         else:
-            billing.complete_operation(billing_op)
+            fresh = int((result or {}).get("new") or 0)
+            if fresh:
+                await _run_db_safely(
+                    billing.complete_operation,
+                    billing_op,
+                )
+            else:
+                # 一条新技能都没学到就不收钱,与全站「没产出就退点」口径一致。
+                try:
+                    await _run_db_safely(
+                        billing.fail_operation,
+                        billing_op,
+                        "进修未学到新技能自动退回",
+                    )
+                except Exception:
+                    logging.getLogger("employees").error(
+                        "employee %s zero-fresh refund failed", idx)
+            try:
+                await notify.push_async(
+                    tid,
+                    "learn_done",
+                    {
+                        "title": emp_name,
+                        "new": fresh,
+                        "total": (result or {}).get("total"),
+                        "summary": (
+                            f"「{emp_name}」新学 {fresh} 条技能,技能库共 "
+                            f"{(result or {}).get('total', '?')} 条"
+                            + ("" if fresh else "(全部与已有重复,3 点已退回)")
+                        ),
+                    },
+                )
+            except Exception:
+                logging.getLogger("employees").warning(
+                    "employee %s learn-done notify failed", idx)
+        finally:
+            # employees.learn owns normal cleanup; this also protects tests,
+            # cancellations before coroutine entry, and future implementation swaps.
+            employees.LEARNING.discard(idx)
 
-    asyncio.create_task(_bg())
+    try:
+        asyncio.create_task(_bg())
+    except BaseException:
+        employees.LEARNING.discard(idx)
+        try:
+            await _run_db_safely(
+                billing.fail_operation,
+                billing_op,
+                "员工进修未启动自动退回",
+            )
+        except Exception as refund_exc:
+            logging.getLogger("employees").error(
+                "employee %s launch refund failed error_type=%s",
+                idx,
+                type(refund_exc).__name__,
+            )
+        raise
     return {"ok": True, "started": True}
 
 
@@ -2990,7 +4090,7 @@ def knowledge_detail(kid: int):
 @app.post("/api/knowledge/{kid}/analyze")
 async def knowledge_analyze(kid: int):
     _need_module("library")
-    row = db.one(
+    row = await db.aone(
         "SELECT tenant_id FROM knowledge WHERE id=? AND deleted_at IS NULL",
         (kid,),
     )
@@ -3005,7 +4105,10 @@ async def knowledge_analyze(kid: int):
 @app.post("/api/assets/{aid}/analyze")
 async def asset_analyze(aid: int):
     _need_module("library")
-    row = db.one("SELECT tenant_id FROM asset WHERE id=?", (aid,))
+    row = await db.aone(
+        "SELECT tenant_id FROM asset WHERE id=? AND deleted_at IS NULL",
+        (aid,),
+    )
     if not row or row.get("tenant_id", 1) != TEN():
         raise HTTPException(404)
     try:
@@ -3084,7 +4187,488 @@ _TRASH_TABLES = {
     "task": ("task", None),
     "knowledge": ("knowledge", "library"),
     "avatar": ("avatar_job", "avatar"),
+    "profile": ("account_profile", "content"),
+    "asset": ("asset", "library"),
 }
+_PURGE_MARKER_PREFIX = "__purge_pending_v1__:"
+_PURGED_CONTENT = "[已彻底删除]"
+
+# job 彻底删除保留矩阵（schema50，派生记录显式关联 job_id）：
+# - DELETE：job、station_run、asset、knowledge、tv_job、站内通知、受管文件。
+# - REDACT+RETAIN：censor_log / publish_log / pub_task 的审计与防重放骨架；
+#   标题、正文、报告、日志、账号名、URL、素材路径全部不可逆清空。
+# - OPAQUE RETAIN：billing_log 金额/余额/时间，billing_operation 的 op_key/
+#   action/status/points，以及 wechat_draft_delivery 的 request_hash/request_key/
+#   status/op_key/media_id。它们承担退款、对账和“外部提交不能重复”的幂等职责，
+#   只清空 note/error/title/report 等业务内容。
+# v50 之前少数标题型审查/账务记录无法可靠区分同租户同标题工单。遇到这种
+# 历史歧义必须拒绝硬删并保留全部数据，绝不能为了“删干净”串改另一笔业务。
+_JOB_PURGE_RETENTION_MATRIX = {
+    "delete": (
+        "job", "station_run", "asset", "knowledge", "tv_job",
+        "notification", "managed_files",
+    ),
+    "redact_keep": ("censor_log", "publish_log", "pub_task"),
+    "opaque_keep": (
+        "billing_log", "billing_operation", "wechat_draft_delivery",
+    ),
+}
+
+
+def _is_purge_marker(value) -> bool:
+    return str(value or "").startswith(_PURGE_MARKER_PREFIX)
+
+
+def _new_purge_marker() -> str:
+    return _PURGE_MARKER_PREFIX + os.urandom(16).hex()
+
+
+def _purge_tombstone_key(kind: str, tid: int, rid: int) -> str:
+    """无业务正文的幂等墓碑；重复请求可返回成功且不泄露别的租户记录。"""
+    return f"purged:v1:{kind}:{int(tid)}:{int(rid)}"
+
+
+def _purge_tombstone_exists(kind: str, tid: int, rid: int) -> bool:
+    return db.get_setting(_purge_tombstone_key(kind, tid, rid)) == "1"
+
+
+def _record_purge_tombstone(
+        connection, kind: str, tid: int, rid: int, now: float) -> None:
+    connection.execute(
+        "INSERT INTO app_setting(key,value,updated_at) VALUES(?,?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
+        "updated_at=excluded.updated_at",
+        (_purge_tombstone_key(kind, tid, rid), "1", now),
+    )
+
+
+def _purge_collect_titles(value, out: set[str]) -> None:
+    """只收集标题类字段，供 schema49 无 job_id 的派生日志做精确脱敏。"""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {"title", "direction", "report_name"}:
+                text = " ".join(str(item or "").split()).strip()
+                if text and text != _PURGED_CONTENT:
+                    out.add(text[:500])
+            elif key == "title_candidates" and isinstance(item, list):
+                for candidate in item:
+                    text = " ".join(str(candidate or "").split()).strip()
+                    if text and text != _PURGED_CONTENT:
+                        out.add(text[:500])
+            if isinstance(item, (dict, list)):
+                _purge_collect_titles(item, out)
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, (dict, list)):
+                _purge_collect_titles(item, out)
+
+
+def _purge_json_titles(raw, out: set[str]) -> None:
+    _purge_collect_titles(db.jloads(raw, {}) or {}, out)
+
+
+def _purge_rows_tuple(rows: list[dict], columns: tuple[str, ...]) -> tuple:
+    return tuple(
+        tuple(row.get(column) for column in columns)
+        for row in rows
+    )
+
+
+def _purge_billing_reason_matches(
+        reason: str, job_id: int) -> bool:
+    """只识别旧版正文中自带工单编号的确定性锚点。"""
+    text = str(reason or "")
+    markers = (
+        f"工单#{int(job_id)}",
+        f"工单 #{int(job_id)}",
+    )
+    return any(
+        marker in text and (
+            text.endswith(marker)
+            or f"{marker}·" in text
+            or f"{marker} " in text
+        )
+        for marker in markers
+    )
+
+
+def _purge_legacy_billing_title_matches(
+        reason: str, titles: tuple[str, ...]) -> bool:
+    """识别没有 job_id 的旧版标题型流水；只能用于阻断，不能用于改写。"""
+    text = str(reason or "")
+    suffixes = {
+        f" · {title[:size]}"
+        for title in titles
+        for size in (16, 20)
+        if title[:size]
+    }
+    # 深审与自动复盘把 ``平台·标题[:14]`` / ``《标题[:14]》`` 放在
+    # note 尾部，billing_log 会再在前面拼动作标签。仍只按真实格式的精确
+    # 尾缀匹配，避免扫描/改写无关流水。
+    suffixes.update(
+        suffix
+        for title in titles
+        for suffix in (
+            f"·{title[:14]}",
+            f"·《{title[:14]}》",
+        )
+        if title[:14]
+    )
+    return any(text.endswith(suffix) for suffix in suffixes)
+
+
+def _purge_billing_note_matches(
+        note: str, titles: tuple[str, ...]) -> bool:
+    """识别代码实际写入的标题型 note，不对任意正文做模糊包含匹配。"""
+    text = str(note or "")
+    if not text:
+        return False
+    exact = {
+        title[:size]
+        for title in titles
+        for size in (14, 16, 20)
+        if title[:size]
+    }
+    if text in exact:
+        return True
+    suffixes = {
+        suffix
+        for title in titles
+        for suffix in (
+            f"·{title[:14]}",
+            f"·《{title[:14]}》",
+        )
+        if title[:14]
+    }
+    return any(text.endswith(suffix) for suffix in suffixes)
+
+
+def _purge_redacted_billing_reason(reason: str) -> str:
+    text = str(reason or "")
+    if " · " in text:
+        return text.split(" · ", 1)[0][:120] + f" · {_PURGED_CONTENT}"
+    for marker in ("工单 #", "工单#"):
+        if marker in text:
+            return text.split(marker, 1)[0][:120] + _PURGED_CONTENT
+    return _PURGED_CONTENT
+
+
+def _purge_job_snapshot(connection, tid: int, job_id: int, job_row) -> dict:
+    """固定 job 的全部派生内容与幂等锚点；阶段三必须逐项完全相同。"""
+    station_rows = [
+        dict(row) for row in connection.execute(
+            "SELECT id,output_json,review_comment,steps_json "
+            "FROM station_run WHERE job_id=? ORDER BY id",
+            (job_id,),
+        ).fetchall()
+    ]
+    asset_rows = [
+        dict(row) for row in connection.execute(
+            "SELECT id,payload_json,meta_json FROM asset "
+            "WHERE tenant_id=? AND job_id=? ORDER BY id",
+            (tid, job_id),
+        ).fetchall()
+    ]
+    knowledge_rows = [
+        dict(row) for row in connection.execute(
+            "SELECT id,title,content,tags_json,meta_json FROM knowledge "
+            "WHERE tenant_id=? AND job_id=? ORDER BY id",
+            (tid, job_id),
+        ).fetchall()
+    ]
+    tv_rows = [
+        dict(row) for row in connection.execute(
+            "SELECT id,params_json,script,status,billing_status,video_file,"
+            "error,steps_json FROM tv_job "
+            "WHERE tenant_id=? AND job_id=? ORDER BY id",
+            (tid, job_id),
+        ).fetchall()
+    ]
+    delivery_rows = [
+        dict(row) for row in connection.execute(
+            "SELECT id,request_hash,request_key,title,status,billing_status,"
+            "op_key,media_id,publish_log_id,report_json,error "
+            "FROM wechat_draft_delivery "
+            "WHERE tenant_id=? AND job_id=? ORDER BY id",
+            (tid, job_id),
+        ).fetchall()
+    ]
+    delivery_publish_ids = {
+        int(row["publish_log_id"])
+        for row in delivery_rows
+        if row.get("publish_log_id")
+    }
+    publish_rows = [
+        dict(row) for row in connection.execute(
+            "SELECT id,platform,title,url,source,retro_json "
+            "FROM publish_log WHERE tenant_id=? AND job_id=? ORDER BY id",
+            (tid, job_id),
+        ).fetchall()
+    ]
+    if delivery_publish_ids:
+        marks = ",".join("?" for _ in delivery_publish_ids)
+        known = {int(row["id"]) for row in publish_rows}
+        publish_rows.extend(
+            dict(row) for row in connection.execute(
+                "SELECT id,platform,title,url,source,retro_json "
+                f"FROM publish_log WHERE tenant_id=? AND id IN ({marks}) "
+                "ORDER BY id",
+                (tid, *sorted(delivery_publish_ids)),
+            ).fetchall()
+            if int(row["id"]) not in known
+        )
+        publish_rows.sort(key=lambda row: int(row["id"]))
+    pub_rows = [
+        dict(row) for row in connection.execute(
+            "SELECT id,platform,account,payload_json,status,submission_state,"
+            "submit_started_at,log,fail_json FROM pub_task "
+            "WHERE tenant_id=? AND json_valid(payload_json) "
+            "AND CAST(json_extract(payload_json,'$.job_id') AS INTEGER)=? "
+            "ORDER BY id",
+            (tid, job_id),
+        ).fetchall()
+    ]
+
+    titles: set[str] = set()
+    _purge_json_titles(job_row["brief_json"], titles)
+    for row in station_rows:
+        _purge_json_titles(row.get("output_json"), titles)
+    for row in asset_rows:
+        _purge_json_titles(row.get("payload_json"), titles)
+    for row in knowledge_rows:
+        text = " ".join(str(row.get("title") or "").split()).strip()
+        if text:
+            titles.add(text[:500])
+    for row in tv_rows:
+        _purge_json_titles(row.get("params_json"), titles)
+    for row in delivery_rows + publish_rows:
+        text = " ".join(str(row.get("title") or "").split()).strip()
+        if text and text != _PURGED_CONTENT:
+            titles.add(text[:500])
+    for row in pub_rows:
+        _purge_json_titles(row.get("payload_json"), titles)
+    title_tuple = tuple(sorted(titles))
+    censor_titles = {title[:80] for title in title_tuple if title[:80]}
+
+    censor_rows = [
+        dict(row) for row in connection.execute(
+            "SELECT id,job_id,kind,platform,title,verdict,score,issues_json,"
+            "report FROM censor_log WHERE tenant_id=? AND job_id=? "
+            "ORDER BY id",
+            (tid, job_id),
+        ).fetchall()
+    ]
+    notification_rows = []
+    for row in connection.execute(
+            "SELECT id,job_id,kind,title,body,link,user_id FROM notification "
+            "WHERE tenant_id=? ORDER BY id", (tid,)).fetchall():
+        item = dict(row)
+        link = str(item.get("link") or "")
+        directly_linked = link in {
+            f"#/job/{job_id}", f"#/delivery/{job_id}"
+        }
+        if item.get("job_id") == job_id or directly_linked:
+            notification_rows.append(item)
+
+    billing_rows = [
+        dict(row) for row in connection.execute(
+            "SELECT id,job_id,delta,balance,reason FROM billing_log "
+            "WHERE tenant_id=? ORDER BY id",
+            (tid,),
+        ).fetchall()
+        if (
+            row["job_id"] == job_id
+            or _purge_billing_reason_matches(row["reason"], job_id)
+        )
+    ]
+    delivery_op_keys = {
+        str(row["op_key"])
+        for row in delivery_rows
+        if row.get("op_key")
+    }
+    billing_operation_rows = [
+        dict(row) for row in connection.execute(
+            "SELECT op_key,job_id,action,units,points,note,status,error "
+            "FROM billing_operation WHERE tenant_id=? ORDER BY op_key",
+            (tid,),
+        ).fetchall()
+        if (
+            row["job_id"] == job_id
+            or
+            str(row["op_key"]) in delivery_op_keys
+        )
+    ]
+
+    # 旧版没有 job_id 的标题型记录可能属于同租户另一笔同标题业务。它们
+    # 只能触发“无法安全归因”的阻断，绝不纳入脱敏集合。
+    unattributed = [
+        ("censor_log", int(row["id"]))
+        for row in connection.execute(
+            "SELECT id,title FROM censor_log "
+            "WHERE tenant_id=? AND job_id IS NULL ORDER BY id",
+            (tid,),
+        ).fetchall()
+        if str(row["title"] or "") in censor_titles
+    ]
+    unattributed.extend(
+        ("notification", int(row["id"]))
+        for row in connection.execute(
+            "SELECT id,title,body,link FROM notification "
+            "WHERE tenant_id=? AND job_id IS NULL ORDER BY id",
+            (tid,),
+        ).fetchall()
+        if (
+            str(row["link"] or "") not in {
+                f"#/job/{job_id}", f"#/delivery/{job_id}"
+            }
+            and (
+                str(row["title"] or "") in title_tuple
+                or str(row["body"] or "") in title_tuple
+                or any(
+                    title[:20]
+                    and f"《{title[:20]}》" in str(row["title"] or "")
+                    for title in title_tuple
+                )
+            )
+        )
+    )
+    unattributed.extend(
+        ("billing_log", int(row["id"]))
+        for row in connection.execute(
+            "SELECT id,reason FROM billing_log "
+            "WHERE tenant_id=? AND job_id IS NULL ORDER BY id",
+            (tid,),
+        ).fetchall()
+        if (
+            not _purge_billing_reason_matches(row["reason"], job_id)
+            and _purge_legacy_billing_title_matches(
+                row["reason"], title_tuple)
+        )
+    )
+    unattributed.extend(
+        ("billing_operation", str(row["op_key"]))
+        for row in connection.execute(
+            "SELECT op_key,note FROM billing_operation "
+            "WHERE tenant_id=? AND job_id IS NULL ORDER BY op_key",
+            (tid,),
+        ).fetchall()
+        if (
+            str(row["op_key"]) not in delivery_op_keys
+            and _purge_billing_note_matches(row["note"], title_tuple)
+        )
+    )
+
+    pub_files = []
+    for row in pub_rows:
+        fail = db.jloads(row.get("fail_json"), {}) or {}
+        shot = fail.get("shot") if isinstance(fail, dict) else None
+        # 只有 /files/ 下的地址可能是本服务管理的本地截图。历史外链也要随
+        # fail_json 脱敏，但不能因为外部 URL 不可删除而阻断彻底删除。
+        if isinstance(shot, str) and shot.strip().startswith("/files/"):
+            pub_files.append((int(row["id"]), str(shot)))
+
+    active = []
+    active.extend(
+        ("tv_job", int(row["id"]))
+        for row in tv_rows
+        if (
+            row.get("status") in {"pending_charge", "queued", "running"}
+            or row.get("billing_status") in {"pending", "charged"}
+        )
+    )
+    active.extend(
+        ("wechat_draft_delivery", int(row["id"]))
+        for row in delivery_rows
+        if (
+            row.get("status") in {
+                "pending_charge", "processing", "submitting", "submitted"
+            }
+            or row.get("billing_status") in {"pending", "charged"}
+        )
+    )
+    active.extend(
+        ("pub_task", int(row["id"]))
+        for row in pub_rows
+        if row.get("status") in {"queued", "running"}
+    )
+    for row in publish_rows:
+        retro = db.jloads(row.get("retro_json"), {}) or {}
+        if any(
+            isinstance(state, dict) and state.get("state") == "processing"
+            for state in retro.values()
+        ):
+            active.append(("publish_log", int(row["id"])))
+    active.extend(
+        ("billing_operation", str(row["op_key"]))
+        for row in billing_operation_rows
+        if row.get("status") in {"pending", "charged"}
+    )
+
+    return {
+        "titles": title_tuple,
+        "station": _purge_rows_tuple(
+            station_rows, ("id", "output_json", "review_comment", "steps_json")),
+        "asset": _purge_rows_tuple(
+            asset_rows, ("id", "payload_json", "meta_json")),
+        "knowledge": _purge_rows_tuple(
+            knowledge_rows,
+            ("id", "title", "content", "tags_json", "meta_json"),
+        ),
+        "tv": _purge_rows_tuple(
+            tv_rows,
+            (
+                "id", "params_json", "script", "status", "billing_status",
+                "video_file", "error", "steps_json",
+            ),
+        ),
+        "delivery": _purge_rows_tuple(
+            delivery_rows,
+            (
+                "id", "request_hash", "request_key", "title", "status",
+                "billing_status", "op_key", "media_id", "publish_log_id",
+                "report_json", "error",
+            ),
+        ),
+        "publish": _purge_rows_tuple(
+            publish_rows,
+            ("id", "platform", "title", "url", "source", "retro_json"),
+        ),
+        "pub": _purge_rows_tuple(
+            pub_rows,
+            (
+                "id", "platform", "account", "payload_json", "status",
+                "submission_state", "submit_started_at", "log", "fail_json",
+            ),
+        ),
+        "censor": _purge_rows_tuple(
+            censor_rows,
+            (
+                "id", "job_id", "kind", "platform", "title", "verdict", "score",
+                "issues_json", "report",
+            ),
+        ),
+        "notification": _purge_rows_tuple(
+            notification_rows,
+            ("id", "job_id", "kind", "title", "body", "link", "user_id"),
+        ),
+        "billing_log": _purge_rows_tuple(
+            billing_rows, ("id", "job_id", "delta", "balance", "reason")),
+        "billing_operation": _purge_rows_tuple(
+            billing_operation_rows,
+            (
+                "op_key", "job_id", "action", "units", "points", "note",
+                "status", "error",
+            ),
+        ),
+        "tv_files": tuple(
+            (int(row["id"]), row.get("video_file"))
+            for row in tv_rows
+            if row.get("video_file")
+        ),
+        "pub_files": tuple(sorted(pub_files)),
+        "active": tuple(active),
+        "unattributed": tuple(unattributed),
+    }
 
 
 def _trash_module(kind: str, row: dict) -> str:
@@ -3098,6 +4682,11 @@ def _trash_module(kind: str, row: dict) -> str:
 def _trash_title(kind: str, row: dict) -> str:
     if kind == "knowledge":
         return (row.get("title") or "未命名知识")[:160]
+    if kind == "profile":
+        return (row.get("title") or "未命名人设")[:160]
+    if kind == "asset":
+        payload = db.jloads(row.get("params_json"), {}) or {}
+        return (payload.get("title") or "未命名资产")[:160]
     if kind == "avatar":
         params = db.jloads(row.get("params_json"), {}) or {}
         return (
@@ -3138,10 +4727,20 @@ def trash_list(limit: int = 200, offset: int = 0):
                  params_json,status,NULL AS emp_idx,
                  deleted_at,created_at,delete_reason
           FROM avatar_job WHERE tenant_id=? AND deleted_at IS NOT NULL
+          UNION ALL
+          SELECT 'profile' AS kind,id,NULL AS brief_json,name AS title,
+                 NULL AS params_json,'' AS status,NULL AS emp_idx,
+                 deleted_at,created_at,delete_reason
+          FROM account_profile WHERE tenant_id=? AND deleted_at IS NOT NULL
+          UNION ALL
+          SELECT 'asset' AS kind,id,NULL AS brief_json,NULL AS title,
+                 payload_json AS params_json,'' AS status,NULL AS emp_idx,
+                 deleted_at,created_at,delete_reason
+          FROM asset WHERE tenant_id=? AND deleted_at IS NOT NULL
         ) AS deleted_records
         ORDER BY deleted_at DESC,id DESC LIMIT ? OFFSET ?
         """,
-        (TEN(), TEN(), TEN(), TEN(), limit + 1, offset),
+        (TEN(), TEN(), TEN(), TEN(), TEN(), TEN(), limit + 1, offset),
     )
     truncated = len(rows) > limit
     for row in rows[:limit]:
@@ -3165,7 +4764,11 @@ def trash_list(limit: int = 200, offset: int = 0):
                 "assignee": employee.get("name") or "",
                 "deleted_at": row.get("deleted_at") or 0,
                 "created_at": row.get("created_at") or 0,
-                "reason": (row.get("delete_reason") or "")[:160],
+                "reason": (
+                    "彻底删除尚未完成，请再次点击彻底删除继续处理"
+                    if _is_purge_marker(row.get("delete_reason"))
+                    else (row.get("delete_reason") or "")[:160]
+                ),
             }
         )
     return {
@@ -3193,6 +4796,21 @@ def trash_restore(kind: str, rid: int):
         raise HTTPException(404)
     try:
         with db.atomic() as connection:
+            current = connection.execute(
+                f"SELECT * FROM {table} WHERE id=? AND tenant_id=? "
+                "AND deleted_at IS NOT NULL",
+                (rid, TEN()),
+            ).fetchone()
+            if not current:
+                raise HTTPException(
+                    409, "记录状态刚刚发生变化，请刷新后再恢复"
+                )
+            if _is_purge_marker(current["delete_reason"]):
+                raise HTTPException(
+                    409,
+                    "该记录正在等待彻底删除，部分文件可能已经销毁，不能恢复；"
+                    "请再次点击彻底删除完成清理",
+                )
             changed = connection.execute(
                 f"UPDATE {table} SET deleted_at=NULL,deleted_by=NULL,"
                 "delete_reason=NULL,updated_at=? "
@@ -3208,19 +4826,414 @@ def trash_restore(kind: str, rid: int):
         raise HTTPException(409, "记录状态刚刚发生变化，请刷新后再恢复")
     if kind == "task":
         taskrunner.sync_meeting_delivery_for_task(rid)
+        expert = departments.get(row.get("emp_idx"))
         engine.broadcast(
             {
                 "type": "task_update",
+                "tenant_id": TEN(),
+                "_required_modules": (
+                    str((expert or {}).get("dept_key") or "content"),
+                ),
                 "task_id": rid,
                 "idx": row.get("emp_idx"),
             }
         )
     elif kind == "job":
-        engine.touch(rid)
-        engine.broadcast({"type": "job_update", "job_id": rid})
+        engine.touch(rid, TEN())
     elif kind == "avatar":
-        engine.broadcast({"type": "avatar_update", "job_id": rid})
+        engine.broadcast({
+            "type": "avatar_update",
+            "tenant_id": TEN(),
+            "job_id": rid,
+        })
     return {"ok": True, "restored": True, "kind": kind, "id": rid}
+
+
+# 进行中状态理论上进不了回收站,但硬删是不可逆操作,这里仍然逐类防御。
+# knowledge 表没有 status 列,天然不受此限制。
+_TRASH_ACTIVE_STATUS = {
+    "job": ("pending_charge", "queued", "running",
+            "awaiting_review", "gate_blocked", "paused"),
+    "task": ("pending_charge", "queued", "running"),
+    "avatar": ("pending_charge", "queued", "running"),
+}
+
+
+def _purge_local_files(kind: str, rid: int) -> tuple[int, int]:
+    """按记录种类由服务端自行推导交付文件位置并销毁。
+
+    绝不接受任何客户端路径:job 的产物固定在 data/assets/job{id}/,
+    数字人成片固定在 data/assets/avatar/avatar_{id}.mp4。
+    返回 (成功删除的文件数, 删除失败的文件数)。调用方必须在失败数为 0
+    之后才能硬删数据库锚点。
+    """
+    removed = failed = 0
+    root = os.path.realpath(assetfiles.ASSET_ROOT)
+    if kind == "job":
+        job_dir = os.path.join(root, f"job{rid}")
+        if os.path.lexists(job_dir):
+            if (
+                os.path.islink(job_dir)
+                or not os.path.isdir(job_dir)
+                or os.path.realpath(job_dir) != job_dir
+            ):
+                return 0, 1
+            count = sum(len(names) for _, _, names in os.walk(job_dir))
+            try:
+                shutil.rmtree(job_dir)
+                removed += count
+            except OSError:
+                # 以磁盘上残留的文件数如实上报,方便运维手工收尾
+                failed += max(
+                    1,
+                    sum(len(names) for _, _, names in os.walk(job_dir)),
+                )
+    elif kind == "avatar":
+        clip = os.path.join(
+            root, "avatar", f"avatar_{rid}.mp4")
+        if os.path.lexists(clip):
+            if (
+                os.path.islink(clip)
+                or not os.path.isfile(clip)
+                or os.path.realpath(clip) != clip
+            ):
+                return 0, 1
+            try:
+                os.remove(clip)
+                removed += 1
+            except OSError:
+                failed += 1
+    return removed, failed
+
+
+def _purge_tv_files(file_urls: list[str], tid: int, job_id: int) -> tuple[int, int]:
+    """销毁工单关联成片；只接受数据库可证明属于该租户与工单的本地路径。"""
+    removed = failed = 0
+    root = os.path.realpath(assetfiles.ASSET_ROOT)
+    for file_url in file_urls:
+        try:
+            canonical = assetfiles.canonical_file_url(file_url)
+            if (
+                assetfiles.file_owner_tid(canonical) != int(tid)
+                or assetfiles.file_job_id(canonical) != int(job_id)
+            ):
+                raise assetfiles.AssetAccessError("asset ownership mismatch")
+            lexical = os.path.abspath(
+                os.path.join(root, canonical.removeprefix("/files/"))
+            )
+            resolved = os.path.realpath(lexical)
+            if (
+                os.path.commonpath((root, resolved)) != root
+                or lexical != resolved
+            ):
+                # 不跟随软链接删除其目标，也不把软链接本身当成已销毁交付物。
+                raise assetfiles.AssetAccessError("asset path is unsafe")
+        except (assetfiles.AssetAccessError, TypeError, ValueError):
+            failed += 1
+            continue
+        if not os.path.lexists(lexical):
+            continue
+        if not os.path.isfile(lexical):
+            failed += 1
+            continue
+        try:
+            os.remove(lexical)
+            removed += 1
+        except OSError:
+            failed += 1
+    return removed, failed
+
+
+def _purge_pub_files(items: list[tuple[int, str]]) -> tuple[int, int]:
+    """销毁关联发布任务的失败截图，不接受 payload 或客户端提供的任意路径。
+
+    pub_task 没有独立文件所有权目录；唯一由代码生成的受管截图是
+    ``/files/pub/fail_{pub_task.id}.png``。必须同时满足精确文件名、位于
+    ASSET_ROOT、不是软链接，才允许删除。
+    """
+    removed = failed = 0
+    root = os.path.realpath(assetfiles.ASSET_ROOT)
+    for pub_id, file_url in items:
+        try:
+            canonical = assetfiles.canonical_file_url(file_url)
+            expected = f"/files/pub/fail_{int(pub_id)}.png"
+            if canonical != expected:
+                raise assetfiles.AssetAccessError("publish screenshot mismatch")
+            lexical = os.path.abspath(
+                os.path.join(root, canonical.removeprefix("/files/"))
+            )
+            resolved = os.path.realpath(lexical)
+            if (
+                os.path.commonpath((root, resolved)) != root
+                or lexical != resolved
+            ):
+                raise assetfiles.AssetAccessError("publish screenshot unsafe")
+        except (assetfiles.AssetAccessError, TypeError, ValueError):
+            failed += 1
+            continue
+        if not os.path.lexists(lexical):
+            continue
+        if not os.path.isfile(lexical):
+            failed += 1
+            continue
+        try:
+            os.remove(lexical)
+            removed += 1
+        except OSError:
+            failed += 1
+    return removed, failed
+
+
+def _purge_ids(snapshot: dict, key: str) -> tuple:
+    return tuple(row[0] for row in snapshot.get(key, ()))
+
+
+def _purge_job_relations(
+        connection, tid: int, job_id: int, snapshot: dict, now: float) -> None:
+    """按保留矩阵删除正文表、脱敏审计表，保留退款与防重放锚点。"""
+    asset_ids = _purge_ids(snapshot, "asset")
+    knowledge_ids = _purge_ids(snapshot, "knowledge")
+    tv_ids = _purge_ids(snapshot, "tv")
+    notification_ids = _purge_ids(snapshot, "notification")
+    censor_ids = _purge_ids(snapshot, "censor")
+    publish_ids = _purge_ids(snapshot, "publish")
+    pub_ids = _purge_ids(snapshot, "pub")
+    delivery_ids = _purge_ids(snapshot, "delivery")
+
+    def delete_ids(table: str, ids: tuple, tenant_scoped: bool = True):
+        if not ids:
+            return
+        marks = ",".join("?" for _ in ids)
+        tenant_sql = " AND tenant_id=?" if tenant_scoped else ""
+        params = (*ids, tid) if tenant_scoped else ids
+        connection.execute(
+            f"DELETE FROM {table} WHERE id IN ({marks}){tenant_sql}",
+            params,
+        )
+
+    # 正文、brief、输出、素材引用所在的派生行必须物理删除。
+    connection.execute("DELETE FROM station_run WHERE job_id=?", (job_id,))
+    delete_ids("asset", asset_ids)
+    delete_ids("knowledge", knowledge_ids)
+    delete_ids("tv_job", tv_ids)
+    delete_ids("notification", notification_ids)
+
+    # 审核与发布骨架留作统计/防重放，但不保留任何可恢复的业务内容。
+    if censor_ids:
+        marks = ",".join("?" for _ in censor_ids)
+        connection.execute(
+            "UPDATE censor_log SET title=?,issues_json='[]',report='',"
+            f"updated_at=? WHERE tenant_id=? AND id IN ({marks})",
+            (_PURGED_CONTENT, now, tid, *censor_ids),
+        )
+    if publish_ids:
+        marks = ",".join("?" for _ in publish_ids)
+        connection.execute(
+            "UPDATE publish_log SET title=?,url='',retro_json='{}',"
+            f"updated_at=? WHERE tenant_id=? AND id IN ({marks})",
+            (_PURGED_CONTENT, now, tid, *publish_ids),
+        )
+    if pub_ids:
+        marks = ",".join("?" for _ in pub_ids)
+        anchor_payload = json.dumps(
+            {"job_id": int(job_id), "purged": True},
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+        connection.execute(
+            "UPDATE pub_task SET account=NULL,payload_json=?,log='',"
+            f"fail_json='{{}}',updated_at=? "
+            f"WHERE tenant_id=? AND id IN ({marks})",
+            (anchor_payload, now, tid, *pub_ids),
+        )
+    if delivery_ids:
+        marks = ",".join("?" for _ in delivery_ids)
+        connection.execute(
+            "UPDATE wechat_draft_delivery SET title=?,report_json=NULL,"
+            f"error=NULL,updated_at=? WHERE tenant_id=? AND id IN ({marks})",
+            (_PURGED_CONTENT, now, tid, *delivery_ids),
+        )
+
+    # 流水金额、余额、动作、状态与幂等键完整保留，只去掉标题/错误正文。
+    for billing_id, _job_id, _delta, _balance, reason in snapshot.get(
+            "billing_log", ()):
+        connection.execute(
+            "UPDATE billing_log SET reason=?,updated_at=? "
+            "WHERE id=? AND tenant_id=?",
+            (
+                _purge_redacted_billing_reason(reason),
+                now,
+                billing_id,
+                tid,
+            ),
+        )
+    for (
+            op_key, _job_id, _action, _units, _points, _note, _status,
+            _error) in (
+            snapshot.get("billing_operation", ())):
+        connection.execute(
+            "UPDATE billing_operation SET note=?,error=NULL,updated_at=? "
+            "WHERE op_key=? AND tenant_id=?",
+            (_PURGED_CONTENT, now, op_key, tid),
+        )
+
+
+@app.post("/api/trash/{kind}/{rid}/purge")
+def trash_purge(kind: str, rid: int):
+    """合规出路:彻底删除回收站记录并连带销毁交付文件。
+
+    账目和防重复投递锚点必须留存；job 的业务正文和派生载荷按上方矩阵
+    物理删除或不可逆脱敏。
+    """
+    _need_admin()
+    meta = _TRASH_TABLES.get(kind)
+    if not meta or rid < 1:
+        raise HTTPException(404)
+    tid = TEN()
+    table, _ = meta
+    row = db.one(
+        f"SELECT * FROM {table} WHERE id=? AND tenant_id=? "
+        "AND deleted_at IS NOT NULL",
+        (rid, tid),
+    )
+    if not row:
+        if _purge_tombstone_exists(kind, tid, rid):
+            return {
+                "ok": True,
+                "purged": True,
+                "kind": kind,
+                "id": rid,
+                "files_removed": 0,
+                "files_failed": 0,
+            }
+        raise HTTPException(404)
+    if not auth.allowed(_trash_module(kind, row)):
+        raise HTTPException(404)
+    active = _TRASH_ACTIVE_STATUS.get(kind, ())
+    if (row.get("status") or "") in active:
+        raise HTTPException(409, "该记录仍在进行中，请先等它收口再彻底删除")
+
+    marker = _new_purge_marker()
+    job_snapshot = None
+    # 阶段一只持有一个短写事务：重验权限/状态、固定关联快照并用随机 marker
+    # 认领软删行。随后立刻释放 SQLite 写锁。
+    with db.atomic() as connection:
+        current = connection.execute(
+            f"SELECT * FROM {table} WHERE id=? AND tenant_id=? "
+            "AND deleted_at IS NOT NULL",
+            (rid, tid),
+        ).fetchone()
+        if not current:
+            raise HTTPException(409, "记录状态刚刚发生变化，请刷新后再删除")
+        current_row = dict(current)
+        if not auth.allowed(_trash_module(kind, current_row)):
+            raise HTTPException(404)
+        if active and (current["status"] or "") in active:
+            raise HTTPException(409, "该记录仍在进行中，请先等它收口再彻底删除")
+        if kind == "job":
+            job_snapshot = _purge_job_snapshot(
+                connection, tid, rid, current
+            )
+            if job_snapshot["unattributed"]:
+                raise HTTPException(
+                    409,
+                    "发现升级前留下且无法安全归属到具体工单的审查或账务记录。"
+                    "为避免误删同标题任务，系统已停止彻底删除；请联系平台完成"
+                    "历史记录归因后再试",
+                )
+            if job_snapshot["active"]:
+                raise HTTPException(
+                    409,
+                    "该工单仍有成片、发布、公众号投递或计费操作在执行/对账，"
+                    "请等待它们收口后再彻底删除",
+                )
+        changed = connection.execute(
+            f"UPDATE {table} SET delete_reason=?,updated_at=? "
+            "WHERE id=? AND tenant_id=? AND deleted_at IS NOT NULL",
+            (marker, time.time(), rid, tid),
+        ).rowcount
+        if changed != 1:
+            raise HTTPException(409, "记录状态刚刚发生变化，请刷新后再删除")
+
+    # 阶段二在事务外做可能很慢的磁盘 I/O；删除失败时 marker 和数据库锚点
+    # 保持在位，下一次点击会重新认领并安全重试。
+    files_removed, files_failed = _purge_local_files(kind, rid)
+    tv_files = (
+        [path for _, path in job_snapshot["tv_files"] if path]
+        if job_snapshot else []
+    )
+    tv_removed, tv_failed = _purge_tv_files(tv_files, tid, rid)
+    files_removed += tv_removed
+    files_failed += tv_failed
+    pub_removed = pub_failed = 0
+    if job_snapshot:
+        pub_removed, pub_failed = _purge_pub_files(
+            list(job_snapshot["pub_files"])
+        )
+        files_removed += pub_removed
+        files_failed += pub_failed
+    if files_failed:
+        raise HTTPException(
+            409,
+            f"仍有 {files_failed} 个交付文件未能销毁，记录已锁定并保留；"
+            "修复存储权限后请再次点击彻底删除，当前不能恢复以免找回残缺内容",
+        )
+
+    # 阶段三再次短事务：marker、租户、状态和全部派生关系都必须与阶段一
+    # 一致。关联若在 I/O 期间变化就保留锚点，下次重试会纳入新关联。
+    with db.atomic() as connection:
+        current = connection.execute(
+            f"SELECT * FROM {table} WHERE id=? AND tenant_id=? "
+            "AND deleted_at IS NOT NULL",
+            (rid, tid),
+        ).fetchone()
+        if not current or current["delete_reason"] != marker:
+            raise HTTPException(
+                409, "另一条彻底删除请求已接管该记录，请刷新回收站确认结果"
+            )
+        if active and (current["status"] or "") in active:
+            raise HTTPException(409, "记录状态发生变化，已保留删除锚点")
+        if kind == "job":
+            current_snapshot = _purge_job_snapshot(
+                connection, tid, rid, current
+            )
+            if current_snapshot != job_snapshot:
+                raise HTTPException(
+                    409,
+                    "清理期间新增或变更了关联交付文件/业务记录，记录已保留；"
+                    "请再次点击彻底删除",
+                )
+            if current_snapshot["active"]:
+                raise HTTPException(
+                    409, "关联任务状态发生变化，已保留删除锚点"
+                )
+        guard = ""
+        args = [rid, tid, marker]
+        if active:
+            guard = " AND status NOT IN (%s)" % ",".join("?" * len(active))
+            args.extend(active)
+        if kind == "job":
+            _purge_job_relations(
+                connection, tid, rid, job_snapshot, time.time()
+            )
+        changed = connection.execute(
+            f"DELETE FROM {table} WHERE id=? AND tenant_id=? "
+            f"AND deleted_at IS NOT NULL AND delete_reason=?{guard}",
+            args,
+        ).rowcount
+        if changed != 1:
+            raise HTTPException(409, "记录状态刚刚发生变化，请刷新后再删除")
+        _record_purge_tombstone(
+            connection, kind, tid, rid, time.time()
+        )
+    return {
+        "ok": True,
+        "purged": True,
+        "kind": kind,
+        "id": rid,
+        "files_removed": files_removed,
+        "files_failed": files_failed,
+    }
 
 
 # ---------------- V22:企业档案(品牌知识 → 提炼 → 注入每个数字员工) ----------------
@@ -3232,9 +5245,13 @@ def company_get():
     _need_admin()
     tid = TEN()
     prof = db.jloads(db.get_setting(f"company_profile:{tid}"), {}) or {}
+    filled = sum(1 for k in _COMPANY_FIELDS if str(prof.get(k) or "").strip())
     return {"materials": db.get_setting(f"company_materials:{tid}") or "",
             "profile": prof,
-            "injected": bool(any(prof.get(k) for k in _COMPANY_FIELDS))}
+            "injected": filled > 0,
+            "filled": filled,
+            "total_fields": len(_COMPANY_FIELDS),
+            "has_prev": bool(db.get_setting(f"company_profile_prev:{tid}"))}
 
 
 @app.put("/api/company")
@@ -3242,9 +5259,14 @@ def company_put(body: dict):
     """保存企业原始资料,或手动微调已提炼的档案字段."""
     _need_admin()
     tid = TEN()
+    result = {"ok": True}
     if "materials" in body:
-        db.set_setting(f"company_materials:{tid}",
-                       (body.get("materials") or "").strip()[:20000] or None)
+        raw = (body.get("materials") or "").strip()
+        clipped = raw[:20000]
+        db.set_setting(f"company_materials:{tid}", clipped or None)
+        # 超长静默丢尾巴老板不会发现;明说存了多少,前端据此提醒。
+        result["materials_saved_chars"] = len(clipped)
+        result["materials_truncated"] = len(raw) > 20000
     if isinstance(body.get("profile"), dict):
         cur = db.jloads(db.get_setting(f"company_profile:{tid}"), {}) or {}
         for k in _COMPANY_FIELDS:
@@ -3252,7 +5274,7 @@ def company_put(body: dict):
                 cur[k] = str(body["profile"].get(k) or "").strip()[:600]
         cur["updated_at"] = time.time()
         db.set_setting(f"company_profile:{tid}", json.dumps(cur, ensure_ascii=False))
-    return {"ok": True}
+    return result
 
 
 @app.post("/api/company/distill")
@@ -3260,10 +5282,16 @@ async def company_distill():
     """把企业资料 + 沉淀库里的企业知识,提炼成固定的「企业档案」,自动注入每个数字员工."""
     _need_admin()
     tid = TEN()
-    materials = db.get_setting(f"company_materials:{tid}") or ""
-    kb = db.q("SELECT title, content FROM knowledge WHERE tenant_id=? "
-              "AND deleted_at IS NULL "
-              "ORDER BY pinned DESC, id DESC LIMIT 20", (tid,))
+    materials, kb = await asyncio.gather(
+        db.aget_setting(f"company_materials:{tid}"),
+        db.aq(
+            "SELECT title, content FROM knowledge WHERE tenant_id=? "
+            "AND deleted_at IS NULL "
+            "ORDER BY pinned DESC, id DESC LIMIT 20",
+            (tid,),
+        ),
+    )
+    materials = materials or ""
     kb_text = "\n".join(f"- {r['title']}:{(r['content'] or '')[:300]}" for r in kb)
     corpus = (materials + ("\n\n【沉淀库里的企业知识】\n" + kb_text if kb_text else "")).strip()
     if len(corpus) < 30:
@@ -3285,8 +5313,31 @@ async def company_distill():
         )
     prof = {k: str(r["data"].get(k) or "").strip()[:600] for k in _COMPANY_FIELDS}
     prof["updated_at"] = time.time()
-    db.set_setting(f"company_profile:{tid}", json.dumps(prof, ensure_ascii=False))
-    return {"profile": prof, "cost_usd": r.get("cost_usd", 0)}
+    # 覆盖前留一份上一版:提炼会重写老板手工调校的字段,必须有后悔药
+    previous = await db.aget_setting(f"company_profile:{tid}")
+    if previous:
+        await db.aset_setting(f"company_profile_prev:{tid}", previous)
+    await db.aset_setting(
+        f"company_profile:{tid}", json.dumps(prof, ensure_ascii=False)
+    )
+    return {"profile": prof, "cost_usd": r.get("cost_usd", 0),
+            "can_undo": bool(previous)}
+
+
+@app.post("/api/company/restore-prev")
+def company_restore_prev():
+    """一键撤销上次提炼:换回覆盖前的那一版档案(仅保留一步)。"""
+    _need_admin()
+    tid = TEN()
+    previous = db.get_setting(f"company_profile_prev:{tid}")
+    if not previous:
+        raise HTTPException(404, "没有可撤销的版本(只保留最近一次提炼前的档案)")
+    current = db.get_setting(f"company_profile:{tid}")
+    db.set_setting(f"company_profile:{tid}", previous)
+    # 两版互换:撤销之后还能"撤销撤销"
+    db.set_setting(f"company_profile_prev:{tid}", current)
+    return {"ok": True,
+            "profile": db.jloads(previous, {}) or {}}
 
 
 # ---------------- V22:老板视角——员工产出总览(产出/token/费用) ----------------
@@ -3462,6 +5513,12 @@ def schedule_update(sid: int, body: dict):
         data["brief_json"] = json.dumps(brief, ensure_ascii=False)
     if "enabled" in body:
         data["enabled"] = 1 if body["enabled"] else 0
+        # 充值后重新拨开开关时,清掉「已暂停:点数不足」残留,
+        # 否则卡片上新旧状态互相打架,老板分不清恢复没恢复。
+        if data["enabled"] and str(s.get("last_note") or "").startswith("已暂停"):
+            data["last_note"] = "已重新启用,下次到点自动开工"
+        if data["enabled"]:
+            data["fail_streak"] = 0   # 复通后连续失败告警从头计数
     if data:
         merged = _validated_schedule({**s, **data})
         for k in ("kind", "at_time", "weekday", "every_hours"):
@@ -3915,16 +5972,87 @@ def _avatar_asset_name(raw, field: str, kinds: set[str], required: bool = True):
     return name
 
 
+def _prepare_avatar_clone_sample(raw_name, tid: int) -> str:
+    """Validate and privately copy a voice sample under the asset registry lock."""
+    sample_descriptor = -1
+    sample_path = ""
+    with avatar.asset_library_lock(tid):
+        name = _avatar_asset_name(raw_name, "audio_name", {"voice"})
+        source_path = avatar.asset_path(name, {"voice"}, tid)
+        suffix = os.path.splitext(name)[1].lower()
+        sample_descriptor, sample_path = tempfile.mkstemp(
+            prefix=".avatar-clone-",
+            suffix=suffix,
+        )
+        try:
+            os.fchmod(sample_descriptor, 0o600)
+            with os.fdopen(sample_descriptor, "wb") as target:
+                sample_descriptor = -1
+                with open(source_path, "rb") as source:
+                    shutil.copyfileobj(source, target, length=1 << 20)
+                target.flush()
+                os.fsync(target.fileno())
+        except BaseException:
+            if sample_descriptor >= 0:
+                os.close(sample_descriptor)
+            try:
+                os.remove(sample_path)
+            except OSError:
+                pass
+            raise
+    return sample_path
+
+
+def _cleanup_avatar_clone_sample(sample_path: str, tid: int) -> None:
+    try:
+        os.remove(sample_path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        log.warning("voice clone work sample cleanup failed tenant=%s", tid)
+
+
+async def _prepare_avatar_clone_sample_safely(
+    raw_name,
+    tid: int,
+) -> str:
+    """Copy the clone sample without leaking it when the request is cancelled."""
+    copy_task = asyncio.create_task(
+        asyncio.to_thread(_prepare_avatar_clone_sample, raw_name, tid)
+    )
+    try:
+        return await asyncio.shield(copy_task)
+    except asyncio.CancelledError:
+        sample_path = ""
+        try:
+            sample_path = await copy_task
+        except BaseException:
+            pass
+        if sample_path:
+            cleanup_task = asyncio.create_task(
+                asyncio.to_thread(
+                    _cleanup_avatar_clone_sample,
+                    sample_path,
+                    tid,
+                )
+            )
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                await cleanup_task
+        raise
+
+
 @app.get("/api/avatar/meta")
 def avatar_meta():
     _need_module("avatar")
     eng = avatar.engine_name()
     return {"voices": avatar.cloned_voices() + avatar.VOICES,
-            "engines": ([{"key": "basic", "label": "基础版·省钱(RunningHub·¥6/条)"}]
+            "engines": ([{"key": "basic", "label": "基础版·省钱(6点/条,不限时长)"}]
                         if avatar.rh_ready() else [])
                        + [{"key": "", "label": f"自动(当前:{'HeyGen' if eng=='heygen' else '可灵'})"},
-                          {"key": "heygen", "label": "HeyGen(会动·快·¥12/30秒)"},
-                          {"key": "kling", "label": "可灵(对口型·¥12/30秒)"}],
+                          {"key": "heygen", "label": "HeyGen(会动·快)"},
+                          {"key": "kling", "label": "可灵(对口型)"}],
             "durations": [{"s": 15, "label": "15秒(快闪)"}, {"s": 30, "label": "30秒(标准)"},
                           {"s": 60, "label": "60秒(深度)"}],
             "public_base": avatar.public_base(),
@@ -3944,8 +6072,11 @@ async def _avatar_script_from_link_work(body: dict, url: str, dur: int) -> dict:
     style = (body.get("style") or "").strip()
     persona_txt = ""
     if body.get("profile_id"):
-        p = db.one("SELECT * FROM account_profile WHERE id=? AND tenant_id=?",
-                   (body["profile_id"], TEN()))
+        p = await db.aone(
+            "SELECT * FROM account_profile WHERE id=? AND tenant_id=? "
+            "AND deleted_at IS NULL",
+            (body["profile_id"], TEN()),
+        )
         if p:
             per = db.jloads(p["persona_json"], {})
             persona_txt = ("\n改写要贴合这个人设(像TA本人说话):"
@@ -4006,7 +6137,7 @@ async def _avatar_script_from_link_work(body: dict, url: str, dur: int) -> dict:
 @app.post("/api/avatar/script-from-link")
 async def avatar_script_from_link(body: dict):
     """爆款链接 → 提取文案 → 改写成口播稿（联网，走云雾能力网关）。"""
-    _need_module("avatar")
+    await db.arun(_need_module, "avatar")
     raw_value = body.get("url", "")
     style_value = body.get("style", "")
     if not isinstance(raw_value, str) or len(raw_value) > 4000:
@@ -4026,7 +6157,10 @@ async def avatar_script_from_link(body: dict):
         raise HTTPException(400, "口播时长无效")
     if dur < 5 or dur > 120:
         raise HTTPException(400, "口播时长需在 5—120 秒之间")
-    profile_id = _profile_id_for_tenant(body.get("profile_id"))
+    profile_id = await db.arun(
+        _profile_id_for_tenant,
+        body.get("profile_id"),
+    )
     safe_body = {"style": style, "profile_id": profile_id}
     from . import linkgrab
     try:  # 防 SSRF:先卡掉内网/本机地址,再扣费(别为一次被拦的请求收钱)
@@ -4034,15 +6168,24 @@ async def avatar_script_from_link(body: dict):
     except ValueError as e:
         raise HTTPException(400, str(e))
     try:
-        billing_op = billing.start_operation(
-            "link_extract", tid=TEN(), note="爆款链接提取")
+        billing_op = await _start_billing_operation_safely(
+            billing.start_operation,
+            "link_extract",
+            tid=TEN(),
+            note="爆款链接提取",
+            cancel_reason="爆款链接提取请求中断自动退回",
+        )
     except billing.InsufficientPoints as e:
         raise HTTPException(402, str(e))
     try:
         result = await _avatar_script_from_link_work(safe_body, url, dur)
     except BaseException as exc:
         try:
-            billing.fail_operation(billing_op, "爆款链接提取失败自动退回")
+            await _run_db_safely(
+                billing.fail_operation,
+                billing_op,
+                "爆款链接提取失败自动退回",
+            )
         except Exception as refund_exc:
             logging.getLogger("billing").error(
                 "link extraction refund failed op=%s error_type=%s",
@@ -4050,7 +6193,7 @@ async def avatar_script_from_link(body: dict):
                 type(refund_exc).__name__,
             )
         raise
-    billing.complete_operation(billing_op)
+    await _run_db_safely(billing.complete_operation, billing_op)
     return result
 
 
@@ -4127,58 +6270,25 @@ def avatar_photo_delete(name: str):
 @app.post("/api/avatar/clone")
 async def avatar_clone(body: dict):
     """克隆声音:audio_name 为已上传(kind=voice)的样本文件名."""
-    _need_module("avatar")
+    await db.arun(_need_module, "avatar")
     tid = TEN()
-    # The external clone call must not depend on a public file that can be
-    # deleted after validation.  Copy a private work sample while holding the
-    # same registry lock used by upload/delete, then release the lock before
-    # making the slow supplier request.
-    sample_descriptor = -1
-    sample_path = ""
-    with avatar.asset_library_lock(tid):
-        name = _avatar_asset_name(
-            body.get("audio_name"), "audio_name", {"voice"}
-        )
-        source_path = avatar.asset_path(name, {"voice"}, tid)
-        suffix = os.path.splitext(name)[1].lower()
-        sample_descriptor, sample_path = tempfile.mkstemp(
-            prefix=".avatar-clone-",
-            suffix=suffix,
-        )
-        try:
-            os.fchmod(sample_descriptor, 0o600)
-            with os.fdopen(sample_descriptor, "wb") as target:
-                sample_descriptor = -1
-                with open(source_path, "rb") as source:
-                    while chunk := source.read(1 << 20):
-                        target.write(chunk)
-                target.flush()
-                os.fsync(target.fileno())
-        except BaseException:
-            if sample_descriptor >= 0:
-                os.close(sample_descriptor)
-                sample_descriptor = -1
-            try:
-                os.remove(sample_path)
-            except OSError:
-                pass
-            raise
-
-    def cleanup_sample():
-        try:
-            os.remove(sample_path)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            log.warning(
-                "voice clone work sample cleanup failed tenant=%s",
-                tid,
-            )
+    # Validation and the private copy share the asset lock, but the potentially
+    # large copy/fsync runs on the default I/O executor rather than the loop or
+    # the scarce DB executor.
+    sample_path = await _prepare_avatar_clone_sample_safely(
+        body.get("audio_name"),
+        tid,
+    )
 
     try:
-        op_key = _start_billed_operation("voice_clone", note="声音克隆")
+        op_key = await _start_billing_operation_safely(
+            _start_billed_operation,
+            "voice_clone",
+            note="声音克隆",
+            cancel_reason="声音克隆请求中断",
+        )
     except BaseException:
-        cleanup_sample()
+        await asyncio.to_thread(_cleanup_avatar_clone_sample, sample_path, tid)
         raise
     try:
         try:
@@ -4186,7 +6296,11 @@ async def avatar_clone(body: dict):
                 sample_path, body.get("label") or "我的声音", save=False
             )
         finally:
-            cleanup_sample()
+            await asyncio.to_thread(
+                _cleanup_avatar_clone_sample,
+                sample_path,
+                tid,
+            )
 
         def claim(connection):
             row = connection.execute(
@@ -4211,11 +6325,19 @@ async def avatar_clone(body: dict):
             )
             return True
 
-        if not billing.complete_operation_if_claimed(op_key, claim):
+        if not await _run_db_safely(
+            billing.complete_operation_if_claimed,
+            op_key,
+            claim,
+        ):
             raise RuntimeError("声音克隆本地结算状态冲突")
     except asyncio.CancelledError:
         try:
-            billing.fail_operation(op_key, "声音克隆请求中断")
+            await _run_db_safely(
+                billing.fail_operation,
+                op_key,
+                "声音克隆请求中断",
+            )
         except Exception as refund_exc:
             log.error(
                 "voice clone cancellation refund failed op=%s error_type=%s",
@@ -4225,7 +6347,11 @@ async def avatar_clone(body: dict):
         raise
     except Exception as exc:
         try:
-            settled = billing.fail_operation(op_key, "声音克隆失败自动退回")
+            settled = await _run_db_safely(
+                billing.fail_operation,
+                op_key,
+                "声音克隆失败自动退回",
+            )
         except Exception as settle_error:
             log.error(
                 "voice clone refund failed op=%s error_type=%s",
@@ -4258,6 +6384,7 @@ def _create_charged_avatar_job(params: dict, tid: int = None) -> int:
     job_id = db.insert("avatar_job", {
         "params_json": json.dumps(params, ensure_ascii=False),
         "tenant_id": tid,
+        "created_by": int((auth.current() or {}).get("id") or 0) or None,
         "status": "pending_charge",
         "billing_status": "pending",
         "billing_points": points,
@@ -4304,6 +6431,19 @@ def _create_charged_avatar_job(params: dict, tid: int = None) -> int:
     return job_id
 
 
+def _start_avatar_job_worker(job_id: int):
+    return asyncio.create_task(
+        avatar.run_job(job_id, engine.broadcast)
+    )
+
+
+def _settle_unstarted_avatar_job(job_id: int) -> bool:
+    return avatar.settle_failure(
+        job_id,
+        "数字人任务启动失败，系统已安全终止并退回本次点数",
+    )
+
+
 @app.post("/api/avatar/jobs")
 async def avatar_job_create(body: dict):
     _need_module("avatar")
@@ -4322,29 +6462,45 @@ async def avatar_job_create(body: dict):
             400,
             f"{dur} 秒口播稿最多 {max_script_chars} 个字符，请精简或选择更长时长",
         )
-    all_voices = avatar.cloned_voices() + avatar.VOICES
-    voice = next((v for v in all_voices if v["id"] == body.get("voice_id")), avatar.VOICES[0])
     tid = TEN()
-    # Validation and the charged job row form one asset-library critical
-    # section.  A concurrent delete can run only after the durable job
-    # reference exists, at which point physical reclamation is prohibited.
-    with avatar.asset_library_lock(tid):
-        photo_name = _avatar_asset_name(
-            body.get("photo_name"), "photo_name", {"photo"}
+
+    def create_job() -> int:
+        all_voices = avatar.cloned_voices() + avatar.VOICES
+        voice = next(
+            (item for item in all_voices
+             if item["id"] == body.get("voice_id")),
+            avatar.VOICES[0],
         )
-        own_audio_name = _avatar_asset_name(
-            body.get("own_audio_name"),
-            "own_audio_name",
-            {"voice"},
-            required=False,
-        )
-        params = {"photo_name": photo_name, "script": script,
-                  "voice_id": voice["id"], "voice_label": voice["label"],
-                  "own_audio_name": own_audio_name,
-                  "engine": body.get("engine") or "", "duration": dur,
-                  "prompt": (body.get("prompt") or "").strip()}
-        jid = _create_charged_avatar_job(params, tid)
-    asyncio.create_task(avatar.run_job(jid, engine.broadcast))
+        # Validation and the charged job row form one asset-library critical
+        # section. A concurrent delete can run only after the durable job
+        # reference exists, at which point physical reclamation is prohibited.
+        with avatar.asset_library_lock(tid):
+            photo_name = _avatar_asset_name(
+                body.get("photo_name"), "photo_name", {"photo"}
+            )
+            own_audio_name = _avatar_asset_name(
+                body.get("own_audio_name"),
+                "own_audio_name",
+                {"voice"},
+                required=False,
+            )
+            params = {
+                "photo_name": photo_name,
+                "script": script,
+                "voice_id": voice["id"],
+                "voice_label": voice["label"],
+                "own_audio_name": own_audio_name,
+                "engine": body.get("engine") or "",
+                "duration": dur,
+                "prompt": (body.get("prompt") or "").strip(),
+            }
+            return _create_charged_avatar_job(params, tid)
+
+    jid = await _run_db_then_start_worker_safely(
+        create_job,
+        start_worker=_start_avatar_job_worker,
+        settle_unstarted=_settle_unstarted_avatar_job,
+    )
     return {"job_id": jid}
 
 
@@ -4390,7 +6546,7 @@ def avatar_jobs(limit: int | None = None, offset: int = 0):
 @app.post("/api/avatar/jobs/{jid}/retry")
 async def avatar_job_retry(jid: int):
     _need_module("avatar")
-    row = db.one(
+    row = await db.aone(
         "SELECT tenant_id,status FROM avatar_job "
         "WHERE id=? AND deleted_at IS NULL",
         (jid,),
@@ -4399,17 +6555,26 @@ async def avatar_job_retry(jid: int):
         raise HTTPException(404)
     if row.get("status") != "failed":
         raise HTTPException(409, "只有失败任务可以免费重试")
-    if not avatar.prepare_retry(jid, TEN()):
-        current = db.one(
+    prepared = await _run_db_then_start_worker_safely(
+        avatar.prepare_retry,
+        jid,
+        TEN(),
+        start_worker=lambda _prepared: _start_avatar_job_worker(jid),
+        should_start=bool,
+        settle_unstarted=(
+            lambda _prepared: _settle_unstarted_avatar_job(jid)
+        ),
+    )
+    if not prepared:
+        current = await db.aone(
             "SELECT retry_count FROM avatar_job WHERE id=? AND tenant_id=?",
             (jid, TEN()),
         ) or {}
         if (current.get("retry_count") or 0) >= avatar.MAX_FREE_RETRIES:
             raise HTTPException(429, "该任务免费重试次数已用完，请新建任务")
-        raise HTTPException(409, "任务状态刚刚发生变化，请刷新后再重试")
-    asyncio.create_task(avatar.run_job(jid, engine.broadcast))
+        raise HTTPException(409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
     engine.broadcast({"type": "avatar_update", "job_id": jid})
-    current = db.one(
+    current = await db.aone(
         "SELECT retry_count FROM avatar_job WHERE id=?", (jid,)
     ) or {}
     return {
@@ -4434,7 +6599,7 @@ def avatar_job_cancel(jid: int):
         raise HTTPException(400, "该任务已经结束,不用取消")
     if not avatar.settle_failure(
             jid, "老板已取消", terminal_status="cancelled"):
-        raise HTTPException(409, "任务状态刚刚发生变化，请刷新后查看")
+        raise HTTPException(409, "这个任务的状态刚刚更新了(可能已被重试或删除),刷新页面看最新进度即可")
     llm.kill(f"avatar{jid}:")
     engine.broadcast({"type": "avatar_update", "job_id": jid})
     return {"ok": True}
@@ -4464,7 +6629,7 @@ def avatar_job_delete(jid: int):
     if not current:
         raise HTTPException(404)
     if current["status"] in ("pending_charge", "queued", "running"):
-        raise HTTPException(503, "数字人任务结算尚未完成，请稍后重试删除")
+        raise HTTPException(503, "这个数字人任务的退点还在处理中(约几秒),稍等片刻再删除")
     if (
         current["status"] in ("failed", "cancelled")
         and current["billing_status"] == "charged"
@@ -4537,6 +6702,7 @@ def _create_charged_meeting(data: dict, member_count: int) -> int:
         * max(1, member_count))
     meeting_id = db.insert("meeting", {
         **data,
+        "created_by": int((auth.current() or {}).get("id") or 0) or None,
         "status": "pending_charge",
         "billing_status": "pending",
         "billing_points": points,
@@ -4552,7 +6718,7 @@ def _create_charged_meeting(data: dict, member_count: int) -> int:
 
     try:
         charged = billing.charge_if_claimed(
-            "expert_task", tid, claim, note="圆桌会议",
+            "expert_task", tid, claim, note=f"会议#{meeting_id}·圆桌会议",
             n=member_count, points=points)
     except Exception:
         db.q(
@@ -4566,21 +6732,43 @@ def _create_charged_meeting(data: dict, member_count: int) -> int:
     return meeting_id
 
 
+def _start_meeting_worker(meeting_id: int):
+    return asyncio.create_task(
+        meeting.run(meeting_id, engine.broadcast)
+    )
+
+
+def _settle_unstarted_meeting(meeting_id: int) -> bool:
+    return meeting.settle_failure(
+        meeting_id,
+        "会议启动失败，系统已安全终止并退回本次点数",
+    )
+
+
 @app.post("/api/meetings")
 async def meeting_create(body: dict):
     # 先做类型净化、去重、权限校验，再计费；重复 idx 不再重复发言/重复收费。
-    idxs, seen = [], set()
-    for raw in (body.get("emp_idxs") or []):
-        try:
-            idx = int(raw)
-        except (TypeError, ValueError):
-            continue
-        if idx in seen or not meeting.emp_brief(idx):
-            continue
-        seen.add(idx)
-        idxs.append(idx)
-        if len(idxs) >= meeting.MAX_MEMBERS:
-            break
+    raw_idxs = tuple(body.get("emp_idxs") or ())
+
+    def select_members() -> tuple[list[int], list[dict]]:
+        idxs, seen = [], set()
+        for raw in raw_idxs:
+            try:
+                idx = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if idx in seen or not meeting.emp_brief(idx):
+                continue
+            seen.add(idx)
+            idxs.append(idx)
+            if len(idxs) >= meeting.MAX_MEMBERS:
+                break
+        for idx in idxs:
+            expert = departments.get(idx)
+            _need_module(expert["dept_key"] if expert else "content")
+        return idxs, [_meeting_member_view(idx) for idx in idxs]
+
+    idxs, member_views = await db.arun(select_members)
     q = (body.get("question") or "").strip()
     if not q or len(idxs) < 2:
         raise HTTPException(400, "议题必填,且至少拉 2 位员工进群")
@@ -4588,25 +6776,27 @@ async def meeting_create(body: dict):
         raise HTTPException(400, "议题太长了,请压缩到 2000 字以内")
     constraints = (body.get("constraints") or "").strip()[:1200]
     acceptance = (body.get("acceptance_criteria") or "").strip()[:1200]
-    for idx in idxs:
-        expert = departments.get(idx)
-        _need_module(expert["dept_key"] if expert else "content")
     # 按公示价「会议每人1点」整单原子扣费；建会失败不会出现扣点无记录。
     try:
-        mid = _create_charged_meeting({
-            "tenant_id": TEN(),
-            "question": q,
-            "constraints": constraints,
-            "acceptance_criteria": acceptance,
-            "emp_idxs_json": json.dumps(idxs),
-            "auto_execute": 0 if body.get("auto_execute") is False else 1,
-            "phase": "queued",
-            "round_no": 0,
-        }, len(idxs))
+        mid = await _run_db_then_start_worker_safely(
+            _create_charged_meeting,
+            {
+                "tenant_id": TEN(),
+                "question": q,
+                "constraints": constraints,
+                "acceptance_criteria": acceptance,
+                "emp_idxs_json": json.dumps(idxs),
+                "auto_execute": 0 if body.get("auto_execute") is False else 1,
+                "phase": "queued",
+                "round_no": 0,
+            },
+            len(idxs),
+            start_worker=_start_meeting_worker,
+            settle_unstarted=_settle_unstarted_meeting,
+        )
     except billing.InsufficientPoints as e:
         raise HTTPException(402, str(e))
-    asyncio.create_task(meeting.run(mid, engine.broadcast))
-    return {"meeting_id": mid, "members": [_meeting_member_view(i) for i in idxs]}
+    return {"meeting_id": mid, "members": member_views}
 
 
 def _meeting_suggest_prompt(question: str, roster: list):
@@ -4636,14 +6826,33 @@ async def meeting_suggest(body: dict):
         raise HTTPException(400, "先输入议题")
     if len(q) > 2000:
         raise HTTPException(400, "议题太长了,请压缩到 2000 字以内")
-    roster = ([{"idx": s["idx"], "name": s["name"], "duty": s["duty"]}
-               for s in registry.STATIONS if employees.is_enabled(s["idx"])]
-              if auth.allowed("content") else [])
-    for d in departments.list_depts():
-        if not auth.allowed(d["key"]):
-            continue
-        roster += [{"idx": e["idx"], "name": f"{e.get('person','')}{e['name']}",
-                    "duty": e["duty"]} for e in d["employees"] if employees.is_enabled(e["idx"])]
+
+    def build_roster() -> list[dict]:
+        candidates = []
+        if auth.allowed("content"):
+            candidates.extend(
+                {"idx": s["idx"], "name": s["name"], "duty": s["duty"]}
+                for s in registry.STATIONS
+            )
+        for department in departments.list_depts():
+            if not auth.allowed(department["key"]):
+                continue
+            candidates.extend(
+                {
+                    "idx": employee["idx"],
+                    "name": f"{employee.get('person', '')}{employee['name']}",
+                    "duty": employee["duty"],
+                }
+                for employee in department["employees"]
+            )
+        configs = employees.get_configs(item["idx"] for item in candidates)
+        return [
+            item
+            for item in candidates
+            if configs.get(item["idx"], {"enabled": True})["enabled"]
+        ]
+
+    roster = await db.arun(build_roster)
     if len(roster) < 2:
         raise HTTPException(403, "当前账号可用的数字员工不足 2 位")
     from . import providers
@@ -4662,7 +6871,10 @@ async def meeting_suggest(body: dict):
     idxs = [i for i in (r["data"].get("idxs") or []) if i in valid][:meeting.MAX_MEMBERS]
     if len(idxs) < 2:
         raise HTTPException(500, "自动选人失败,请手动勾选")
-    return {"idxs": idxs, "members": [_meeting_member_view(i) for i in idxs]}
+    members = await db.arun(
+        lambda: [_meeting_member_view(i) for i in idxs]
+    )
+    return {"idxs": idxs, "members": members}
 
 
 @app.get("/api/meetings/{mid}/export.{fmt}")
@@ -4799,25 +7011,29 @@ def meeting_get(mid: int):
 
 @app.post("/api/meetings/{mid}/execute")
 async def meeting_execute(mid: int):
-    m = _meeting_row_or_404(mid)
+    m = await db.arun(_meeting_row_or_404, mid)
     if m.get("phase") == "completed":
         return {
             "ok": True,
-            "task_ids": meeting.validated_execution_task_ids(m, repair=True),
+            "task_ids": await db.arun(
+                meeting.validated_execution_task_ids, m, repair=True
+            ),
         }
-    if not meeting.claim_execution(mid):
+    if not await db.arun(meeting.claim_execution, mid):
         raise HTTPException(409, "会议尚未形成可执行决定,或执行已经启动")
     try:
         task_ids = await meeting.execute_actions(mid, engine.broadcast)
     except Exception:
-        db.update("meeting", mid, {"status": "done", "phase": "awaiting_execution"})
+        await db.aupdate(
+            "meeting", mid, {"status": "done", "phase": "awaiting_execution"}
+        )
         raise HTTPException(500, "派活启动失败,请稍后重试")
     return {"ok": True, "task_ids": task_ids}
 
 
 @app.post("/api/meetings/{mid}/ask")
 async def meeting_ask(mid: int, body: dict):
-    m = _meeting_row_or_404(mid)
+    m = await db.arun(_meeting_row_or_404, mid)
     q = (body.get("question") or "").strip()
     if not q:
         raise HTTPException(400, "先输入您想追问或挑战的话")
@@ -4826,7 +7042,21 @@ async def meeting_ask(mid: int, body: dict):
     # 追问会让全部参会成员各答一轮,按人头扣(原来只扣1点,6人会每次追问漏收5点)
     n = len(db.jloads(m.get("emp_idxs_json"), [])) or 1
     try:
-        billing_op = meeting.begin_intervention(mid, q, n)
+        billing_op = await _run_db_then_start_worker_safely(
+            meeting.begin_intervention,
+            mid,
+            q,
+            n,
+            start_worker=lambda op_key: asyncio.create_task(
+                meeting.ask(mid, q, engine.broadcast, op_key)
+            ),
+            should_start=bool,
+            settle_unstarted=lambda op_key: meeting.abort_intervention(
+                mid,
+                op_key,
+                "会议追问启动失败，点数已退回",
+            ),
+        )
     except billing.InsufficientPoints as e:
         raise HTTPException(402, str(e))
     if not billing_op:
@@ -4834,7 +7064,6 @@ async def meeting_ask(mid: int, body: dict):
             409,
             f"会议正在运行,或已达到最多 {meeting.MAX_INTERVENTIONS} 次介入",
         )
-    asyncio.create_task(meeting.ask(mid, q, engine.broadcast, billing_op))
     return {"ok": True}
 
 
@@ -4890,7 +7119,7 @@ def library_export(kind: str = "knowledge"):
         out = []
         for r in rows:
             m = db.jloads(r.get("meta_json"), {})
-            out.append({"标题": r["title"], "内容": (r["content"] or "")[:500],
+            out.append({"标题": r["title"], "内容": (r["content"] or "")[:8000],
                         "类别": m.get("category"), "平台": m.get("platform"),
                         "行业": m.get("industry"), "主题": m.get("theme"),
                         "关键词": "、".join(m.get("keywords") or []),
@@ -4902,20 +7131,25 @@ def library_export(kind: str = "knowledge"):
                    "匹配度", "复用度", "时效性", "情绪", "摘要", "来源"]
         name = "沉淀库"
     else:
-        rows = db.q("SELECT * FROM asset WHERE tenant_id=? ORDER BY id DESC", (TEN(),))
+        rows = db.q("SELECT * FROM asset WHERE tenant_id=? "
+                    "AND deleted_at IS NULL ORDER BY id DESC", (TEN(),))
         out = []
         for r in rows:
             m = db.jloads(r.get("meta_json"), {})
             p = db.jloads(r.get("payload_json"), {})
             out.append({"标题": p.get("title"), "类型": r["type"],
+                        "内容": str(p.get("angle") or p.get("brief")
+                                    or p.get("desc") or "")[:8000],
+                        "关联": (f"工单#{r['job_id']}" if r.get("job_id")
+                                 else str(p.get("file") or "")),
                         "类别": m.get("category"), "平台": m.get("platform"),
                         "行业": m.get("industry"), "主题": m.get("theme"),
                         "关键词": "、".join(m.get("keywords") or []),
                         "质量分": m.get("quality"), "匹配度": m.get("match"),
                         "复用度": m.get("reuse"), "时效性": m.get("timeliness"),
                         "摘要": m.get("summary")})
-        headers = ["标题", "类型", "类别", "平台", "行业", "主题", "关键词", "质量分",
-                   "匹配度", "复用度", "时效性", "摘要"]
+        headers = ["标题", "类型", "内容", "关联", "类别", "平台", "行业", "主题",
+                   "关键词", "质量分", "匹配度", "复用度", "时效性", "摘要"]
         name = "资产库"
     return Response(export.rows_to_xlsx(out, headers, name),
                     media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -4979,21 +7213,32 @@ async def guest_apply(body: dict, request: Request):
     company = (body.get("company") or "").strip()[:60]
     note = (body.get("note") or "").strip()[:200]
     # 手机号去重:已有账号 / 已有待处理或已开通的申请 → 不重复建单,引导登录或联系客服
-    if db.one("SELECT id FROM users WHERE username=?", (phone,)) or \
-       db.one("SELECT id FROM account_apply WHERE phone=? AND (status=0 OR username IS NOT NULL)",
-              (phone,)):
+    existing_user, existing_apply = await asyncio.gather(
+        db.aone("SELECT id FROM users WHERE username=?", (phone,)),
+        db.aone(
+            "SELECT id FROM account_apply "
+            "WHERE phone=? AND (status=0 OR username IS NOT NULL)",
+            (phone,),
+        ),
+    )
+    if existing_user or existing_apply:
         return {"ok": True, "msg": "这个手机号已申请过 / 已有账号啦:直接登录就行;"
                                    "忘了密码或还没收到账号,联系客服帮您处理"}
     # 同IP日限:防脚本刷号(不重复的申请才计次,已去重的重复提交不占额度)
     if _apply_ip_over_limit(_client_ip(request)):
         return {"ok": True, "msg": "今天的申请次数已达上限,明天再试,或直接联系客服帮您开通"}
-    recent = db.one("SELECT id FROM account_apply WHERE phone=? AND created_at>?",
-                    (phone, time.time() - 3600))
+    recent = await db.aone(
+        "SELECT id FROM account_apply WHERE phone=? AND created_at>?",
+        (phone, time.time() - 3600),
+    )
     if recent:
         return {"ok": True, "msg": "申请已收到,我们会在 1 个工作日内联系您开通账号"}
-    aid = db.insert("account_apply", {"phone": phone, "name": name,
-                                      "company": company, "note": note})
-    funnel.record_safe(
+    aid = await db.ainsert(
+        "account_apply",
+        {"phone": phone, "name": name, "company": company, "note": note},
+    )
+    await db.arun(
+        funnel.record_safe,
         "lead_submitted",
         "account_apply",
         tenant_id=0,
@@ -5006,8 +7251,12 @@ async def guest_apply(body: dict, request: Request):
     except Exception:
         pass
     # V26:老板开了「自动开通体验账号」→ 当场开好,凭据直接给客户(自助试用,不用等)
-    if db.get_setting("auto_approve_apply") == "1":
-        cap = int(float(db.get_setting("auto_approve_daily_cap") or 20))
+    auto_approve, daily_cap = await asyncio.gather(
+        db.aget_setting("auto_approve_apply"),
+        db.aget_setting("auto_approve_daily_cap"),
+    )
+    if auto_approve == "1":
+        cap = int(float(daily_cap or 20))
         today = int(time.time() // 86400)
         if _auto_opens[1] != today:
             _auto_opens[0], _auto_opens[1] = 0, today
@@ -5015,9 +7264,14 @@ async def guest_apply(body: dict, request: Request):
             # 当天自动名额已满 → 申请保留为待处理,转老板人工「⚡一键开通」
             return {"ok": True, "msg": "今日体验名额已满,已转人工,我们会尽快为您开通"}
         try:
-            a = db.one("SELECT * FROM account_apply WHERE id=?", (aid,))
-            trial = float(db.get_setting("trial_points") or 20)
-            r = _open_account_from_apply(a, trial_points=trial)
+            a, trial_setting = await asyncio.gather(
+                db.aone("SELECT * FROM account_apply WHERE id=?", (aid,)),
+                db.aget_setting("trial_points"),
+            )
+            trial = float(trial_setting or 20)
+            r = await db.arun(
+                _open_account_from_apply, a, trial_points=trial
+            )
             _auto_opens[0] += 1
             return {"ok": True, "auto": True,
                     "msg": f"体验账号已自动开通,已赠 {trial:.0f} 点体验点,登录就能派活!",
@@ -5051,7 +7305,7 @@ async def guest_register(body: dict, request: Request):
     phone = (body.get("phone") or "").strip()
     if not (phone.isdigit() and len(phone) == 11):
         raise HTTPException(400, "请填 11 位手机号")
-    old = db.one("SELECT * FROM guests WHERE phone=?", (phone,))
+    old = await db.aone("SELECT * FROM guests WHERE phone=?", (phone,))
     if old and old["used"]:
         raise HTTPException(403, "这个手机号已经体验过啦,想继续用请联系我们开通账号")
     created = False
@@ -5060,16 +7314,20 @@ async def guest_register(body: dict, request: Request):
     else:
         if not _claim_guest_trial_slot(_client_ip(request)):
             raise HTTPException(429, "今日免费体验名额已达上限，请明天再试或申请正式账号")
-        with db.atomic() as connection:
-            existing = connection.execute(
-                "SELECT id,used FROM guests WHERE phone=? ORDER BY id LIMIT 1",
-                (phone,),
-            ).fetchone()
-            if existing:
-                if existing["used"]:
-                    raise HTTPException(403, "这个手机号已经体验过啦,想继续用请联系我们开通账号")
-                gid = existing["id"]
-            else:
+        def _register_guest():
+            with db.atomic() as connection:
+                existing = connection.execute(
+                    "SELECT id,used FROM guests WHERE phone=? "
+                    "ORDER BY id LIMIT 1",
+                    (phone,),
+                ).fetchone()
+                if existing:
+                    if existing["used"]:
+                        raise HTTPException(
+                            403,
+                            "这个手机号已经体验过啦,想继续用请联系我们开通账号",
+                        )
+                    return existing["id"], False
                 now = time.time()
                 cursor = connection.execute(
                     "INSERT INTO guests(phone,company,name,created_at,updated_at) "
@@ -5082,10 +7340,12 @@ async def guest_register(body: dict, request: Request):
                         now,
                     ),
                 )
-                gid = cursor.lastrowid
-                created = True
+                return cursor.lastrowid, True
+
+        gid, created = await db.arun(_register_guest)
     if created:
-        funnel.record_safe(
+        await db.arun(
+            funnel.record_safe,
             "lead_submitted",
             "guest_trial",
             tenant_id=0,
@@ -5121,29 +7381,33 @@ async def guest_try(request: Request, body: dict):
         raise HTTPException(401, "请先填写信息领取体验")
     if sig != _guest_sign(gid):
         raise HTTPException(401, "体验凭证无效")
-    g = db.one("SELECT * FROM guests WHERE id=?", (gid,))
+    g = await db.aone("SELECT * FROM guests WHERE id=?", (gid,))
     if not g or g["used"]:
         raise HTTPException(403, "体验次数已用完,联系我们开通账号继续用")
     q = (body.get("question") or "").strip()[:500]
     if not q:
         raise HTTPException(400, "先输入您想问的问题")
-    claimed = db.execute(
+    claimed = await db.aexecute(
         "UPDATE guests SET used=1,updated_at=? WHERE id=? AND used=0",
         (time.time(), gid),
     )
     if claimed != 1:
         raise HTTPException(403, "体验次数已用完,联系我们开通账号继续用")
     from . import providers
+    content_count = len(registry.STATIONS)
+    expert_count = len(departments.specialists())
+    industry_count = len(departments.list_depts())
     prompt = (f"你是「派活 PaiHuo」的金牌数字员工,正在给一位来体验的老板露一手。"
               f"老板的问题:{q}\n要求:直接给出专业、可落地的回答(300字内,结构清晰);"
-              f"结尾用一句话自然带出:平台上还有70多位数字员工(内容流水线/59位餐饮专家/数字人视频),"
+              f"结尾用一句话自然带出:平台上还有{content_count + expert_count}位数字员工"
+              f"({content_count}个内容岗位/{industry_count}个行业的{expert_count}位产业专家/数字人视频),"
               f"开通账号就能把活派给他们。")
     try:
         r = await providers.call_text(
             None, prompt, timeout=180, token=f"guest:{gid}"
         )
     except Exception:
-        db.execute(
+        await db.aexecute(
             "UPDATE guests SET used=0,updated_at=? WHERE id=? AND used=1",
             (time.time(), gid),
         )
@@ -5253,6 +7517,18 @@ def pack_zip(job_id: int, platform: str = ""):
                 fp = _local(im.get("file"))
                 if fp:
                     z.write(fp, f"{p}/配图{i+1}{os.path.splitext(fp)[1]}")
+        # 成片视频一并入包:此前"全平台发布包"独缺视频,老板只能网页右键另存
+        for tv_row in db.q(
+                "SELECT id,video_file FROM tv_job WHERE job_id=? AND tenant_id=? "
+                "AND status='done' AND video_file IS NOT NULL",
+                (job_id, TEN())):
+            try:
+                clip = assetfiles.resolve_tenant_asset(
+                    tv_row["video_file"], TEN())
+            except assetfiles.AssetAccessError:
+                continue
+            z.write(clip,
+                    f"成片视频/成片{tv_row['id']}{os.path.splitext(clip)[1]}")
         if d.get("publish_plan"):
             z.writestr("发布节奏.txt", d["publish_plan"])
     buf.seek(0)
@@ -5299,7 +7575,8 @@ def export_fmt(job_id: int, fmt: str):
 @app.get("/api/profiles/{pid}")
 def get_profile(pid: int):
     _need_module("content")
-    p = db.one("SELECT * FROM account_profile WHERE id=? AND tenant_id=?", (pid, TEN()))
+    p = db.one("SELECT * FROM account_profile WHERE id=? AND tenant_id=? "
+               "AND deleted_at IS NULL", (pid, TEN()))
     if not p:
         raise HTTPException(404)
     return {"id": p["id"], "name": p["name"],
@@ -5318,7 +7595,8 @@ def create_profile(body: dict):
 @app.put("/api/profiles/{pid}")
 def update_profile(pid: int, body: dict):
     _need_module("content")
-    row = db.one("SELECT tenant_id FROM account_profile WHERE id=?", (pid,))
+    row = db.one("SELECT tenant_id FROM account_profile WHERE id=? "
+                 "AND deleted_at IS NULL", (pid,))
     if not row or row.get("tenant_id", 1) != TEN():
         raise HTTPException(404)
     data = {}
@@ -5330,11 +7608,58 @@ def update_profile(pid: int, body: dict):
     return {"ok": True}
 
 
+@app.delete("/api/profiles/{pid}")
+def delete_profile(pid: int):
+    """人设档案软删除进回收站;被启用中的定时任务引用时先提示解绑。"""
+    _need_admin()
+    _need_module("content")
+    row = db.one(
+        "SELECT id FROM account_profile WHERE id=? AND tenant_id=? "
+        "AND deleted_at IS NULL",
+        (pid, TEN()),
+    )
+    if not row:
+        raise HTTPException(404)
+    schedules = db.q(
+        "SELECT name FROM schedule WHERE tenant_id=? AND profile_id=? "
+        "AND enabled=1",
+        (TEN(), pid),
+    )
+    if schedules:
+        names = "、".join(
+            f"「{(s.get('name') or '未命名')[:20]}」" for s in schedules[:5]
+        )
+        raise HTTPException(
+            409,
+            f"该人设还被启用中的定时任务 {names} 使用。"
+            "请先到定时任务里换人设或停用任务,再删除",
+        )
+    deleted_at = time.time()
+    changed = db.execute(
+        "UPDATE account_profile SET deleted_at=?,deleted_by=?,delete_reason=?,"
+        "updated_at=? WHERE id=? AND tenant_id=? AND deleted_at IS NULL",
+        (
+            deleted_at,
+            int((auth.current() or {}).get("id") or 0),
+            "用户移入回收站",
+            deleted_at,
+            pid,
+            TEN(),
+        ),
+    )
+    if changed != 1:
+        raise HTTPException(409, "人设状态刚刚发生变化，请刷新后再删除")
+    return {"ok": True, "soft_deleted": True, "deleted_at": deleted_at}
+
+
 @app.post("/api/profiles/{pid}/distill")
 async def distill(pid: int):
     """喂历史作品 → 提炼文风特征(nuwa-skill 的建档职责)."""
     _need_module("content")
-    p = db.one("SELECT * FROM account_profile WHERE id=?", (pid,))
+    p = await db.aone(
+        "SELECT * FROM account_profile WHERE id=? AND deleted_at IS NULL",
+        (pid,),
+    )
     if not p or p.get("tenant_id", 1) != TEN():
         raise HTTPException(404)
     persona = db.jloads(p["persona_json"])
@@ -5349,7 +7674,11 @@ async def distill(pid: int):
 历史作品:
 {corpus[:8000]}""", timeout=300)
     persona.update({k: v for k, v in r["data"].items() if v})
-    db.update("account_profile", pid, {"persona_json": json.dumps(persona, ensure_ascii=False)})
+    await db.aupdate(
+        "account_profile",
+        pid,
+        {"persona_json": json.dumps(persona, ensure_ascii=False)},
+    )
     return {"persona": persona, "cost_usd": r["cost_usd"]}
 
 
@@ -5365,7 +7694,7 @@ def assets(
 ):
     _need_module("library")
     page_limit, page_offset, paged = _pagination(limit, offset, 200)
-    where = ["tenant_id=?"]
+    where = ["tenant_id=?", "deleted_at IS NULL"]
     params = [TEN()]
     if type:
         where.append("type=?")
@@ -5403,7 +7732,8 @@ def assets(
     total = db.one(
         f"SELECT COUNT(*) AS n FROM asset WHERE {where_sql}", tuple(params)
     )["n"]
-    facet_where = "type=?" if type else ""
+    facet_where = ("deleted_at IS NULL AND type=?" if type
+                   else "deleted_at IS NULL")
     facet_params = ((type or "")[:40],) if type else ()
     return _page_result(
         rows, total, page_limit, page_offset,
@@ -5414,12 +7744,38 @@ def assets(
 @app.get("/api/assets/{aid}")
 def asset_detail(aid: int):
     _need_module("library")
-    row = db.one("SELECT * FROM asset WHERE id=? AND tenant_id=?", (aid, TEN()))
+    row = db.one(
+        "SELECT * FROM asset WHERE id=? AND tenant_id=? AND deleted_at IS NULL",
+        (aid, TEN()),
+    )
     if not row:
         raise HTTPException(404)
     row["payload"] = db.jloads(row.pop("payload_json"), {})
     row["meta"] = db.jloads(row.pop("meta_json", None), None)
     return row
+
+
+@app.delete("/api/assets/{aid}")
+def delete_asset(aid: int):
+    """资产软删除进回收站,可恢复;不碰任何工单产物文件。"""
+    _need_admin()
+    _need_module("library")
+    deleted_at = time.time()
+    changed = db.execute(
+        "UPDATE asset SET deleted_at=?,deleted_by=?,delete_reason=?,"
+        "updated_at=? WHERE id=? AND tenant_id=? AND deleted_at IS NULL",
+        (
+            deleted_at,
+            int((auth.current() or {}).get("id") or 0),
+            "用户移入回收站",
+            deleted_at,
+            aid,
+            TEN(),
+        ),
+    )
+    if changed != 1:
+        raise HTTPException(404)
+    return {"ok": True, "soft_deleted": True, "deleted_at": deleted_at}
 
 
 # ---------------- SSE ----------------
@@ -5428,7 +7784,16 @@ async def events():
     q_: asyncio.Queue = asyncio.Queue(maxsize=100)
     # 只有唯一超级管理账号 boss 能收到内部步骤明细；其他账号（包括未来新增的
     # root 角色）都走 Engine.public_event 的对外进度契约。
-    engine.subscribers[q_] = (TEN(), _is_boss())
+    user = auth.current() or {}
+    # member 只订阅自己板块相关的事件;owner/root 传 None = 全收
+    modules = (frozenset(user.get("modules") or [])
+               if user.get("role") == "member" else None)
+    engine.subscribers[q_] = (
+        TEN(),
+        _is_boss(),
+        modules,
+        str(user.get("role") or ""),
+    )
 
     async def gen():
         try:
@@ -5539,7 +7904,7 @@ def _insert_censor_log_tx(connection, values: dict) -> int:
     row.setdefault("created_at", now)
     row.setdefault("updated_at", now)
     columns = (
-        "tenant_id", "kind", "platform", "title", "verdict", "score",
+        "tenant_id", "job_id", "kind", "platform", "title", "verdict", "score",
         "issues_json", "report", "created_at", "updated_at",
     )
     cursor = connection.execute(
@@ -5683,6 +8048,7 @@ def _create_wechat_delivery(tid: int, job_id: int, request_hash: str,
             claim,
             note=title[:20],
             op_key=op_key,
+            job_id=job_id,
         )
     except Exception:
         db.q(
@@ -5757,7 +8123,7 @@ def _complete_blocked_wechat_delivery(delivery: dict, report: dict) -> bool:
                 delivery.get("title") or "",
                 "公众号",
                 report,
-            ),
+            ) | {"job_id": int(delivery["job_id"])},
         )
         return True
 
@@ -5803,7 +8169,7 @@ def _finalize_wechat_delivery(delivery: dict) -> bool:
                 current["title"] or "",
                 "公众号",
                 report,
-            ),
+            ) | {"job_id": int(current["job_id"])},
         )
         retro = {
             str(day): {"due": now + day * 86400, "state": "pending"}
@@ -5929,21 +8295,21 @@ def _wechat_delivery_or_404(delivery_id: int) -> dict:
 @app.post("/api/wechat-deliveries/{delivery_id}/reconcile")
 async def reconcile_wechat_delivery(delivery_id: int):
     """只读核对微信草稿箱；找到标记才收口，绝不盲目重发。"""
-    _need_module("content")
-    delivery = _wechat_delivery_or_404(delivery_id)
+    await db.arun(_need_module, "content")
+    delivery = await db.arun(_wechat_delivery_or_404, delivery_id)
     if delivery["status"] in ("done", "blocked"):
         return _wechat_delivery_result(delivery)
     if delivery["status"] == "submitted":
         try:
-            if not _finalize_wechat_delivery(delivery):
+            if not await _run_db_safely(_finalize_wechat_delivery, delivery):
                 raise RuntimeError("草稿台账结算状态冲突")
         except Exception as exc:
-            raise HTTPException(503, "草稿已送达，平台台账正在补记") from exc
+            raise HTTPException(503, "好消息:文章已经进入公众号草稿箱✅ 系统记录稍后自动补齐,请勿重复发送") from exc
         return _wechat_delivery_result(
-            _wechat_delivery_or_404(delivery_id)
+            await db.arun(_wechat_delivery_or_404, delivery_id)
         )
     if delivery["status"] != "submitting":
-        raise HTTPException(409, "这笔投递当前不需要对账")
+        raise HTTPException(409, "这篇已确认送达公众号草稿箱,不需要再处理")
     try:
         media_id = await wechat.find_draft_by_marker(
             int(delivery["tenant_id"]), delivery["request_key"]
@@ -5956,30 +8322,37 @@ async def reconcile_wechat_delivery(delivery_id: int):
             "尚未在最近草稿中找到这篇内容；请打开公众号草稿箱人工确认，"
             "确认确实没有后可使用“确认未送达”解锁",
         )
-    if not _mark_wechat_submitted(delivery_id, delivery["op_key"], media_id):
-        raise HTTPException(409, "草稿投递状态已变化，请刷新")
-    delivery = _wechat_delivery_or_404(delivery_id)
+    if not await _run_db_safely(
+        _mark_wechat_submitted,
+        delivery_id,
+        delivery["op_key"],
+        media_id,
+    ):
+        raise HTTPException(409, "这篇的发送状态刚刚更新了(可能已送达或已退点),刷新页面看最新结果,别重复点发送")
+    delivery = await db.arun(_wechat_delivery_or_404, delivery_id)
     try:
-        if not _finalize_wechat_delivery(delivery):
+        if not await _run_db_safely(_finalize_wechat_delivery, delivery):
             raise RuntimeError("草稿台账结算状态冲突")
     except Exception as exc:
-        raise HTTPException(503, "草稿已确认送达，平台台账正在补记") from exc
-    return _wechat_delivery_result(_wechat_delivery_or_404(delivery_id))
+        raise HTTPException(503, "文章已确认在公众号草稿箱✅ 系统记录稍后自动补齐,请勿重复发送") from exc
+    return _wechat_delivery_result(
+        await db.arun(_wechat_delivery_or_404, delivery_id)
+    )
 
 
 @app.post("/api/wechat-deliveries/{delivery_id}/confirm-not-delivered")
 async def confirm_wechat_delivery_not_delivered(delivery_id: int, body: dict):
     """管理员人工确认微信无草稿后退款解锁；提交前再做一次只读核对。"""
-    _need_module("content")
+    await db.arun(_need_module, "content")
     _need_admin()
-    delivery = _wechat_delivery_or_404(delivery_id)
+    delivery = await db.arun(_wechat_delivery_or_404, delivery_id)
     if delivery["status"] in ("done", "blocked"):
         return _wechat_delivery_result(delivery)
     if (
         delivery["status"] != "submitting"
         or delivery["billing_status"] != "charged"
     ):
-        raise HTTPException(409, "这笔投递当前不能执行人工解锁")
+        raise HTTPException(409, "这篇的状态不需要人工确认(可能已送达或已退点),刷新页面看最新状态")
     age = time.time() - float(
         delivery.get("updated_at") or delivery.get("created_at") or time.time()
     )
@@ -6002,20 +8375,27 @@ async def confirm_wechat_delivery_not_delivered(delivery_id: int, body: dict):
             503, "系统无法完成最后一次草稿箱核对，未退款也未解锁"
         ) from exc
     if media_id:
-        if not _mark_wechat_submitted(
-            delivery_id, delivery["op_key"], media_id
+        if not await _run_db_safely(
+            _mark_wechat_submitted,
+            delivery_id,
+            delivery["op_key"],
+            media_id,
         ):
-            raise HTTPException(409, "草稿投递状态已变化，请刷新")
-        delivery = _wechat_delivery_or_404(delivery_id)
+            raise HTTPException(409, "这篇的发送状态刚刚更新了(可能已送达或已退点),刷新页面看最新结果,别重复点发送")
+        delivery = await db.arun(_wechat_delivery_or_404, delivery_id)
         try:
-            if not _finalize_wechat_delivery(delivery):
+            if not await _run_db_safely(_finalize_wechat_delivery, delivery):
                 raise RuntimeError("草稿台账结算状态冲突")
         except Exception as exc:
-            raise HTTPException(503, "已找到草稿，平台台账正在补记") from exc
-        return _wechat_delivery_result(_wechat_delivery_or_404(delivery_id))
+            raise HTTPException(503, "已在公众号草稿箱里找到这篇文章✅ 系统记录稍后自动补齐,请勿重复发送") from exc
+        return _wechat_delivery_result(
+            await db.arun(_wechat_delivery_or_404, delivery_id)
+        )
     try:
-        settled = _fail_wechat_delivery(
-            delivery, "管理员人工核对公众号草稿箱后确认未送达"
+        settled = await _run_db_safely(
+            _fail_wechat_delivery,
+            delivery,
+            "管理员人工核对公众号草稿箱后确认未送达",
         )
     except Exception as exc:
         log.error(
@@ -6023,9 +8403,9 @@ async def confirm_wechat_delivery_not_delivered(delivery_id: int, body: dict):
             delivery_id,
             type(exc).__name__,
         )
-        raise HTTPException(503, "人工解锁结算失败，未重复发送，请稍后重试") from exc
+        raise HTTPException(503, "确认操作没有完成(文章不会重复发送),请稍后再点一次") from exc
     if not settled:
-        raise HTTPException(409, "草稿投递状态已变化，请刷新")
+        raise HTTPException(409, "这篇的发送状态刚刚更新了(可能已送达或已退点),刷新页面看最新结果,别重复点发送")
     return {
         "ok": False,
         "status": "failed",
@@ -6059,32 +8439,36 @@ def admin_wechat_delivery_alerts():
 @app.post("/api/jobs/{job_id}/wechat-draft")
 async def job_wechat_draft(job_id: int, body: dict):
     _need_module("content")
-    _job_or_404(job_id)
+    await db.arun(_job_or_404, job_id)
     theme = body.get("theme") or mplayout.DEFAULT_THEME
     tid = TEN()
-    conf = wechat.get_conf(tid if tid != 1 else 1)
+    conf = await db.arun(wechat.get_conf, tid if tid != 1 else 1)
     if not (conf.get("appid") and conf.get("secret")):
         raise HTTPException(400, "还没配置公众号:去「📣 发布渠道」页填 AppID/AppSecret(1分钟搞定)")
-    p = _mp_payload(job_id, theme)
+    p = await db.arun(_mp_payload, job_id, theme)
     request_hash = _wechat_delivery_hash(job_id, theme, p)
     # 先处理同工单的任意旧投递。老板若在不确定期间改了正文/hash，也不能
     # 绕过旧锚点再扣一次，必须先核对或人工解锁旧投递。
-    existing = (
-        _wechat_delivery_active(tid, job_id)
-        or _wechat_delivery_latest(tid, job_id, request_hash)
-    )
+    existing = await db.arun(_wechat_delivery_active, tid, job_id)
+    if not existing:
+        existing = await db.arun(
+            _wechat_delivery_latest, tid, job_id, request_hash
+        )
     if existing and existing["status"] in ("done", "blocked"):
         return _wechat_delivery_result(existing)
     if existing and existing["status"] == "submitted":
         try:
-            if not _finalize_wechat_delivery(existing):
+            if not await db.arun(_finalize_wechat_delivery, existing):
                 raise RuntimeError("草稿台账结算状态冲突")
         except Exception as exc:
             raise HTTPException(
-                503, "草稿已进入公众号，平台台账正在补记；请稍后重试，不会重复发送"
+                503, "文章已经进入公众号草稿箱✅ 系统记录稍后自动补齐;请勿再点发送,不会重复扣点"
             ) from exc
         return _wechat_delivery_result(
-            db.one("SELECT * FROM wechat_draft_delivery WHERE id=?", (existing["id"],))
+            await db.aone(
+                "SELECT * FROM wechat_draft_delivery WHERE id=?",
+                (existing["id"],),
+            )
         )
     if existing and existing["status"] == "submitting":
         try:
@@ -6099,26 +8483,30 @@ async def job_wechat_draft(job_id: int, body: dict):
             raise HTTPException(
                 409, "上次投递结果仍待确认；请先查看公众号草稿箱，系统不会重复创建"
             )
-        if not _mark_wechat_submitted(
+        if not await db.arun(
+                _mark_wechat_submitted,
                 existing["id"], existing["op_key"], media_id):
-            raise HTTPException(409, "草稿投递状态已变化，请刷新后重试")
-        existing = db.one(
+            raise HTTPException(409, "这篇的发送状态刚刚更新了,刷新页面看最新结果;确实没送达的话再重试,不会重复扣点")
+        existing = await db.aone(
             "SELECT * FROM wechat_draft_delivery WHERE id=?", (existing["id"],)
         )
         try:
-            _finalize_wechat_delivery(existing)
+            await db.arun(_finalize_wechat_delivery, existing)
         except Exception as exc:
             raise HTTPException(
-                503, "草稿已确认送达，平台台账正在补记；请稍后重试"
+                503, "文章已确认在公众号草稿箱✅ 系统记录稍后自动补齐,请勿重复发送"
             ) from exc
         return _wechat_delivery_result(
-            db.one("SELECT * FROM wechat_draft_delivery WHERE id=?", (existing["id"],))
+            await db.aone(
+                "SELECT * FROM wechat_draft_delivery WHERE id=?",
+                (existing["id"],),
+            )
         )
     if existing and existing["status"] in ("processing", "pending_charge"):
         raise HTTPException(409, "这篇内容正在发送公众号草稿箱，请勿重复点击")
     try:
-        delivery, created = _create_wechat_delivery(
-            tid, job_id, request_hash, p["title"]
+        delivery, created = await db.arun(
+            _create_wechat_delivery, tid, job_id, request_hash, p["title"]
         )
     except billing.InsufficientPoints as exc:
         raise HTTPException(402, str(exc)) from exc
@@ -6137,10 +8525,11 @@ async def job_wechat_draft(job_id: int, body: dict):
             save=False,
         )
         if report["verdict"] == "block":
-            if not _complete_blocked_wechat_delivery(delivery, report):
+            if not await db.arun(
+                    _complete_blocked_wechat_delivery, delivery, report):
                 raise RuntimeError("草稿审查结算状态冲突")
             return _wechat_delivery_result(
-                db.one(
+                await db.aone(
                     "SELECT * FROM wechat_draft_delivery WHERE id=?",
                     (delivery["id"],),
                 )
@@ -6153,9 +8542,10 @@ async def job_wechat_draft(job_id: int, body: dict):
                 allowed_extensions=(".png", ".jpg", ".jpeg", ".webp"),
             )
             try:
-                with open(lp, "rb") as f:
-                    wx_url = await wechat.upload_content_img(tid, f.read(),
-                                                             os.path.basename(lp))
+                image_bytes = await asyncio.to_thread(_read_file_bytes, lp)
+                wx_url = await wechat.upload_content_img(
+                    tid, image_bytes, os.path.basename(lp)
+                )
                 html = html.replace(im["url"], wx_url)
             except wechat.WeChatError:
                 raise
@@ -6170,16 +8560,19 @@ async def job_wechat_draft(job_id: int, body: dict):
             allowed_extensions=(".png", ".jpg", ".jpeg"),
         ) if p["cover_rel"] else None)
         if cover_lp:
-            with open(cover_lp, "rb") as f:
-                cover_bytes = f.read()
+            cover_bytes = await asyncio.to_thread(
+                _read_file_bytes, cover_lp
+            )
         else:
             color = (mplayout.THEMES.get(theme) or {}).get("color", "#ff7f2a")
-            cover_bytes = wechat.make_cover_png(p["title"], color)
+            cover_bytes = await asyncio.to_thread(
+                wechat.make_cover_png, p["title"], color
+            )
         thumb_id = await wechat.upload_thumb(tid, cover_bytes)
         # ④ 进草稿箱 + 登记发布台账(T+1/3/7 自动复盘的钟表从此起算)
         marker = f"<!-- paihuo-draft:{delivery['request_key']} -->"
         html = html + "\n" + marker
-        changed = db.execute(
+        changed = await db.aexecute(
             "UPDATE wechat_draft_delivery SET status='submitting',report_json=?,"
             "updated_at=? WHERE id=? AND op_key=? AND status='processing' "
             "AND billing_status='charged'",
@@ -6224,30 +8617,33 @@ async def job_wechat_draft(job_id: int, body: dict):
                 raise HTTPException(
                     503, "微信未返回草稿编号，已暂停重复投递；稍后重试会先自动对账"
                 )
-        if not _mark_wechat_submitted(
+        if not await db.arun(
+                _mark_wechat_submitted,
                 delivery["id"], delivery["op_key"], media_id):
             raise HTTPException(
-                503, "草稿已送达微信，平台正在补记结果；稍后重试不会重复发送"
+                503, "文章已经进入公众号草稿箱✅ 系统记录稍后自动补齐;请勿再点发送,不会重复扣点"
             )
-        delivery = db.one(
+        delivery = await db.aone(
             "SELECT * FROM wechat_draft_delivery WHERE id=?", (delivery["id"],)
         )
         try:
-            if not _finalize_wechat_delivery(delivery):
+            if not await db.arun(_finalize_wechat_delivery, delivery):
                 raise RuntimeError("草稿台账结算状态冲突")
         except Exception as exc:
             raise HTTPException(
                 503, "草稿已进入公众号，平台台账正在补记；稍后重试不会重复发送"
             ) from exc
         return _wechat_delivery_result(
-            db.one(
+            await db.aone(
                 "SELECT * FROM wechat_draft_delivery WHERE id=?",
                 (delivery["id"],),
             )
         )
     except wechat.WeChatError as e:
         try:
-            settled = _fail_wechat_delivery(delivery, f"微信明确拒绝:{e}")
+            settled = await db.arun(
+                _fail_wechat_delivery, delivery, f"微信明确拒绝:{e}"
+            )
         except Exception as settle_error:
             log.error(
                 "wechat delivery %s refund failed error_type=%s",
@@ -6255,7 +8651,7 @@ async def job_wechat_draft(job_id: int, body: dict):
                 type(settle_error).__name__,
             )
             raise HTTPException(
-                503, "微信已拒绝草稿，但退点结算暂未完成；请稍后重试"
+                503, "微信拒收了这篇草稿(内容或配置问题)。点数退回正在处理,稍后在账单明细可见,不会多扣"
             ) from settle_error
         if not settled:
             raise HTTPException(503, "微信已拒绝草稿，但退点结算状态待确认")
@@ -6263,7 +8659,11 @@ async def job_wechat_draft(job_id: int, body: dict):
     except asyncio.CancelledError:
         if not external_started:
             try:
-                _fail_wechat_delivery(delivery, "请求中断，尚未提交微信")
+                await db.arun(
+                    _fail_wechat_delivery,
+                    delivery,
+                    "请求中断，尚未提交微信",
+                )
             except Exception as refund_exc:
                 log.error(
                     "cancelled wechat delivery %s refund failed error_type=%s",
@@ -6274,7 +8674,9 @@ async def job_wechat_draft(job_id: int, body: dict):
     except HTTPException as exc:
         if not external_started:
             try:
-                settled = _fail_wechat_delivery(delivery, "投递前校验失败")
+                settled = await db.arun(
+                    _fail_wechat_delivery, delivery, "投递前校验失败"
+                )
             except Exception as settle_error:
                 log.error(
                     "wechat delivery %s refund failed error_type=%s",
@@ -6285,12 +8687,13 @@ async def job_wechat_draft(job_id: int, body: dict):
                     503, "草稿未提交，但退点结算暂未完成；请稍后重试"
                 ) from settle_error
             if not settled:
-                raise HTTPException(503, "草稿未提交，但退点结算状态待确认")
+                raise HTTPException(503, "这篇没有发出去。点数退回正在处理,稍后可在「套餐与点数」的明细里核对,不会多扣")
         raise exc
     except Exception as exc:
         if not external_started:
             try:
-                settled = _fail_wechat_delivery(
+                settled = await db.arun(
+                    _fail_wechat_delivery,
                     delivery,
                     "投递前失败，尚未提交微信",
                 )
@@ -6304,7 +8707,7 @@ async def job_wechat_draft(job_id: int, body: dict):
                     503, "草稿未提交，但退点结算暂未完成；请稍后重试"
                 ) from settle_error
             if not settled:
-                raise HTTPException(503, "草稿未提交，但退点结算状态待确认")
+                raise HTTPException(503, "这篇没有发出去。点数退回正在处理,稍后可在「套餐与点数」的明细里核对,不会多扣")
             raise HTTPException(500, "发草稿箱失败，点数已退回，请重试") from exc
         raise HTTPException(
             503, "草稿可能已送达微信，系统已停止重复发送；请稍后重试自动对账"
@@ -6414,15 +8817,18 @@ def censor_scan_api(body: dict):
 @app.post("/api/censor/check")
 async def censor_check_api(body: dict):
     """深度审查(规则词库 + AI 对照平台规范)."""
-    _need_module("content")
+    await db.arun(_need_module, "content")
     tid = TEN()
     title = (body.get("title") or "").strip()[:120]
     text = (body.get("body") or "").strip()
     if not text:
         raise HTTPException(400, "先贴上要审查的正文")
     platform = body.get("platform") or "公众号"
-    op_key = _start_billed_operation(
-        "censor_check", note=f"{platform}·{title[:14]}"
+    op_key = await _start_billing_operation_safely(
+        _start_billed_operation,
+        "censor_check",
+        note=f"{platform}·{title[:14]}",
+        cancel_reason="审查请求中断",
     )
     try:
         report = await censor.check(
@@ -6441,11 +8847,19 @@ async def censor_check_api(body: dict):
             )
             return True
 
-        if not billing.complete_operation_if_claimed(op_key, claim):
+        if not await _run_db_safely(
+            billing.complete_operation_if_claimed,
+            op_key,
+            claim,
+        ):
             raise RuntimeError("审查结算状态冲突")
     except asyncio.CancelledError:
         try:
-            billing.fail_operation(op_key, "审查请求中断")
+            await _run_db_safely(
+                billing.fail_operation,
+                op_key,
+                "审查请求中断",
+            )
         except Exception as refund_exc:
             log.error(
                 "censor cancellation refund failed op=%s error_type=%s",
@@ -6453,9 +8867,41 @@ async def censor_check_api(body: dict):
                 type(refund_exc).__name__,
             )
         raise
+    except providers.ProviderError as exc:
+        # AI 深审失败照旧退点,但免费的规则词库结果不能陪葬:
+        # 老板至少带走这部分,并明确知道深审没跑完、钱退了。
+        try:
+            settled = await _run_db_safely(
+                billing.fail_operation,
+                op_key,
+                "审查失败自动退回",
+            )
+        except Exception as settle_error:
+            log.error(
+                "censor refund failed op=%s error_type=%s",
+                op_key,
+                type(settle_error).__name__,
+            )
+            raise HTTPException(
+                503, "审查未完成，退点结算正在恢复，请稍后查看"
+            ) from settle_error
+        if not settled:
+            raise HTTPException(503, "审查结算状态待确认，请稍后查看") from exc
+        fallback = await censor.check(
+            tid, title, text, platform, deep=False, save=False
+        )
+        fallback["degraded"] = True
+        fallback["summary"] = ("AI 深审未完成,1 点已自动退回。"
+                               "以下是免费规则词库的扫描结果,可稍后重试深审")
+        fallback["label"] = "⚠️ 深审未完成(已退点),下方仅为规则词库结果"
+        return fallback
     except Exception as exc:
         try:
-            settled = billing.fail_operation(op_key, "审查失败自动退回")
+            settled = await _run_db_safely(
+                billing.fail_operation,
+                op_key,
+                "审查失败自动退回",
+            )
         except Exception as settle_error:
             log.error(
                 "censor refund failed op=%s error_type=%s",
@@ -6474,14 +8920,19 @@ async def censor_check_api(body: dict):
 @app.post("/api/censor/retro")
 async def censor_retro_api(body: dict):
     """发后数据复盘:把平台数据丢给审查官."""
-    _need_module("content")
+    await db.arun(_need_module, "content")
     tid = TEN()
     data_text = (body.get("data_text") or "").strip()
     if not data_text:
         raise HTTPException(400, "先把发布后的数据贴进来(阅读/点赞/评论/涨粉…截图可先传文件识别)")
     platform = body.get("platform") or "公众号"
     title = (body.get("title") or "")[:120]
-    op_key = _start_billed_operation("censor_retro", note=platform)
+    op_key = await _start_billing_operation_safely(
+        _start_billed_operation,
+        "censor_retro",
+        note=platform,
+        cancel_reason="复盘请求中断",
+    )
     try:
         result = await censor.retro(
             tid,
@@ -6499,11 +8950,19 @@ async def censor_retro_api(body: dict):
             )
             return True
 
-        if not billing.complete_operation_if_claimed(op_key, claim):
+        if not await _run_db_safely(
+            billing.complete_operation_if_claimed,
+            op_key,
+            claim,
+        ):
             raise RuntimeError("复盘结算状态冲突")
     except asyncio.CancelledError:
         try:
-            billing.fail_operation(op_key, "复盘请求中断")
+            await _run_db_safely(
+                billing.fail_operation,
+                op_key,
+                "复盘请求中断",
+            )
         except Exception as refund_exc:
             log.error(
                 "censor retro cancellation refund failed op=%s error_type=%s",
@@ -6513,7 +8972,11 @@ async def censor_retro_api(body: dict):
         raise
     except Exception as exc:
         try:
-            settled = billing.fail_operation(op_key, "复盘失败自动退回")
+            settled = await _run_db_safely(
+                billing.fail_operation,
+                op_key,
+                "复盘失败自动退回",
+            )
         except Exception as settle_error:
             log.error(
                 "censor retro refund failed op=%s error_type=%s",
@@ -6610,12 +9073,16 @@ async def imagehunt_thumb(u: str, f: str = ""):
 async def job_add_image(job_id: int, body: dict):
     """把老板在真实图库挑中的图下载入工单素材,追加到多媒体师产出."""
     _need_module("content")
-    _job_or_404(job_id)
+    await db.arun(_job_or_404, job_id)
     url = (body.get("url") or "").strip()
     if not url.startswith("http"):
         raise HTTPException(400, "图片地址无效")
-    r = db.one("SELECT * FROM station_run WHERE job_id=? AND station_idx=5 "
-               "AND status IN ('done','awaiting_review') ORDER BY version DESC LIMIT 1", (job_id,))
+    r = await db.aone(
+        "SELECT * FROM station_run WHERE job_id=? AND station_idx=5 "
+        "AND status IN ('done','awaiting_review') "
+        "ORDER BY version DESC LIMIT 1",
+        (job_id,),
+    )
     if not r:
         raise HTTPException(400, "该工单的多媒体师还没有产出,等配图工位完成后再补图")
     try:
@@ -6627,18 +9094,30 @@ async def job_add_image(job_id: int, body: dict):
             "这张图抓不下来（可能防盗链较严），请换一张重试",
         )
     name = f"media_add_{int(time.time())}.jpg"
-    fpath = imagehunt._save_job_file(job_id, name, data)
+    fpath = await asyncio.to_thread(
+        imagehunt._save_job_file, job_id, name, data
+    )
     out = db.jloads(r["output_json"], {})
     entry = {"slot": "真实图补充", "desc": (body.get("query") or "")[:40], "platform": "通用",
              "file": fpath, "engine": "真实图·全网抓取", "source": body.get("page") or url}
     out["images"] = (out.get("images") or []) + [entry]
-    db.update("station_run", r["id"], {"output_json": json.dumps(out, ensure_ascii=False)})
+    await db.aupdate(
+        "station_run",
+        r["id"],
+        {"output_json": json.dumps(out, ensure_ascii=False)},
+    )
     engine.touch(job_id)
     return {"ok": True, "image": entry}
 
 
 # ================ V25:成片 / 台账 / 工具箱 / 矩阵发布 / 通知 ================
 from . import growth, matrixpub, notify, pubtrack, textvideo  # noqa: E402
+
+
+def _start_publish_worker(task_id: int):
+    return asyncio.create_task(
+        matrixpub.run_task(task_id, engine.broadcast)
+    )
 
 
 # ---------------- ① 图文转视频 ----------------
@@ -6680,6 +9159,7 @@ def _create_charged_tv_job(params: dict, tenant_id: int = None,
         "tenant_id": tid,
         "job_id": job_id,
         "params_json": json.dumps(params, ensure_ascii=False),
+        "created_by": int((auth.current() or {}).get("id") or 0) or None,
         "status": "pending_charge",
         "billing_status": "pending",
         "billing_points": points,
@@ -6702,6 +9182,7 @@ def _create_charged_tv_job(params: dict, tenant_id: int = None,
             claim,
             note=(note or f"成片任务 #{tvid}")[:160],
             points=points,
+            job_id=job_id,
         )
     except billing.InsufficientPoints as exc:
         db.q(
@@ -6727,44 +9208,73 @@ def _create_charged_tv_job(params: dict, tenant_id: int = None,
     return tvid
 
 
+def _start_text_video_worker(tvid: int):
+    return asyncio.create_task(
+        textvideo.run_job(tvid, engine.broadcast)
+    )
+
+
+def _settle_unstarted_text_video(tvid: int) -> bool:
+    return textvideo.settle_failure(
+        tvid,
+        "成片任务启动失败，系统已安全终止并退回本次点数",
+    )
+
+
 @app.post("/api/jobs/{job_id}/text-video")
 async def job_text_video(job_id: int, body: dict):
     _need_module("content")
     bgm = _validated_tv_bgm(body)
-    _job_or_404(job_id)
-    d = build_delivery(job_id)
-    v = next((x for x in (d.get("versions") or []) if x.get("platform") in ("抖音", "视频号")), None)
-    text = (v or {}).get("body") or d["body"]
-    if not (text or "").strip():
-        raise HTTPException(400, "工单还没有定稿正文")
-    images = []
-    for image in d.get("images") or []:
-        file_url = image.get("file") or ""
-        if not file_url.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
-            continue
-        try:
-            assetfiles.resolve_tenant_asset(
-                file_url, TEN(), expected_job_id=job_id,
-                allowed_extensions=(".png", ".jpg", ".jpeg", ".webp"),
-            )
-        except assetfiles.AssetAccessError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        images.append(assetfiles.canonical_file_url(file_url))
-    params = {
-        "title": d["title"],
-        "body": text,
-        "images": images,
-        "voice_id": body.get("voice_id") or "",
-        "image_query": d["title"][:16],
-        "bgm": bgm,
-    }
-    tvid = _create_charged_tv_job(
-        params,
-        tenant_id=TEN(),
-        job_id=job_id,
-        note=d["title"][:16],
+    tid = TEN()
+
+    def create_job_video() -> int:
+        _job_or_404(job_id)
+        delivery = build_delivery(job_id)
+        version = next(
+            (
+                item for item in (delivery.get("versions") or [])
+                if item.get("platform") in ("抖音", "视频号")
+            ),
+            None,
+        )
+        text = (version or {}).get("body") or delivery["body"]
+        if not (text or "").strip():
+            raise HTTPException(400, "工单还没有定稿正文")
+        images = []
+        for image in delivery.get("images") or []:
+            file_url = image.get("file") or ""
+            if not file_url.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                continue
+            try:
+                assetfiles.resolve_tenant_asset(
+                    file_url,
+                    tid,
+                    expected_job_id=job_id,
+                    allowed_extensions=(".png", ".jpg", ".jpeg", ".webp"),
+                )
+            except assetfiles.AssetAccessError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            images.append(assetfiles.canonical_file_url(file_url))
+        params = {
+            "title": delivery["title"],
+            "body": text,
+            "images": images,
+            "voice_id": body.get("voice_id") or "",
+            "image_query": delivery["title"][:16],
+            "bgm": bgm,
+        }
+        return _create_charged_tv_job(
+            params,
+            tenant_id=tid,
+            job_id=job_id,
+            note=delivery["title"][:16],
+        )
+
+    tvid = await _run_db_then_start_worker_safely(
+        create_job_video,
+        start_worker=_start_text_video_worker,
+        settle_unstarted=_settle_unstarted_text_video,
     )
-    asyncio.create_task(textvideo.run_job(tvid, engine.broadcast))
     return {"tv_id": tvid}
 
 
@@ -6781,31 +9291,44 @@ async def text_video_create(body: dict):
             raise HTTPException(400, "主题和文案至少填一个")
         raw_clips = body.get("clips")
         raw_clips = raw_clips if isinstance(raw_clips, list) else []
-        with textvideo.clip_library_lock(TEN()):
-            clips = []
-            seen = set()
-            for name in raw_clips[:50]:
-                path = textvideo.resolve_clip_path(TEN(), name)
-                if path and path not in seen:
-                    seen.add(path)
-                    clips.append(path)
-                if len(clips) >= 12:
-                    break
-            if not clips:
-                raise HTTPException(400, "先勾选至少 1 段素材视频")
-            params = {"mode": "clips", "clips": clips,
-                      "title": (body.get("title") or topic or "")[:40],
-                      "script": script[:2000], "topic": topic[:60],
-                      "voice_id": body.get("voice_id") or "",
-                      "bgm": bgm,
-                      "end_text": (body.get("end_text") or "")[:40]}
+        tid = TEN()
+
+        def create_clip_video() -> int:
             # Selection and persistence share the same tenant lock with DELETE,
             # so a paid job can never be born pointing at a just-removed clip.
-            tvid = _create_charged_tv_job(
-                params,
-                tenant_id=TEN(),
-                note=(params.get("title") or script or topic)[:16],
-            )
+            with textvideo.clip_library_lock(tid):
+                clips = []
+                seen = set()
+                for name in raw_clips[:50]:
+                    path = textvideo.resolve_clip_path(tid, name)
+                    if path and path not in seen:
+                        seen.add(path)
+                        clips.append(path)
+                    if len(clips) >= 12:
+                        break
+                if not clips:
+                    raise HTTPException(400, "先勾选至少 1 段素材视频")
+                params = {
+                    "mode": "clips",
+                    "clips": clips,
+                    "title": (body.get("title") or topic or "")[:40],
+                    "script": script[:2000],
+                    "topic": topic[:60],
+                    "voice_id": body.get("voice_id") or "",
+                    "bgm": bgm,
+                    "end_text": (body.get("end_text") or "")[:40],
+                }
+                return _create_charged_tv_job(
+                    params,
+                    tenant_id=tid,
+                    note=(params.get("title") or script or topic)[:16],
+                )
+
+        tvid = await _run_db_then_start_worker_safely(
+            create_clip_video,
+            start_worker=_start_text_video_worker,
+            settle_unstarted=_settle_unstarted_text_video,
+        )
     else:
         if len(script) < 20:
             raise HTTPException(400, "口播稿太短(至少20字)")
@@ -6814,12 +9337,14 @@ async def text_video_create(body: dict):
                   "image_query": (body.get("image_query") or body.get("title") or "")[:30],
                   "bgm": bgm,
                   "end_text": (body.get("end_text") or "")[:40]}
-        tvid = _create_charged_tv_job(
+        tvid = await _run_db_then_start_worker_safely(
+            _create_charged_tv_job,
             params,
             tenant_id=TEN(),
             note=(params.get("title") or script or topic)[:16],
+            start_worker=_start_text_video_worker,
+            settle_unstarted=_settle_unstarted_text_video,
         )
-    asyncio.create_task(textvideo.run_job(tvid, engine.broadcast))
     return {"tv_id": tvid}
 
 
@@ -7143,9 +9668,31 @@ def tv_clip_delete(name: str):
 
 # ---------------- ② 发布台账 ----------------
 @app.get("/api/publog")
-def publog_list():
+def publog_list(limit: int = None, offset: int = 0):
+    """发布台账此前硬截 60 条且不告知;接入标准分页契约,老板能翻到月初。"""
     _need_module("content")
-    return pubtrack.entries(TEN())
+    page_limit, page_offset, paged = _pagination(limit, offset, 60)
+    rows = pubtrack.entries(TEN(), limit=page_limit, offset=page_offset)
+    if not paged:
+        return rows
+    return _page_result(rows, pubtrack.entries_total(TEN()),
+                        page_limit, page_offset)
+
+
+@app.get("/api/publog/auto-retro")
+def publog_auto_retro_get():
+    _need_module("content")
+    return {"enabled": pubtrack.auto_enabled(TEN())}
+
+
+@app.post("/api/publog/auto-retro")
+def publog_auto_retro_set(body: dict):
+    """租户级自动复盘总开关;只有企业主能动钱袋子相关的开关。"""
+    _need_admin()
+    _need_module("content")
+    enabled = bool(body.get("enabled"))
+    pubtrack.set_auto_enabled(TEN(), enabled)
+    return {"ok": True, "enabled": enabled}
 
 
 @app.post("/api/publog")
@@ -7188,7 +9735,10 @@ def publog_mark(pid: int):
 async def publog_pull(pid: int):
     """立即尝试自动拉数据+复盘(公众号需配好API且文章已群发)."""
     _need_module("content")
-    r = db.one("SELECT * FROM publish_log WHERE id=? AND tenant_id=?", (pid, TEN()))
+    r = await db.aone(
+        "SELECT * FROM publish_log WHERE id=? AND tenant_id=?",
+        (pid, TEN()),
+    )
     if not r:
         raise HTTPException(404)
     days = max(1, round((time.time() - (r["published_at"] or time.time())) / 86400))
@@ -7265,6 +9815,18 @@ def _settle_tool_failure(row: dict, error: str, refund_note: str) -> bool:
         return False
 
 
+def _settle_unstarted_tool_result(result: dict) -> bool:
+    job_id = int((result or {}).get("job_id") or 0)
+    row = db.one("SELECT * FROM tool_job WHERE id=?", (job_id,))
+    if not row:
+        return False
+    return _settle_tool_failure(
+        row,
+        "工具任务启动失败，系统已安全终止并退回本次点数",
+        "启动失败退回",
+    )
+
+
 def _recover_interrupted_tool_jobs():
     """服务重启时，旧进程留下的 running 已不可能继续，立即收口并退点。"""
     # pending_charge 从未扣款，直接清理；不能把它误当成已付费任务退款。
@@ -7297,10 +9859,13 @@ def _ensure_tool_running_index():
     )
 
 
-def _recover_stale_tool_jobs(now: float = None) -> int:
+def _recover_stale_tool_jobs(
+    now: float = None, defer_broadcast: bool = False
+) -> int | tuple[int, list[tuple[int, str]]]:
     """按创建时间执行绝对总时限；心跳只供展示，不能把截止时间越续越长。"""
     now = now or time.time()
     recovered = 0
+    events = []
     for row in db.q("SELECT * FROM tool_job WHERE status='running'"):
         timeout = TOOL_TIMEOUTS.get(row["kind"], 360)
         # 免费重试沿用原记录，必须从本次 retry_started_at 重新计时；否则历史
@@ -7319,7 +9884,10 @@ def _recover_stale_tool_jobs(now: float = None) -> int:
                     row, f"运行超过{minutes}分钟仍未完成，已自动结束并退回点数，请重试",
                     "超时自动退回"):
                 recovered += 1
-                _broadcast_tool(row["tenant_id"], row["kind"])
+                if defer_broadcast:
+                    events.append((row["tenant_id"], row["kind"]))
+                else:
+                    _broadcast_tool(row["tenant_id"], row["kind"])
         except Exception as exc:
             try:
                 log.error(
@@ -7329,14 +9897,18 @@ def _recover_stale_tool_jobs(now: float = None) -> int:
                 )
             except Exception:
                 pass
-    return recovered
+    return (recovered, events) if defer_broadcast else recovered
 
 
 async def _tool_watchdog_loop():
     while True:
         try:
             await asyncio.sleep(60)
-            _recover_stale_tool_jobs()
+            _recovered, events = await db.arun(
+                _recover_stale_tool_jobs, None, True
+            )
+            for tenant_id, kind in events:
+                _broadcast_tool(tenant_id, kind)
         except asyncio.CancelledError:
             return
         except Exception as exc:
@@ -7462,7 +10034,7 @@ def _persist_tool_result(connection, row: dict, result: dict, now: float) -> boo
 
 async def _tool_worker(jid: int):
     try:
-        row = db.one("SELECT * FROM tool_job WHERE id=?", (jid,))
+        row = await db.aone("SELECT * FROM tool_job WHERE id=?", (jid,))
     except Exception as exc:
         try:
             log.error(
@@ -7488,7 +10060,8 @@ async def _tool_worker(jid: int):
         if now - progress_last["at"] < 8:
             return
         try:
-            db.execute(
+            db.submit_write(
+                db.execute,
                 "UPDATE tool_job SET progress=?, updated_at=? "
                 "WHERE id=? AND status='running'",
                 (label, now, jid),
@@ -7507,14 +10080,26 @@ async def _tool_worker(jid: int):
         r = dict(r)
         r.pop("cost_usd", None)
         r.pop("tokens", None)
-        with db.atomic() as connection:
-            changed = _persist_tool_result(connection, row, r, time.time())
+        def _commit_result():
+            with db.atomic() as connection:
+                return _persist_tool_result(
+                    connection, row, r, time.time()
+                )
+
+        changed = await db.arun(_commit_result)
         if changed:
             try:
-                notify.push(
-                    tid, "report",
-                    {"report_name": f"{TOOL_KINDS.get(kind, kind)}跑完了",
-                     "summary": "结果已经摆在工具箱里,回来就能看", "link": "#/tools"},
+                await asyncio.to_thread(
+                    notify.push,
+                    tid,
+                    "report",
+                    {
+                        "report_name": (
+                            f"{TOOL_KINDS.get(kind, kind)}跑完了"
+                        ),
+                        "summary": "结果已经摆在工具箱里,回来就能看",
+                        "link": "#/tools",
+                    },
                 )
             except Exception as exc:
                 try:
@@ -7527,24 +10112,32 @@ async def _tool_worker(jid: int):
                     pass
     except asyncio.TimeoutError:
         minutes = max(1, round(TOOL_TIMEOUTS.get(kind, 360) / 60))
-        _settle_tool_failure(
-            row, f"运行超过{minutes}分钟仍未完成，已自动结束并退回点数，请重试",
-            "超时自动退回"
+        await db.arun(
+            _settle_tool_failure,
+            row,
+            f"运行超过{minutes}分钟仍未完成，已自动结束并退回点数，请重试",
+            "超时自动退回",
         )
         try:
             log.warning("tool_job %s(%s) timed out", jid, kind)
         except Exception:
             pass
     except asyncio.CancelledError:
-        _settle_tool_failure(
-            row, "任务被服务中断，已自动结束，请重新发起", "服务中断退回"
+        await db.arun(
+            _settle_tool_failure,
+            row,
+            "任务被服务中断，已自动结束，请重新发起",
+            "服务中断退回",
         )
         raise
     except Exception as e:
         # 先收口状态和退款，再记日志；即使日志组件自身出错，用户也不会再看到永久 running。
         public_error = providers.public_failure_message(e)
-        _settle_tool_failure(
-            row, public_error, "后台任务失败退回"
+        await db.arun(
+            _settle_tool_failure,
+            row,
+            public_error,
+            "后台任务失败退回",
         )
         try:
             log.error(
@@ -7566,7 +10159,7 @@ def _tool_require_idle(kind: str):
         raise HTTPException(429, "这个工具已有一个任务在后台跑,等它完事再派新的")
 
 
-def _tool_enqueue(kind: str, params: dict, note: str = "") -> dict:
+def _tool_enqueue_record(kind: str, params: dict, note: str = "") -> dict:
     """先落任务再原子扣点；任何插入/并发失败都不会碰用户余额。"""
     tid = TEN()
     action = TOOL_REFUND.get(kind, "expert_task")
@@ -7577,6 +10170,7 @@ def _tool_enqueue(kind: str, params: dict, note: str = "") -> dict:
         jid = db.insert("tool_job", {
             "tenant_id": tid, "kind": kind,
             "params_json": json.dumps(params, ensure_ascii=False),
+            "created_by": int((auth.current() or {}).get("id") or 0) or None,
             "status": "pending_charge",
             "billing_status": "pending",
             "billing_points": points,
@@ -7595,7 +10189,9 @@ def _tool_enqueue(kind: str, params: dict, note: str = "") -> dict:
 
     try:
         charged = billing.charge_if_claimed(
-            action, tid, claim, note=note, points=points
+            action, tid, claim,
+            note=(f"工具单#{jid}·{note}" if note else f"工具单#{jid}")[:160],
+            points=points
         )
     except billing.InsufficientPoints as exc:
         db.q(
@@ -7613,8 +10209,30 @@ def _tool_enqueue(kind: str, params: dict, note: str = "") -> dict:
         raise
     if not charged:
         raise RuntimeError("工具任务计费状态冲突")
-    _spawn_tool_worker(jid)
     return {"job_id": jid, "note": "已挂到后台跑:您随便去忙别的,回工具箱就能看到;跑完还会推微信"}
+
+
+def _tool_enqueue(kind: str, params: dict, note: str = "") -> dict:
+    """同步兼容入口；HTTP 协程使用 ``_tool_enqueue_async``。"""
+    result = _tool_enqueue_record(kind, params, note)
+    _spawn_tool_worker(result["job_id"])
+    return result
+
+
+async def _tool_enqueue_async(
+    kind: str, params: dict, note: str = ""
+) -> dict:
+    """完整扣费事务进 DB 池，回到事件循环后再创建 asyncio worker。"""
+    await db.arun(_tool_require_idle, kind)
+    result = await _run_db_then_start_worker_safely(
+        _tool_enqueue_record,
+        kind,
+        params,
+        note,
+        start_worker=lambda queued: _spawn_tool_worker(queued["job_id"]),
+        settle_unstarted=_settle_unstarted_tool_result,
+    )
+    return result
 
 
 @app.get("/api/tools/jobs")
@@ -7689,11 +10307,17 @@ def pcal_get(ym: str):
 
 @app.post("/api/tools/pcal")
 async def pcal_gen(body: dict):
-    _need_module("content")
+    await db.arun(_need_module, "content")
     ym = body.get("ym") or time.strftime("%Y-%m")
-    _tool_require_idle("pcal")
-    return _tool_enqueue("pcal", {"ym": ym, "industry": (body.get("industry") or "通用")[:20],
-                                  "focus": (body.get("focus") or "")[:200]}, note=ym)
+    return await _tool_enqueue_async(
+        "pcal",
+        {
+            "ym": ym,
+            "industry": (body.get("industry") or "通用")[:20],
+            "focus": (body.get("focus") or "")[:200],
+        },
+        note=ym,
+    )
 
 
 @app.put("/api/tools/pcal")
@@ -7731,41 +10355,54 @@ def hotpick_get(industry: str = "通用"):
 
 @app.post("/api/tools/hotpick")
 async def hotpick_gen(body: dict):
-    _need_module("content")
+    await db.arun(_need_module, "content")
     industry = (body.get("industry") or "通用")[:20]
-    _tool_require_idle("hot")
-    return _tool_enqueue("hot", {"industry": industry,
-                                 "channels": (body.get("channels") or [])[:10]},
-                         note=industry)
+    return await _tool_enqueue_async(
+        "hot",
+        {
+            "industry": industry,
+            "channels": (body.get("channels") or [])[:10],
+        },
+        note=industry,
+    )
 
 
 @app.post("/api/tools/warmup")
 async def warmup_gen(body: dict):
-    _need_module("content")
-    _tool_require_idle("warm")
+    await db.arun(_need_module, "content")
     persona_text = ""
     if body.get("profile_id"):
-        pr = db.one("SELECT * FROM account_profile WHERE id=? AND tenant_id=?",
-                    (body["profile_id"], TEN()))
+        pr = await db.aone(
+            "SELECT * FROM account_profile WHERE id=? AND tenant_id=? "
+            "AND deleted_at IS NULL",
+            (body["profile_id"], TEN()),
+        )
         if pr:
             persona_text = registry._persona_text({"persona": db.jloads(pr["persona_json"], {})})
-    return _tool_enqueue("warm", {"platform": body.get("platform") or "小红书",
-                                  "industry": (body.get("industry") or "通用")[:20],
-                                  "positioning": (body.get("positioning") or "")[:200],
-                                  "persona_text": persona_text[:1500]},
-                         note=(body.get("platform") or "")
-                              + (body.get("industry") or ""))
+    return await _tool_enqueue_async(
+        "warm",
+        {
+            "platform": body.get("platform") or "小红书",
+            "industry": (body.get("industry") or "通用")[:20],
+            "positioning": (body.get("positioning") or "")[:200],
+            "persona_text": persona_text[:1500],
+        },
+        note=(body.get("platform") or "") + (body.get("industry") or ""),
+    )
 
 
 @app.post("/api/tools/leads")
 async def leads_gen(body: dict):
-    _need_module("content")
-    _tool_require_idle("leads")
-    return _tool_enqueue("leads", {"industry": (body.get("industry") or "通用")[:20],
-                                   "city": (body.get("city") or "")[:20],
-                                   "product": (body.get("product") or "")[:60]},
-                         note=(body.get("city") or "")
-                              + (body.get("industry") or ""))
+    await db.arun(_need_module, "content")
+    return await _tool_enqueue_async(
+        "leads",
+        {
+            "industry": (body.get("industry") or "通用")[:20],
+            "city": (body.get("city") or "")[:20],
+            "product": (body.get("product") or "")[:60],
+        },
+        note=(body.get("city") or "") + (body.get("industry") or ""),
+    )
 
 
 @app.get("/api/tools/bench")
@@ -7784,92 +10421,276 @@ def bench_put(body: dict):
 
 @app.post("/api/tools/bench/run-now")
 async def bench_run(body: dict = None):
-    _need_module("content")
-    if not growth.watch_conf(TEN()).get("targets"):
+    await db.arun(_need_module, "content")
+    if not (await db.arun(growth.watch_conf, TEN())).get("targets"):
         raise HTTPException(400, "先在上面添加要盯的对标账号并保存")
-    _tool_require_idle("bench")
-    return _tool_enqueue("bench", {}, note="手动")
+    return await _tool_enqueue_async("bench", {}, note="手动")
+
+
+def _tool_image_base64(raw: bytes) -> str:
+    import base64
+    return base64.b64encode(raw).decode()
+
+
+def _store_tool_image(data: bytes, tid: int) -> tuple[str, str]:
+    """Durably store one generated image and remove partial writes on failure."""
+    import uuid
+    directory = os.path.join(ROOT, "data", "assets", "tools", str(tid))
+    os.makedirs(directory, exist_ok=True)
+    name = f"shot_{uuid.uuid4().hex[:10]}.png"
+    path = os.path.join(directory, name)
+    try:
+        with open(path, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise
+    return path, name
+
+
+def _remove_tool_image(path: str) -> None:
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+async def _store_tool_image_safely(data: bytes, tid: int) -> tuple[str, str]:
+    """Keep blocking writes off-loop and avoid an orphan on cancellation."""
+    write_task = asyncio.create_task(
+        asyncio.to_thread(_store_tool_image, data, tid)
+    )
+    try:
+        return await asyncio.shield(write_task)
+    except asyncio.CancelledError:
+        stored = None
+        try:
+            stored = await write_task
+        except BaseException:
+            pass
+        if stored:
+            cleanup_task = asyncio.create_task(
+                asyncio.to_thread(_remove_tool_image, stored[0])
+            )
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                await cleanup_task
+        raise
 
 
 @app.post("/api/tools/menu-copy")
 async def menu_copy_api(file: _UploadFile = _File(...), want: str = Form("")):
-    _need_module("content")
+    await db.arun(_need_module, "content")
     raw = await _read_limited(file, 8 * 1024 * 1024, "图片太大(≤8MB)")
-    op_key = _start_billed_operation("menu_copy")
-    import base64 as _b64
+    op_key = await _start_billing_operation_safely(
+        _start_billed_operation,
+        "menu_copy",
+        cancel_reason="识图请求中断自动退回",
+    )
     mime = file.content_type if (file.content_type or "").startswith("image/") else "image/jpeg"
     try:
         result = await growth.menu_copy(
-            TEN(), _b64.b64encode(raw).decode(), mime, want
+            TEN(),
+            await asyncio.to_thread(_tool_image_base64, raw),
+            mime,
+            want,
         )
-        if not billing.complete_operation(op_key):
+        if not await _run_db_safely(billing.complete_operation, op_key):
             raise RuntimeError("计费操作状态冲突")
         return result
     except asyncio.CancelledError:
-        billing.fail_operation(op_key, "请求中断自动退回")
+        await _run_db_safely(
+            billing.fail_operation,
+            op_key,
+            "请求中断自动退回",
+        )
         raise
     except Exception:
-        billing.fail_operation(op_key, "识图失败自动退回")
+        await _run_db_safely(
+            billing.fail_operation,
+            op_key,
+            "识图失败自动退回",
+        )
         raise HTTPException(500, "识图失败,点数已退回,换张清晰的图试试")
 
 
 @app.post("/api/tools/product-shot")
 async def product_shot_api(file: _UploadFile = _File(...), scene: str = Form("")):
-    _need_module("content")
+    await db.arun(_need_module, "content")
     raw = await _read_limited(file, 8 * 1024 * 1024, "图片太大(≤8MB)")
-    op_key = _start_billed_operation("product_shot")
+    op_key = await _start_billing_operation_safely(
+        _start_billed_operation,
+        "product_shot",
+        cancel_reason="商品图请求中断自动退回",
+    )
     path = ""
     try:
         data = await growth.product_shot(TEN(), raw, scene)
-        import uuid as _uuid
-        d = os.path.join(ROOT, "data", "assets", "tools", str(TEN()))
-        os.makedirs(d, exist_ok=True)
-        name = f"shot_{_uuid.uuid4().hex[:10]}.png"
-        path = os.path.join(d, name)
-        with open(path, "wb") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        if not billing.complete_operation(op_key):
+        path, name = await _store_tool_image_safely(data, TEN())
+        if not await _run_db_safely(billing.complete_operation, op_key):
             raise RuntimeError("计费操作状态冲突")
         return {"file": f"/files/tools/{TEN()}/{name}"}
     except asyncio.CancelledError:
-        billing.fail_operation(op_key, "请求中断自动退回")
-        if path:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+        await _run_db_safely(
+            billing.fail_operation,
+            op_key,
+            "请求中断自动退回",
+        )
+        await asyncio.to_thread(_remove_tool_image, path)
         raise
     except Exception:
-        billing.fail_operation(op_key, "商品图生成或保存失败自动退回")
-        if path:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+        await _run_db_safely(
+            billing.fail_operation,
+            op_key,
+            "商品图生成或保存失败自动退回",
+        )
+        await asyncio.to_thread(_remove_tool_image, path)
         raise HTTPException(500, "美化失败，点数已退回，请稍后重试")
+
+
+@app.post("/api/tools/photo-factory")
+async def photo_factory_api(file: _UploadFile = _File(...), scene: str = Form(""),
+                            want: str = Form("")):
+    """拍照工厂:一次上传同时出「商业海报图 + 全套文案」。
+
+    此前前端并行调 product-shot 与 menu-copy 两个接口,同一张 8MB 照片要上传
+    两遍(手机 4G 下时间翻倍)。合并为一次上传、服务器侧并发跑两条腿;
+    两条腿各自独立计费与退款,哪条失败退哪条的点,响应里把每条腿的结果
+    与失败原因分开说清,老板不用猜"钱花在哪了"。
+    """
+    await db.arun(_need_module, "content")
+    raw = await _read_limited(file, 8 * 1024 * 1024, "图片太大(≤8MB)")
+    mime = file.content_type if (file.content_type or "").startswith("image/") else "image/jpeg"
+    b64 = await asyncio.to_thread(_tool_image_base64, raw)
+
+    # 两条腿的计费操作先后开好:第二条点数不足时退掉第一条,给合并后的
+    # 提示,而不是让老板看到"本次需 1 点"这种只说半截的话。
+    shot_op = await _start_billing_operation_safely(
+        _start_billed_operation,
+        "product_shot",
+        cancel_reason="拍照工厂商品图请求中断自动退回",
+    )
+    try:
+        copy_op = await _start_billing_operation_safely(
+            _start_billed_operation,
+            "menu_copy",
+            cancel_reason="拍照工厂文案请求中断自动退回",
+        )
+    except BaseException as exc:
+        await _run_db_safely(
+            billing.fail_operation,
+            shot_op,
+            "拍照工厂另一半未启动,整体退回",
+        )
+        if isinstance(exc, HTTPException) and exc.status_code == 402:
+            raise HTTPException(
+                402, "拍照工厂一次需 3 点(出图2+文案1),当前余额不足。请充值后再试"
+            ) from exc
+        raise
+
+    async def _shot_leg(op_key):
+        path = ""
+        try:
+            data = await growth.product_shot(TEN(), raw, scene)
+            path, name = await _store_tool_image_safely(data, TEN())
+            if not await _run_db_safely(
+                billing.complete_operation,
+                op_key,
+            ):
+                raise RuntimeError("计费操作状态冲突")
+            return {"file": f"/files/tools/{TEN()}/{name}"}
+        except asyncio.CancelledError:
+            await _run_db_safely(
+                billing.fail_operation,
+                op_key,
+                "请求中断自动退回",
+            )
+            await asyncio.to_thread(_remove_tool_image, path)
+            raise
+        except Exception:
+            await _run_db_safely(
+                billing.fail_operation,
+                op_key,
+                "商品图生成或保存失败自动退回",
+            )
+            await asyncio.to_thread(_remove_tool_image, path)
+            return {"error": "美化没成功,这条腿的 2 点已退回;可换张更清晰的图重试"}
+
+    async def _copy_leg(op_key):
+        try:
+            result = await growth.menu_copy(TEN(), b64, mime, want)
+            if not await _run_db_safely(
+                billing.complete_operation,
+                op_key,
+            ):
+                raise RuntimeError("计费操作状态冲突")
+            return {"menu": result}
+        except asyncio.CancelledError:
+            await _run_db_safely(
+                billing.fail_operation,
+                op_key,
+                "请求中断自动退回",
+            )
+            raise
+        except Exception:
+            await _run_db_safely(
+                billing.fail_operation,
+                op_key,
+                "识图失败自动退回",
+            )
+            return {"error": "文案没写成,这条腿的 1 点已退回;可换张更清晰的图重试"}
+
+    shot_result, copy_result = await asyncio.gather(
+        _shot_leg(shot_op), _copy_leg(copy_op))
+    if shot_result.get("error") and copy_result.get("error"):
+        raise HTTPException(500, "图和文案都没成功,3 点已全部退回;换张清晰的图再试")
+    return {
+        "file": shot_result.get("file") or "",
+        "image_error": shot_result.get("error") or "",
+        "menu": copy_result.get("menu"),
+        "copy_error": copy_result.get("error") or "",
+    }
 
 
 @app.post("/api/tools/variants")
 async def variants_api(body: dict):
-    _need_module("content")
+    await db.arun(_need_module, "content")
     script = (body.get("script") or "").strip()
     if len(script) < 30:
         raise HTTPException(400, "先贴一篇口播稿(至少30字)")
-    op_key = _start_billed_operation("matrix_variants")
+    op_key = await _start_billing_operation_safely(
+        _start_billed_operation,
+        "matrix_variants",
+        cancel_reason="裂变请求中断自动退回",
+    )
     try:
         result = await growth.script_variants(
             TEN(), script, body.get("n") or 3, body.get("styles") or ""
         )
-        if not billing.complete_operation(op_key):
+        if not await _run_db_safely(billing.complete_operation, op_key):
             raise RuntimeError("计费操作状态冲突")
         return result
     except asyncio.CancelledError:
-        billing.fail_operation(op_key, "请求中断自动退回")
+        await _run_db_safely(
+            billing.fail_operation,
+            op_key,
+            "请求中断自动退回",
+        )
         raise
     except Exception:
-        billing.fail_operation(op_key, "裂变失败自动退回")
+        await _run_db_safely(
+            billing.fail_operation,
+            op_key,
+            "裂变失败自动退回",
+        )
         raise HTTPException(500, "裂变失败,点数已退回,请重试")
 
 
@@ -7898,6 +10719,21 @@ async def webhook_test():
         return await notify.test_send(TEN())
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+@app.get("/api/notify/daily-digest")
+def daily_digest_get():
+    """每日经营简报开关:默认开;任何登录角色可读."""
+    return {"enabled": not db.get_setting(f"daily_digest_off:{TEN()}")}
+
+
+@app.post("/api/notify/daily-digest")
+def daily_digest_set(body: dict):
+    """租户级简报开关;推送打扰与否只有企业主说了算."""
+    _need_admin()
+    enabled = bool(body.get("enabled"))
+    db.set_setting(f"daily_digest_off:{TEN()}", None if enabled else "1")
+    return {"ok": True, "enabled": enabled}
 
 
 # ---------------- ⑧ 矩阵发布(beta) ----------------
@@ -7937,7 +10773,7 @@ def matrix_account_del(acc_id: str):
 
 @app.post("/api/matrix/publish")
 async def matrix_publish(body: dict):
-    _need_module("content")
+    await db.arun(_need_module, "content")
     platform = body.get("platform")
     if platform not in matrixpub.PLATFORMS:
         raise HTTPException(400, "平台不支持")
@@ -7948,29 +10784,56 @@ async def matrix_publish(body: dict):
             job_id = int(body["job_id"])
         except (TypeError, ValueError):
             raise HTTPException(400, "工单参数无效")
-        _job_or_404(job_id)
-        payload["job_id"] = job_id
-    imgs = []
-    for f in (body.get("images") or [])[:9]:
-        try:
-            lp = assetfiles.resolve_tenant_asset(
-                f, TEN(), expected_job_id=job_id,
+    tenant_id = TEN()
+
+    def validate_payload() -> None:
+        if job_id is not None:
+            _job_or_404(job_id)
+            payload["job_id"] = job_id
+        payload["images"] = [
+            assetfiles.resolve_tenant_asset(
+                value,
+                tenant_id,
+                expected_job_id=job_id,
                 allowed_extensions=(".png", ".jpg", ".jpeg"),
             )
-        except assetfiles.AssetAccessError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        imgs.append(lp)
-    payload["images"] = imgs
-    if body.get("video"):
-        try:
+            for value in (body.get("images") or [])[:9]
+        ]
+        if body.get("video"):
             payload["video"] = assetfiles.resolve_tenant_asset(
-                body["video"], TEN(), expected_job_id=job_id,
+                body["video"],
+                tenant_id,
+                expected_job_id=job_id,
                 allowed_extensions=(".mp4",),
             )
-        except assetfiles.AssetAccessError as exc:
-            raise HTTPException(400, str(exc)) from exc
+
     try:
-        pid = matrixpub.enqueue(TEN(), platform, body.get("account"), payload)
+        await db.arun(validate_payload)
+    except assetfiles.AssetAccessError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    enqueue_task = asyncio.create_task(
+        db.arun(
+            matrixpub.enqueue,
+            tenant_id,
+            platform,
+            body.get("account"),
+            payload,
+        )
+    )
+    try:
+        pid = await asyncio.shield(enqueue_task)
+    except asyncio.CancelledError:
+        pid = None
+        try:
+            pid = await enqueue_task
+        except BaseException:
+            pass
+        if pid is not None:
+            asyncio.create_task(matrixpub.run_task(pid, engine.broadcast))
+        raise
     except ValueError as e:
         raise HTTPException(400, str(e))
     asyncio.create_task(matrixpub.run_task(pid, engine.broadcast))

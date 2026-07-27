@@ -74,9 +74,8 @@ def _text_of(kind: str, row: dict) -> str:
 
 async def analyze(kind: str, row_id: int) -> dict:
     table = "knowledge" if kind == "knowledge" else "asset"
-    deleted_clause = " AND deleted_at IS NULL" if kind == "knowledge" else ""
-    row = db.one(
-        f"SELECT * FROM {table} WHERE id=?{deleted_clause}", (row_id,)
+    row = await db.aone(
+        f"SELECT * FROM {table} WHERE id=? AND deleted_at IS NULL", (row_id,)
     )
     if not row:
         raise ValueError("不存在")
@@ -89,7 +88,7 @@ async def analyze(kind: str, row_id: int) -> dict:
                                        token=f"analyze:{kind}:{row_id}")
     meta = normalize_meta(r.get("data"))
     if kind == "knowledge":
-        changed = db.execute(
+        changed = await db.aexecute(
             "UPDATE knowledge SET meta_json=?,updated_at=? "
             "WHERE id=? AND deleted_at IS NULL",
             (json.dumps(meta, ensure_ascii=False), time.time(), row_id),
@@ -97,7 +96,13 @@ async def analyze(kind: str, row_id: int) -> dict:
         if changed != 1:
             raise ValueError("沉淀已删除")
     else:
-        db.update(table, row_id, {"meta_json": json.dumps(meta, ensure_ascii=False)})
+        changed = await db.aexecute(
+            "UPDATE asset SET meta_json=?,updated_at=? "
+            "WHERE id=? AND deleted_at IS NULL",
+            (json.dumps(meta, ensure_ascii=False), time.time(), row_id),
+        )
+        if changed != 1:
+            raise ValueError("资产已删除")
     return meta
 
 
@@ -106,11 +111,18 @@ async def loop():
     log.info("analyzer started")
     while True:
         try:
-            todo = ([("knowledge", r["id"]) for r in db.q(
+            knowledge_rows, asset_rows = await asyncio.gather(
+                db.aq(
                         "SELECT id FROM knowledge WHERE meta_json IS NULL "
-                        "AND deleted_at IS NULL ORDER BY id DESC LIMIT 2")]
-                    + [("asset", r["id"]) for r in db.q(
-                        "SELECT id FROM asset WHERE meta_json IS NULL ORDER BY id DESC LIMIT 2")])
+                        "AND deleted_at IS NULL ORDER BY id DESC LIMIT 2"
+                ),
+                db.aq(
+                        "SELECT id FROM asset WHERE meta_json IS NULL "
+                        "AND deleted_at IS NULL ORDER BY id DESC LIMIT 2"
+                ),
+            )
+            todo = ([("knowledge", r["id"]) for r in knowledge_rows]
+                    + [("asset", r["id"]) for r in asset_rows])
             for kind, rid in todo[:3]:
                 try:
                     await analyze(kind, rid)
@@ -122,13 +134,17 @@ async def loop():
                         ensure_ascii=False,
                     )
                     if kind == "knowledge":
-                        db.execute(
+                        await db.aexecute(
                             "UPDATE knowledge SET meta_json=?,updated_at=? "
                             "WHERE id=? AND deleted_at IS NULL",
                             (payload, time.time(), rid),
                         )
                     else:
-                        db.update("asset", rid, {"meta_json": payload})
+                        await db.aexecute(
+                            "UPDATE asset SET meta_json=?,updated_at=? "
+                            "WHERE id=? AND deleted_at IS NULL",
+                            (payload, time.time(), rid),
+                        )
         except Exception as exc:
             log.error(
                 "analyzer tick failed error_type=%s",
