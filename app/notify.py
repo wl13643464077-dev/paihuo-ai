@@ -165,6 +165,8 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
 OWNER_ONLY_KINDS = {
     "daily_digest", "schedule_paused", "schedule_failed",
     "learn_done", "learn_failed",
+    # 「成员代拍板」是说给老板听的:广播回员工自己只是回声噪音
+    "member_reviewed",
 }
 
 

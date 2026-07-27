@@ -70,6 +70,24 @@ class NotificationTargetingCase(unittest.TestCase):
         self._as(self.member_id, "member")
         self.assertEqual(set(), self._visible_ids())
 
+    def test_member_reviewed_targets_owner_and_taskcenter_shows_creator(self):
+        # 「成员代拍板」定向老板:广播回员工自己只是回声噪音
+        nid = notify.record(2, "member_reviewed", {
+            "user": "yuangong", "job_id": 1, "station": 3, "approved": True})
+        self._as(self.member_id, "member")
+        self.assertNotIn(nid, self._visible_ids())
+        self._as(self.owner_id, "owner")
+        self.assertIn(nid, self._visible_ids())
+        # 任务中心列表带发起人用户名(严格限本租户解析)
+        import json as _json
+        from app import taskcenter
+        db.insert("job", {"tenant_id": 2, "status": "done",
+                          "created_by": self.member_id,
+                          "brief_json": _json.dumps(
+                              {"direction": "开业稿"}, ensure_ascii=False)})
+        items = taskcenter.list_items(2, {"content"})["items"]
+        self.assertEqual("yuangong", items[0].get("creator"))
+
     def test_member_cannot_read_owner_targeted_notification(self):
         nid = notify.record(2, "schedule_paused", {"title": "日更"})
         self._as(self.member_id, "member")

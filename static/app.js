@@ -1416,7 +1416,7 @@ function tcRow(x){
       <div style="display:flex;gap:7px;align-items:center;flex-wrap:wrap"><span class="tag">${esc(x.kind_label)}</span>
         <span class="pill ${tcPill(x.status_group)}">${esc(x.status_label)}</span>
         <b style="font-size:15px">#${x.record_id} · ${esc(x.title)}</b></div>
-      <div class="sub" style="margin-top:6px">👤 ${esc(x.assignee||"待分配")}　·　🕒 ${tcFmt(x.created_at)}</div>
+      <div class="sub" style="margin-top:6px">👤 ${esc(x.assignee||"待分配")}${x.creator?`　·　✍️ 发起:${esc(x.creator)}`:""}　·　🕒 ${tcFmt(x.created_at)}</div>
       <div style="margin-top:5px"><span class="tag" style="background:#ece3ff">↳ 来源：${esc(x.source_label)}</span>
         ${x.source_detail?`<span class="sub">${esc(x.source_detail)}</span>`:""}</div>
       ${x.retry_block_reason?`<div class="sub" style="margin-top:6px;color:#9b3b35">⚠️ ${esc(x.retry_block_reason)}</div>`:""}</div>

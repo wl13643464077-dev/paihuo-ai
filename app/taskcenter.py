@@ -443,13 +443,13 @@ def list_items(tenant_id: int, allowed_modules: set[str], limit: int = 300,
     details: dict[str, dict[int, dict]] = {}
     details["expert"] = _rows_for_ids(
         "id,emp_idx,brief_json,status,source_meeting_id,source_task_id,"
-        "billing_status,retry_count,created_at,updated_at",
+        "billing_status,retry_count,created_by,created_at,updated_at",
         "task", tenant_id, ids_by_kind.get("expert", []),
         extra_where="deleted_at IS NULL",
     )
     details["content"] = _rows_for_ids(
         "id,brief_json,status,billing_status,retry_count,current_idx,"
-        "source_schedule_id,created_at,updated_at",
+        "source_schedule_id,created_by,created_at,updated_at",
         "job", tenant_id, ids_by_kind.get("content", []),
         extra_where="deleted_at IS NULL",
     )
@@ -824,6 +824,27 @@ def list_items(tenant_id: int, allowed_modules: set[str], limit: int = 300,
         for header in page_headers
         if (str(header["kind"]), int(header["record_id"])) in built
     ]
+    # 协作可见:批量把发起人 id 换成用户名(单查询,严格限本租户)
+    creator_ids = set()
+    for kind in ("expert", "content"):
+        for row in details.get(kind, {}).values():
+            if row.get("created_by"):
+                creator_ids.add(int(row["created_by"]))
+    names = {}
+    if creator_ids:
+        names = {
+            int(u["id"]): u["username"]
+            for u in db.q(
+                "SELECT id,username FROM users WHERE tenant_id=? AND id IN "
+                "(SELECT CAST(value AS INTEGER) FROM json_each(?))",
+                (tenant_id, _json_array(creator_ids)),
+            )
+        }
+    for item in items:
+        row = details.get(item["kind"], {}).get(item["record_id"]) or {}
+        creator = names.get(int(row.get("created_by") or 0))
+        if creator:
+            item["creator"] = creator
     next_offset = offset + len(page_headers)
     has_more = next_offset < counts["all"]
     return {
