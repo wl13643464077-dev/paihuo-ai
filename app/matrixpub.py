@@ -437,6 +437,7 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
             tid,
             "pub",
             {
+                "job_id": payload.get("job_id"),
                 "ok": False,
                 "platform": p["name"],
                 "title": payload.get("title") or "",
@@ -470,6 +471,7 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
             tid,
             "pub",
             {
+                "job_id": payload.get("job_id"),
                 "ok": True,
                 "platform": p["name"],
                 "title": payload.get("title") or "",

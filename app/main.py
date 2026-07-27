@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import (analyzer, assetfiles, auth, billing, db, departments, employees, expertmatch,
                export, feishu, funnel, llm, meeting, obs, providers, scheduler,
-               secureconfig, taskcenter, taskrunner)
+               purchases, secureconfig, taskcenter, taskrunner)
 from .engine import engine
 from .skills import registry
 
@@ -444,11 +444,16 @@ async def _auth_mw(request: Request, call_next):
     TOUR_GET_OK = ("/api/meta", "/api/depts", "/api/employees", "/api/state",
                    "/api/auth/me", "/api/knowledge", "/api/billing", "/api/meetings",
                    "/api/avatar/meta", "/api/avatar/jobs", "/api/assets", "/api/schedules")
+    public_purchase_catalog = (
+        request.method.upper() == "GET"
+        and path == "/api/purchases/catalog"
+    )
     # 游客可点开员工公开介绍；员工配置写接口继续统一拦截。
     TOUR_BLOCK = ("/api/employees/",)
     if (path.startswith("/api/") and not path.startswith("/api/auth/login")
             and not path.startswith("/api/guest/")
             and path != "/api/funnel/events"
+            and not public_purchase_catalog
             # 登录页「忘记密码」要在未登录时展示对客联系方式;该接口只回
             # root 主动配置、本就面向客户公开的联系字符串。
             and path != "/api/support-contact"):
@@ -619,18 +624,103 @@ def _is_boss() -> bool:
     return u.get("role") == "root" and u.get("username") == "boss"
 
 
+def _is_tour() -> bool:
+    return (auth.current() or {}).get("role") == "tour"
+
+
 def _need_boss():
     """Enforce the named super-account boundary, not merely a database role."""
     if not _is_boss():
         raise HTTPException(403, "仅超级管理账号 boss 可访问数字员工内部资料")
 
 
-def _public_station(s: dict) -> dict:
+_PUBLIC_STATION_TASK_GUIDES = {
+    "trend": {
+        "task_placeholder": "例如：追踪[行业/品牌]最近[时间范围]的市场变化，筛出适合我们跟进的内容机会。",
+        "material_placeholder": "可补充品牌定位、目标客群、近期活动和重点关注的平台；没有现成材料也可直接说明业务目标。",
+        "input_tips": ["关注的行业、品牌或人群", "希望覆盖的平台和时间范围", "本次选题要服务的业务目标"],
+        "output_hint": "得到经过筛选的趋势判断、选题优先级和建议跟进时点",
+    },
+    "research": {
+        "task_placeholder": "例如：围绕[具体主题]核实关键事实、数据与案例，为后续内容准备可靠素材。",
+        "material_placeholder": "可粘贴待核实的说法、已有链接、数据口径和优先来源；请标明哪些信息仍不确定。",
+        "input_tips": ["要核实的主题和核心问题", "优先关注的地区、时间或来源", "已有链接、说法或待验证数据"],
+        "output_hint": "得到带来源的事实摘要、证据强弱和仍待核验的问题",
+    },
+    "benchmark": {
+        "task_placeholder": "例如：拆解[主题/账号/作品]为什么有效，并提炼适合我们借鉴的表达方式。",
+        "material_placeholder": "可粘贴对标账号、帖子链接、截图文字和希望重点拆解的维度。",
+        "input_tips": ["要研究的主题或对标对象", "目标平台与目标受众", "最关心的内容、结构或转化问题"],
+        "output_hint": "得到对标差异、可借鉴做法、不可照搬风险和验证建议",
+    },
+    "draft": {
+        "task_placeholder": "例如：为[目标人群]撰写一篇关于[主题]的[平台/文体]初稿，重点传达[核心观点]。",
+        "material_placeholder": "可粘贴产品卖点、事实素材、活动规则、品牌口吻和参考文章。",
+        "input_tips": ["主题、核心观点和目标读者", "发布平台与内容形式", "必须包含或不能出现的信息"],
+        "output_hint": "得到结构完整、可继续修改或直接评审的内容初稿",
+    },
+    "style": {
+        "task_placeholder": "例如：把这份内容调整为[品牌/个人]的表达风格，保持观点不变并提升辨识度。",
+        "material_placeholder": "请粘贴待改原文，并补充品牌语气、常用表达、禁用词和必须保留的事实。",
+        "input_tips": ["需要改写的原文", "希望接近的语气与风格", "品牌常用词、禁用词或参考作品"],
+        "output_hint": "得到语气统一、自然且符合账号人设的定稿建议",
+    },
+    "media": {
+        "task_placeholder": "例如：为[主题内容]规划适合[目标平台]的视觉素材和画面表达。",
+        "material_placeholder": "可粘贴正文、视觉参考、品牌色、图片尺寸、已有素材和版权限制。",
+        "input_tips": ["正文、主题或重点信息", "目标平台和画面尺寸", "品牌视觉、素材来源与版权限制"],
+        "output_hint": "得到与正文对应的视觉方案、素材需求和使用位置",
+    },
+    "cover": {
+        "task_placeholder": "例如：为[内容主题]设计适合[目标平台]的封面方向，突出[第一眼卖点]。",
+        "material_placeholder": "可粘贴标题、品牌色、参考风格、封面尺寸，以及必须出现的文字或图片说明。",
+        "input_tips": ["标题、主题和核心卖点", "目标平台与目标人群", "品牌视觉或必须保留的元素"],
+        "output_hint": "得到可比较的封面方向、关键信息层级和视觉建议",
+    },
+    "deck": {
+        "task_placeholder": "例如：把[现有内容]整理成面向[听众/场景]的演示结构，突出[核心结论]。",
+        "material_placeholder": "可粘贴原始正文、关键数据、汇报对象、演示时长和已有页面结构。",
+        "input_tips": ["现有正文、报告或要点", "听众、使用场景和演示时长", "必须讲清的结论与行动要求"],
+        "output_hint": "得到清晰的演示结构、页面重点和讲解顺序",
+    },
+    "publish": {
+        "task_placeholder": "例如：把这份成品适配到[目标平台]，整理发布文案、标签和发布节奏。",
+        "material_placeholder": "可粘贴已确认的定稿、账号信息、发布时间限制和各平台审核注意事项。",
+        "input_tips": ["已经确认的内容成品", "目标平台与发布时间要求", "账号限制、审核要求和运营节奏"],
+        "output_hint": "得到各平台可直接审核的发布包和发布检查项",
+    },
+    "retro": {
+        "task_placeholder": "例如：复盘[内容/活动]在[时间范围]的表现，找出有效做法和下一轮调整重点。",
+        "material_placeholder": "可粘贴曝光、点击、互动、转化等汇总数据，以及评论摘要、发布时间和异常事件。",
+        "input_tips": ["要复盘的内容与发布时间", "曝光、互动、转化等可用数据", "原定目标、异常事件与用户反馈"],
+        "output_hint": "得到表现诊断、原因假设、复用项和下一轮改进动作",
+    },
+}
+
+
+def _public_station_task_guide(s: dict) -> dict:
+    """内容部的公开派活提示；与内部模板、能力和模型配置完全隔离。"""
+    guide = _PUBLIC_STATION_TASK_GUIDES.get(s.get("key")) or {
+        "task_placeholder": f"例如：请「{s.get('name') or '数字员工'}」围绕[具体目标]完成[具体任务]。",
+        "material_placeholder": "可粘贴与当前任务直接相关的资料、数据和参考链接。",
+        "input_tips": ["具体目标和使用场景", "已有材料与限制条件", "期望完成时间"],
+        "output_hint": "得到一份围绕当前目标的可执行结果",
+    }
+    return {
+        **guide,
+        "industry_placeholder": "例如：所属行业、产品类别、目标人群或具体业务场景",
+    }
+
+
+def _public_station(s: dict, *, include_task_guide: bool = False) -> dict:
     """内容部员工的对外名片：只含展示信息，不含岗位实现与模型配置。"""
-    return {k: s[k] for k in ("idx", "key", "name", "dept", "emoji", "color", "intro")}
+    public = {k: s[k] for k in ("idx", "key", "name", "dept", "emoji", "color", "intro")}
+    if include_task_guide:
+        public["task_guide"] = _public_station_task_guide(s)
+    return public
 
 
-def _public_expert(e: dict) -> dict:
+def _public_expert(e: dict, *, include_task_guide: bool = False) -> dict:
     """产业专家的对外名片：文字介绍优先，绝不透出岗位手册结构。"""
     intro = (e.get("intro") or "").strip()
     if not intro:
@@ -645,9 +735,12 @@ def _public_expert(e: dict) -> dict:
     topic = (e.get("name") or "相关业务").strip()
     intro += (f" TA在团队中担任{role}，适合处理与“{topic}”相关的经营问题。"
               "您只需说明当前背景、目标和已有材料，TA就能围绕实际业务给出清晰、专业、可落地的建议。")
-    return {k: e.get(k) for k in ("idx", "name", "emoji", "color", "person", "dept_name")} | {
+    public = {k: e.get(k) for k in ("idx", "name", "emoji", "color", "person", "dept_name")} | {
         "intro": intro,
     }
+    if include_task_guide:
+        public["task_guide"] = departments.public_task_guide(e)
+    return public
 
 
 def _need_module(module: str):
@@ -751,6 +844,22 @@ def _start_billed_operation(action: str, note: str = "") -> str:
         raise HTTPException(402, str(exc)) from exc
 
 
+async def _drain_task_despite_cancellation(task: asyncio.Task):
+    """Wait for an already-submitted task through any outer cancellations.
+
+    Executors cannot revoke a SQLite write that has already started.  Repeated
+    request cancellation therefore must not cancel the child task or let the
+    caller guess whether it committed.  Child failures are deliberately read
+    from ``task.result()`` and propagated unchanged.
+    """
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+    return task.result()
+
+
 async def _run_db_safely(fn, *args, **kwargs):
     """Linearize an already-submitted DB mutation through request cancellation.
 
@@ -759,10 +868,46 @@ async def _run_db_safely(fn, *args, **kwargs):
     the handler concurrently refunds or deletes the committed artifact.
     """
     operation = asyncio.create_task(db.arun(fn, *args, **kwargs))
+    return await _drain_task_despite_cancellation(operation)
+
+
+async def _run_db_then_start_worker_safely(
+    fn,
+    *args,
+    start_worker,
+    should_start=None,
+    settle_unstarted=None,
+    **kwargs,
+):
+    """Linearize a durable queue mutation with its in-process worker start.
+
+    ``db.arun`` runs work in an executor, so cancelling the request cannot
+    reliably cancel a SQLite transaction that has already begun.  The caller
+    must therefore observe the final DB result and, when it committed a queued
+    record, schedule its worker before propagating cancellation.  If scheduling
+    itself fails, the optional settlement callback closes/refunds the durable
+    record instead of leaving a charged orphan.
+    """
+    operation = asyncio.create_task(db.arun(fn, *args, **kwargs))
+    cancellation = None
     try:
-        return await asyncio.shield(operation)
-    except asyncio.CancelledError:
-        return await operation
+        result = await asyncio.shield(operation)
+    except asyncio.CancelledError as exc:
+        cancellation = exc
+        result = await _drain_task_despite_cancellation(operation)
+
+    must_start = should_start(result) if should_start else True
+    if must_start:
+        try:
+            start_worker(result)
+        except Exception:
+            if settle_unstarted:
+                await _run_db_safely(settle_unstarted, result)
+            raise
+
+    if cancellation is not None:
+        raise cancellation
+    return result
 
 
 async def _start_billing_operation_safely(
@@ -776,11 +921,7 @@ async def _start_billing_operation_safely(
     try:
         return await asyncio.shield(start_task)
     except asyncio.CancelledError:
-        op_key = None
-        try:
-            op_key = await start_task
-        except BaseException:
-            pass
+        op_key = await _drain_task_despite_cancellation(start_task)
         if op_key:
             try:
                 await _run_db_safely(
@@ -794,6 +935,7 @@ async def _start_billing_operation_safely(
                     op_key,
                     type(exc).__name__,
                 )
+                raise
         raise
 
 
@@ -869,8 +1011,134 @@ def billing_get():
             "txn_n": agg.get("n") or 0,
             "prices": price_rows, "plans": billing.PLANS,
             "periods": billing.PERIODS, "log": log_rows,
+            "log_limit": 300,
+            "log_truncated": int(agg.get("n") or 0) > len(log_rows),
             "spend_by_action": spend_by_action,
             "monthly": monthly}
+
+
+def _raise_purchase_error(exc: Exception):
+    if isinstance(exc, purchases.PurchaseNotFound):
+        status_code = 404
+    elif isinstance(exc, purchases.PurchaseForbidden):
+        status_code = 403
+    elif isinstance(exc, purchases.PurchaseConflict):
+        status_code = 409
+    else:
+        status_code = 400
+    raise HTTPException(status_code, str(exc)) from None
+
+
+@app.get("/api/purchases/catalog")
+def purchase_catalog():
+    """Authoritative catalogue; this is an offline application, not checkout."""
+    return purchases.catalog()
+
+
+@app.post("/api/purchases")
+def purchase_create(body: dict):
+    user = auth.current() or {}
+    if user.get("role") not in {"root", "owner"}:
+        raise HTTPException(403, "仅企业主账号可以提交购买申请")
+    if any(
+        key in body
+        for key in ("price", "points", "amount", "quoted_price", "quoted_points")
+    ):
+        raise HTTPException(400, "价格和点数由服务器计算，请勿自行传入")
+    try:
+        return purchases.create_intent(
+            int(user["tenant_id"]),
+            int(user["id"]),
+            request_key=body.get("request_id"),
+            plan_key=body.get("plan"),
+            period_key=body.get("period"),
+            contact=body.get("contact"),
+            note=body.get("note") or "",
+            source=body.get("source") or "billing",
+        )
+    except (purchases.PurchaseError, ValueError) as exc:
+        _raise_purchase_error(exc)
+
+
+@app.get("/api/purchases")
+def purchase_list(
+        status: str | None = None,
+        limit: int = 20,
+        offset: int = 0):
+    user = auth.current() or {}
+    if user.get("role") not in {"root", "owner"}:
+        raise HTTPException(403, "仅企业主账号可以查看购买申请")
+    try:
+        return purchases.list_own(
+            int(user["tenant_id"]),
+            int(user["id"]),
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+    except purchases.PurchaseError as exc:
+        _raise_purchase_error(exc)
+
+
+def _purchase_admin_scope() -> int | None:
+    _need_admin()
+    return None if auth.is_root() else TEN()
+
+
+@app.get("/api/admin/purchases")
+def purchase_admin_list(
+        tenant_id: int | None = None,
+        status: str | None = None,
+        plan: str | None = None,
+        period: str | None = None,
+        limit: int = 50,
+        offset: int = 0):
+    try:
+        return purchases.list_admin(
+            scope_tid=_purchase_admin_scope(),
+            tenant_id=tenant_id,
+            status=status,
+            plan=plan,
+            period=period,
+            limit=limit,
+            offset=offset,
+        )
+    except purchases.PurchaseError as exc:
+        _raise_purchase_error(exc)
+
+
+@app.get("/api/admin/purchases/stats")
+def purchase_admin_stats(
+        tenant_id: int | None = None,
+        status: str | None = None,
+        plan: str | None = None,
+        period: str | None = None):
+    try:
+        return purchases.stats(
+            scope_tid=_purchase_admin_scope(),
+            tenant_id=tenant_id,
+            status=status,
+            plan=plan,
+            period=period,
+        )
+    except purchases.PurchaseError as exc:
+        _raise_purchase_error(exc)
+
+
+@app.patch("/api/admin/purchases/{intent_id}")
+def purchase_admin_transition(intent_id: int, body: dict):
+    _need_root()
+    user = auth.current() or {}
+    try:
+        return purchases.transition(
+            intent_id,
+            expected_status=body.get("expected_status"),
+            target_status=body.get("status"),
+            actor_id=int(user["id"]),
+            note=body.get("note") or "",
+        )
+    except purchases.PurchaseError as exc:
+        _raise_purchase_error(exc)
 
 
 @app.get("/api/records/export.xlsx")
@@ -1995,20 +2263,13 @@ def state(limit: int | None = None, offset: int = 0):
         p["persona"] = persona
         p["has_corpus"] = bool(corpus)
     inbox = [j for j in jobs if j["status"] in ("awaiting_review", "gate_blocked", "failed")]
-    # 通知可见性:广播(user_id 空)对全租户,且本人没在 read_by 里点过已读;
-    # 定向通知只给收件人本人。read_at 非空 = 对所有人已读(主账号一键全读)。
-    notifications = db.q(
-        "SELECT id,kind,title,body,link,created_at "
-        "FROM notification WHERE tenant_id=? AND read_at IS NULL "
-        "AND (user_id=? OR (user_id IS NULL "
-        "AND instr(COALESCE(read_by,','), ','||?||',')=0)) "
-        "ORDER BY id DESC LIMIT 30",
-        (TEN(), int((auth.current() or {}).get("id") or 0),
-         str(int((auth.current() or {}).get("id") or 0))),
-    )
+    # 通知标题/摘要/链接本身也是业务数据。查询与 mark-read 统一经过
+    # notify 的角色 + 板块白名单，不能先把跨模块广播取出来再交给前端隐藏。
+    from . import notify as _nt
+    notifications = _nt.unread_for_user(TEN(), auth.current(), limit=30)
     # V26:余额+新手引导进度(首页头卡与开工清单用)
     ten_row = db.one("SELECT balance, plan FROM tenants WHERE id=?", (TEN(),)) or {}
-    from . import wechat as _wc, notify as _nt
+    from . import wechat as _wc
     setup = {"profile": len(profiles) > 0,
              "first_job": (jobs_total > 0 if paged else len(jobs) > 0),
              "wechat": bool(_wc.get_conf(TEN()).get("appid")) or bool(_nt.get_webhook(TEN())),
@@ -2037,11 +2298,7 @@ def notifications_read(body: dict):
         # 所以只允许主账号操作;成员对自己看过的单条点已读不受限。
         if not auth.is_admin():
             raise HTTPException(403, "一键全读会替企业主清掉待办,请单条已读或让主账号操作")
-        changed = db.execute(
-            "UPDATE notification SET read_at=?,updated_at=? "
-            "WHERE tenant_id=? AND read_at IS NULL",
-            (time.time(), time.time(), TEN()),
-        )
+        changed = notify.mark_all_read(TEN(), auth.current())
         return {"ok": True, "updated": changed}
     if not isinstance(raw_ids, list) or len(raw_ids) > 100:
         raise HTTPException(400, "通知编号格式无效")
@@ -2057,28 +2314,30 @@ def notifications_read(body: dict):
             ids.append(item_id)
     if not ids:
         return {"ok": True, "updated": 0}
-    now = time.time()
-    uid = int((auth.current() or {}).get("id") or 0)
-    changed = 0
-    with db.atomic() as connection:
-        marks = ",".join("?" for _ in ids)
-        # 定向给我的:直接置已读
-        changed += connection.execute(
-            f"UPDATE notification SET read_at=?,updated_at=? "
-            f"WHERE tenant_id=? AND read_at IS NULL AND user_id=? "
-            f"AND id IN ({marks})",
-            (now, now, TEN(), uid, *ids),
-        ).rowcount
-        # 广播的:只把"我"追加进 read_by,别人(尤其老板)的未读不受影响
-        changed += connection.execute(
-            f"UPDATE notification SET "
-            f"read_by=COALESCE(read_by,',')||?||',',updated_at=? "
-            f"WHERE tenant_id=? AND read_at IS NULL AND user_id IS NULL "
-            f"AND instr(COALESCE(read_by,','), ','||?||',')=0 "
-            f"AND id IN ({marks})",
-            (str(uid), now, TEN(), str(uid), *ids),
-        ).rowcount
+    changed = notify.mark_read(TEN(), auth.current(), ids)
     return {"ok": True, "updated": changed}
+
+
+@app.get("/api/notifications")
+def notifications_list(
+        limit: int = 40,
+        offset: int = 0,
+        unread: bool = False):
+    page_limit, page_offset, _ = _pagination(limit, offset, 40)
+    result = notify.history_for_user(
+        TEN(),
+        auth.current(),
+        limit=page_limit,
+        offset=page_offset,
+        unread_only=bool(unread),
+    )
+    return _page_result(
+        result["items"],
+        result["total"],
+        page_limit,
+        page_offset,
+        unread=bool(unread),
+    )
 
 
 def _profile_id_for_tenant(value):
@@ -2228,7 +2487,8 @@ def _create_charged_content_job(data: dict, note: str) -> int:
     try:
         charged = billing.charge_if_claimed(
             "content_job", tid, claim,
-            note=f"工单#{job_id}·{note}"[:160], points=points)
+            note=f"工单#{job_id}·{note}"[:160], points=points,
+            job_id=job_id)
     except billing.InsufficientPoints as e:
         db.q("DELETE FROM job WHERE id=? AND billing_status='pending'", (job_id,))
         raise HTTPException(402, str(e)) from e
@@ -2239,6 +2499,18 @@ def _create_charged_content_job(data: dict, note: str) -> int:
         db.q("DELETE FROM job WHERE id=? AND billing_status='pending'", (job_id,))
         raise HTTPException(409, "这单刚刚已经提交过了,原单正在执行,没有重复扣点;正在带您去任务中心查看")
     return job_id
+
+
+def _start_content_job_worker(job_id: int) -> None:
+    engine.notify(job_id)
+    engine.touch(job_id)
+
+
+def _settle_unstarted_content_job(job_id: int) -> bool:
+    return engine.settle_failure(
+        job_id,
+        "内容工单启动失败，系统已安全终止并退回本次点数",
+    )
 
 
 @app.post("/api/jobs")
@@ -2255,7 +2527,7 @@ async def create_job(body: dict):
     profile_id = await db.arun(
         _profile_id_for_tenant, body.get("profile_id")
     )
-    job_id = await db.arun(
+    job_id = await _run_db_then_start_worker_safely(
         _create_charged_content_job,
         {
             "brief_json": json.dumps(brief, ensure_ascii=False),
@@ -2264,10 +2536,12 @@ async def create_job(body: dict):
             "mode": _validated_mode(body.get("mode")),
         },
         note=brief["direction"][:20],
+        start_worker=_start_content_job_worker,
+        settle_unstarted=_settle_unstarted_content_job,
     )
-    engine.notify(job_id)
-    engine.touch(job_id)
-    await db.arun(funnel.record_first_work, TEN(), "content")
+    asyncio.create_task(
+        _record_first_work_best_effort(TEN(), "content")
+    )
     return {"job_id": job_id}
 
 
@@ -2629,7 +2903,9 @@ def depts_list():
         for e in d["employees"]:
             cfg = cfgs.get(e["idx"]) or employees.get_config(e["idx"])
             st = stats.get(e["idx"]) or {}
-            public = _public_expert({**e, "dept_name": d["name"]}) | {
+            public = _public_expert(
+                {**e, "dept_key": d["key"], "dept_name": d["name"]},
+            ) | {
                 "group": e["group"], "enabled": cfg.get("enabled", True),
                 "tasks_n": st.get("n", 0), "running_n": st.get("run", 0) or 0,
             }
@@ -2664,7 +2940,9 @@ def dept_emp(idx: int):
     stats = db.one("SELECT COUNT(*) n, SUM(cost_usd) cost FROM task WHERE emp_idx=? "
                    "AND status='done' AND tenant_id=? AND deleted_at IS NULL",
                    (idx, TEN())) or {}
-    public = _public_expert(e) | {"tasks": tasks}
+    public = _public_expert(
+        e, include_task_guide=not _is_tour()
+    ) | {"tasks": tasks}
     if not _is_boss():
         return public
     return {**public,
@@ -2715,6 +2993,32 @@ def _create_charged_expert_task(task_data: dict, note: str = "") -> int:
     return task_id
 
 
+def _start_expert_task_worker(task_id: int):
+    return asyncio.create_task(
+        taskrunner.run_task(task_id, engine.broadcast)
+    )
+
+
+def _settle_unstarted_expert_task(task_id: int) -> bool:
+    return taskrunner.settle_failure(
+        task_id,
+        "任务启动失败，系统已安全终止并退回本次点数",
+    )
+
+
+async def _record_first_work_best_effort(tid: int, kind: str) -> None:
+    try:
+        await db.arun(funnel.record_first_work, tid, kind)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.warning(
+            "first-work funnel record skipped kind=%s error_type=%s",
+            kind,
+            type(exc).__name__,
+        )
+
+
 @app.post("/api/tasks")
 async def task_create(body: dict):
     idx = body.get("emp_idx")
@@ -2751,15 +3055,18 @@ async def task_create(body: dict):
     task_data = {"emp_idx": idx, "tenant_id": TEN(),
                  "brief_json": json.dumps(brief, ensure_ascii=False)}
     try:
-        tid = await db.arun(
+        tid = await _run_db_then_start_worker_safely(
             _create_charged_expert_task,
             task_data,
             note=(brief.get("direction") or "")[:20],
+            start_worker=_start_expert_task_worker,
+            settle_unstarted=_settle_unstarted_expert_task,
         )
     except billing.InsufficientPoints as e:
         raise HTTPException(402, str(e))
-    await db.arun(funnel.record_first_work, TEN(), "expert")
-    asyncio.create_task(taskrunner.run_task(tid, engine.broadcast))
+    asyncio.create_task(
+        _record_first_work_best_effort(TEN(), "expert")
+    )
     return {"task_id": tid}
 
 
@@ -2801,11 +3108,27 @@ async def experts_match(body: dict):
 
 
 @app.get("/api/task-center")
-def task_center(limit: int = 300, offset: int = 0, q: str = ""):
+def task_center(
+    limit: int = 300,
+    offset: int = 0,
+    q: str = "",
+    status: str = "all",
+    kind: str = "all",
+):
     """老板任务总账：聚合真实业务表，不复制状态，也不跨租户/越板块展示。"""
     modules = {m["key"] for m in auth.all_modules() if auth.allowed(m["key"])}
-    return taskcenter.list_items(TEN(), modules, limit=limit, offset=offset,
-                                 q=(q or "").strip()[:100])
+    try:
+        return taskcenter.list_items(
+            TEN(),
+            modules,
+            limit=limit,
+            offset=offset,
+            q=(q or "").strip()[:100],
+            status=status,
+            kind=kind,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
 
 
 @app.get("/api/task-center/{kind}/{rid}")
@@ -3014,9 +3337,13 @@ async def task_center_retry(kind: str, rid: int):
                     (now, rid),
                 )
 
-        await db.arun(_retry_content)
-        engine.notify(rid)
-        engine.touch(rid)
+        await _run_db_then_start_worker_safely(
+            _retry_content,
+            start_worker=lambda _result: _start_content_job_worker(rid),
+            settle_unstarted=(
+                lambda _result: _settle_unstarted_content_job(rid)
+            ),
+        )
         return {
             "ok": True, "kind": kind, "job_id": rid, "record_id": rid,
             "free_retry": True, "retry_count": retries + 1,
@@ -3031,22 +3358,42 @@ async def task_center_retry(kind: str, rid: int):
         if not meta["retryable"]:
             _raise_retry_denied(meta)
         retries = int(row.get("retry_count") or 0)
-        changed = await db.aexecute(
-            "UPDATE tv_job SET status='queued',billing_status='charged',"
-            "billing_points=0,retry_count=retry_count+1,steps_json='[]',"
-            "script=NULL,video_file=NULL,error=NULL,updated_at=? "
-            "WHERE id=? AND tenant_id=? AND status='failed' "
-            "AND billing_status=? AND retry_count=?",
-            (
-                now, rid, TEN(), row.get("billing_status"), retries,
+        from . import textvideo
+
+        def _retry_video():
+            changed = db.execute(
+                "UPDATE tv_job SET status='queued',billing_status='charged',"
+                "billing_points=0,retry_count=retry_count+1,steps_json='[]',"
+                "script=NULL,video_file=NULL,error=NULL,updated_at=? "
+                "WHERE id=? AND tenant_id=? AND status='failed' "
+                "AND billing_status=? AND retry_count=?",
+                (
+                    now, rid, TEN(), row.get("billing_status"), retries,
+                ),
+            )
+            if changed == 1:
+                try:
+                    textvideo.cleanup_job_assets(rid, row)
+                except Exception:
+                    textvideo.settle_failure(
+                        rid,
+                        "成片任务重试准备失败，已安全终止",
+                    )
+                    raise
+            return changed
+
+        changed = await _run_db_then_start_worker_safely(
+            _retry_video,
+            start_worker=lambda _changed: _start_text_video_worker(rid),
+            should_start=lambda value: value == 1,
+            settle_unstarted=lambda _changed: textvideo.settle_failure(
+                rid,
+                "成片任务启动失败，已安全终止",
             ),
         )
         if changed != 1:
             raise HTTPException(
                 409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
-        from . import textvideo
-        await asyncio.to_thread(textvideo.cleanup_job_assets, rid, row)
-        asyncio.create_task(textvideo.run_job(rid, engine.broadcast))
         engine.broadcast({"type": "tv_done", "tv_id": rid, "tenant_id": TEN()})
         return {
             "ok": True, "kind": kind, "record_id": rid,
@@ -3062,8 +3409,8 @@ async def task_center_retry(kind: str, rid: int):
         if not meta["retryable"]:
             _raise_retry_denied(meta)
         retries = int(row.get("retry_count") or 0)
-        try:
-            changed = await db.aexecute(
+        def _retry_tool():
+            return db.execute(
                 "UPDATE tool_job SET status='running',billing_status='charged',"
                 "billing_points=0,retry_count=retry_count+1,"
                 "retry_started_at=?,result_json=NULL,error=NULL,"
@@ -3074,13 +3421,31 @@ async def task_center_retry(kind: str, rid: int):
                     now, now, rid, TEN(), row.get("billing_status"), retries,
                 ),
             )
+
+        def _settle_unstarted_tool(_changed):
+            current = db.one(
+                "SELECT * FROM tool_job WHERE id=? AND tenant_id=?",
+                (rid, TEN()),
+            )
+            return bool(current) and _settle_tool_failure(
+                current,
+                "工具任务启动失败，已安全终止",
+                "启动失败退回",
+            )
+
+        try:
+            changed = await _run_db_then_start_worker_safely(
+                _retry_tool,
+                start_worker=lambda _changed: _spawn_tool_worker(rid),
+                should_start=lambda value: value == 1,
+                settle_unstarted=_settle_unstarted_tool,
+            )
         except sqlite3.IntegrityError as exc:
             raise HTTPException(
                 409, "这个工具已有任务正在运行，请等它完成后再重试") from exc
         if changed != 1:
             raise HTTPException(
                 409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
-        _spawn_tool_worker(rid)
         _broadcast_tool(TEN(), row.get("kind") or "")
         return {
             "ok": True, "kind": kind, "record_id": rid,
@@ -3141,9 +3506,20 @@ async def task_center_retry(kind: str, rid: int):
                     raise HTTPException(
                         409, "会议状态刚刚发生变化，请刷新后再重试")
 
-        await db.arun(_retry_meeting)
-        asyncio.create_task(meeting.run(rid, engine.broadcast))
-        engine.broadcast({"type": "meeting_update", "meeting_id": rid})
+        await _run_db_then_start_worker_safely(
+            _retry_meeting,
+            start_worker=lambda _result: _start_meeting_worker(rid),
+            settle_unstarted=lambda _result: meeting.settle_failure(
+                rid,
+                "会议重试启动失败，已安全终止",
+            ),
+        )
+        engine.broadcast({
+            "type": "meeting_update",
+            "tenant_id": tenant_id,
+            "_required_modules": meeting._event_scope(row)[1],
+            "meeting_id": rid,
+        })
         return {
             "ok": True, "kind": kind, "record_id": rid,
             "free_retry": True, "retry_count": retries + 1,
@@ -3158,18 +3534,52 @@ async def task_center_retry(kind: str, rid: int):
         if not meta["retryable"]:
             _raise_retry_denied(meta)
         retries = int(row.get("retry_count") or 0)
-        changed = await db.aexecute(
-            "UPDATE pub_task SET status='queued',fail_json=NULL,"
-            "retry_count=retry_count+1,submit_started_at=NULL,updated_at=? "
-            "WHERE id=? AND tenant_id=? AND status='failed' "
-            "AND submission_state='not_submitted' AND retry_count=?",
-            (now, rid, TEN(), retries),
+        tenant_id = TEN()
+
+        def _retry_publish():
+            return db.execute(
+                "UPDATE pub_task SET status='queued',fail_json=NULL,"
+                "retry_count=retry_count+1,submit_started_at=NULL,updated_at=? "
+                "WHERE id=? AND tenant_id=? AND status='failed' "
+                "AND submission_state='not_submitted' AND retry_count=?",
+                (now, rid, tenant_id, retries),
+            )
+
+        def _settle_unstarted_publish(_changed):
+            fail = {
+                "kind": "unknown",
+                "why": "发布任务未能启动",
+                "fix": "可点击免费重试重新排队",
+                "err": "自动发布未开始，内容未发出",
+                "shot": "",
+                "home": "",
+            }
+            return db.execute(
+                "UPDATE pub_task SET status='failed',fail_json=?,updated_at=? "
+                "WHERE id=? AND tenant_id=? AND status='queued' "
+                "AND submission_state='not_submitted'",
+                (
+                    json.dumps(fail, ensure_ascii=False),
+                    time.time(),
+                    rid,
+                    tenant_id,
+                ),
+            ) == 1
+
+        changed = await _run_db_then_start_worker_safely(
+            _retry_publish,
+            start_worker=lambda _changed: _start_publish_worker(rid),
+            should_start=lambda value: value == 1,
+            settle_unstarted=_settle_unstarted_publish,
         )
         if changed != 1:
             raise HTTPException(
                 409, "发布任务状态刚刚发生变化，请刷新后再重试")
-        asyncio.create_task(matrixpub.run_task(rid, engine.broadcast))
-        engine.broadcast({"type": "pub_update", "task_id": rid})
+        engine.broadcast({
+            "type": "pub_update",
+            "tenant_id": tenant_id,
+            "task_id": rid,
+        })
         return {
             "ok": True, "kind": kind, "record_id": rid,
             "free_retry": True, "retry_count": retries + 1,
@@ -3266,16 +3676,17 @@ async def task_redo(tid: int, body: dict):
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     try:
-        nid = await db.arun(
+        nid = await _run_db_then_start_worker_safely(
             _create_charged_expert_task,
             {"emp_idx": t["emp_idx"], "tenant_id": TEN(),
              "source_task_id": tid,
              "brief_json": json.dumps(brief, ensure_ascii=False)},
             note="重做",
+            start_worker=_start_expert_task_worker,
+            settle_unstarted=_settle_unstarted_expert_task,
         )
     except billing.InsufficientPoints as e:
         raise HTTPException(402, str(e))
-    asyncio.create_task(taskrunner.run_task(nid, engine.broadcast))
     return {"task_id": nid}
 
 
@@ -3285,7 +3696,15 @@ async def task_retry(tid: int):
     task = await db.arun(_task_row_or_404, tid)
     if task.get("status") != "failed":
         raise HTTPException(409, "只有失败任务可以免费重试")
-    if not await db.arun(taskrunner.prepare_retry, tid, TEN()):
+    prepared = await _run_db_then_start_worker_safely(
+        taskrunner.prepare_retry,
+        tid,
+        TEN(),
+        start_worker=lambda _prepared: _start_expert_task_worker(tid),
+        should_start=bool,
+        settle_unstarted=lambda _prepared: _settle_unstarted_expert_task(tid),
+    )
+    if not prepared:
         current = await db.aone(
             "SELECT retry_count FROM task WHERE id=? AND tenant_id=?",
             (tid, TEN()),
@@ -3293,9 +3712,17 @@ async def task_retry(tid: int):
         if (current.get("retry_count") or 0) >= taskrunner.MAX_FREE_RETRIES:
             raise HTTPException(429, "该任务免费重试次数已用完，请新建任务")
         raise HTTPException(409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
-    asyncio.create_task(taskrunner.run_task(tid, engine.broadcast))
+    expert = departments.get(task["emp_idx"])
     engine.broadcast(
-        {"type": "task_update", "task_id": tid, "idx": task["emp_idx"]}
+        {
+            "type": "task_update",
+            "tenant_id": TEN(),
+            "_required_modules": (
+                str((expert or {}).get("dept_key") or "content"),
+            ),
+            "task_id": tid,
+            "idx": task["emp_idx"],
+        }
     )
     row = await db.aone(
         "SELECT retry_count FROM task WHERE id=?", (tid,)
@@ -3373,7 +3800,9 @@ def employees_list():
         cfg = employees.get_config(s["idx"])
         st = stats.get(s["idx"]) or {}
         if not internal:
-            out.append(_public_station(s))
+            out.append(
+                _public_station(s, include_task_guide=not _is_tour())
+            )
             continue
         model_id = providers.text_model_for(s["idx"])
         out.append({
@@ -3389,6 +3818,7 @@ def employees_list():
             "settings": registry.station_settings(s["key"]),
             "settings_custom": bool(cfg["settings"]),
             "learning": s["idx"] in employees.LEARNING,
+            "task_guide": _public_station_task_guide(s),
             "stats": {"runs": st.get("runs", 0), "cost_usd": st.get("cost") or 0,
                       "tokens": st.get("tokens") or 0, "avg_ms": st.get("avg_ms") or 0},
         })
@@ -3761,6 +4191,28 @@ _TRASH_TABLES = {
     "asset": ("asset", "library"),
 }
 _PURGE_MARKER_PREFIX = "__purge_pending_v1__:"
+_PURGED_CONTENT = "[已彻底删除]"
+
+# job 彻底删除保留矩阵（schema50，派生记录显式关联 job_id）：
+# - DELETE：job、station_run、asset、knowledge、tv_job、站内通知、受管文件。
+# - REDACT+RETAIN：censor_log / publish_log / pub_task 的审计与防重放骨架；
+#   标题、正文、报告、日志、账号名、URL、素材路径全部不可逆清空。
+# - OPAQUE RETAIN：billing_log 金额/余额/时间，billing_operation 的 op_key/
+#   action/status/points，以及 wechat_draft_delivery 的 request_hash/request_key/
+#   status/op_key/media_id。它们承担退款、对账和“外部提交不能重复”的幂等职责，
+#   只清空 note/error/title/report 等业务内容。
+# v50 之前少数标题型审查/账务记录无法可靠区分同租户同标题工单。遇到这种
+# 历史歧义必须拒绝硬删并保留全部数据，绝不能为了“删干净”串改另一笔业务。
+_JOB_PURGE_RETENTION_MATRIX = {
+    "delete": (
+        "job", "station_run", "asset", "knowledge", "tv_job",
+        "notification", "managed_files",
+    ),
+    "redact_keep": ("censor_log", "publish_log", "pub_task"),
+    "opaque_keep": (
+        "billing_log", "billing_operation", "wechat_draft_delivery",
+    ),
+}
 
 
 def _is_purge_marker(value) -> bool:
@@ -3771,18 +4223,452 @@ def _new_purge_marker() -> str:
     return _PURGE_MARKER_PREFIX + os.urandom(16).hex()
 
 
-def _purge_tv_snapshot(connection, tid: int, job_id: int) -> tuple:
-    return tuple(
-        (
-            int(item["id"]),
-            str(item["video_file"]) if item["video_file"] is not None else None,
-        )
-        for item in connection.execute(
-            "SELECT id,video_file FROM tv_job "
-            "WHERE job_id=? AND tenant_id=? ORDER BY id",
-            (job_id, tid),
-        ).fetchall()
+def _purge_tombstone_key(kind: str, tid: int, rid: int) -> str:
+    """无业务正文的幂等墓碑；重复请求可返回成功且不泄露别的租户记录。"""
+    return f"purged:v1:{kind}:{int(tid)}:{int(rid)}"
+
+
+def _purge_tombstone_exists(kind: str, tid: int, rid: int) -> bool:
+    return db.get_setting(_purge_tombstone_key(kind, tid, rid)) == "1"
+
+
+def _record_purge_tombstone(
+        connection, kind: str, tid: int, rid: int, now: float) -> None:
+    connection.execute(
+        "INSERT INTO app_setting(key,value,updated_at) VALUES(?,?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
+        "updated_at=excluded.updated_at",
+        (_purge_tombstone_key(kind, tid, rid), "1", now),
     )
+
+
+def _purge_collect_titles(value, out: set[str]) -> None:
+    """只收集标题类字段，供 schema49 无 job_id 的派生日志做精确脱敏。"""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {"title", "direction", "report_name"}:
+                text = " ".join(str(item or "").split()).strip()
+                if text and text != _PURGED_CONTENT:
+                    out.add(text[:500])
+            elif key == "title_candidates" and isinstance(item, list):
+                for candidate in item:
+                    text = " ".join(str(candidate or "").split()).strip()
+                    if text and text != _PURGED_CONTENT:
+                        out.add(text[:500])
+            if isinstance(item, (dict, list)):
+                _purge_collect_titles(item, out)
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, (dict, list)):
+                _purge_collect_titles(item, out)
+
+
+def _purge_json_titles(raw, out: set[str]) -> None:
+    _purge_collect_titles(db.jloads(raw, {}) or {}, out)
+
+
+def _purge_rows_tuple(rows: list[dict], columns: tuple[str, ...]) -> tuple:
+    return tuple(
+        tuple(row.get(column) for column in columns)
+        for row in rows
+    )
+
+
+def _purge_billing_reason_matches(
+        reason: str, job_id: int) -> bool:
+    """只识别旧版正文中自带工单编号的确定性锚点。"""
+    text = str(reason or "")
+    markers = (
+        f"工单#{int(job_id)}",
+        f"工单 #{int(job_id)}",
+    )
+    return any(
+        marker in text and (
+            text.endswith(marker)
+            or f"{marker}·" in text
+            or f"{marker} " in text
+        )
+        for marker in markers
+    )
+
+
+def _purge_legacy_billing_title_matches(
+        reason: str, titles: tuple[str, ...]) -> bool:
+    """识别没有 job_id 的旧版标题型流水；只能用于阻断，不能用于改写。"""
+    text = str(reason or "")
+    suffixes = {
+        f" · {title[:size]}"
+        for title in titles
+        for size in (16, 20)
+        if title[:size]
+    }
+    # 深审与自动复盘把 ``平台·标题[:14]`` / ``《标题[:14]》`` 放在
+    # note 尾部，billing_log 会再在前面拼动作标签。仍只按真实格式的精确
+    # 尾缀匹配，避免扫描/改写无关流水。
+    suffixes.update(
+        suffix
+        for title in titles
+        for suffix in (
+            f"·{title[:14]}",
+            f"·《{title[:14]}》",
+        )
+        if title[:14]
+    )
+    return any(text.endswith(suffix) for suffix in suffixes)
+
+
+def _purge_billing_note_matches(
+        note: str, titles: tuple[str, ...]) -> bool:
+    """识别代码实际写入的标题型 note，不对任意正文做模糊包含匹配。"""
+    text = str(note or "")
+    if not text:
+        return False
+    exact = {
+        title[:size]
+        for title in titles
+        for size in (14, 16, 20)
+        if title[:size]
+    }
+    if text in exact:
+        return True
+    suffixes = {
+        suffix
+        for title in titles
+        for suffix in (
+            f"·{title[:14]}",
+            f"·《{title[:14]}》",
+        )
+        if title[:14]
+    }
+    return any(text.endswith(suffix) for suffix in suffixes)
+
+
+def _purge_redacted_billing_reason(reason: str) -> str:
+    text = str(reason or "")
+    if " · " in text:
+        return text.split(" · ", 1)[0][:120] + f" · {_PURGED_CONTENT}"
+    for marker in ("工单 #", "工单#"):
+        if marker in text:
+            return text.split(marker, 1)[0][:120] + _PURGED_CONTENT
+    return _PURGED_CONTENT
+
+
+def _purge_job_snapshot(connection, tid: int, job_id: int, job_row) -> dict:
+    """固定 job 的全部派生内容与幂等锚点；阶段三必须逐项完全相同。"""
+    station_rows = [
+        dict(row) for row in connection.execute(
+            "SELECT id,output_json,review_comment,steps_json "
+            "FROM station_run WHERE job_id=? ORDER BY id",
+            (job_id,),
+        ).fetchall()
+    ]
+    asset_rows = [
+        dict(row) for row in connection.execute(
+            "SELECT id,payload_json,meta_json FROM asset "
+            "WHERE tenant_id=? AND job_id=? ORDER BY id",
+            (tid, job_id),
+        ).fetchall()
+    ]
+    knowledge_rows = [
+        dict(row) for row in connection.execute(
+            "SELECT id,title,content,tags_json,meta_json FROM knowledge "
+            "WHERE tenant_id=? AND job_id=? ORDER BY id",
+            (tid, job_id),
+        ).fetchall()
+    ]
+    tv_rows = [
+        dict(row) for row in connection.execute(
+            "SELECT id,params_json,script,status,billing_status,video_file,"
+            "error,steps_json FROM tv_job "
+            "WHERE tenant_id=? AND job_id=? ORDER BY id",
+            (tid, job_id),
+        ).fetchall()
+    ]
+    delivery_rows = [
+        dict(row) for row in connection.execute(
+            "SELECT id,request_hash,request_key,title,status,billing_status,"
+            "op_key,media_id,publish_log_id,report_json,error "
+            "FROM wechat_draft_delivery "
+            "WHERE tenant_id=? AND job_id=? ORDER BY id",
+            (tid, job_id),
+        ).fetchall()
+    ]
+    delivery_publish_ids = {
+        int(row["publish_log_id"])
+        for row in delivery_rows
+        if row.get("publish_log_id")
+    }
+    publish_rows = [
+        dict(row) for row in connection.execute(
+            "SELECT id,platform,title,url,source,retro_json "
+            "FROM publish_log WHERE tenant_id=? AND job_id=? ORDER BY id",
+            (tid, job_id),
+        ).fetchall()
+    ]
+    if delivery_publish_ids:
+        marks = ",".join("?" for _ in delivery_publish_ids)
+        known = {int(row["id"]) for row in publish_rows}
+        publish_rows.extend(
+            dict(row) for row in connection.execute(
+                "SELECT id,platform,title,url,source,retro_json "
+                f"FROM publish_log WHERE tenant_id=? AND id IN ({marks}) "
+                "ORDER BY id",
+                (tid, *sorted(delivery_publish_ids)),
+            ).fetchall()
+            if int(row["id"]) not in known
+        )
+        publish_rows.sort(key=lambda row: int(row["id"]))
+    pub_rows = [
+        dict(row) for row in connection.execute(
+            "SELECT id,platform,account,payload_json,status,submission_state,"
+            "submit_started_at,log,fail_json FROM pub_task "
+            "WHERE tenant_id=? AND json_valid(payload_json) "
+            "AND CAST(json_extract(payload_json,'$.job_id') AS INTEGER)=? "
+            "ORDER BY id",
+            (tid, job_id),
+        ).fetchall()
+    ]
+
+    titles: set[str] = set()
+    _purge_json_titles(job_row["brief_json"], titles)
+    for row in station_rows:
+        _purge_json_titles(row.get("output_json"), titles)
+    for row in asset_rows:
+        _purge_json_titles(row.get("payload_json"), titles)
+    for row in knowledge_rows:
+        text = " ".join(str(row.get("title") or "").split()).strip()
+        if text:
+            titles.add(text[:500])
+    for row in tv_rows:
+        _purge_json_titles(row.get("params_json"), titles)
+    for row in delivery_rows + publish_rows:
+        text = " ".join(str(row.get("title") or "").split()).strip()
+        if text and text != _PURGED_CONTENT:
+            titles.add(text[:500])
+    for row in pub_rows:
+        _purge_json_titles(row.get("payload_json"), titles)
+    title_tuple = tuple(sorted(titles))
+    censor_titles = {title[:80] for title in title_tuple if title[:80]}
+
+    censor_rows = [
+        dict(row) for row in connection.execute(
+            "SELECT id,job_id,kind,platform,title,verdict,score,issues_json,"
+            "report FROM censor_log WHERE tenant_id=? AND job_id=? "
+            "ORDER BY id",
+            (tid, job_id),
+        ).fetchall()
+    ]
+    notification_rows = []
+    for row in connection.execute(
+            "SELECT id,job_id,kind,title,body,link,user_id FROM notification "
+            "WHERE tenant_id=? ORDER BY id", (tid,)).fetchall():
+        item = dict(row)
+        link = str(item.get("link") or "")
+        directly_linked = link in {
+            f"#/job/{job_id}", f"#/delivery/{job_id}"
+        }
+        if item.get("job_id") == job_id or directly_linked:
+            notification_rows.append(item)
+
+    billing_rows = [
+        dict(row) for row in connection.execute(
+            "SELECT id,job_id,delta,balance,reason FROM billing_log "
+            "WHERE tenant_id=? ORDER BY id",
+            (tid,),
+        ).fetchall()
+        if (
+            row["job_id"] == job_id
+            or _purge_billing_reason_matches(row["reason"], job_id)
+        )
+    ]
+    delivery_op_keys = {
+        str(row["op_key"])
+        for row in delivery_rows
+        if row.get("op_key")
+    }
+    billing_operation_rows = [
+        dict(row) for row in connection.execute(
+            "SELECT op_key,job_id,action,units,points,note,status,error "
+            "FROM billing_operation WHERE tenant_id=? ORDER BY op_key",
+            (tid,),
+        ).fetchall()
+        if (
+            row["job_id"] == job_id
+            or
+            str(row["op_key"]) in delivery_op_keys
+        )
+    ]
+
+    # 旧版没有 job_id 的标题型记录可能属于同租户另一笔同标题业务。它们
+    # 只能触发“无法安全归因”的阻断，绝不纳入脱敏集合。
+    unattributed = [
+        ("censor_log", int(row["id"]))
+        for row in connection.execute(
+            "SELECT id,title FROM censor_log "
+            "WHERE tenant_id=? AND job_id IS NULL ORDER BY id",
+            (tid,),
+        ).fetchall()
+        if str(row["title"] or "") in censor_titles
+    ]
+    unattributed.extend(
+        ("notification", int(row["id"]))
+        for row in connection.execute(
+            "SELECT id,title,body,link FROM notification "
+            "WHERE tenant_id=? AND job_id IS NULL ORDER BY id",
+            (tid,),
+        ).fetchall()
+        if (
+            str(row["link"] or "") not in {
+                f"#/job/{job_id}", f"#/delivery/{job_id}"
+            }
+            and (
+                str(row["title"] or "") in title_tuple
+                or str(row["body"] or "") in title_tuple
+                or any(
+                    title[:20]
+                    and f"《{title[:20]}》" in str(row["title"] or "")
+                    for title in title_tuple
+                )
+            )
+        )
+    )
+    unattributed.extend(
+        ("billing_log", int(row["id"]))
+        for row in connection.execute(
+            "SELECT id,reason FROM billing_log "
+            "WHERE tenant_id=? AND job_id IS NULL ORDER BY id",
+            (tid,),
+        ).fetchall()
+        if (
+            not _purge_billing_reason_matches(row["reason"], job_id)
+            and _purge_legacy_billing_title_matches(
+                row["reason"], title_tuple)
+        )
+    )
+    unattributed.extend(
+        ("billing_operation", str(row["op_key"]))
+        for row in connection.execute(
+            "SELECT op_key,note FROM billing_operation "
+            "WHERE tenant_id=? AND job_id IS NULL ORDER BY op_key",
+            (tid,),
+        ).fetchall()
+        if (
+            str(row["op_key"]) not in delivery_op_keys
+            and _purge_billing_note_matches(row["note"], title_tuple)
+        )
+    )
+
+    pub_files = []
+    for row in pub_rows:
+        fail = db.jloads(row.get("fail_json"), {}) or {}
+        shot = fail.get("shot") if isinstance(fail, dict) else None
+        # 只有 /files/ 下的地址可能是本服务管理的本地截图。历史外链也要随
+        # fail_json 脱敏，但不能因为外部 URL 不可删除而阻断彻底删除。
+        if isinstance(shot, str) and shot.strip().startswith("/files/"):
+            pub_files.append((int(row["id"]), str(shot)))
+
+    active = []
+    active.extend(
+        ("tv_job", int(row["id"]))
+        for row in tv_rows
+        if (
+            row.get("status") in {"pending_charge", "queued", "running"}
+            or row.get("billing_status") in {"pending", "charged"}
+        )
+    )
+    active.extend(
+        ("wechat_draft_delivery", int(row["id"]))
+        for row in delivery_rows
+        if (
+            row.get("status") in {
+                "pending_charge", "processing", "submitting", "submitted"
+            }
+            or row.get("billing_status") in {"pending", "charged"}
+        )
+    )
+    active.extend(
+        ("pub_task", int(row["id"]))
+        for row in pub_rows
+        if row.get("status") in {"queued", "running"}
+    )
+    for row in publish_rows:
+        retro = db.jloads(row.get("retro_json"), {}) or {}
+        if any(
+            isinstance(state, dict) and state.get("state") == "processing"
+            for state in retro.values()
+        ):
+            active.append(("publish_log", int(row["id"])))
+    active.extend(
+        ("billing_operation", str(row["op_key"]))
+        for row in billing_operation_rows
+        if row.get("status") in {"pending", "charged"}
+    )
+
+    return {
+        "titles": title_tuple,
+        "station": _purge_rows_tuple(
+            station_rows, ("id", "output_json", "review_comment", "steps_json")),
+        "asset": _purge_rows_tuple(
+            asset_rows, ("id", "payload_json", "meta_json")),
+        "knowledge": _purge_rows_tuple(
+            knowledge_rows,
+            ("id", "title", "content", "tags_json", "meta_json"),
+        ),
+        "tv": _purge_rows_tuple(
+            tv_rows,
+            (
+                "id", "params_json", "script", "status", "billing_status",
+                "video_file", "error", "steps_json",
+            ),
+        ),
+        "delivery": _purge_rows_tuple(
+            delivery_rows,
+            (
+                "id", "request_hash", "request_key", "title", "status",
+                "billing_status", "op_key", "media_id", "publish_log_id",
+                "report_json", "error",
+            ),
+        ),
+        "publish": _purge_rows_tuple(
+            publish_rows,
+            ("id", "platform", "title", "url", "source", "retro_json"),
+        ),
+        "pub": _purge_rows_tuple(
+            pub_rows,
+            (
+                "id", "platform", "account", "payload_json", "status",
+                "submission_state", "submit_started_at", "log", "fail_json",
+            ),
+        ),
+        "censor": _purge_rows_tuple(
+            censor_rows,
+            (
+                "id", "job_id", "kind", "platform", "title", "verdict", "score",
+                "issues_json", "report",
+            ),
+        ),
+        "notification": _purge_rows_tuple(
+            notification_rows,
+            ("id", "job_id", "kind", "title", "body", "link", "user_id"),
+        ),
+        "billing_log": _purge_rows_tuple(
+            billing_rows, ("id", "job_id", "delta", "balance", "reason")),
+        "billing_operation": _purge_rows_tuple(
+            billing_operation_rows,
+            (
+                "op_key", "job_id", "action", "units", "points", "note",
+                "status", "error",
+            ),
+        ),
+        "tv_files": tuple(
+            (int(row["id"]), row.get("video_file"))
+            for row in tv_rows
+            if row.get("video_file")
+        ),
+        "pub_files": tuple(sorted(pub_files)),
+        "active": tuple(active),
+        "unattributed": tuple(unattributed),
+    }
 
 
 def _trash_module(kind: str, row: dict) -> str:
@@ -3940,18 +4826,26 @@ def trash_restore(kind: str, rid: int):
         raise HTTPException(409, "记录状态刚刚发生变化，请刷新后再恢复")
     if kind == "task":
         taskrunner.sync_meeting_delivery_for_task(rid)
+        expert = departments.get(row.get("emp_idx"))
         engine.broadcast(
             {
                 "type": "task_update",
+                "tenant_id": TEN(),
+                "_required_modules": (
+                    str((expert or {}).get("dept_key") or "content"),
+                ),
                 "task_id": rid,
                 "idx": row.get("emp_idx"),
             }
         )
     elif kind == "job":
-        engine.touch(rid)
-        engine.broadcast({"type": "job_update", "job_id": rid})
+        engine.touch(rid, TEN())
     elif kind == "avatar":
-        engine.broadcast({"type": "avatar_update", "job_id": rid})
+        engine.broadcast({
+            "type": "avatar_update",
+            "tenant_id": TEN(),
+            "job_id": rid,
+        })
     return {"ok": True, "restored": True, "kind": kind, "id": rid}
 
 
@@ -4050,31 +4944,177 @@ def _purge_tv_files(file_urls: list[str], tid: int, job_id: int) -> tuple[int, i
     return removed, failed
 
 
+def _purge_pub_files(items: list[tuple[int, str]]) -> tuple[int, int]:
+    """销毁关联发布任务的失败截图，不接受 payload 或客户端提供的任意路径。
+
+    pub_task 没有独立文件所有权目录；唯一由代码生成的受管截图是
+    ``/files/pub/fail_{pub_task.id}.png``。必须同时满足精确文件名、位于
+    ASSET_ROOT、不是软链接，才允许删除。
+    """
+    removed = failed = 0
+    root = os.path.realpath(assetfiles.ASSET_ROOT)
+    for pub_id, file_url in items:
+        try:
+            canonical = assetfiles.canonical_file_url(file_url)
+            expected = f"/files/pub/fail_{int(pub_id)}.png"
+            if canonical != expected:
+                raise assetfiles.AssetAccessError("publish screenshot mismatch")
+            lexical = os.path.abspath(
+                os.path.join(root, canonical.removeprefix("/files/"))
+            )
+            resolved = os.path.realpath(lexical)
+            if (
+                os.path.commonpath((root, resolved)) != root
+                or lexical != resolved
+            ):
+                raise assetfiles.AssetAccessError("publish screenshot unsafe")
+        except (assetfiles.AssetAccessError, TypeError, ValueError):
+            failed += 1
+            continue
+        if not os.path.lexists(lexical):
+            continue
+        if not os.path.isfile(lexical):
+            failed += 1
+            continue
+        try:
+            os.remove(lexical)
+            removed += 1
+        except OSError:
+            failed += 1
+    return removed, failed
+
+
+def _purge_ids(snapshot: dict, key: str) -> tuple:
+    return tuple(row[0] for row in snapshot.get(key, ()))
+
+
+def _purge_job_relations(
+        connection, tid: int, job_id: int, snapshot: dict, now: float) -> None:
+    """按保留矩阵删除正文表、脱敏审计表，保留退款与防重放锚点。"""
+    asset_ids = _purge_ids(snapshot, "asset")
+    knowledge_ids = _purge_ids(snapshot, "knowledge")
+    tv_ids = _purge_ids(snapshot, "tv")
+    notification_ids = _purge_ids(snapshot, "notification")
+    censor_ids = _purge_ids(snapshot, "censor")
+    publish_ids = _purge_ids(snapshot, "publish")
+    pub_ids = _purge_ids(snapshot, "pub")
+    delivery_ids = _purge_ids(snapshot, "delivery")
+
+    def delete_ids(table: str, ids: tuple, tenant_scoped: bool = True):
+        if not ids:
+            return
+        marks = ",".join("?" for _ in ids)
+        tenant_sql = " AND tenant_id=?" if tenant_scoped else ""
+        params = (*ids, tid) if tenant_scoped else ids
+        connection.execute(
+            f"DELETE FROM {table} WHERE id IN ({marks}){tenant_sql}",
+            params,
+        )
+
+    # 正文、brief、输出、素材引用所在的派生行必须物理删除。
+    connection.execute("DELETE FROM station_run WHERE job_id=?", (job_id,))
+    delete_ids("asset", asset_ids)
+    delete_ids("knowledge", knowledge_ids)
+    delete_ids("tv_job", tv_ids)
+    delete_ids("notification", notification_ids)
+
+    # 审核与发布骨架留作统计/防重放，但不保留任何可恢复的业务内容。
+    if censor_ids:
+        marks = ",".join("?" for _ in censor_ids)
+        connection.execute(
+            "UPDATE censor_log SET title=?,issues_json='[]',report='',"
+            f"updated_at=? WHERE tenant_id=? AND id IN ({marks})",
+            (_PURGED_CONTENT, now, tid, *censor_ids),
+        )
+    if publish_ids:
+        marks = ",".join("?" for _ in publish_ids)
+        connection.execute(
+            "UPDATE publish_log SET title=?,url='',retro_json='{}',"
+            f"updated_at=? WHERE tenant_id=? AND id IN ({marks})",
+            (_PURGED_CONTENT, now, tid, *publish_ids),
+        )
+    if pub_ids:
+        marks = ",".join("?" for _ in pub_ids)
+        anchor_payload = json.dumps(
+            {"job_id": int(job_id), "purged": True},
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+        connection.execute(
+            "UPDATE pub_task SET account=NULL,payload_json=?,log='',"
+            f"fail_json='{{}}',updated_at=? "
+            f"WHERE tenant_id=? AND id IN ({marks})",
+            (anchor_payload, now, tid, *pub_ids),
+        )
+    if delivery_ids:
+        marks = ",".join("?" for _ in delivery_ids)
+        connection.execute(
+            "UPDATE wechat_draft_delivery SET title=?,report_json=NULL,"
+            f"error=NULL,updated_at=? WHERE tenant_id=? AND id IN ({marks})",
+            (_PURGED_CONTENT, now, tid, *delivery_ids),
+        )
+
+    # 流水金额、余额、动作、状态与幂等键完整保留，只去掉标题/错误正文。
+    for billing_id, _job_id, _delta, _balance, reason in snapshot.get(
+            "billing_log", ()):
+        connection.execute(
+            "UPDATE billing_log SET reason=?,updated_at=? "
+            "WHERE id=? AND tenant_id=?",
+            (
+                _purge_redacted_billing_reason(reason),
+                now,
+                billing_id,
+                tid,
+            ),
+        )
+    for (
+            op_key, _job_id, _action, _units, _points, _note, _status,
+            _error) in (
+            snapshot.get("billing_operation", ())):
+        connection.execute(
+            "UPDATE billing_operation SET note=?,error=NULL,updated_at=? "
+            "WHERE op_key=? AND tenant_id=?",
+            (_PURGED_CONTENT, now, op_key, tid),
+        )
+
+
 @app.post("/api/trash/{kind}/{rid}/purge")
 def trash_purge(kind: str, rid: int):
     """合规出路:彻底删除回收站记录并连带销毁交付文件。
 
-    账目锚点(billing_log/billing_operation)必须留存,不做任何改动。
+    账目和防重复投递锚点必须留存；job 的业务正文和派生载荷按上方矩阵
+    物理删除或不可逆脱敏。
     """
     _need_admin()
     meta = _TRASH_TABLES.get(kind)
     if not meta or rid < 1:
         raise HTTPException(404)
+    tid = TEN()
     table, _ = meta
     row = db.one(
         f"SELECT * FROM {table} WHERE id=? AND tenant_id=? "
         "AND deleted_at IS NOT NULL",
-        (rid, TEN()),
+        (rid, tid),
     )
-    if not row or not auth.allowed(_trash_module(kind, row)):
+    if not row:
+        if _purge_tombstone_exists(kind, tid, rid):
+            return {
+                "ok": True,
+                "purged": True,
+                "kind": kind,
+                "id": rid,
+                "files_removed": 0,
+                "files_failed": 0,
+            }
+        raise HTTPException(404)
+    if not auth.allowed(_trash_module(kind, row)):
         raise HTTPException(404)
     active = _TRASH_ACTIVE_STATUS.get(kind, ())
     if (row.get("status") or "") in active:
         raise HTTPException(409, "该记录仍在进行中，请先等它收口再彻底删除")
 
-    tid = TEN()
     marker = _new_purge_marker()
-    tv_snapshot = ()
+    job_snapshot = None
     # 阶段一只持有一个短写事务：重验权限/状态、固定关联快照并用随机 marker
     # 认领软删行。随后立刻释放 SQLite 写锁。
     with db.atomic() as connection:
@@ -4091,7 +5131,22 @@ def trash_purge(kind: str, rid: int):
         if active and (current["status"] or "") in active:
             raise HTTPException(409, "该记录仍在进行中，请先等它收口再彻底删除")
         if kind == "job":
-            tv_snapshot = _purge_tv_snapshot(connection, tid, rid)
+            job_snapshot = _purge_job_snapshot(
+                connection, tid, rid, current
+            )
+            if job_snapshot["unattributed"]:
+                raise HTTPException(
+                    409,
+                    "发现升级前留下且无法安全归属到具体工单的审查或账务记录。"
+                    "为避免误删同标题任务，系统已停止彻底删除；请联系平台完成"
+                    "历史记录归因后再试",
+                )
+            if job_snapshot["active"]:
+                raise HTTPException(
+                    409,
+                    "该工单仍有成片、发布、公众号投递或计费操作在执行/对账，"
+                    "请等待它们收口后再彻底删除",
+                )
         changed = connection.execute(
             f"UPDATE {table} SET delete_reason=?,updated_at=? "
             "WHERE id=? AND tenant_id=? AND deleted_at IS NOT NULL",
@@ -4103,10 +5158,20 @@ def trash_purge(kind: str, rid: int):
     # 阶段二在事务外做可能很慢的磁盘 I/O；删除失败时 marker 和数据库锚点
     # 保持在位，下一次点击会重新认领并安全重试。
     files_removed, files_failed = _purge_local_files(kind, rid)
-    tv_files = [path for _, path in tv_snapshot if path]
+    tv_files = (
+        [path for _, path in job_snapshot["tv_files"] if path]
+        if job_snapshot else []
+    )
     tv_removed, tv_failed = _purge_tv_files(tv_files, tid, rid)
     files_removed += tv_removed
     files_failed += tv_failed
+    pub_removed = pub_failed = 0
+    if job_snapshot:
+        pub_removed, pub_failed = _purge_pub_files(
+            list(job_snapshot["pub_files"])
+        )
+        files_removed += pub_removed
+        files_failed += pub_failed
     if files_failed:
         raise HTTPException(
             409,
@@ -4114,7 +5179,7 @@ def trash_purge(kind: str, rid: int):
             "修复存储权限后请再次点击彻底删除，当前不能恢复以免找回残缺内容",
         )
 
-    # 阶段三再次短事务：marker、租户、状态和全部 tv_job 关联都必须与阶段一
+    # 阶段三再次短事务：marker、租户、状态和全部派生关系都必须与阶段一
     # 一致。关联若在 I/O 期间变化就保留锚点，下次重试会纳入新关联。
     with db.atomic() as connection:
         current = connection.execute(
@@ -4128,15 +5193,29 @@ def trash_purge(kind: str, rid: int):
             )
         if active and (current["status"] or "") in active:
             raise HTTPException(409, "记录状态发生变化，已保留删除锚点")
-        if kind == "job" and _purge_tv_snapshot(connection, tid, rid) != tv_snapshot:
-            raise HTTPException(
-                409, "清理期间新增了关联交付文件，记录已保留；请再次点击彻底删除"
+        if kind == "job":
+            current_snapshot = _purge_job_snapshot(
+                connection, tid, rid, current
             )
+            if current_snapshot != job_snapshot:
+                raise HTTPException(
+                    409,
+                    "清理期间新增或变更了关联交付文件/业务记录，记录已保留；"
+                    "请再次点击彻底删除",
+                )
+            if current_snapshot["active"]:
+                raise HTTPException(
+                    409, "关联任务状态发生变化，已保留删除锚点"
+                )
         guard = ""
         args = [rid, tid, marker]
         if active:
             guard = " AND status NOT IN (%s)" % ",".join("?" * len(active))
             args.extend(active)
+        if kind == "job":
+            _purge_job_relations(
+                connection, tid, rid, job_snapshot, time.time()
+            )
         changed = connection.execute(
             f"DELETE FROM {table} WHERE id=? AND tenant_id=? "
             f"AND deleted_at IS NOT NULL AND delete_reason=?{guard}",
@@ -4144,13 +5223,9 @@ def trash_purge(kind: str, rid: int):
         ).rowcount
         if changed != 1:
             raise HTTPException(409, "记录状态刚刚发生变化，请刷新后再删除")
-        if kind == "job":
-            # 工单的工位产出(含正文/图片引用)一并硬删,不能留孤儿行
-            connection.execute(
-                "DELETE FROM station_run WHERE job_id=?", (rid,))
-            connection.execute(
-                "DELETE FROM tv_job WHERE job_id=? AND tenant_id=?",
-                (rid, tid))
+        _record_purge_tombstone(
+            connection, kind, tid, rid, time.time()
+        )
     return {
         "ok": True,
         "purged": True,
@@ -5356,6 +6431,19 @@ def _create_charged_avatar_job(params: dict, tid: int = None) -> int:
     return job_id
 
 
+def _start_avatar_job_worker(job_id: int):
+    return asyncio.create_task(
+        avatar.run_job(job_id, engine.broadcast)
+    )
+
+
+def _settle_unstarted_avatar_job(job_id: int) -> bool:
+    return avatar.settle_failure(
+        job_id,
+        "数字人任务启动失败，系统已安全终止并退回本次点数",
+    )
+
+
 @app.post("/api/avatar/jobs")
 async def avatar_job_create(body: dict):
     _need_module("avatar")
@@ -5408,8 +6496,11 @@ async def avatar_job_create(body: dict):
             }
             return _create_charged_avatar_job(params, tid)
 
-    jid = await db.arun(create_job)
-    asyncio.create_task(avatar.run_job(jid, engine.broadcast))
+    jid = await _run_db_then_start_worker_safely(
+        create_job,
+        start_worker=_start_avatar_job_worker,
+        settle_unstarted=_settle_unstarted_avatar_job,
+    )
     return {"job_id": jid}
 
 
@@ -5464,7 +6555,17 @@ async def avatar_job_retry(jid: int):
         raise HTTPException(404)
     if row.get("status") != "failed":
         raise HTTPException(409, "只有失败任务可以免费重试")
-    if not await db.arun(avatar.prepare_retry, jid, TEN()):
+    prepared = await _run_db_then_start_worker_safely(
+        avatar.prepare_retry,
+        jid,
+        TEN(),
+        start_worker=lambda _prepared: _start_avatar_job_worker(jid),
+        should_start=bool,
+        settle_unstarted=(
+            lambda _prepared: _settle_unstarted_avatar_job(jid)
+        ),
+    )
+    if not prepared:
         current = await db.aone(
             "SELECT retry_count FROM avatar_job WHERE id=? AND tenant_id=?",
             (jid, TEN()),
@@ -5472,7 +6573,6 @@ async def avatar_job_retry(jid: int):
         if (current.get("retry_count") or 0) >= avatar.MAX_FREE_RETRIES:
             raise HTTPException(429, "该任务免费重试次数已用完，请新建任务")
         raise HTTPException(409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
-    asyncio.create_task(avatar.run_job(jid, engine.broadcast))
     engine.broadcast({"type": "avatar_update", "job_id": jid})
     current = await db.aone(
         "SELECT retry_count FROM avatar_job WHERE id=?", (jid,)
@@ -5632,6 +6732,19 @@ def _create_charged_meeting(data: dict, member_count: int) -> int:
     return meeting_id
 
 
+def _start_meeting_worker(meeting_id: int):
+    return asyncio.create_task(
+        meeting.run(meeting_id, engine.broadcast)
+    )
+
+
+def _settle_unstarted_meeting(meeting_id: int) -> bool:
+    return meeting.settle_failure(
+        meeting_id,
+        "会议启动失败，系统已安全终止并退回本次点数",
+    )
+
+
 @app.post("/api/meetings")
 async def meeting_create(body: dict):
     # 先做类型净化、去重、权限校验，再计费；重复 idx 不再重复发言/重复收费。
@@ -5665,7 +6778,7 @@ async def meeting_create(body: dict):
     acceptance = (body.get("acceptance_criteria") or "").strip()[:1200]
     # 按公示价「会议每人1点」整单原子扣费；建会失败不会出现扣点无记录。
     try:
-        mid = await db.arun(
+        mid = await _run_db_then_start_worker_safely(
             _create_charged_meeting,
             {
                 "tenant_id": TEN(),
@@ -5678,10 +6791,11 @@ async def meeting_create(body: dict):
                 "round_no": 0,
             },
             len(idxs),
+            start_worker=_start_meeting_worker,
+            settle_unstarted=_settle_unstarted_meeting,
         )
     except billing.InsufficientPoints as e:
         raise HTTPException(402, str(e))
-    asyncio.create_task(meeting.run(mid, engine.broadcast))
     return {"meeting_id": mid, "members": member_views}
 
 
@@ -5928,8 +7042,20 @@ async def meeting_ask(mid: int, body: dict):
     # 追问会让全部参会成员各答一轮,按人头扣(原来只扣1点,6人会每次追问漏收5点)
     n = len(db.jloads(m.get("emp_idxs_json"), [])) or 1
     try:
-        billing_op = await db.arun(
-            meeting.begin_intervention, mid, q, n
+        billing_op = await _run_db_then_start_worker_safely(
+            meeting.begin_intervention,
+            mid,
+            q,
+            n,
+            start_worker=lambda op_key: asyncio.create_task(
+                meeting.ask(mid, q, engine.broadcast, op_key)
+            ),
+            should_start=bool,
+            settle_unstarted=lambda op_key: meeting.abort_intervention(
+                mid,
+                op_key,
+                "会议追问启动失败，点数已退回",
+            ),
         )
     except billing.InsufficientPoints as e:
         raise HTTPException(402, str(e))
@@ -5938,7 +7064,6 @@ async def meeting_ask(mid: int, body: dict):
             409,
             f"会议正在运行,或已达到最多 {meeting.MAX_INTERVENTIONS} 次介入",
         )
-    asyncio.create_task(meeting.ask(mid, q, engine.broadcast, billing_op))
     return {"ok": True}
 
 
@@ -6269,9 +7394,13 @@ async def guest_try(request: Request, body: dict):
     if claimed != 1:
         raise HTTPException(403, "体验次数已用完,联系我们开通账号继续用")
     from . import providers
+    content_count = len(registry.STATIONS)
+    expert_count = len(departments.specialists())
+    industry_count = len(departments.list_depts())
     prompt = (f"你是「派活 PaiHuo」的金牌数字员工,正在给一位来体验的老板露一手。"
               f"老板的问题:{q}\n要求:直接给出专业、可落地的回答(300字内,结构清晰);"
-              f"结尾用一句话自然带出:平台上还有70多位数字员工(内容流水线/59位餐饮专家/数字人视频),"
+              f"结尾用一句话自然带出:平台上还有{content_count + expert_count}位数字员工"
+              f"({content_count}个内容岗位/{industry_count}个行业的{expert_count}位产业专家/数字人视频),"
               f"开通账号就能把活派给他们。")
     try:
         r = await providers.call_text(
@@ -6659,7 +7788,12 @@ async def events():
     # member 只订阅自己板块相关的事件;owner/root 传 None = 全收
     modules = (frozenset(user.get("modules") or [])
                if user.get("role") == "member" else None)
-    engine.subscribers[q_] = (TEN(), _is_boss(), modules)
+    engine.subscribers[q_] = (
+        TEN(),
+        _is_boss(),
+        modules,
+        str(user.get("role") or ""),
+    )
 
     async def gen():
         try:
@@ -6770,7 +7904,7 @@ def _insert_censor_log_tx(connection, values: dict) -> int:
     row.setdefault("created_at", now)
     row.setdefault("updated_at", now)
     columns = (
-        "tenant_id", "kind", "platform", "title", "verdict", "score",
+        "tenant_id", "job_id", "kind", "platform", "title", "verdict", "score",
         "issues_json", "report", "created_at", "updated_at",
     )
     cursor = connection.execute(
@@ -6914,6 +8048,7 @@ def _create_wechat_delivery(tid: int, job_id: int, request_hash: str,
             claim,
             note=title[:20],
             op_key=op_key,
+            job_id=job_id,
         )
     except Exception:
         db.q(
@@ -6988,7 +8123,7 @@ def _complete_blocked_wechat_delivery(delivery: dict, report: dict) -> bool:
                 delivery.get("title") or "",
                 "公众号",
                 report,
-            ),
+            ) | {"job_id": int(delivery["job_id"])},
         )
         return True
 
@@ -7034,7 +8169,7 @@ def _finalize_wechat_delivery(delivery: dict) -> bool:
                 current["title"] or "",
                 "公众号",
                 report,
-            ),
+            ) | {"job_id": int(current["job_id"])},
         )
         retro = {
             str(day): {"due": now + day * 86400, "state": "pending"}
@@ -7979,6 +9114,12 @@ async def job_add_image(job_id: int, body: dict):
 from . import growth, matrixpub, notify, pubtrack, textvideo  # noqa: E402
 
 
+def _start_publish_worker(task_id: int):
+    return asyncio.create_task(
+        matrixpub.run_task(task_id, engine.broadcast)
+    )
+
+
 # ---------------- ① 图文转视频 ----------------
 def _tv_row(r):
     r["params"] = db.jloads(r.pop("params_json"), {})
@@ -8041,6 +9182,7 @@ def _create_charged_tv_job(params: dict, tenant_id: int = None,
             claim,
             note=(note or f"成片任务 #{tvid}")[:160],
             points=points,
+            job_id=job_id,
         )
     except billing.InsufficientPoints as exc:
         db.q(
@@ -8064,6 +9206,19 @@ def _create_charged_tv_job(params: dict, tenant_id: int = None,
         )
         raise HTTPException(409, "成片任务已提交，请到任务中心查看")
     return tvid
+
+
+def _start_text_video_worker(tvid: int):
+    return asyncio.create_task(
+        textvideo.run_job(tvid, engine.broadcast)
+    )
+
+
+def _settle_unstarted_text_video(tvid: int) -> bool:
+    return textvideo.settle_failure(
+        tvid,
+        "成片任务启动失败，系统已安全终止并退回本次点数",
+    )
 
 
 @app.post("/api/jobs/{job_id}/text-video")
@@ -8115,8 +9270,11 @@ async def job_text_video(job_id: int, body: dict):
             note=delivery["title"][:16],
         )
 
-    tvid = await db.arun(create_job_video)
-    asyncio.create_task(textvideo.run_job(tvid, engine.broadcast))
+    tvid = await _run_db_then_start_worker_safely(
+        create_job_video,
+        start_worker=_start_text_video_worker,
+        settle_unstarted=_settle_unstarted_text_video,
+    )
     return {"tv_id": tvid}
 
 
@@ -8166,7 +9324,11 @@ async def text_video_create(body: dict):
                     note=(params.get("title") or script or topic)[:16],
                 )
 
-        tvid = await db.arun(create_clip_video)
+        tvid = await _run_db_then_start_worker_safely(
+            create_clip_video,
+            start_worker=_start_text_video_worker,
+            settle_unstarted=_settle_unstarted_text_video,
+        )
     else:
         if len(script) < 20:
             raise HTTPException(400, "口播稿太短(至少20字)")
@@ -8175,13 +9337,14 @@ async def text_video_create(body: dict):
                   "image_query": (body.get("image_query") or body.get("title") or "")[:30],
                   "bgm": bgm,
                   "end_text": (body.get("end_text") or "")[:40]}
-        tvid = await db.arun(
+        tvid = await _run_db_then_start_worker_safely(
             _create_charged_tv_job,
             params,
             tenant_id=TEN(),
             note=(params.get("title") or script or topic)[:16],
+            start_worker=_start_text_video_worker,
+            settle_unstarted=_settle_unstarted_text_video,
         )
-    asyncio.create_task(textvideo.run_job(tvid, engine.broadcast))
     return {"tv_id": tvid}
 
 
@@ -8652,6 +9815,18 @@ def _settle_tool_failure(row: dict, error: str, refund_note: str) -> bool:
         return False
 
 
+def _settle_unstarted_tool_result(result: dict) -> bool:
+    job_id = int((result or {}).get("job_id") or 0)
+    row = db.one("SELECT * FROM tool_job WHERE id=?", (job_id,))
+    if not row:
+        return False
+    return _settle_tool_failure(
+        row,
+        "工具任务启动失败，系统已安全终止并退回本次点数",
+        "启动失败退回",
+    )
+
+
 def _recover_interrupted_tool_jobs():
     """服务重启时，旧进程留下的 running 已不可能继续，立即收口并退点。"""
     # pending_charge 从未扣款，直接清理；不能把它误当成已付费任务退款。
@@ -9049,8 +10224,14 @@ async def _tool_enqueue_async(
 ) -> dict:
     """完整扣费事务进 DB 池，回到事件循环后再创建 asyncio worker。"""
     await db.arun(_tool_require_idle, kind)
-    result = await db.arun(_tool_enqueue_record, kind, params, note)
-    _spawn_tool_worker(result["job_id"])
+    result = await _run_db_then_start_worker_safely(
+        _tool_enqueue_record,
+        kind,
+        params,
+        note,
+        start_worker=lambda queued: _spawn_tool_worker(queued["job_id"]),
+        settle_unstarted=_settle_unstarted_tool_result,
+    )
     return result
 
 

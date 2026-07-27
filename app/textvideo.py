@@ -1467,6 +1467,7 @@ def settle_failure(tvid: int, message: str,
         points,
         claim,
         f"退回:{label} · {error[:160]}",
+        job_id=row.get("job_id"),
     )
     if settled:
         cleanup_job_assets(tvid, row)
@@ -1733,7 +1734,11 @@ async def _run_job_inner(tvid: int, row: dict, p: dict, tid: int, broadcast):
                 notify.push,
                 tid,
                 "video",
-                {"title": title, "file": produced_file},
+                {
+                    "job_id": row.get("job_id"),
+                    "title": title,
+                    "file": produced_file,
+                },
             )
         except Exception as exc:
             log.error(

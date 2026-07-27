@@ -424,7 +424,8 @@ def fire(s: dict, engine, occurrence: str | None = None) -> int:
         try:
             charged = billing.charge_if_claimed(
                 "content_job", tid, claim,
-                note=f"定时·{s.get('name', '')[:12]}", points=points)
+                note=f"定时·{s.get('name', '')[:12]}", points=points,
+                job_id=job_id)
         except Exception:
             db.q(
                 "DELETE FROM job WHERE id=? AND billing_status='pending'",

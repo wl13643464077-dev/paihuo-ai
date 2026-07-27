@@ -88,6 +88,22 @@ class BillingSpendByActionCase(unittest.TestCase):
         self.assertEqual("expert_task", spend[0]["action"])
         self.assertEqual(1, spend[0]["points"])
 
+    def test_billing_window_is_explicit_when_history_exceeds_300_rows(self):
+        now = time.time()
+        with db.atomic() as connection:
+            connection.executemany(
+                "INSERT INTO billing_log"
+                "(tenant_id,delta,balance,reason,created_at,updated_at) "
+                "VALUES(2,-1,499,'测试流水',?,?)",
+                [(now + index, now + index) for index in range(305)],
+            )
+        from app import main
+        result = main.billing_get()
+        self.assertEqual(305, result["txn_n"])
+        self.assertEqual(300, len(result["log"]))
+        self.assertEqual(300, result["log_limit"])
+        self.assertTrue(result["log_truncated"])
+
 
 if __name__ == "__main__":
     unittest.main()

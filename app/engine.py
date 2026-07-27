@@ -44,6 +44,7 @@ class Engine:
         self.locks: dict = {}
         self.subscribers: dict = {}   # queue -> (租户id,是否root)，避免租户1普通成员被当平台方
         self._tid_cache: dict = {}     # (table, id) -> tenant_id 记忆,省得每条事件查库
+        self._tid_waiting: dict = {}   # 首次解析期间按记录合并事件，避免高频进度重复查库
         self._loop = None              # 引擎所在事件循环,供线程池路由跨线程安全唤醒
 
     # ---------- 跨线程安全投递 ----------
@@ -71,26 +72,93 @@ class Engine:
     _EV_TABLE = {"meeting": ("meeting", "meeting_id"), "task": ("task", "task_id"),
                  "avatar": ("avatar_job", "job_id"), "pub": ("pub_task", "task_id")}
 
-    def _tid_of(self, ev: dict):
-        """按事件归属解析租户 id；解析不出时返回 None，仅平台 root 可接收。"""
-        typ = ev.get("type") or ""
-        if ev.get("tenant_id") is not None:
-            return int(ev["tenant_id"])
+    def _event_identity(self, ev: dict):
+        """返回事件对应的租户表与记录 id；不做任何 I/O。"""
+        typ = str(ev.get("type") or "")
         table, idkey = "job", "job_id"
-        for pre, (t, k) in self._EV_TABLE.items():
-            if typ.startswith(pre):
-                table, idkey = t, k
+        for prefix, (candidate, candidate_key) in self._EV_TABLE.items():
+            if typ.startswith(prefix):
+                table, idkey = candidate, candidate_key
                 break
         rid = ev.get(idkey)
         if rid is None:
             return None
-        ck = (table, rid)
-        if ck not in self._tid_cache:
-            if len(self._tid_cache) > 4000:
-                self._tid_cache.clear()
-            r = db.one(f"SELECT tenant_id FROM {table} WHERE id=?", (rid,))
-            self._tid_cache[ck] = (r or {}).get("tenant_id") if r else None
-        return self._tid_cache[ck]
+        return table, rid
+
+    def _tid_of(self, ev: dict):
+        """只读显式归属/内存缓存；禁止在调用线程同步访问 SQLite。"""
+        if ev.get("tenant_id") is not None:
+            try:
+                return int(ev["tenant_id"])
+            except (TypeError, ValueError):
+                return None
+        identity = self._event_identity(ev)
+        if identity is None:
+            return None
+        return self._tid_cache.get(identity)
+
+    @staticmethod
+    def _lookup_tid(identity):
+        """同步兼容查询；只能由 DB 线程池或无事件循环的装配阶段调用。"""
+        table, rid = identity
+        row = db.one(f"SELECT tenant_id FROM {table} WHERE id=?", (rid,))
+        return int(row["tenant_id"]) if row and row.get("tenant_id") is not None else None
+
+    def _remember_tid(self, identity, tenant_id):
+        if len(self._tid_cache) > 4000:
+            self._tid_cache.clear()
+        self._tid_cache[identity] = tenant_id
+
+    def _defer_tenant_resolution(self, ev: dict, identity):
+        """在引擎循环合并缓存未命中的事件，并异步卸载租户查询。"""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # 引擎尚未启动且当前也没有事件循环：允许同步装配/旧测试路径查询。
+            # 生产协程和 worker 线程在 start 后都会由 _dispatch 投回引擎循环。
+            try:
+                tenant_id = self._lookup_tid(identity)
+            except Exception as exc:
+                log.warning(
+                    "event tenant lookup failed error_type=%s",
+                    type(exc).__name__,
+                )
+                self._broadcast_now(ev, None)
+                return
+            self._remember_tid(identity, tenant_id)
+            self._broadcast_now(ev, tenant_id)
+            return
+
+        waiting = self._tid_waiting.setdefault(identity, [])
+        waiting.append(ev)
+        if len(waiting) == 1:
+            asyncio.create_task(self._resolve_waiting_events(identity))
+
+    async def _resolve_waiting_events(self, identity):
+        try:
+            tenant_id = await db.arun(self._lookup_tid, identity)
+        except Exception as exc:
+            log.warning(
+                "event tenant lookup failed error_type=%s",
+                type(exc).__name__,
+            )
+            waiting = self._tid_waiting.pop(identity, [])
+            for event in waiting:
+                self._broadcast_now(event, None)
+            return
+        self._remember_tid(identity, tenant_id)
+        waiting = self._tid_waiting.pop(identity, [])
+        for event in waiting:
+            self._broadcast_now(event, tenant_id)
+
+    @staticmethod
+    def _client_event(ev: dict) -> dict:
+        """剥离仅供服务端授权使用的事件元数据。"""
+        return {
+            key: value
+            for key, value in ev.items()
+            if not str(key).startswith("_")
+        }
 
     @staticmethod
     def _public_step(step: dict) -> dict:
@@ -110,6 +178,7 @@ class Engine:
     @classmethod
     def public_event(cls, ev: dict) -> dict:
         """把实时事件降级为对外契约；未知 ``*_step`` 同样默认去掉明细。"""
+        ev = cls._client_event(ev)
         typ = str(ev.get("type") or "")
         if typ in {"station_step", "task_step", "avatar_step", "employee_step"} \
                 or typ.endswith("_step"):
@@ -133,6 +202,7 @@ class Engine:
     @classmethod
     def internal_event(cls, ev: dict) -> dict:
         """Boss keeps operational detail, but never receives raw error text."""
+        ev = cls._client_event(ev)
         typ = str(ev.get("type") or "")
         step = ev.get("step")
         if (
@@ -150,35 +220,82 @@ class Engine:
     # 事件类型 → 所需板块:content-only 成员不该收到数字人/发布等事件,
     # 否则页面为拿不到的数据白白自刷新(SHELL_DIRTY)+白打 /state。
     EVENT_MODULE = {
-        "avatar_update": "avatar", "talking_photo": "avatar",
+        "avatar_update": "avatar", "avatar_step": "avatar",
+        "talking_photo": "avatar",
         "tv_done": "content", "tv_step": "content",
         "job_update": "content", "station_step": "content",
+        "task_update": "content", "task_step": "content",
         "tool_update": "content", "pub_update": "content",
         "gate_running": "content",
     }
 
     def broadcast(self, ev: dict):
         tid = self._tid_of(ev)
+        identity = self._event_identity(ev)
+        if (
+            tid is None
+            and ev.get("tenant_id") is None
+            and identity is not None
+            and identity not in self._tid_cache
+        ):
+            # 缓存未命中时绝不在事件循环直接查 SQLite。跨线程调用同样先投回
+            # 引擎循环，再由 db.arun 卸载；同一记录的并发事件会在循环内合并。
+            self._dispatch(
+                self._defer_tenant_resolution,
+                dict(ev),
+                identity,
+            )
+            return
+        self._broadcast_now(ev, tid)
+
+    def _broadcast_now(self, ev: dict, tid):
         for q_, subscriber in list(self.subscribers.items()):
             if isinstance(subscriber, tuple):
                 sub_tid, sub_root = subscriber[0], subscriber[1]
                 sub_modules = subscriber[2] if len(subscriber) > 2 else None
+                sub_role = subscriber[3] if len(subscriber) > 3 else None
             else:
-                sub_tid, sub_root, sub_modules = subscriber, False, None
+                sub_tid, sub_root, sub_modules, sub_role = (
+                    subscriber,
+                    False,
+                    None,
+                    None,
+                )
             if tid is None and not sub_root:
                 continue   # 找不到归属绝不广播给普通账号，避免删除竞态/未知事件泄露
             if tid is not None and not sub_root and sub_tid != tid:
                 continue
-            if sub_modules is not None:
-                need = self.EVENT_MODULE.get(str(ev.get("type") or ""))
-                if need and need not in sub_modules:
-                    continue   # member 无该板块:事件与他无关,不投递
+            member = (
+                sub_role == "member"
+                or (
+                    sub_role is None
+                    and sub_modules is not None
+                    and not sub_root
+                )
+            )
+            privileged = sub_root or sub_role in {"root", "owner"}
+            if member and not privileged:
+                granted = frozenset(sub_modules or ())
+                if "_required_modules" in ev:
+                    required = frozenset(
+                        str(module)
+                        for module in (ev.get("_required_modules") or ())
+                        if str(module)
+                    )
+                    if not required or not required.issubset(granted):
+                        continue
+                else:
+                    need = self.EVENT_MODULE.get(str(ev.get("type") or ""))
+                    if not need or need not in granted:
+                        # 新增业务事件若忘了声明板块，普通 member 默认拒绝；
+                        # owner/root 仍按租户边界接收，避免安全默认值变成泄露。
+                        continue
             payload = (
                 self.internal_event(ev)
                 if sub_root
                 else self.public_event(ev)
             )
-            # 事件塑形(含 _tid_of 的库查询)留在调用线程,只把入队动作投递回循环。
+            # 授权与塑形不做 I/O；只把 asyncio.Queue 入队投递回所属循环。
             self._dispatch(self._enqueue_event, q_, payload)
 
     @staticmethod
@@ -188,10 +305,13 @@ class Engine:
         except asyncio.QueueFull:
             pass
 
-    def touch(self, job_id):
-        self.broadcast({"type": "job_update", "job_id": job_id, "ts": time.time()})
+    def touch(self, job_id, tenant_id=None):
+        event = {"type": "job_update", "job_id": job_id, "ts": time.time()}
+        if tenant_id is not None:
+            event["tenant_id"] = tenant_id
+        self.broadcast(event)
 
-    def _recorder(self, job_id, idx, run_id=None):
+    def _recorder(self, job_id, idx, run_id=None, tenant_id=None):
         """工位步骤记录器:每一步实时 SSE 广播 + 落库(steps_json),供前端可视化.
         返回 (progress回调, steps列表)。idx 传 "gate" 表示质检关卡。"""
         steps = []
@@ -206,8 +326,11 @@ class Engine:
             else:
                 steps.append({"k": kind, "l": str(label)[:300], "ts": now})
             st["cast"] = now
-            self.broadcast({"type": "station_step", "job_id": job_id, "idx": idx,
-                            "n": len(steps), "step": steps[-1]})
+            event = {"type": "station_step", "job_id": job_id, "idx": idx,
+                     "n": len(steps), "step": steps[-1]}
+            if tenant_id is not None:
+                event["tenant_id"] = tenant_id
+            self.broadcast(event)
             if run_id and (kind != "typing" or now - st["save"] > 3):
                 # 进度回调常在事件循环上被 provider 协程调用;这里的落库是一次
                 # 写操作,写锁竞争时会把整个循环冻住,必须投给 db 线程池。
@@ -376,6 +499,7 @@ class Engine:
                 float(amount or 0),
                 claim,
                 f"退回:内容流水线整单 · {reason[:120]}",
+                job_id=job_id,
             )
         except Exception as exc:
             # 结算故障也不能留下“永远运行中”；保留 charged 供启动对账补退。
@@ -511,6 +635,7 @@ class Engine:
             float(amount or 0),
             claim,
             f"退回:内容流水线整单 · {reason[:120]}",
+            job_id=job_id,
         )
         if outcome["invalid"]:
             raise ValueError(outcome["invalid"])
@@ -945,8 +1070,13 @@ class Engine:
         early, run_id, tenant_id = await db.arun(_open_tx)
         if early:
             return early
-        self.touch(job_id)
-        progress, steps = self._recorder(job_id, idx, run_id)
+        self.touch(job_id, tenant_id)
+        progress, steps = self._recorder(
+            job_id,
+            idx,
+            run_id,
+            tenant_id=tenant_id,
+        )
         ctx = {
             "job_id": job_id, "tenant_id": tenant_id,
             "brief": brief, "profile": profile,

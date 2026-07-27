@@ -58,6 +58,39 @@ PERIODS = [{"key": "month", "label": "月付", "months": 1, "discount": 1.0},
            {"key": "year", "label": "年付(8折)", "months": 12, "discount": 0.8}]
 
 
+def subscription_quote(plan_key: str, period_key: str) -> dict:
+    """Return the authoritative server-side quote for one subscription."""
+    plan = next((p for p in PLANS if p["key"] == plan_key), None)
+    period = next((p for p in PERIODS if p["key"] == period_key), None)
+    if not plan or not period:
+        raise ValueError("未知套餐或周期")
+    months = int(period["months"])
+    return {
+        "plan": plan["key"],
+        "plan_name": plan["name"],
+        "period": period["key"],
+        "period_label": period["label"],
+        "months": months,
+        "points": plan["points"] * months,
+        "price": round(plan["sale"] * months * period["discount"]),
+    }
+
+
+def subscription_catalog() -> dict:
+    """Expose catalogue copy and quotes from the same server-side price source."""
+    return {
+        "plans": [dict(plan) for plan in PLANS],
+        "periods": [dict(period) for period in PERIODS],
+        "quotes": [
+            subscription_quote(plan["key"], period["key"])
+            for plan in PLANS
+            for period in PERIODS
+        ],
+        "payment_mode": "offline_confirmation",
+        "payment_notice": "提交购买申请后由平台联系；确认线下到账后才开通套餐。",
+    }
+
+
 def prices() -> dict:
     saved = db.jloads(db.get_setting("prices"), None)
     return saved if saved else DEFAULT_PRICES
@@ -77,7 +110,8 @@ class _LinkedClaimRejected(Exception):
     """让计费操作与业务状态一起回滚的内部控制流。"""
 
 
-def _spend(tid: int, pts: float, reason: str) -> float:
+def _spend(
+        tid: int, pts: float, reason: str, job_id: int | None = None) -> float:
     """原子扣点:条件 UPDATE(防并发扣穿)+ 流水,同一事务(防余额与流水脱节)."""
     now = time.time()
     with db.atomic() as c:
@@ -88,13 +122,18 @@ def _spend(tid: int, pts: float, reason: str) -> float:
             bal = (r[0] if r else 0) or 0
             raise InsufficientPoints(f"点数不足:本次需 {pts:.0f} 点,余额 {bal:.0f} 点。请充值或升级套餐")
         newbal = c.execute("SELECT balance FROM tenants WHERE id=?", (tid,)).fetchone()[0]
-        c.execute("INSERT INTO billing_log(tenant_id,delta,balance,reason,created_at,updated_at)"
-                  " VALUES(?,?,?,?,?,?)", (tid, -pts, newbal, reason, now, now))
+        c.execute(
+            "INSERT INTO billing_log"
+            "(tenant_id,job_id,delta,balance,reason,created_at,updated_at)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (tid, job_id, -pts, newbal, reason, now, now),
+        )
     return newbal
 
 
 def charge_if_claimed(action: str, tid: int, claim, note: str = "",
-                      n: int = 1, points: float = None) -> bool:
+                      n: int = 1, points: float = None,
+                      job_id: int | None = None) -> bool:
     """原子抢占待开工记录并扣点，杜绝“先扣点、任务却没创建”。"""
     p = prices().get(action) or {"points": 1}
     amount = float(points if points is not None else p["points"] * max(1, n))
@@ -117,15 +156,16 @@ def charge_if_claimed(action: str, tid: int, claim, note: str = "",
                 f"点数不足:本次需 {amount:.0f} 点,余额 {bal:.0f} 点。请充值或升级套餐")
         newbal = c.execute("SELECT balance FROM tenants WHERE id=?", (tid,)).fetchone()[0]
         c.execute(
-            "INSERT INTO billing_log(tenant_id,delta,balance,reason,created_at,updated_at) "
-            "VALUES(?,?,?,?,?,?)",
-            (tid, -amount, newbal, reason, now, now),
+            "INSERT INTO billing_log"
+            "(tenant_id,job_id,delta,balance,reason,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (tid, job_id, -amount, newbal, reason, now, now),
         )
     return True
 
 
 def start_operation(action: str, tid: int = None, note: str = "", n: int = 1,
-                    op_key: str = None) -> str:
+                    op_key: str = None, job_id: int | None = None) -> str:
     """建立一笔可恢复的后台/长请求计费操作并原子扣点。
 
     ``op_key`` 可由业务传入以防重复提交；省略时生成不可预测的唯一键。记录先以
@@ -144,9 +184,13 @@ def start_operation(action: str, tid: int = None, note: str = "", n: int = 1,
         with db.atomic() as c:
             cur = c.execute(
                 "INSERT OR IGNORE INTO billing_operation"
-                "(op_key,tenant_id,action,units,points,note,status,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,'pending',?,?)",
-                (key, tid, action, units, points, note[:200], now, now),
+                "(op_key,tenant_id,job_id,action,units,points,note,status,"
+                "created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,'pending',?,?)",
+                (
+                    key, tid, job_id, action, units, points, note[:200],
+                    now, now,
+                ),
             )
             if cur.rowcount != 1:
                 raise ValueError("重复的计费操作")
@@ -163,7 +207,8 @@ def start_operation(action: str, tid: int = None, note: str = "", n: int = 1,
 
     try:
         charged = charge_if_claimed(
-            action, tid, claim, note=note, n=units, points=points)
+            action, tid, claim, note=note, n=units, points=points,
+            job_id=job_id)
     except Exception:
         db.q("DELETE FROM billing_operation WHERE op_key=? AND status='pending'", (key,))
         raise
@@ -173,7 +218,8 @@ def start_operation(action: str, tid: int = None, note: str = "", n: int = 1,
 
 
 def start_operation_if_claimed(action: str, tid: int, claim, note: str = "",
-                               n: int = 1, op_key: str = None) -> str | None:
+                               n: int = 1, op_key: str = None,
+                               job_id: int | None = None) -> str | None:
     """在同一事务中占用业务状态、建立操作记录并扣点。
 
     用于“先把业务改成 running，再另开计费记录”会留下崩溃窗口的入口。
@@ -193,9 +239,13 @@ def start_operation_if_claimed(action: str, tid: int, claim, note: str = "",
             return None
         c.execute(
             "INSERT INTO billing_operation"
-            "(op_key,tenant_id,action,units,points,note,status,created_at,updated_at) "
-            "VALUES(?,?,?,?,?,?,'charged',?,?)",
-            (key, tid, action, units, points, note[:200], now, now),
+            "(op_key,tenant_id,job_id,action,units,points,note,status,"
+            "created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,'charged',?,?)",
+            (
+                key, tid, job_id, action, units, points, note[:200],
+                now, now,
+            ),
         )
         if tid != 1 and points > 0:
             cur = c.execute(
@@ -217,9 +267,9 @@ def start_operation_if_claimed(action: str, tid: int, claim, note: str = "",
             ).fetchone()[0]
             c.execute(
                 "INSERT INTO billing_log"
-                "(tenant_id,delta,balance,reason,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?)",
-                (tid, -points, new_balance, reason, now, now),
+                "(tenant_id,job_id,delta,balance,reason,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (tid, job_id, -points, new_balance, reason, now, now),
             )
     return key
 
@@ -257,7 +307,7 @@ def fail_operation_if_claimed(op_key: str, reason: str, claim) -> bool:
     try:
         with db.atomic() as c:
             row = c.execute(
-                "SELECT tenant_id,points,action FROM billing_operation "
+                "SELECT tenant_id,job_id,points,action FROM billing_operation "
                 "WHERE op_key=? AND status='charged'",
                 (op_key,),
             ).fetchone()
@@ -287,10 +337,11 @@ def fail_operation_if_claimed(op_key: str, reason: str, claim) -> bool:
                 ).fetchone()[0]
                 c.execute(
                     "INSERT INTO billing_log"
-                    "(tenant_id,delta,balance,reason,created_at,updated_at) "
-                    "VALUES(?,?,?,?,?,?)",
+                    "(tenant_id,job_id,delta,balance,reason,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?)",
                     (
                         tid,
+                        row["job_id"],
                         points,
                         new_balance,
                         f"退回:{label} · {error[:160]}",
@@ -319,7 +370,8 @@ def complete_operation(op_key: str) -> bool:
 def fail_operation(op_key: str, reason: str = "执行失败自动退回") -> bool:
     """失败结算并按实际扣款退款；并发/重复调用最多成功一次。"""
     row = db.one(
-        "SELECT tenant_id,points,action FROM billing_operation WHERE op_key=?",
+        "SELECT tenant_id,job_id,points,action FROM billing_operation "
+        "WHERE op_key=?",
         (op_key,),
     )
     if not row:
@@ -337,6 +389,7 @@ def fail_operation(op_key: str, reason: str = "执行失败自动退回") -> boo
     return refund_amount_if_claimed(
         row["tenant_id"], row["points"], claim,
         f"退回:{label} · {(reason or '执行失败')[:160]}",
+        job_id=row.get("job_id"),
     )
 
 
@@ -378,36 +431,47 @@ def recover_interrupted_operations(reason: str = "服务重启，中断任务自
     return refunded
 
 
-def charge(action: str, tid: int = None, note: str = "") -> float:
+def charge(
+        action: str, tid: int = None, note: str = "",
+        job_id: int | None = None) -> float:
     """扣点。平台自有租户(1)免扣。返回扣后余额;不足抛 InsufficientPoints."""
     tid = tid or auth.tenant_id()
     if tid == 1:
         return -1  # 平台自有,不计费
     p = prices().get(action) or {"points": 1}
     return _spend(tid, p["points"],
-                  f"{p.get('label', action)}{(' · ' + note) if note else ''}")
+                  f"{p.get('label', action)}{(' · ' + note) if note else ''}",
+                  job_id=job_id)
 
 
-def charge_n(action: str, n: int, tid: int = None, note: str = "") -> float:
+def charge_n(
+        action: str, n: int, tid: int = None, note: str = "",
+        job_id: int | None = None) -> float:
     """按份数一次性扣点(圆桌会议按人头):要么全扣要么不扣,杜绝扣一半报 402."""
     tid = tid or auth.tenant_id()
     if tid == 1:
         return -1
     p = prices().get(action) or {"points": 1}
     return _spend(tid, p["points"] * max(1, n),
-                  f"{p.get('label', action)} ×{n}{(' · ' + note) if note else ''}")
+                  f"{p.get('label', action)} ×{n}{(' · ' + note) if note else ''}",
+                  job_id=job_id)
 
 
-def refund(action: str, tid: int, note: str = "", n: int = 1):
+def refund(
+        action: str, tid: int, note: str = "", n: int = 1,
+        job_id: int | None = None):
     """任务失败退点(与 charge 对称;租户1本来免扣,不退)."""
     if not tid or tid == 1:
         return
     p = prices().get(action) or {"points": 1}
     grant(tid, p["points"] * max(1, n),
-          f"退回:{p.get('label', action)}{(' · ' + note) if note else ''}")
+          f"退回:{p.get('label', action)}{(' · ' + note) if note else ''}",
+          job_id=job_id)
 
 
-def refund_amount_if_claimed(tid: int, points: float, claim, reason: str) -> bool:
+def refund_amount_if_claimed(
+        tid: int, points: float, claim, reason: str,
+        job_id: int | None = None) -> bool:
     """原子抢占失败结算并按任务实际扣点金额退款。"""
     amount = float(points or 0)
     now = time.time()
@@ -424,14 +488,17 @@ def refund_amount_if_claimed(tid: int, points: float, claim, reason: str) -> boo
             raise RuntimeError(f"退款租户不存在:{tid}")
         newbal = c.execute("SELECT balance FROM tenants WHERE id=?", (tid,)).fetchone()[0]
         c.execute(
-            "INSERT INTO billing_log(tenant_id,delta,balance,reason,created_at,updated_at) "
-            "VALUES(?,?,?,?,?,?)",
-            (tid, amount, newbal, reason, now, now),
+            "INSERT INTO billing_log"
+            "(tenant_id,job_id,delta,balance,reason,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (tid, job_id, amount, newbal, reason, now, now),
         )
     return True
 
 
-def refund_if_claimed(action: str, tid: int, claim, note: str = "", n: int = 1) -> bool:
+def refund_if_claimed(
+        action: str, tid: int, claim, note: str = "", n: int = 1,
+        job_id: int | None = None) -> bool:
     """先原子抢占一条待失败任务，再在同一事务内退点。
 
     ``claim(connection)`` 只有在本调用把任务从 running 改成 failed 时才返回 True。
@@ -440,17 +507,24 @@ def refund_if_claimed(action: str, tid: int, claim, note: str = "", n: int = 1) 
     p = prices().get(action) or {"points": 1}
     points = p["points"] * max(1, n)
     reason = f"退回:{p.get('label', action)}{(' · ' + note) if note else ''}"
-    return refund_amount_if_claimed(tid, points, claim, reason)
+    return refund_amount_if_claimed(
+        tid, points, claim, reason, job_id=job_id)
 
 
-def grant(tid: int, points: float, reason: str):
+def grant(
+        tid: int, points: float, reason: str,
+        job_id: int | None = None):
     now = time.time()
     with db.atomic() as c:
         c.execute("UPDATE tenants SET balance=COALESCE(balance,0)+?, updated_at=? WHERE id=?",
                   (points, now, tid))
         newbal = c.execute("SELECT balance FROM tenants WHERE id=?", (tid,)).fetchone()[0]
-        c.execute("INSERT INTO billing_log(tenant_id,delta,balance,reason,created_at,updated_at)"
-                  " VALUES(?,?,?,?,?,?)", (tid, points, newbal, reason, now, now))
+        c.execute(
+            "INSERT INTO billing_log"
+            "(tenant_id,job_id,delta,balance,reason,created_at,updated_at)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (tid, job_id, points, newbal, reason, now, now),
+        )
     return newbal
 
 
@@ -461,29 +535,45 @@ def subscribe(tid: int, plan_key: str, period_key: str, op_key: str = None):
     不能在服务端偷偷补随机值后宣称幂等。相同订单与相同套餐重复请求会重放原始
     回执；相同订单号若被拿去购买不同套餐则拒绝。
     """
-    plan = next((p for p in PLANS if p["key"] == plan_key), None)
-    period = next((p for p in PERIODS if p["key"] == period_key), None)
-    if not plan or not period:
-        raise ValueError("未知套餐或周期")
-    pts = plan["points"] * period["months"]
-    price = round(plan["sale"] * period["months"] * period["discount"])
-    expires = time.time() + period["months"] * 31 * 86400
+    quote = subscription_quote(plan_key, period_key)
+    pts = quote["points"]
+    price = quote["price"]
     key = str(op_key or "").strip()
     if not key or len(key) > 160:
         raise ValueError("缺少有效的开通单号，请刷新页面后重试")
     now = time.time()
-    label = f"开通{plan['name']}({period['label']},实收¥{price}),含 {pts} 点"
-    receipt = {
-        "v": 1,
-        "plan": plan_key,
-        "period": period_key,
-        "points": pts,
-        "price": price,
-        "expires": expires,
-    }
-    receipt_note = json.dumps(receipt, ensure_ascii=True, separators=(",", ":"))
+    label = (
+        f"开通{quote['plan_name']}({quote['period_label']},"
+        f"实收¥{price}),含 {pts} 点"
+    )
     # 套餐变更与点数入账放进同一个事务:中途崩溃不会留下"有套餐没点数"或反之。
     with db.atomic() as c:
+        tenant = c.execute(
+            "SELECT plan_expires FROM tenants WHERE id=?",
+            (tid,),
+        ).fetchone()
+        if not tenant:
+            raise ValueError("企业账号不存在或已被删除")
+        try:
+            current_expires = float(tenant["plan_expires"] or 0)
+        except (TypeError, ValueError):
+            current_expires = 0
+        # 续费从现有有效期继续累加；已过期/首次开通才从当前时刻起算。
+        # BEGIN IMMEDIATE 将不同订单串行化，因此并发续费也不会覆盖彼此期限。
+        expires = max(now, current_expires) + quote["months"] * 31 * 86400
+        receipt = {
+            "v": 1,
+            "plan": plan_key,
+            "period": period_key,
+            "points": pts,
+            "price": price,
+            "expires": expires,
+        }
+        receipt_note = json.dumps(
+            receipt,
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
         cur = c.execute(
             "INSERT OR IGNORE INTO billing_operation"
             "(op_key,tenant_id,action,units,points,note,status,created_at,updated_at) "
@@ -492,7 +582,7 @@ def subscribe(tid: int, plan_key: str, period_key: str, op_key: str = None):
                 key,
                 tid,
                 "subscribe",
-                period["months"],
+                quote["months"],
                 pts,
                 receipt_note,
                 now,
@@ -535,7 +625,12 @@ def subscribe(tid: int, plan_key: str, period_key: str, op_key: str = None):
             }
         changed = c.execute(
             "UPDATE tenants SET plan=?,plan_expires=?,updated_at=? WHERE id=?",
-            (f"{plan['name']}·{period['label']}", expires, now, tid),
+            (
+                f"{quote['plan_name']}·{quote['period_label']}",
+                expires,
+                now,
+                tid,
+            ),
         ).rowcount
         if changed != 1:
             raise ValueError("企业账号不存在或已被删除")

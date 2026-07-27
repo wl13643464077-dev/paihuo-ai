@@ -2334,9 +2334,19 @@ async def run_job(job_id: int, broadcast):
         # 快照先序列化(steps 之后还会被改),整体重写语义下丢一帧无碍。
         snapshot = json.dumps(steps, ensure_ascii=False)
         db.submit_write(db.update, "avatar_job", job_id, {"steps_json": snapshot})
-        broadcast({"type": "avatar_step", "job_id": job_id, "step": steps[-1], "n": len(steps)})
+        broadcast({
+            "type": "avatar_step",
+            "tenant_id": j.get("tenant_id") or 1,
+            "job_id": job_id,
+            "step": steps[-1],
+            "n": len(steps),
+        })
 
-    broadcast({"type": "avatar_update", "job_id": job_id})
+    broadcast({
+        "type": "avatar_update",
+        "tenant_id": j.get("tenant_id") or 1,
+        "job_id": job_id,
+    })
     try:
         if await db.arun(cancelled, job_id):
             raise Cancelled()
@@ -2585,7 +2595,11 @@ async def run_job(job_id: int, broadcast):
                 )
         # 进度是异步落库的;结束前冲刷,保证终态可见时步骤记录已完整。
         await db.adrain()
-        broadcast({"type": "avatar_update", "job_id": job_id})
+        broadcast({
+            "type": "avatar_update",
+            "tenant_id": j.get("tenant_id") or 1,
+            "job_id": job_id,
+        })
 
 
 def resume_pending(broadcast):

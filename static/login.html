@@ -28,7 +28,7 @@ h1{font-size:30px;letter-spacing:3px;text-align:center;font-weight:900}
   box-shadow:7px 7px 0 rgba(51,41,31,.18);animation:pop .5s cubic-bezier(.2,1.6,.4,1)}
 @keyframes pop{from{transform:scale(.92);opacity:0}to{transform:scale(1);opacity:1}}
 label{display:block;font-weight:800;font-size:13px;margin:14px 0 6px}
-input{width:100%;border:2.5px solid var(--ink);border-radius:12px;padding:12px 14px;font-size:15px;background:#fff;outline:none;transition:.15s}
+input{width:100%;min-height:44px;border:2.5px solid var(--ink);border-radius:12px;padding:12px 14px;font-size:15px;background:#fff;outline:none;transition:.15s}
 input:focus{box-shadow:3px 3px 0 rgba(51,41,31,.15);transform:translateY(-1px)}
 button{width:100%;margin-top:22px;border:3px solid var(--ink);border-radius:14px;padding:13px;font-size:16px;font-weight:900;
   background:var(--gold);cursor:pointer;box-shadow:4px 4px 0 rgba(51,41,31,.2);transition:.12s;letter-spacing:4px}
@@ -41,8 +41,17 @@ button:active{transform:translateY(1px);box-shadow:2px 2px 0 rgba(51,41,31,.2)}
 .alt button{margin-top:0;padding:10px;font-size:13.5px;letter-spacing:1px;background:#fffdf7}
 .alt button.tour{background:#e8f6fb}
 .applycard{display:none;margin-top:14px}
+.purchase-choice{display:none;margin-top:10px;padding:10px 12px;border:2px solid var(--ink);border-radius:11px;background:#fff3c4;font-size:13px;line-height:1.6}
 .applycard textarea{width:100%;border:2.5px solid var(--ink);border-radius:12px;padding:10px 14px;font-size:14px;background:#fff;outline:none;min-height:64px;resize:vertical;font-family:inherit}
 .ok{color:#2c8a4b;font-size:13.5px;text-align:center;margin-top:12px;font-weight:800;min-height:18px}
+@media(max-width:640px){
+  body{padding:24px 0}
+  .emp{display:none}
+  .card{padding:24px 20px}
+}
+@media(prefers-reduced-motion:reduce){
+  *,*:before,*:after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
+}
 </style>
 </head>
 <body>
@@ -61,7 +70,7 @@ button:active{transform:translateY(1px);box-shadow:2px 2px 0 rgba(51,41,31,.2)}
     <label>密码</label>
     <input id="p" type="password" placeholder="您的密码" autocomplete="current-password" onkeydown="if(event.key==='Enter')go()">
     <button onclick="go()">进 入 集 团</button>
-    <div class="err" id="err"></div>
+    <div class="err" id="err" role="status" aria-live="polite"></div>
     <div class="alt">
       <button onclick="toggleApply()">📝 申请开通账号</button>
       <button class="tour" onclick="goTour(this)">👀 游客参观(只看不用)</button>
@@ -69,17 +78,44 @@ button:active{transform:translateY(1px);box-shadow:2px 2px 0 rgba(51,41,31,.2)}
   </div>
   <div class="card applycard" id="applycard">
     <b style="font-size:15px">📝 申请开通账号</b>
-    <div style="font-size:12.5px;color:#8b7355;margin-top:4px">留下联系方式,我们 1 个工作日内联系您开通企业账号</div>
+    <div style="font-size:12.5px;color:#8b7355;margin-top:4px">符合体验条件会即时开通；其他申请转人工审核,我们会在 1 个工作日内反馈</div>
+    <div class="purchase-choice" id="purchase-choice" role="status"></div>
     <label>手机号 *</label><input id="a-phone" placeholder="11 位手机号">
     <label>怎么称呼您</label><input id="a-name" placeholder="如:王老板">
-    <label>您的企业 / 行业</label><input id="a-co" placeholder="如:茶饮连锁 5 家店">
+    <label>您的企业 / 行业</label><input id="a-co" placeholder="如:汽车服务连锁 / 美容工作室 / 企业服务">
     <label>想用派活做什么(选填)</label><textarea id="a-note" placeholder="如:想让数字员工帮我做内容和新店选址"></textarea>
     <button onclick="applyGo(this)">提 交 申 请</button>
-    <div class="err" id="a-err"></div><div class="ok" id="a-ok"></div>
+    <div class="err" id="a-err" role="status" aria-live="polite"></div><div class="ok" id="a-ok" role="status" aria-live="polite"></div>
   </div>
   <div class="foot">副账号:开通与重置密码都请找您的企业主 · <span id="forgot-line">主账号忘记密码?联系顾问重置</span> · <a href="/promo">了解产品 →</a></div>
 </div>
 <script>
+const PURCHASE_PLAN_LABELS={trial:"体验版",startup:"创业版",biz:"企业版",flagship:"旗舰版"};
+const PURCHASE_PERIOD_LABELS={month:"月付",quarter:"季付",year:"年付"};
+function selectedPurchase(){
+  const params=new URLSearchParams(location.search);
+  const fromUrl={plan:params.get("plan"),period:params.get("period"),source:params.get("source")||"login"};
+  if(PURCHASE_PLAN_LABELS[fromUrl.plan]&&PURCHASE_PERIOD_LABELS[fromUrl.period]) return fromUrl;
+  try{
+    const cached=JSON.parse(localStorage.getItem("paihuo:pending-purchase")||"null");
+    if(PURCHASE_PLAN_LABELS[cached?.plan]&&PURCHASE_PERIOD_LABELS[cached?.period]) return cached;
+  }catch(_){}
+  return null;
+}
+function showSelectedPurchase(){
+  const selected=selectedPurchase();
+  if(!selected) return;
+  try{localStorage.setItem("paihuo:pending-purchase",JSON.stringify({...selected,created_at:Date.now()}));}catch(_){}
+  const choice=document.getElementById("purchase-choice");
+  choice.style.display="block";
+  choice.textContent=`已选择：${PURCHASE_PLAN_LABELS[selected.plan]} · ${PURCHASE_PERIOD_LABELS[selected.period]}。先登录或申请账号，进入套餐页后提交购买申请；此处不会扣款。`;
+  const card=document.getElementById("applycard");
+  card.style.display="block";
+  const note=document.getElementById("a-note");
+  const prefix=`[购买意向] ${PURCHASE_PLAN_LABELS[selected.plan]}·${PURCHASE_PERIOD_LABELS[selected.period]}`;
+  if(note&&!note.value.includes("[购买意向]")) note.value=prefix;
+}
+showSelectedPurchase();
 fetch("/api/support-contact").then(r=>r.json()).then(d=>{
   if(d.contact){ const el=document.getElementById("forgot-line");
     if(el) el.textContent = "忘记密码?联系顾问重置:" + d.contact; }
@@ -92,7 +128,7 @@ async function go(){
     const r = await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({username:document.getElementById('u').value.trim(),password:document.getElementById('p').value})});
     if(!r.ok){ err.textContent = (await r.json()).detail||'登录失败'; return; }
-    location.href = '/';
+    location.href = selectedPurchase() ? '/#/billing' : '/';
   }catch(e){ err.textContent = '网络异常,稍后再试'; }
 }
 function toggleApply(){
@@ -105,6 +141,7 @@ async function applyGo(btn){
   err.textContent=''; ok.textContent='';
   const phone = document.getElementById('a-phone').value.trim();
   if(!/^1\d{10}$/.test(phone)){ err.textContent='请填 11 位手机号'; return; }
+  try{localStorage.setItem("paihuo:purchase-contact",phone);}catch(_){}
   btn.disabled = true; btn.textContent = '提交中…';
   try{
     const r = await fetch('/api/guest/apply',{method:'POST',headers:{'Content-Type':'application/json'},

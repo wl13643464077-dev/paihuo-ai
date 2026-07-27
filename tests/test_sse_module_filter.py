@@ -20,16 +20,19 @@ class SseModuleFilterCase(unittest.TestCase):
         return hits
 
     def test_content_member_skips_avatar_events(self):
-        member = (2, False, frozenset({"content"}))
+        member = (2, False, frozenset({"content"}), "member")
         self.assertEqual(
             [], self._delivered(member, {"type": "avatar_update", "job_id": 1}),
             "content-only 成员不该收到数字人事件")
+        self.assertEqual(
+            [], self._delivered(member, {"type": "avatar_step", "job_id": 1}),
+            "content-only 成员不该收到数字人高频进度事件")
         self.assertEqual(
             1, len(self._delivered(member, {"type": "job_update", "job_id": 1})),
             "自己板块的事件照常投递")
 
     def test_owner_receives_everything(self):
-        owner = (2, False, None)
+        owner = (2, False, None, "owner")
         self.assertEqual(
             1, len(self._delivered(owner, {"type": "avatar_update", "job_id": 1})))
 
@@ -39,11 +42,19 @@ class SseModuleFilterCase(unittest.TestCase):
             1, len(self._delivered(legacy, {"type": "avatar_update", "job_id": 1})),
             "旧格式订阅者(无板块信息)不受过滤影响")
 
-    def test_unmapped_event_types_broadcast_to_members(self):
-        member = (2, False, frozenset({"library"}))
+    def test_unmapped_event_types_fail_closed_for_members(self):
+        member = (2, False, frozenset({"library"}), "member")
         self.assertEqual(
-            1, len(self._delivered(member, {"type": "meeting_update", "id": 3})),
-            "未映射类型保持原行为,不误伤")
+            [], self._delivered(member, {"type": "future_business_event", "id": 3}),
+            "新增业务事件必须显式声明板块，否则普通成员默认收不到")
+        self.assertEqual(
+            1,
+            len(self._delivered(
+                (2, False, None, "owner"),
+                {"type": "future_business_event", "id": 3},
+            )),
+            "owner 仍可接收租户内全部事件",
+        )
 
 
 if __name__ == "__main__":

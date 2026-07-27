@@ -21,6 +21,10 @@ KIND_META = {
     "publish": ("📣", "发布任务"),
     "wechat": ("📮", "公众号草稿投递"),
 }
+STATUS_FILTERS = {
+    "all", "open", "active", "waiting", "done", "failed", "cancelled",
+}
+KIND_FILTERS = {"all", *KIND_META}
 
 STATUS_LABELS = {
     "queued": "排队中",
@@ -285,6 +289,35 @@ def _like_value(value: str, max_length: int = 100) -> str:
             .replace("_", "\\_") + "%")
 
 
+def _safe_json_search_sql(
+    column: str,
+    path: str | None = None,
+    *,
+    fallback_to_document: bool = False,
+) -> str:
+    """生成不会被损坏历史 JSON 拖垮的搜索表达式。
+
+    SQLite 的 ``json_extract`` 遇到一条非法 JSON 会中止整条 UNION 查询。
+    只有 ``json_valid`` 已证明合法时才解析字段；非法载荷退回原始文本，既
+    保证任务中心可用，也让运维仍能用已知片段找到并处理坏记录。仅需全文
+    搜索的 JSON 列完全不调用 JSON1，因此同样不受损坏载荷影响。
+    """
+    document = f"COALESCE(CAST({column} AS TEXT),'')"
+    if not path:
+        return document
+
+    safe_path = path.replace("'", "''")
+    missing_value = document if fallback_to_document else "''"
+    extracted = (
+        f"COALESCE(CAST(json_extract({column},'{safe_path}') AS TEXT),"
+        f"{missing_value})"
+    )
+    return (
+        f"(CASE WHEN json_valid({column}) THEN {extracted} "
+        f"ELSE {document} END)"
+    )
+
+
 def _visible_header_query(tenant_id: int, allowed_modules: set[str],
                           task_idxs: set[int],
                           meeting_idxs: set[int],
@@ -320,25 +353,35 @@ def _visible_header_query(tenant_id: int, allowed_modules: set[str],
             "tenant_id=? AND deleted_at IS NULL AND emp_idx IN "
             "(SELECT CAST(value AS INTEGER) FROM json_each(?))",
             (tenant_id, _json_array(task_idxs)),
-            search_expr="COALESCE(json_extract(brief_json,'$.direction'),'')",
+            search_expr=_safe_json_search_sql(
+                "brief_json", "$.direction"
+            ),
         )
 
     if "content" in allowed_modules:
         add("content", "job", "status",
             "tenant_id=? AND deleted_at IS NULL", (tenant_id,),
-            search_expr="COALESCE(json_extract(brief_json,'$.direction'),'')")
+            search_expr=_safe_json_search_sql(
+                "brief_json", "$.direction"
+            ))
         add("video", "tv_job", "status", "tenant_id=?", (tenant_id,),
-            search_expr="COALESCE(json_extract(params_json,'$.title'),"
-                        "params_json,'')")
+            search_expr=_safe_json_search_sql(
+                "params_json", "$.title", fallback_to_document=True
+            ))
         # 工具单列表标题显示的是 TOOL_NAMES 中文名,搜索必须能按它命中,
         # 否则老板照着屏幕上的「今日必发」搜出 0 条
         tool_name_case = ("CASE kind " + " ".join(
             f"WHEN '{key}' THEN '{name}'" for key, name in TOOL_NAMES.items()
         ) + " ELSE kind END")
         add("tool", "tool_job", "status", "tenant_id=?", (tenant_id,),
-            search_expr=f"({tool_name_case})||COALESCE(params_json,'')")
+            search_expr=(
+                f"({tool_name_case})||"
+                + _safe_json_search_sql("params_json")
+            ))
         add("publish", "pub_task", "status", "tenant_id=?", (tenant_id,),
-            search_expr="COALESCE(json_extract(payload_json,'$.title'),'')")
+            search_expr=_safe_json_search_sql(
+                "payload_json", "$.title"
+            ))
         add("wechat", "wechat_draft_delivery", "status",
             "tenant_id=?", (tenant_id,),
             search_expr="COALESCE(title,'')")
@@ -355,7 +398,7 @@ def _visible_header_query(tenant_id: int, allowed_modules: set[str],
     if "avatar" in allowed_modules:
         add("avatar", "avatar_job", "status",
             "tenant_id=? AND deleted_at IS NULL", (tenant_id,),
-            search_expr="COALESCE(params_json,'')")
+            search_expr=_safe_json_search_sql("params_json"))
 
     if not branches:
         return "", []
@@ -387,8 +430,15 @@ def _rows_for_ids(select_sql: str, table: str, tenant_id: int,
     return {int(row["id"]): row for row in rows}
 
 
-def list_items(tenant_id: int, allowed_modules: set[str], limit: int = 300,
-               offset: int = 0, q: str = "") -> dict:
+def list_items(
+    tenant_id: int,
+    allowed_modules: set[str],
+    limit: int = 300,
+    offset: int = 0,
+    q: str = "",
+    status: str = "all",
+    kind: str = "all",
+) -> dict:
     """返回当前租户可见的统一任务流。
 
     counts 基于全部匹配记录；items 是稳定排序后的一个 offset 分页。调用方必须使用
@@ -397,6 +447,12 @@ def list_items(tenant_id: int, allowed_modules: set[str], limit: int = 300,
     allowed_modules = set(allowed_modules or ())
     limit = max(1, min(int(limit or 300), 5000))
     offset = max(0, int(offset or 0))
+    status = str(status or "all").strip().lower()
+    kind = str(kind or "all").strip().lower()
+    if status not in STATUS_FILTERS:
+        raise ValueError("任务状态筛选无效")
+    if kind not in KIND_FILTERS:
+        raise ValueError("任务类型筛选无效")
     counts = {"all": 0, "active": 0, "waiting": 0, "done": 0,
               "failed": 0, "cancelled": 0}
     kind_counts: dict[str, int] = {}
@@ -411,6 +467,7 @@ def list_items(tenant_id: int, allowed_modules: set[str], limit: int = 300,
         counts["open"] = 0
         return {
             "items": [], "counts": counts, "kind_counts": {},
+            "filtered_total": 0,
             "truncated": False, "has_more": False, "limit": limit,
             "offset": offset, "next_offset": None,
         }
@@ -424,20 +481,43 @@ def list_items(tenant_id: int, allowed_modules: set[str], limit: int = 300,
     for row in grouped:
         n = int(row.get("n") or 0)
         group = str(row.get("status_group") or "active")
-        kind = str(row.get("kind") or "")
+        row_kind = str(row.get("kind") or "")
         counts["all"] += n
         counts[group] = counts.get(group, 0) + n
-        kind_counts[kind] = kind_counts.get(kind, 0) + n
+        kind_counts[row_kind] = kind_counts.get(row_kind, 0) + n
     counts["open"] = counts["active"] + counts["waiting"]
+
+    page_filters: list[str] = []
+    page_filter_args: list[str] = []
+    if status == "open":
+        page_filters.append("status_group IN ('active','waiting')")
+    elif status != "all":
+        page_filters.append("status_group=?")
+        page_filter_args.append(status)
+    if kind != "all":
+        page_filters.append("kind=?")
+        page_filter_args.append(kind)
+    page_where = (
+        " WHERE " + " AND ".join(page_filters)
+        if page_filters else ""
+    )
+    filtered_total = int((
+        db.one(
+            "SELECT COUNT(*) AS n FROM (" + headers_sql
+            + ") filtered_headers" + page_where,
+            tuple(header_args + page_filter_args),
+        ) or {}
+    ).get("n") or 0)
 
     page_headers = db.q(
         "SELECT kind,record_id,status,status_group,created_at,updated_at FROM ("
-        + headers_sql + ") paged_headers "
+        + headers_sql + ") paged_headers"
+        + page_where + " "
         "ORDER BY CASE status_group WHEN 'waiting' THEN 2 "
         "WHEN 'active' THEN 1 ELSE 0 END DESC,"
         "updated_at DESC,created_at DESC,kind DESC,record_id DESC "
         "LIMIT ? OFFSET ?",
-        tuple(header_args) + (limit, offset),
+        tuple(header_args + page_filter_args) + (limit, offset),
     )
     ids_by_kind: dict[str, list[int]] = {}
     for header in page_headers:
@@ -851,11 +931,12 @@ def list_items(tenant_id: int, allowed_modules: set[str], limit: int = 300,
         if creator:
             item["creator"] = creator
     next_offset = offset + len(page_headers)
-    has_more = next_offset < counts["all"]
+    has_more = next_offset < filtered_total
     return {
         "items": items,
         "counts": counts,
         "kind_counts": kind_counts,
+        "filtered_total": filtered_total,
         "truncated": has_more,
         "has_more": has_more,
         "limit": limit,

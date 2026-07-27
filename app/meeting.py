@@ -38,6 +38,38 @@ def _emit(broadcast, event: dict):
         if now - _last_broadcast_warning >= 60:
             _last_broadcast_warning = now
             log.warning("meeting broadcast failed class=%s", type(exc).__name__)
+
+
+def _event_scope(row: dict) -> tuple[int, tuple[str, ...]]:
+    """把 HTTP 的“必须拥有全部参会部门”规则固化到实时事件。"""
+    required = set()
+    raw_idxs = db.jloads(row.get("emp_idxs_json"), [])
+    if not isinstance(raw_idxs, list) or not raw_idxs:
+        return int(row.get("tenant_id") or 1), ()
+    for raw_idx in raw_idxs:
+        try:
+            idx = int(raw_idx)
+        except (TypeError, ValueError):
+            return int(row.get("tenant_id") or 1), ()
+        expert = departments.get(idx)
+        required.add(expert["dept_key"] if expert else "content")
+    return int(row.get("tenant_id") or 1), tuple(sorted(required))
+
+
+def _emit_meeting_update(broadcast, meeting_id: int, row: dict):
+    """会议状态事件与正文消息使用同一租户、同一参会板块授权边界。"""
+    tenant_id, required_modules = _event_scope(row)
+    _emit(
+        broadcast,
+        {
+            "type": "meeting_update",
+            "meeting_id": meeting_id,
+            "tenant_id": tenant_id,
+            "_required_modules": required_modules,
+        },
+    )
+
+
 MAX_INTERVENTIONS = 2
 DECISIONS = {"GO", "NO_GO", "NEED_INFO"}
 _INTERVENTION_SNAPSHOT_FIELDS = (
@@ -318,21 +350,33 @@ async def _push(meeting_id: int, broadcast, who: str, text: str,
         # 读-改-写放同一事务并整体进 db 线程池:并行发言(提案/验证阶段是并发的)
         # 不互相覆盖。逐字稿是业务记录而不是可丢进度快照，写失败必须冒泡。
         with db.atomic() as c:
-            row = c.execute("SELECT messages_json FROM meeting WHERE id=?",
-                            (meeting_id,)).fetchone()
+            row = c.execute(
+                "SELECT tenant_id,emp_idxs_json,messages_json "
+                "FROM meeting WHERE id=?",
+                (meeting_id,),
+            ).fetchone()
             if not row:
-                return
+                return None
             messages = db.jloads(row["messages_json"], [])
             messages.append(msg)
             c.execute("UPDATE meeting SET messages_json=?,updated_at=? WHERE id=?",
                       (json.dumps(messages, ensure_ascii=False),
                        time.time(), meeting_id))
+            return _event_scope(dict(row))
 
-    await db.arun(_append_tx)
-    _emit(
-        broadcast,
-        {"type": "meeting_msg", "meeting_id": meeting_id, "msg": msg},
-    )
+    scope = await db.arun(_append_tx)
+    if scope:
+        tenant_id, required_modules = scope
+        _emit(
+            broadcast,
+            {
+                "type": "meeting_msg",
+                "meeting_id": meeting_id,
+                "tenant_id": tenant_id,
+                "_required_modules": required_modules,
+                "msg": msg,
+            },
+        )
     return msg
 
 
@@ -530,7 +574,7 @@ async def run(meeting_id: int, broadcast):
                 ),
             },
         )
-        _emit(broadcast, {"type": "meeting_update", "meeting_id": meeting_id})
+        _emit_meeting_update(broadcast, meeting_id, m)
 
         # 少于两个方案也不回到闲聊：直接产生“补证据”任务并收口。
         if len(proposals) < 2:
@@ -542,7 +586,7 @@ async def run(meeting_id: int, broadcast):
             await db.aupdate(
                 "meeting", meeting_id, {"phase": "validate", "round_no": 2}
             )
-            _emit(broadcast, {"type": "meeting_update", "meeting_id": meeting_id})
+            _emit_meeting_update(broadcast, meeting_id, m)
             await _push(meeting_id, broadcast, "系统",
                   f"第 2 轮｜集中验证 P{selected['id']}：失败预演 + 市场证据 + 单位经济。",
                   "#33291f", "2️⃣", kind="phase", phase="validate", round_no=2)
@@ -616,7 +660,7 @@ async def run(meeting_id: int, broadcast):
                     "next_action": "主持人依据证据做最终决定",
                 },
             )
-            _emit(broadcast, {"type": "meeting_update", "meeting_id": meeting_id})
+            _emit_meeting_update(broadcast, meeting_id, m)
 
             roster = "\n".join(f"{member['idx']}={member['name']}" for member in members)
             decision_system = """你是结果型会议主持人，必须停止讨论并做决定。
@@ -683,7 +727,7 @@ GO 要派 1-3 个能产出实物的执行任务；NEED_INFO 要派 1-2 个最小
                 ),
             },
         )
-        _emit(broadcast, {"type": "meeting_update", "meeting_id": meeting_id})
+        _emit_meeting_update(broadcast, meeting_id, m)
         action_lines = "\n".join(f"- **{a['who']}**：{a['task']}" for a in actions)
         await _push(meeting_id, broadcast, "会议主持人",
               f"**最终决策：{decision}**\n\n{summary}\n\n"
@@ -760,7 +804,7 @@ GO 要派 1-3 个能产出实物的执行任务；NEED_INFO 要派 1-2 个最小
             )
         await db.arun(settle_failure, meeting_id, public_error)
     finally:
-        _emit(broadcast, {"type": "meeting_update", "meeting_id": meeting_id})
+        _emit_meeting_update(broadcast, meeting_id, m)
 
 
 def _task_matches_action(task_row: dict, action: dict) -> bool:
@@ -879,6 +923,7 @@ def _prepare_execution_actions(meeting_id: int) -> tuple[list[int], list[int]]:
                     tid = db.insert("task", {
                         "emp_idx": action["idx"],
                         "tenant_id": meeting_tenant_id,
+                        "created_by": m.get("created_by"),
                         "brief_json": json.dumps(brief, ensure_ascii=False),
                         "source_meeting_id": meeting_id,
                         "source_action_key": action["key"],
@@ -944,7 +989,12 @@ async def execute_actions(meeting_id: int, broadcast) -> list[int]:
                 meeting_id,
                 type(exc).__name__,
             )
-    _emit(broadcast, {"type": "meeting_update", "meeting_id": meeting_id})
+    scope_row = await db.aone(
+        "SELECT tenant_id,emp_idxs_json FROM meeting WHERE id=?",
+        (meeting_id,),
+    )
+    if scope_row:
+        _emit_meeting_update(broadcast, meeting_id, scope_row)
     for tid in started:
         asyncio.create_task(taskrunner.run_task(tid, broadcast))
     return task_ids
@@ -1417,7 +1467,7 @@ async def ask(meeting_id: int, question: str, broadcast, billing_op: str = None)
                 kind="error",
                 phase="awaiting_execution",
             )
-    _emit(broadcast, {"type": "meeting_update", "meeting_id": meeting_id})
+    _emit_meeting_update(broadcast, meeting_id, m)
 
 
 def resume_pending(broadcast):
@@ -1428,7 +1478,7 @@ def resume_pending(broadcast):
         "SELECT id FROM meeting WHERE status='failed' AND billing_status='charged'"
     ):
         settle_failure(row["id"], "服务启动补做失败结算")
-    for row in db.q("SELECT id, status, phase, decision, auto_execute FROM meeting "
+    for row in db.q("SELECT id, tenant_id, emp_idxs_json, status, phase, decision, auto_execute FROM meeting "
                     "WHERE status IN ('queued','running')"):
         if row["status"] == "queued":
             asyncio.create_task(run(row["id"], broadcast))
@@ -1437,4 +1487,4 @@ def resume_pending(broadcast):
             asyncio.create_task(execute_actions(row["id"], broadcast))
         else:
             settle_failure(row["id"], "服务重启中断，会议未形成可交付结果")
-            _emit(broadcast, {"type": "meeting_update", "meeting_id": row["id"]})
+            _emit_meeting_update(broadcast, row["id"], row)

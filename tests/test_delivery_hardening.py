@@ -8,12 +8,14 @@
 - 引擎唤醒：线程池线程调用 notify/broadcast 必须经事件循环安全投递
 """
 import asyncio
+import concurrent.futures
 import io
 import json
 import os
 import pathlib
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -454,6 +456,13 @@ class SubscriptionIdempotencyTests(unittest.TestCase):
 
         self.assertEqual(after_first, self._balance(), "重复提交二次发点")
         self.assertEqual(first, replay, "网络重放应返回第一次成交的原始回执")
+        self.assertEqual(
+            first["expires"],
+            self.db.one(
+                "SELECT plan_expires FROM tenants WHERE id=2"
+            )["plan_expires"],
+            "幂等重放不能二次延长有效期",
+        )
         operation = self.db.one(
             "SELECT status FROM billing_operation WHERE op_key='order-1'"
         )
@@ -498,10 +507,63 @@ class SubscriptionIdempotencyTests(unittest.TestCase):
         from app import billing
 
         plan, period = self._plan()
-        billing.subscribe(2, plan, period, op_key="order-1")
+        first = billing.subscribe(2, plan, period, op_key="order-1")
         one = self._balance()
-        billing.subscribe(2, plan, period, op_key="order-2")
+        second = billing.subscribe(2, plan, period, op_key="order-2")
         self.assertGreater(self._balance(), one)
+        self.assertEqual(
+            first["expires"] + 31 * 86400,
+            second["expires"],
+            "提前续费必须从现有到期日继续累加",
+        )
+
+    def test_expired_subscription_starts_from_now(self):
+        from app import billing
+
+        plan, period = self._plan()
+        now = 2_000_000_000.0
+        self.db.execute(
+            "UPDATE tenants SET plan_expires=? WHERE id=2",
+            (now - 86400,),
+        )
+        with patch.object(billing.time, "time", return_value=now):
+            receipt = billing.subscribe(
+                2, plan, period, op_key="expired-order"
+            )
+        self.assertEqual(now + 31 * 86400, receipt["expires"])
+
+    def test_concurrent_distinct_orders_stack_plan_expiry(self):
+        from app import billing
+
+        plan, period = self._plan()
+        now = time.time()
+        original_expiry = now + 10 * 86400
+        self.db.execute(
+            "UPDATE tenants SET plan_expires=? WHERE id=2",
+            (original_expiry,),
+        )
+
+        def subscribe(order):
+            return billing.subscribe(2, plan, period, op_key=order)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            receipts = list(pool.map(
+                subscribe,
+                ("concurrent-order-1", "concurrent-order-2"),
+            ))
+        expected = original_expiry + 2 * 31 * 86400
+        self.assertAlmostEqual(
+            expected,
+            self.db.one(
+                "SELECT plan_expires FROM tenants WHERE id=2"
+            )["plan_expires"],
+            places=4,
+        )
+        self.assertAlmostEqual(
+            expected,
+            max(receipt["expires"] for receipt in receipts),
+            places=4,
+        )
 
     def test_plan_and_points_move_together(self):
         """发点失败时套餐也不该生效,反之亦然。"""

@@ -432,6 +432,11 @@ async def run_task(task_id: int, broadcast):
     if solo_content:
         s = registry.BY_IDX[idx]
         e = {"name": s["name"], "dept_name": "内容生产部", "group": s["dept"]}
+    required_modules = (
+        (str(e.get("dept_key") or "content"),)
+        if e
+        else ("content",)
+    )
     t = await db.arun(_claim_task, task_id)
     if not t:
         return
@@ -447,8 +452,15 @@ async def run_task(task_id: int, broadcast):
             steps.append({"k": kind, "l": str(label)[:300], "ts": now})
         _broadcast_safely(
             broadcast,
-            {"type": "task_step", "task_id": task_id, "idx": t["emp_idx"],
-             "n": len(steps), "step": steps[-1]},
+            {
+                "type": "task_step",
+                "tenant_id": t.get("tenant_id") or 1,
+                "_required_modules": required_modules,
+                "task_id": task_id,
+                "idx": t["emp_idx"],
+                "n": len(steps),
+                "step": steps[-1],
+            },
         )
         if kind != "typing" or now - st["save"] > 3:
             # 事件循环上的进度落库进 db 线程池,避免写锁竞争冻结全部协程。
@@ -472,12 +484,24 @@ async def run_task(task_id: int, broadcast):
             )
         _broadcast_safely(
             broadcast,
-            {"type": "task_update", "task_id": task_id, "idx": t["emp_idx"]},
+            {
+                "type": "task_update",
+                "tenant_id": t.get("tenant_id") or 1,
+                "_required_modules": required_modules,
+                "task_id": task_id,
+                "idx": t["emp_idx"],
+            },
         )
 
     _broadcast_safely(
         broadcast,
-        {"type": "task_update", "task_id": task_id, "idx": t["emp_idx"]},
+        {
+            "type": "task_update",
+            "tenant_id": t.get("tenant_id") or 1,
+            "_required_modules": required_modules,
+            "task_id": task_id,
+            "idx": t["emp_idx"],
+        },
     )
     md_done = None
     try:
@@ -692,7 +716,16 @@ async def _gen_summary(task_id: int, md: str, idx: int, tid: int, broadcast):
             },
         )
         await db.arun(sync_meeting_delivery_for_task, task_id)
-        broadcast({"type": "task_update", "task_id": task_id, "idx": idx})
+        expert = departments.get(idx)
+        broadcast({
+            "type": "task_update",
+            "tenant_id": tid,
+            "_required_modules": (
+                str((expert or {}).get("dept_key") or "content"),
+            ),
+            "task_id": task_id,
+            "idx": idx,
+        })
     except Exception as exc:
         log.debug(
             "老板速览生成跳过 task=%s error_type=%s",

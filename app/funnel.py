@@ -20,15 +20,23 @@ log = logging.getLogger("funnel")
 EVENT_DIMENSIONS = {
     "landing_view": {"promo"},
     "page_view": {
-        "office", "new", "tasks", "meetings", "avatar", "library", "trash",
-        "tools", "billing", "team", "admin", "job", "delivery", "schedule",
-        "censor", "publish", "matrix", "profiles", "other",
+        # Keep this aligned with static/app.js `routes`: the first hash segment
+        # is emitted verbatim by trackPageView().
+        "office", "new", "job", "profiles", "assets", "delivery",
+        "knowledge", "schedules", "settings", "avatar", "admin", "team",
+        "billing", "meetings", "tasks", "company", "production", "censor",
+        "channels", "tools", "trash", "guide", "notifications",
+        # Legacy dimensions remain readable while current routes no longer
+        # collapse into "other".
+        "library", "schedule", "publish", "matrix", "other",
     },
     "pricing_view": {"promo", "billing"},
     "lead_submitted": {"account_apply", "guest_trial"},
     "registration_complete": {"application", "direct_admin"},
     "login_success": {"password"},
     "first_job_submitted": {"content", "expert"},
+    "purchase_requested": {"promo", "login", "billing"},
+    "purchase_paid": {"subscription"},
 }
 PUBLIC_EVENTS = {"landing_view", "pricing_view"}
 CLIENT_EVENTS = {"page_view", "pricing_view"}
@@ -38,6 +46,8 @@ LABELS = {
     "registration_complete": "账号开通",
     "login_success": "登录成功",
     "first_job_submitted": "首次派活",
+    "purchase_requested": "提交购买申请",
+    "purchase_paid": "确认购买到账",
     "pricing_view": "定价页到达",
     "page_view": "产品页访问",
 }
@@ -248,6 +258,9 @@ def report(days: int = 30) -> dict:
                 "first_job_submitted", "registration_complete"
             ),
             "landing_to_pricing_pct": rate("pricing_view", "landing_view"),
+            "purchase_to_paid_pct": cohort_rate(
+                "purchase_paid", "purchase_requested"
+            ),
         },
         "daily": list(daily.values()),
     }

@@ -603,6 +603,11 @@ class UpgradeSecurityCase(unittest.TestCase):
             "asset": ("deleted_at", "deleted_by", "delete_reason"),
             "job": ("created_by",),
             "task": ("created_by",),
+            "avatar_job": ("created_by",),
+            "meeting": ("created_by",),
+            "tv_job": ("created_by",),
+            "tool_job": ("created_by",),
+            "notification": ("user_id", "read_by"),
             "station_run": ("reviewed_by",),
         }.items():
             for column in columns:
@@ -626,6 +631,11 @@ class UpgradeSecurityCase(unittest.TestCase):
             "asset": {"deleted_at", "deleted_by", "delete_reason"},
             "job": {"created_by"},
             "task": {"created_by"},
+            "avatar_job": {"created_by"},
+            "meeting": {"created_by"},
+            "tv_job": {"created_by"},
+            "tool_job": {"created_by"},
+            "notification": {"user_id", "read_by"},
             "station_run": {"reviewed_by"},
         }.items():
             actual = {
@@ -639,7 +649,10 @@ class UpgradeSecurityCase(unittest.TestCase):
             "collaboration-soft-delete-schedule-fail-streak",
             ledger["name"],
         )
-        self.assertEqual(48, db.one("PRAGMA user_version")["user_version"])
+        self.assertEqual(
+            db.LATEST_SCHEMA_VERSION,
+            db.one("PRAGMA user_version")["user_version"],
+        )
 
     def test_future_database_is_rejected_before_wal_or_schema_mutation(self):
         if db._conn is not None:

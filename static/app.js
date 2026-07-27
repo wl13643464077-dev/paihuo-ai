@@ -184,7 +184,7 @@ function reportClientError(kind, err, extra={}){
     fingerprint,
     path:location.pathname,
     hash:String(location.hash||"").slice(0,160),
-    release:"web-v39",
+    release:"web-v40",
     line:Number(extra.line)||0,
   });
   try{
@@ -467,7 +467,8 @@ const routes = {"":dashboard,"new":newBrief,"job":jobView,"profiles":profilesVie
   "delivery":deliveryView,"knowledge":knowledgeView,"schedules":schedulesView,"settings":settingsView,
   "avatar":avatarView,"admin":adminView,"team":teamView,"billing":billingView,"meetings":meetingsView,
   "tasks":tasksView,"company":companyView,"production":productionView,"censor":censorView,
-  "channels":channelsView,"tools":toolsView,"trash":trashView,"guide":guideReset};
+  "channels":channelsView,"tools":toolsView,"trash":trashView,"guide":guideReset,
+  "notifications":notificationsView};
 function nav(){
   const cur = location.hash.replace("#/","").split("/")[0];
   const inbox = (STATE?.inbox?.length||0)+(STATE?.notifications?.length||0);
@@ -486,6 +487,7 @@ function nav(){
   if(canWork("library")) more.push(["assets","🗂️ 资产库"],["knowledge","📚 沉淀库"]);
   if(ME && (ME.role==="owner"||ME.role==="root")) more.push(["production","📊 员工产出"],["company","🏢 企业档案"]);
   if(isAdmin()) more.push(["trash","🗑 回收站"]);
+  if(ME && ME.role!=="tour") more.push(["notifications","🔔 通知记录"]);
   more.push(["billing","💎 套餐"]);
   if(ME && (ME.role==="owner"||ME.role==="root")) more.push(["team","👥 权限管理"]);
   if(ME && ME.role==="root") more.push(["admin","🛠 后台"]);
@@ -549,7 +551,7 @@ function routeLoading(page){
     tools:"营销工具箱",channels:"发布渠道",schedules:"定时任务",profiles:"人设档案",
     assets:"资产库",knowledge:"沉淀库",production:"员工产出",company:"企业档案",
     billing:"套餐",team:"权限管理",admin:"后台",job:"工单详情",delivery:"交付中心",
-    trash:"回收站"};
+    trash:"回收站",notifications:"通知记录"};
   const box=$("#main"); if(!box) return;
   box.innerHTML=`<div class="card route-loading" role="status" aria-live="polite">
     <div style="display:flex;align-items:center;gap:12px"><span class="spin"></span>
@@ -1066,8 +1068,8 @@ function specRoomCard(e){
         <span class="stpill ${PILL_CLS[st]}">${{work:"干活中",learn:"进修中",idle:"待命中"}[st]}</span></div>
       <div class="live">${esc(isBoss()?e.duty:e.intro).slice(0,38)}</div>
       <div class="actions" style="margin-top:8px;gap:6px">
-        <button class="btn sm" onclick="event.stopPropagation();openSpec(${e.idx})">🪪 ${isBoss()?"面板":"介绍"}</button>
-        ${ME&&ME.role!=="tour"?`<button class="btn sm pri" onclick="event.stopPropagation();openSpec(${e.idx})">📋 派活</button>`:""}
+        <button class="btn sm" onclick="event.stopPropagation();openSpec(${e.idx},${isBoss()?"undefined":cp("intro")})">🪪 ${isBoss()?"面板":"介绍"}</button>
+        ${ME&&ME.role!=="tour"?`<button class="btn sm pri" onclick="event.stopPropagation();openSpec(${e.idx},'task')">📋 派活</button>`:""}
       </div>
     </div></div>`;
 }
@@ -1120,6 +1122,7 @@ async function dashboard(){
   const inboxCard = inbox.length?`<div class="card" style="background:#fff6dc"><h2>📥 等您拍板(${inbox.length})</h2>${inbox.map(jobRow).join("")}</div>`:"";
   const notificationCard = notifications.length?`<div class="card" style="background:#eef6ff">
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><h2 style="margin:0;flex:1">🔔 新进展(${notifications.length})</h2>
+      <a class="btn sm" href="#/notifications">查看历史</a>
       ${isAdmin()?`<button class="btn sm" onclick="notificationReadAll(this)">全部已读</button>`:""}</div>
     ${notifications.map(n=>`<div class="topic" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <div style="flex:1;min-width:190px"><b>${esc(n.title)}</b>${n.body?`<div class="sub">${esc(n.body)}</div>`:""}
@@ -1181,6 +1184,52 @@ async function notificationReadAll(btn){
   try{
     await api("/notifications/read",{method:"POST",body:{}});
     STATE.notifications=[]; nav(); render();
+  }catch(e){ toast(e.message); btn.disabled=false; }
+}
+let NOTIFY_UNREAD_ONLY=false;
+async function notificationsView(offset=0){
+  const pageOffset=Math.max(0,Number(offset)||0);
+  const data=await api(`/notifications?limit=40&offset=${pageOffset}&unread=${NOTIFY_UNREAD_ONLY?"true":"false"}`);
+  const rows=data.items||[];
+  $("#main").innerHTML=`<div class="card" style="background:linear-gradient(120deg,#eef6ff,#fffaf0 70%)">
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <div style="flex:1;min-width:220px"><h2 style="margin:0">🔔 通知记录</h2>
+        <div class="sub" style="margin-top:5px">重要进展读过后仍可追溯；您只会看到自己有权限的板块内容。</div></div>
+      <button class="btn sm ${NOTIFY_UNREAD_ONLY?"pri":""}" onclick="NOTIFY_UNREAD_ONLY=!NOTIFY_UNREAD_ONLY;notificationsView(0)">${NOTIFY_UNREAD_ONLY?"显示全部":"只看未读"}</button>
+      ${isAdmin()&&rows.some(n=>!n.is_read)?`<button class="btn sm" onclick="notificationHistoryReadAll(this)">全部已读</button>`:""}</div></div>
+  <div class="card">
+    <div class="sub" style="margin-bottom:10px">共 ${data.total||0} 条 · 当前显示 ${rows.length} 条</div>
+    ${rows.length?rows.map(n=>`<div class="topic" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;${n.is_read?"opacity:.68":""}">
+      <div style="flex:1;min-width:190px">
+        <div style="display:flex;gap:7px;align-items:center;flex-wrap:wrap"><span class="tag" style="background:${n.is_read?"#eee":"#fff1bd"}">${n.is_read?"已读":"未读"}</span><b>${esc(n.title)}</b></div>
+        ${n.body?`<div class="sub" style="margin-top:4px">${esc(n.body)}</div>`:""}
+        <div class="sub" style="margin-top:4px">${tcFmt(n.created_at)}</div></div>
+      ${!n.is_read?`<button class="btn sm" onclick="notificationHistoryRead(${n.id},${pageOffset},this)">标为已读</button>`:""}
+      <button class="btn sm pri" onclick="notificationOpen(${n.id},${cp(safeRouteUrl(n.link)||"#/")})">查看关联</button>
+    </div>`).join(""):`<div class="empty">${NOTIFY_UNREAD_ONLY?"没有未读通知":"还没有通知记录"}</div>`}
+    <div class="actions" style="justify-content:flex-end">
+      <button class="btn sm" ${pageOffset<=0?"disabled":""} onclick="notificationsView(${Math.max(0,pageOffset-40)})">← 上一页</button>
+      <button class="btn sm" ${data.has_more?"":"disabled"} onclick="notificationsView(${data.next_offset??0})">下一页 →</button>
+    </div></div>`;
+}
+async function notificationHistoryRead(id,offset,btn){
+  if(btn) btn.disabled=true;
+  try{
+    await api("/notifications/read",{method:"POST",body:{ids:[id]}});
+    if(STATE?.notifications) STATE.notifications=STATE.notifications.filter(n=>n.id!==id);
+    SHELL_DIRTY=true;
+    nav();
+    await notificationsView(offset);
+  }catch(e){ toast(e.message); if(btn) btn.disabled=false; }
+}
+async function notificationHistoryReadAll(btn){
+  btn.disabled=true;
+  try{
+    await api("/notifications/read",{method:"POST",body:{}});
+    if(STATE) STATE.notifications=[];
+    SHELL_DIRTY=true;
+    nav();
+    await notificationsView(0);
   }catch(e){ toast(e.message); btn.disabled=false; }
 }
 /* V27.2:「发布三件套」向导——把 成片→审查→排版 串成一条可点的流程(对外主推卖点的上手版) */
@@ -1322,14 +1371,14 @@ async function trashRestore(kind,id,btn){
   }
 }
 async function trashPurge(kind,id,btn){
-  if(!await uiConfirm(`彻底删除后不可恢复，交付文件会一并销毁。确定彻底删除 #${id}?`,{
+  if(!await uiConfirm(`业务正文、客户素材和交付文件将永久删除且不可恢复。为对账、退款和防止重复发布，系统仅保留不含正文或素材的去标识化账务与审计锚点。确定彻底删除 #${id}?`,{
     title:"彻底删除",confirmText:"彻底删除",danger:true})) return;
-  if(!await uiConfirm(`最后确认:#${id} 将永久消失，无法找回。`,{
+  if(!await uiConfirm(`最后确认:#${id} 的业务内容将永久消失，无法找回；去标识化账务与审计锚点按上述用途保留。`,{
     title:"最后确认",confirmText:"永久删除",danger:true})) return;
   btn.disabled=true; btn.innerHTML='<span class="spin"></span> 删除中…';
   try{
     await api(`/trash/${encodeURIComponent(kind)}/${id}/purge`,{method:"POST"});
-    toast("已彻底删除");
+    toast("业务内容已彻底删除");
     SHELL_DIRTY=true;
     await trashView();
   }catch(e){
@@ -1339,7 +1388,9 @@ async function trashPurge(kind,id,btn){
 }
 
 /* ---------- V29:老板全局任务中心 ---------- */
+const TC_PAGE_SIZE=100;
 let TC_DATA = null, TC_DATA_Q = "", TC_STATUS = "open", TC_KIND = "all", TC_QUERY = "", TC_LOADING_MORE = false;
+let TC_REQUEST_SEQ = 0, TC_SEARCH_TIMER = null;
 const TC_KIND_LABEL = {expert:"数字员工任务",content:"内容工单",meeting:"AI会议",avatar:"数字人视频",
   video:"图文成片",tool:"营销工具",publish:"发布任务",wechat:"公众号草稿投递"};
 function tcPill(group){ return group==="done"?"done":group==="failed"?"failed":
@@ -1352,16 +1403,66 @@ function tcFmt(ts){
   if(d.getFullYear()!==new Date().getFullYear()) opts.year="numeric";
   return d.toLocaleString("zh-CN",opts);
 }
+function tcFilterSnapshot(){
+  return {status:TC_STATUS,kind:TC_KIND,query:(TC_QUERY||"").trim()};
+}
+function tcFilterMatches(snapshot){
+  const current=tcFilterSnapshot();
+  return current.status===snapshot.status&&current.kind===snapshot.kind&&current.query===snapshot.query;
+}
+function tcBeginRequest(snapshot=tcFilterSnapshot()){
+  return {seq:++TC_REQUEST_SEQ,snapshot};
+}
+function tcRequestIsCurrent(request){
+  return request.seq===TC_REQUEST_SEQ&&tcFilterMatches(request.snapshot)
+    &&location.hash.startsWith("#/tasks");
+}
+function tcInvalidateRequests(){
+  TC_REQUEST_SEQ++;
+  TC_LOADING_MORE=false;
+}
+function tcApiUrl(offset=0,snapshot=tcFilterSnapshot()){
+  const params=new URLSearchParams({
+    limit:String(TC_PAGE_SIZE),
+    offset:String(Math.max(0,Number(offset)||0)),
+    q:snapshot.query,
+    status:snapshot.status,
+    kind:snapshot.kind,
+  });
+  return `/task-center?${params.toString()}`;
+}
 async function tasksView(tid){
   if(tid){
     const ref=String(tid);
     if(ref.includes(":")) return taskCenterRecordView(ref);
     return taskDetailView(+ref);
   }
+  clearTimeout(TC_SEARCH_TIMER);
   TC_LOADING_MORE = false;
-  TC_DATA = await api(`/task-center?limit=500&offset=0&q=${encodeURIComponent((TC_QUERY||"").trim())}`);
-  TC_DATA_Q = (TC_QUERY||"").trim();
-  if(TC_STATUS==="open" && !(TC_DATA.counts?.open)) TC_STATUS="all";
+  let snapshot=tcFilterSnapshot(), request=tcBeginRequest(snapshot), data;
+  try{
+    data=await api(tcApiUrl(0,snapshot));
+  }catch(e){
+    if(!tcRequestIsCurrent(request)) return;
+    throw e;
+  }
+  if(!tcRequestIsCurrent(request)) return;
+  TC_DATA=data;
+  TC_DATA_Q=snapshot.query;
+  if(snapshot.status==="open" && !(TC_DATA.counts?.open)){
+    TC_STATUS="all";
+    snapshot=tcFilterSnapshot();
+    request=tcBeginRequest(snapshot);
+    try{
+      data=await api(tcApiUrl(0,snapshot));
+    }catch(e){
+      if(!tcRequestIsCurrent(request)) return;
+      throw e;
+    }
+    if(!tcRequestIsCurrent(request)) return;
+    TC_DATA=data;
+    TC_DATA_Q=snapshot.query;
+  }
   taskCenterDraw();
 }
 function tcVisibleItems(){
@@ -1390,6 +1491,7 @@ function tcNewButton(){
 }
 function taskCenterDraw(){
   const d=TC_DATA||{counts:{},items:[],kind_counts:{}}, c=d.counts||{}, rows=tcVisibleItems();
+  const filteredTotal=Number.isFinite(Number(d.filtered_total))?Number(d.filtered_total):rows.length;
   const kinds = Object.keys(TC_KIND_LABEL).filter(k=>(d.kind_counts||{})[k]);
   const hasMore = d.has_more===true || (d.has_more===undefined && d.truncated===true);
   $("#main").innerHTML = `<div class="card" style="background:linear-gradient(120deg,#fff2bd,#fffaf0 65%)">
@@ -1411,7 +1513,7 @@ function taskCenterDraw(){
     </select></div></div>
     <div style="display:flex;align-items:center;gap:8px;margin:15px 0 9px;flex-wrap:wrap">
       <b style="font-size:16px">${{open:"当前任务",waiting:"等我处理",done:"已完成",failed:"失败",all:"全部任务"}[TC_STATUS]||"任务"}</b>
-      <span class="tag" id="tc-count">${rows.length} 条</span>${hasMore?`<span class="sub">已加载 ${d.items.length} / ${c.all||d.items.length} 条</span><button class="btn sm" onclick="tcLoadMore(this)">加载更早任务</button>`:""}
+      <span class="tag" id="tc-count">${filteredTotal} 条</span>${hasMore?`<span class="sub">已加载 ${d.items.length} / ${filteredTotal} 条</span><button class="btn sm" id="tc-load-more" onclick="tcLoadMore(this)">加载更早任务</button>`:""}
       <button class="btn sm" style="margin-left:auto" onclick="tasksView()">↻ 刷新</button></div>
     ${TC_QUERY.trim()?`<div class="notice" style="margin:0 0 9px">🔍 已按「${esc(TC_QUERY.trim())}」<b>全局搜索</b>全部历史记录,命中 ${c.all||0} 条${hasMore?",下方还有更多可加载":""}。</div>`:""}
     <div id="tc-list">${rows.length?rows.map(tcRow).join(""):`<div class="empty">${(c.all||0)===0?`还没有任务。<div class="actions" style="margin-top:10px;justify-content:center"><a class="btn sm pri" href="#/new">✍️ 发第一单内容</a><a class="btn sm" href="#/">🧑‍🔧 找行业专家派活</a></div>`:"这个筛选下没有任务。换个状态或关键词看看。"}</div>`}</div>
@@ -1433,43 +1535,68 @@ function tcRow(x){
       ${x.retryable?`<button class="btn sm" onclick="tcRetry(${cp(x.kind)},${x.record_id},this)">🔁 免费重试</button>`:""}
       <button class="btn sm pri" onclick="tcGo(${cp(x.key)},false)">${x.target_exact===false?"去所在工作台":"打开任务"}</button></div></div>`;
 }
-function tcSetStatus(s){ TC_STATUS=s; taskCenterDraw(); }
-function tcSetKind(k){ TC_KIND=k; taskCenterDraw(); }
-let TC_SEARCH_TIMER=null;
+function tcSetStatus(s){
+  if(TC_STATUS===s) return;
+  TC_STATUS=s;
+  tcInvalidateRequests();
+  tasksView().catch(e=>toast(e.message||"任务筛选失败"));
+}
+function tcSetKind(k){
+  if(TC_KIND===k) return;
+  TC_KIND=k;
+  tcInvalidateRequests();
+  tasksView().catch(e=>toast(e.message||"任务筛选失败"));
+}
 function tcSearch(q){
   TC_QUERY=q;
+  tcInvalidateRequests();
   // 先在已加载数据里即时过滤(零延迟反馈)……
   const box=$("#tc-list"), rows=tcVisibleItems();
   if(box) box.innerHTML=rows.length?rows.map(tcRow).join(""):`<div class="empty">没有搜到相关任务</div>`;
   if($("#tc-count")) $("#tc-count").textContent=rows.length+" 条";
+  const more=$("#tc-load-more");
+  if(more){ more.disabled=true; more.textContent="正在搜索…"; }
   // ……400ms 后真正去服务端全局搜(计数与分页同源,不再只搜已加载)
   clearTimeout(TC_SEARCH_TIMER);
   TC_SEARCH_TIMER=setTimeout(async()=>{
+    const snapshot=tcFilterSnapshot(), request=tcBeginRequest(snapshot);
     try{
-      const data=await api(`/task-center?limit=500&offset=0&q=${encodeURIComponent(TC_QUERY.trim())}`);
-      if(location.hash.startsWith("#/tasks")&&TC_QUERY===q){ TC_DATA=data; TC_DATA_Q=TC_QUERY.trim(); taskCenterDraw(); }
-    }catch(e){ if(e?.name!=="NavigationAbort") console.error(e); }
+      const data=await api(tcApiUrl(0,snapshot));
+      if(tcRequestIsCurrent(request)){
+        TC_DATA=data;
+        TC_DATA_Q=snapshot.query;
+        taskCenterDraw();
+      }
+    }catch(e){
+      if(tcRequestIsCurrent(request)&&e?.name!=="NavigationAbort") console.error(e);
+    }
   },400);
 }
 async function tcLoadMore(btn){
   if(TC_LOADING_MORE||!TC_DATA) return;
+  const snapshot=tcFilterSnapshot();
+  if((TC_DATA_Q||"").trim()!==snapshot.query) return;
   const offset=Number(TC_DATA.next_offset);
   if(!Number.isInteger(offset)||offset<0) return;
+  const baseData=TC_DATA, request=tcBeginRequest(snapshot);
   TC_LOADING_MORE=true;
   if(btn){ btn.disabled=true; btn.textContent="加载中…"; }
   try{
-    const page=await api(`/task-center?limit=500&offset=${offset}&q=${encodeURIComponent(TC_QUERY.trim())}`);
-    const seen=new Set(TC_DATA.items.map(item=>item.key));
+    const page=await api(tcApiUrl(offset,snapshot));
+    if(!tcRequestIsCurrent(request)||TC_DATA!==baseData) return;
+    const seen=new Set(baseData.items.map(item=>item.key));
     const additions=(page.items||[]).filter(item=>!seen.has(item.key));
     const hasMore=page.has_more===true||(page.has_more===undefined&&page.truncated===true);
-    TC_DATA={...TC_DATA,...page,items:[...TC_DATA.items,...additions],
+    TC_DATA={...baseData,...page,items:[...baseData.items,...additions],
       offset:0,next_offset:page.next_offset,has_more:hasMore,truncated:hasMore};
     taskCenterDraw();
   }catch(e){
-    if(e?.name!=="NavigationAbort") toast(e.message||"更早任务加载失败");
-    if(btn){ btn.disabled=false; btn.textContent="加载更早任务"; }
+    if(tcRequestIsCurrent(request)){
+      if(e?.name!=="NavigationAbort") toast(e.message||"更早任务加载失败");
+      if(btn){ btn.disabled=false; btn.textContent="加载更早任务"; }
+    }
   }finally{
-    TC_LOADING_MORE=false;
+    if(request.seq===TC_REQUEST_SEQ) TC_LOADING_MORE=false;
   }
 }
 function tcGo(key,source){
@@ -1654,6 +1781,89 @@ const LEN_OPTS = `<label>篇幅</label>
   </select>`;
 function lenOpts(id){ return LEN_OPTS.replace("LENID", id); }
 function lenVal(id){ return ($("#"+id)||{}).value || "std"; }
+const CONTENT_TASK_GUIDE_FALLBACK = {
+  trend:{
+    task_placeholder:"例：面向新能源汽车售后门店，找出本周值得追的 5 个内容机会，优先关注小红书和抖音",
+    material_placeholder:"可粘贴品牌定位、目标客群、近期活动或希望重点关注的平台",
+    input_tips:["想服务的业务或产品","目标受众与地区","关注的平台和时间范围"],
+    output_hint:"趋势信号、候选选题、切入角度与热度依据"
+  },
+  research:{
+    task_placeholder:"例：核实“宠物洗护消费增长”这个选题的最新数据、典型案例和原始来源",
+    material_placeholder:"可粘贴待核实的说法、已有链接、数据口径或参考资料",
+    input_tips:["要核实的具体问题","希望覆盖的地区与时间","已有线索或优先来源"],
+    output_hint:"事实摘要、关键数据、多方观点与可追溯来源"
+  },
+  benchmark:{
+    task_placeholder:"例：拆解 3 个近期高互动的美容门店获客内容，提炼标题、结构、评论反馈和可复制打法",
+    material_placeholder:"可粘贴对标账号、帖子链接、截图文字或希望重点拆解的维度",
+    input_tips:["对标主题或内容类型","指定账号、链接或平台","最关心的拆解维度"],
+    output_hint:"逐案例拆解、受众反馈、有效做法与可复制建议"
+  },
+  draft:{
+    task_placeholder:"例：为新开的社区健身工作室写一篇小红书开业种草稿，突出小班体验和新客权益",
+    material_placeholder:"可粘贴产品卖点、事实素材、活动规则、品牌口吻或参考文章",
+    input_tips:["写作主题与核心目标","受众和发布平台","必须包含的事实与卖点"],
+    output_hint:"标题备选、完整初稿、话题标签与配图建议"
+  },
+  style:{
+    task_placeholder:"例：把这篇企业服务介绍改得更像创始人口吻，专业但不端着，保留所有事实",
+    material_placeholder:"请粘贴待改文字，并补充品牌语气、常用表达和不能出现的说法",
+    input_tips:["需要改写的原文","希望呈现的语气","必须保留与禁止修改的内容"],
+    output_hint:"保持事实不变的风格化定稿与标题建议"
+  },
+  media:{
+    task_placeholder:"例：为这篇汽车保养科普规划 4 张信息图，适配公众号和小红书",
+    material_placeholder:"可粘贴正文、视觉参考、品牌色、图片尺寸或已有素材说明",
+    input_tips:["正文或核心信息","目标平台与尺寸","品牌视觉要求"],
+    output_hint:"配图点位、画面方案与可直接使用的视觉素材"
+  },
+  cover:{
+    task_placeholder:"例：为“第一次带宠物住酒店避坑指南”设计 3 个小红书封面方向",
+    material_placeholder:"可粘贴标题、品牌色、参考风格、必须上封面的文字或图片说明",
+    input_tips:["封面主题与主标题","目标平台和尺寸","视觉偏好与禁忌"],
+    output_hint:"多套封面方向、版式重点与平台适配方案"
+  },
+  deck:{
+    task_placeholder:"例：把这份连锁门店月度复盘整理成老板 10 分钟能讲清的演示长页",
+    material_placeholder:"可粘贴正文、数据、汇报对象、演示场景或页面结构要求",
+    input_tips:["需要演绎的原始内容","观看对象与使用场景","重点结论和数据"],
+    output_hint:"结构清晰、移动端可读的交互式演绎稿"
+  },
+  publish:{
+    task_placeholder:"例：把这篇新品发布稿分别适配成公众号、小红书和抖音发布包",
+    material_placeholder:"可粘贴定稿、目标账号信息、发布时间限制或各平台注意事项",
+    input_tips:["已确认的内容成品","目标发布平台","账号规则与发布时间要求"],
+    output_hint:"各平台标题、正文、标签、发布时间与发布检查清单"
+  },
+  retro:{
+    task_placeholder:"例：复盘这篇酒店暑期套餐内容的发布表现，找出问题并给出下一轮选题",
+    material_placeholder:"可粘贴曝光、点击、互动、转化等数据，以及评论和发布时间",
+    input_tips:["需要复盘的内容","各阶段真实表现数据","原定目标与异常反馈"],
+    output_hint:"指标诊断、问题归因、优化动作与下一轮选题"
+  }
+};
+function taskGuideFor(e, fallback={}){
+  const raw = (e&&e.task_guide&&typeof e.task_guide==="object") ? e.task_guide : {};
+  const tips = Array.isArray(raw.input_tips) ? raw.input_tips.filter(Boolean).slice(0,5) :
+    (Array.isArray(fallback.input_tips)?fallback.input_tips:[]);
+  return {
+    task_placeholder:String(raw.task_placeholder||fallback.task_placeholder||"例：说明当前问题、希望达成的目标和交付期限"),
+    industry_placeholder:String(raw.industry_placeholder||fallback.industry_placeholder||"如：汽车后市场 / 美容美业 / 企业服务"),
+    material_placeholder:String(raw.material_placeholder||fallback.material_placeholder||"粘贴与本任务有关的数据、现状、约束或链接；也可直接传文件"),
+    input_tips:tips,
+    output_hint:String(raw.output_hint||fallback.output_hint||"一份围绕当前问题、可直接执行的专业交付")
+  };
+}
+function taskGuideCard(g){
+  return `<div class="card" style="margin:10px 0;background:#fffaf0">
+    <b>🧭 派活前准备</b>
+    ${g.input_tips.length?`<div class="sub" style="margin-top:5px">说清这些信息，TA 会更快交付：</div>
+      <div class="chips" style="margin-top:7px">${g.input_tips.map(x=>`<span class="tag">${esc(x)}</span>`).join("")}</div>`:""}
+    <div class="sub" style="margin-top:8px"><b>您将拿到：</b>${esc(g.output_hint)}</div>
+  </div>`;
+}
+const TASK_DATA_PRIVACY_NOTE = "仅上传您有权使用的资料；会员、患者、员工等信息请先删除姓名、手机号、证件号等个人标识。";
 const TB_STATE = {};  // task_id -> 用户手动展开/收起
 const TB_LIVE = {};   // task_id -> 本页曾以全文形态见过(速览晚到时不许把正在读的正文折走)
 function taskBody(t){
@@ -1684,6 +1894,7 @@ function stopSoloWatch(){
 }
 function soloTab(s,e){
   const t = SOLO_TASK;
+  const guide = taskGuideFor(e, CONTENT_TASK_GUIDE_FALLBACK[s.key]||{});
   let cur = "";
   if(t){
     const stL = {queued:"排队中",running:"⚙️ 干活中…",done:"✅ 已交付",failed:"❌ 失败"}[t.status]||t.status;
@@ -1702,14 +1913,16 @@ function soloTab(s,e){
           <span class="sub">不再次扣点 · 还可重试 ${t.free_retries_remaining} 次</span>`
           :`<span class="sub">免费重试次数已用完</span>`}</div></div>`:""}</div>`;
   }
-  return `<div class="notice" style="margin-top:0">📋 <b>不走流水线,单独用 ${esc(s.name)}</b>:一句话派活,TA 独立交付(自动进资产库)。适合只要一个环节的活,比如只让${esc(s.name)}${{"趋势官":"找 5 个选题","情报员":"查一手资料","撰稿人":"写篇稿子","封面师":"出张封面文案"}[s.name]||"干本职的活"}。</div>
+  return `<div class="notice" style="margin-top:0">📋 <b>不走流水线,单独用 ${esc(s.name)}</b>:一句话派活,TA 独立交付(自动进资产库)。适合只需要 ${esc(s.name)} 完成一个明确环节的任务。</div>
+  ${taskGuideCard(guide)}
   <label>任务内容 *</label>
-  <textarea id="solo-dir" placeholder="例:围绕[主题],按你的岗位职责给我一份专业交付"></textarea>
+  <textarea id="solo-dir" placeholder="${esc(guide.task_placeholder)}"></textarea>
   <div class="row">
-    <div><label>行业(选填)</label><input id="solo-ind" placeholder="如:餐饮"></div>
+    <div><label>行业/业务场景(选填)</label><input id="solo-ind" placeholder="${esc(guide.industry_placeholder)}"></div>
     <div><label>材料(选填,可传文件/图片/PDF)</label>
       <input type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.jpg,.jpeg,.png,.webp" onchange="parseFileInto(this,'#solo-mat')" style="margin-bottom:6px">
-      <textarea id="solo-mat" style="min-height:60px" placeholder="粘贴相关素材或传文件"></textarea></div>
+      <textarea id="solo-mat" style="min-height:60px" placeholder="${esc(guide.material_placeholder)}"></textarea>
+      <div class="sub" style="margin-top:5px;color:#795548">🔒 ${esc(TASK_DATA_PRIVACY_NOTE)}</div></div>
   </div>
   ${lenOpts("solo-len")}
   <div class="actions"><button class="btn pri" onclick="soloSubmit(${s.idx},this)">🚀 派活(1点)</button></div>
@@ -1935,8 +2148,11 @@ async function startLearn(idx){
 }
 
 /* ---------- V5:行业专家面板(派活/能力/技能/提示词) ---------- */
-async function openSpec(idx){
-  SPEC = await api("/depts/emp/"+idx); SPEC_TAB = isBoss()?"task":(ME&&ME.role==="tour"?"intro":"intro"); SPEC_TASK = null;
+async function openSpec(idx,initialTab){
+  SPEC = await api("/depts/emp/"+idx);
+  SPEC_TAB = isBoss() ? (initialTab==="intro"?"info":"task") :
+    (ME&&ME.role==="tour" ? "intro" : (initialTab==="task"?"task":"intro"));
+  SPEC_TASK = null;
   drawSpec();
 }
 function closeSpec(){ SPEC = null; SPEC_TASK = null; $("#modal").innerHTML = ""; }
@@ -1987,6 +2203,13 @@ function specIntroTab(e){
 function specTaskTab(e){
   const tasks = e.tasks||[];
   const cur = SPEC_TASK;
+  const guide = taskGuideFor(e,{
+    task_placeholder:`例：请围绕“${e.name||"当前经营问题"}”分析现状，给出判断依据和下一步行动清单`,
+    industry_placeholder:`如：${String(e.dept_name||"所在行业").replace(/产业部$/,"")}的具体业态、地区或经营场景`,
+    material_placeholder:"粘贴当前数据、现状、约束、地址或参考链接；也可直接传文件",
+    input_tips:["当前现状或要解决的问题","目标、期限和判断标准","已有数据、材料和限制条件"],
+    output_hint:"围绕当前经营问题的专业判断、证据与可执行行动清单"
+  });
   let curHtml = "";
   if(cur){
     const stLabel = {queued:"排队中",running:"⚙️ 干活中…",done:"✅ 已交付",failed:"❌ 失败"}[cur.status]||cur.status;
@@ -2012,18 +2235,20 @@ function specTaskTab(e){
   }
   const prefill = EXP_PREFILL; EXP_PREFILL = "";   // 从「帮我选/改派」带过来的一句话,一次性回填
   return `
-  <div class="notice" style="margin-top:0">📋 <b>给「${esc(e.name)}」派活</b>:一句话说清要什么。TA 会按岗位手册联网核实、产出可落地的交付物(自动进资产库)。</div>
+  <div class="notice" style="margin-top:0">📋 <b>给「${esc(e.name)}」派活</b>:一句话说清要什么。TA 会核实关键信息并围绕实际业务交付可执行结果(自动进资产库)。</div>
+  ${taskGuideCard(guide)}
   <label>任务内容 *</label>
-  <textarea id="spec-dir" placeholder="例:请说明要解决的问题、目标和已有背景材料…">${esc(prefill)}</textarea>
+  <textarea id="spec-dir" placeholder="${esc(guide.task_placeholder)}">${esc(prefill)}</textarea>
   <div class="row">
-    <div><label>行业/业态(选填)</label><input id="spec-industry" placeholder="如:川菜正餐 / 咖啡快闪 / 茶饮连锁"></div>
+    <div><label>细分业态/经营场景(选填)</label><input id="spec-industry" placeholder="${esc(guide.industry_placeholder)}"></div>
     <div><label>补充材料(选填,可传文件/图片/PDF)</label>
       <input type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.jpg,.jpeg,.png,.webp" onchange="parseFileInto(this,'#spec-material')" style="margin-bottom:6px">
-      <textarea id="spec-material" style="min-height:60px" placeholder="粘贴数据、地址、菜单;或直接传文件"></textarea></div>
+      <textarea id="spec-material" style="min-height:60px" placeholder="${esc(guide.material_placeholder)}"></textarea>
+      <div class="sub" style="margin-top:5px;color:#795548">🔒 ${esc(TASK_DATA_PRIVACY_NOTE)}</div></div>
   </div>
   ${lenOpts("spec-len")}
   <div class="actions"><button class="btn pri" onclick="specSubmit(${e.idx},this)">🚀 派活(1点)</button>
-    <span class="sub">${isBoss()&&e.inputs?.length?"建议材料:"+esc(e.inputs.slice(0,3).join(";").slice(0,60)):"把背景、目标和已有材料说清楚即可；缺失信息 TA 会注明假设"}</span></div>
+    <span class="sub">缺失的信息可以先不填，TA 会明确标注假设与待补数据</span></div>
   <div id="spec-fit"></div>
   ${curHtml}
   ${tasks.length?`<h3>历史任务(${tasks.length})</h3>${tasks.map(t=>`
@@ -2105,8 +2330,8 @@ function expCard(p){
 }
 // 记住那句话,openSpec 后由 specTaskTab 一次性回填到派活框。
 // 帮我选:取部门找人框;改派:取当前派活框里老板刚写的任务。
-function pickExpert(idx){ EXP_PREFILL = EXP_LAST_QUERY; openSpec(idx); }
-function reassignExpert(idx){ EXP_PREFILL = ($("#spec-dir")?.value || "").trim(); openSpec(idx); }
+function pickExpert(idx){ EXP_PREFILL = EXP_LAST_QUERY; openSpec(idx,"task"); }
+function reassignExpert(idx){ EXP_PREFILL = ($("#spec-dir")?.value || "").trim(); openSpec(idx,"task"); }
 // 派单预检不对口:显示原因 + 更对口的同事(一键改派)+ 坚持照派(force)
 function specShowMismatch(idx, r){
   const box = $("#spec-fit"); if(!box) return;
@@ -2905,7 +3130,7 @@ async function assetsView(){
           <button class="btn sm" onclick="reAnalyze('assets',${a.id},this)">🔁 重评</button>
           ${isAdmin()?`<button class="btn sm bad" onclick="assetDel(${a.id})" title="移入回收站">🗑</button>`:""}</div>
       </div>`).join("")}</div>`
-      :`<div class="empty">空的。行业专家(如餐饮部)交付的报告会沉淀到这里;工具箱的报告在工具箱当页看,点「💾 沉淀」的会进沉淀库。</div>`)
+      :`<div class="empty">空的。汽车、美容、酒店等行业专家交付的报告会沉淀到这里;工具箱的报告在工具箱当页看,点「💾 沉淀」的会进沉淀库。</div>`)
     : shown.length?`<div class="dimwrap"><table class="dimtable"><thead><tr>
       <th>标题</th><th>类别</th><th>平台</th><th>行业</th><th>主题</th><th>关键词</th>
       <th>质量</th><th>匹配</th><th>复用</th><th>时效</th><th>情绪</th><th>摘要</th><th>操作</th>
@@ -2916,7 +3141,7 @@ async function assetsView(){
         <button class="btn sm" onclick="reAnalyze('assets',${a.id},this)" title="重新评估">🔁</button>
         ${isAdmin()?`<button class="btn sm bad" onclick="assetDel(${a.id})" title="移入回收站">🗑</button>`:""}</td>
     </tr>`).join("")}</tbody></table></div>`
-    :`<div class="empty">空的。${{topic:"趋势官没被选中的选题会自动沉淀到这里",final:"完成的工单会沉淀到这里",report:"行业专家(如餐饮部)交付的报告会沉淀到这里"}[ASSET_TAB]}</div>`}
+    :`<div class="empty">空的。${{topic:"趋势官没被选中的选题会自动沉淀到这里",final:"完成的工单会沉淀到这里",report:"汽车、美容、酒店等行业专家交付的报告会沉淀到这里"}[ASSET_TAB]}</div>`}
     ${listPager(assetContract,"assets")}
   </div>`;
 }
@@ -3025,7 +3250,7 @@ async function companyView(){
       :`<div class="notice" style="background:#fff3d6">🟡 企业档案部分生效:已填 ${c.filled}/${c.total_fields||7} 项。员工只知道已填的部分——<b>空着的字段(如调性/禁忌)不会凭空生效</b>,建议补全后重新保存。</div>`)
       :`<div class="notice">⚠️ 还没生成档案,员工暂时不了解你的企业。填资料 → 点提炼即可。</div>`}
     <label>企业资料(可直接粘贴,或上传文档;最多 2 万字)</label>
-    <textarea id="cp-materials" style="min-height:150px" placeholder="例:我们是「川小福」麻辣烫连锁,主打一人食平价麻辣烫,人均25元…目标客户…品牌调性…核心卖点…表达禁忌…slogan…">${esc(c.materials||"")}</textarea>
+    <textarea id="cp-materials" style="min-height:150px" placeholder="例:我们是「品牌 / 企业名」,主营[产品或服务],服务[目标客户],核心场景是[…],品牌调性是[…],主要卖点是[…],表达禁忌是[…],常用口号是[…]。">${esc(c.materials||"")}</textarea>
     <div class="actions">
       <label class="btn" style="cursor:pointer">📎 上传文档(可多选)
         <input type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.docx,.xlsx,.pptx,.jpg,.jpeg,.png,.webp" style="display:none" onchange="companyUpload(this)"></label>
@@ -3035,10 +3260,10 @@ async function companyView(){
     <div class="sub" style="margin-top:-4px">支持 Word / PDF / Excel / PPT / 图片 / txt——上传后会自动提取文字并追加到上面,再点提炼。</div>
     <h3 style="margin:20px 0 4px">📇 提炼出的企业档案(注入员工的"固定参数",可手动微调)</h3>
     <div class="sub">这 7 项就是每个员工每次开工都会先读到的企业信息。可直接改,改完点保存。</div>
-    ${f("brand","品牌 / 企业名","如:川小福")}
+    ${f("brand","品牌 / 企业名","填写对外使用的品牌名或企业名")}
     ${f("business","主营业务","一句话说清:卖什么给谁")}
     ${f("audience","目标客群","如:20-35岁上班族与学生")}
-    ${f("tone","品牌调性 / 说话风格","如:年轻、亲切、接地气、有烟火气")}
+    ${f("tone","品牌调性 / 说话风格","如:专业可信、年轻直接、温暖克制")}
     ${f("selling_points","核心卖点","3-5个,顿号分隔")}
     ${f("taboo","表达禁忌","不能说什么 / 避免的调性")}
     ${f("keywords","常用话术 / 关键词 / slogan","顿号分隔")}
@@ -4025,7 +4250,7 @@ let TM_INDS = [];
 function tmTenantForm(){
   TM_INDS = window.__TEAM?.all_industries || [];
   $("#tm-tform").innerHTML = `<div class="card">
-    <div class="row"><div><label>企业名</label><input id="tt-name" placeholder="如:某某餐饮公司"></div>
+    <div class="row"><div><label>企业名</label><input id="tt-name" placeholder="如:某某科技服务公司"></div>
       <div><label>主账号用户名</label><input id="tt-owner"></div>
       <div><label>初始密码(≥12位，至少两类字符)</label><input id="tt-pw" type="password"></div></div>
     <label>该企业所属行业(勾选后,他们只能看到「内容部+数字人+库+所选行业」,看不到别的行业)</label>
@@ -4156,13 +4381,256 @@ function billReasonHtml(reason){
     .replace(/会议#(\d+)/g,'会议<a href="#/meetings" style="text-decoration:underline;font-weight:800">#$1</a>')
     .replace(/工具单#(\d+)/g,'工具单<a href="#/tasks" style="text-decoration:underline;font-weight:800">#$1</a>');
 }
+const PURCHASE_STATUS_LABELS={
+  requested:"待联系",contacted:"已联系",lost:"已结束",paid:"已到账开通",
+};
+const PURCHASE_STATUS_COLORS={
+  requested:"#fff0b8",contacted:"#dceeff",lost:"#eee7dc",paid:"#c9f1d8",
+};
+const PURCHASE_SOURCE_LABELS={
+  promo:"宣传页",login:"登录页",billing:"应用内套餐页",
+};
+const PURCHASE_REQUEST_IDS=new Map();
+let PURCHASE_CONTEXT={catalog:null,own:{items:[],total:0},admin:{items:[],total:0},stats:null};
+let PURCHASE_ADMIN_OFFSET=0,PURCHASE_ADMIN_STATUS="";
+function purchaseRequestStorageKey(plan,period){
+  return `paihuo:purchase-request:${Number(ME?.id||0)}:${String(plan)}:${String(period)}`;
+}
+function newPurchaseRequestId(){
+  const cryptoApi=globalThis.crypto;
+  if(!cryptoApi?.getRandomValues) throw new Error("当前浏览器无法生成安全申请号，请升级浏览器后重试");
+  const token=typeof cryptoApi.randomUUID==="function"
+    ?cryptoApi.randomUUID()
+    :Array.from(cryptoApi.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,"0")).join("");
+  return `purchase:${Number(ME?.id||0)}:${token}`;
+}
+function purchaseRequestId(plan,period){
+  const key=purchaseRequestStorageKey(plan,period);
+  if(PURCHASE_REQUEST_IDS.has(key)) return PURCHASE_REQUEST_IDS.get(key);
+  try{
+    const cached=JSON.parse(localStorage.getItem(key)||"null");
+    if(cached?.id&&Number(cached.created_at)>Date.now()-7*86400000){
+      PURCHASE_REQUEST_IDS.set(key,String(cached.id));
+      return String(cached.id);
+    }
+  }catch(_){}
+  const id=newPurchaseRequestId();
+  PURCHASE_REQUEST_IDS.set(key,id);
+  try{localStorage.setItem(key,JSON.stringify({id,created_at:Date.now()}));}catch(_){}
+  return id;
+}
+function clearPurchaseRequestId(plan,period){
+  const key=purchaseRequestStorageKey(plan,period);
+  PURCHASE_REQUEST_IDS.delete(key);
+  try{localStorage.removeItem(key);}catch(_){}
+}
+function pendingPurchase(){
+  try{
+    const selected=JSON.parse(localStorage.getItem("paihuo:pending-purchase")||"null");
+    if(selected?.plan&&selected?.period) return selected;
+  }catch(_){}
+  return null;
+}
+function purchaseQuote(plan,period){
+  return PURCHASE_CONTEXT.catalog?.quotes?.find(item=>item.plan===plan&&item.period===period)||null;
+}
+function activePurchase(plan){
+  return (PURCHASE_CONTEXT.own?.items||[]).find(item=>
+    item.plan===plan&&["requested","contacted"].includes(item.status));
+}
+async function loadPurchaseContext(){
+  const catalog=await api("/purchases/catalog");
+  const context={catalog,own:{items:[],total:0},admin:{items:[],total:0},stats:null};
+  if(ME?.role==="owner"||ME?.role==="root"){
+    context.own=await api("/purchases?limit=100&offset=0").catch(()=>({items:[],total:0}));
+  }
+  for(const item of context.own.items||[]){
+    if(["paid","lost"].includes(item.status)) clearPurchaseRequestId(item.plan,item.period);
+  }
+  if(ME?.role==="root"){
+    const adminQuery=new URLSearchParams({
+      limit:"50",offset:String(PURCHASE_ADMIN_OFFSET),
+    });
+    if(PURCHASE_ADMIN_STATUS) adminQuery.set("status",PURCHASE_ADMIN_STATUS);
+    [context.admin,context.stats]=await Promise.all([
+      api(`/admin/purchases?${adminQuery.toString()}`).catch(()=>({items:[],total:0})),
+      api("/admin/purchases/stats").catch(()=>null),
+    ]);
+  }
+  PURCHASE_CONTEXT=context;
+  return context;
+}
+function purchasePlanHtml(plan){
+  const active=activePurchase(plan.key);
+  const pending=pendingPurchase();
+  const selectedPeriod=pending?.plan===plan.key?pending.period:"month";
+  const periods=(PURCHASE_CONTEXT.catalog?.periods||[]).map(period=>
+    `<option value="${esc(period.key)}" ${period.key===selectedPeriod?"selected":""}>${esc(period.label)}</option>`
+  ).join("");
+  const quote=purchaseQuote(plan.key,selectedPeriod);
+  const action=ME?.role==="member"
+    ?`<div class="notice" style="margin:10px 0 0">请联系贵司企业主提交购买申请。</div>`
+    :ME?.role==="root"
+      ?`<a class="btn sm" href="#purchase-admin">查看平台购买线索</a>`
+      :active
+        ?`<button class="btn sm" disabled>申请处理中 · ${esc(PURCHASE_STATUS_LABELS[active.status])}</button>`
+        :`<button class="btn pri sm" onclick="purchaseOpen(${cp(plan.key)})">提交购买申请</button>`;
+  return `<div class="topic" data-purchase-plan="${esc(plan.key)}" style="text-align:center;${plan.key==="startup"?"border-color:#ef476f;border-width:3px":""}">
+    ${plan.key==="startup"?`<div style="color:#ef476f;font-weight:900;font-size:12px">🔥 最多人选</div>`:""}
+    <h3 style="margin:4px 0">${esc(plan.name)}</h3>
+    <div class="sub" style="text-decoration:line-through">原价 ¥${Number(plan.price)}/月</div>
+    <div style="font-size:30px;font-weight:900">¥${Number(plan.sale)}<span style="font-size:13px;font-weight:400">/月</span></div>
+    <div class="tag" style="margin:6px 0">${Number(plan.points)} 点/月</div>
+    <select aria-label="${esc(plan.name)}购买周期" onchange="purchasePlanPeriodChanged(${cp(plan.key)},this.value)" ${ME?.role==="owner"?"":"disabled"}>${periods}</select>
+    <div class="sub purchase-quote" style="margin:8px 0">${quote?`${esc(quote.period_label)}合计 <b>¥${Number(quote.price)}</b> · ${Number(quote.points)} 点`:"以服务端报价为准"}</div>
+    <div class="sub">${esc(plan.desc||"")}</div><div class="actions" style="justify-content:center">${action}</div></div>`;
+}
+function purchasePlanPeriodChanged(plan,period){
+  const card=document.querySelector(`[data-purchase-plan="${plan}"]`);
+  const quote=purchaseQuote(plan,period);
+  if(card&&quote) card.querySelector(".purchase-quote").innerHTML=
+    `${esc(quote.period_label)}合计 <b>¥${Number(quote.price)}</b> · ${Number(quote.points)} 点`;
+  const pending=pendingPurchase();
+  if(pending?.plan===plan){
+    try{localStorage.setItem("paihuo:pending-purchase",JSON.stringify({...pending,period,created_at:Date.now()}));}catch(_){}
+  }
+}
+function purchaseOpen(plan){
+  if(ME?.role!=="owner") return toast("仅企业主账号可以提交购买申请");
+  if(activePurchase(plan)) return toast("这个套餐已有申请在处理中");
+  const card=document.querySelector(`[data-purchase-plan="${plan}"]`);
+  const period=card?.querySelector("select")?.value||"month";
+  const quote=purchaseQuote(plan,period);
+  if(!quote) return toast("套餐报价加载失败，请刷新后重试");
+  let savedContact="";
+  try{savedContact=localStorage.getItem("paihuo:purchase-contact")||"";}catch(_){}
+  document.body.insertAdjacentHTML("beforeend",`<div class="overlay" id="purchase-overlay">
+    <div class="panel" role="dialog" aria-modal="true" aria-labelledby="purchase-title">
+      <div class="phead"><h2 id="purchase-title" style="margin:0;flex:1">申请购买 ${esc(quote.plan_name)}</h2>
+        <button class="btn sm" onclick="$('#purchase-overlay')?.remove()" aria-label="关闭">✕</button></div>
+      <div class="pbody">
+        <div class="notice" style="margin-top:0"><b>${esc(quote.period_label)} · ¥${Number(quote.price)} · ${Number(quote.points)} 点</b><br>
+          这是线下购买申请，不会在线扣款。平台联系并确认到账后才开通。</div>
+        <label>联系方式 *</label><input id="purchase-contact" maxlength="80" value="${esc(savedContact)}" placeholder="手机号 / 微信 / 企业微信">
+        <label style="margin-top:10px">补充说明（选填）</label><textarea id="purchase-note" maxlength="300" class="promptbox" style="min-height:100px" placeholder="如：工作日下午联系、需要对公合同"></textarea>
+        <div class="actions"><button class="btn" onclick="$('#purchase-overlay')?.remove()">取消</button>
+          <button class="btn pri" id="purchase-submit" onclick="purchaseSubmit(${cp(plan)},${cp(period)})">确认提交申请</button></div>
+      </div></div></div>`);
+  setTimeout(()=>$("#purchase-contact")?.focus(),0);
+}
+async function purchaseSubmit(plan,period){
+  const contact=$("#purchase-contact")?.value.trim()||"";
+  const note=$("#purchase-note")?.value.trim()||"";
+  const selected=pendingPurchase();
+  const source=selected?.plan===plan&&selected?.period===period
+    ?(selected.source||"billing")
+    :"billing";
+  if(!contact) return toast("请填写联系方式");
+  const button=$("#purchase-submit");
+  if(button?.disabled) return;
+  if(button){button.disabled=true;button.textContent="提交中…";}
+  try{
+    const result=await api("/purchases",{method:"POST",body:{
+      request_id:purchaseRequestId(plan,period),plan,period,contact,note,source,
+    }});
+    try{
+      localStorage.setItem("paihuo:purchase-contact",contact);
+      localStorage.removeItem("paihuo:pending-purchase");
+    }catch(_){}
+    $("#purchase-overlay")?.remove();
+    toast(result.created?"✅ 购买申请已提交，平台会联系您":"这条购买申请已经提交，无需重复操作");
+    await billingView();
+  }catch(e){
+    if(button){button.disabled=false;button.textContent="确认提交申请";}
+    toast(e.message);
+  }
+}
+function purchaseOwnHtml(){
+  const items=PURCHASE_CONTEXT.own?.items||[];
+  if(ME?.role!=="owner") return "";
+  return `<div class="card"><h2>🧭 我的购买申请</h2>
+    <div class="sub">从申请、联系到到账开通，每一步都能在这里追踪。</div>
+    ${items.length?items.map(item=>`<div class="topic" style="margin-top:10px">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><b style="flex:1">${esc(item.plan_name)} · ${esc(item.period_label)}</b>
+        <span class="tag" style="background:${PURCHASE_STATUS_COLORS[item.status]||"#eee"}">${esc(PURCHASE_STATUS_LABELS[item.status]||item.status)}</span></div>
+      <div class="sub" style="margin-top:6px">报价 ¥${Number(item.price)} · ${Number(item.points)} 点 · 申请于 ${tcFmt(item.created_at)}</div>
+      <div class="sub">${item.status==="requested"?"平台尚未确认联系，请保持联系方式畅通。":item.status==="contacted"?"平台已联系，确认线下到账后才会开通。":item.status==="paid"?"套餐与积分已开通，可在本页上方核对余额。":"本次申请已结束，如仍有需要可重新申请。"}</div>
+    </div>`).join(""):`<div class="empty" style="padding:24px">还没有购买申请。选择下面的套餐即可提交。</div>`}</div>`;
+}
+function purchaseAdminHtml(){
+  if(ME?.role!=="root") return "";
+  const stats=PURCHASE_CONTEXT.stats, items=PURCHASE_CONTEXT.admin?.items||[];
+  const stat=(key)=>stats?.by_status?.[key]?.count||0;
+  return `<div class="card" id="purchase-admin"><h2>💼 购买线索与成交</h2>
+    <div class="sub">客户提交 → 平台联系 → 线下到账核验 → 系统幂等开通。只有确认真实到账后才能点“已到账”。</div>
+    <div class="kv" style="margin-top:12px"><span>待联系 <b>${stat("requested")}</b></span><span>已联系 <b>${stat("contacted")}</b></span>
+      <span>已到账 <b>${stat("paid")}</b></span><span>已结束 <b>${stat("lost")}</b></span>
+      <span>成交报价额 <b>¥${Number(stats?.paid_amount||0)}</b></span></div>
+    <div class="tabs" style="margin-top:12px">${[
+      ["","全部"],["requested","待联系"],["contacted","已联系"],["paid","已到账"],["lost","已结束"],
+    ].map(([key,label])=>`<span class="tb ${PURCHASE_ADMIN_STATUS===key?"on":""}" onclick="purchaseAdminFilter(${cp(key)})">${label}</span>`).join("")}</div>
+    <div class="sub" style="margin-top:8px">正在显示第 ${items.length?PURCHASE_ADMIN_OFFSET+1:0}–${PURCHASE_ADMIN_OFFSET+items.length} 条，共 ${Number(PURCHASE_CONTEXT.admin?.total||0)} 条。</div>
+    ${items.length?`<div class="dimwrap" style="margin-top:12px"><table class="dimtable"><thead><tr>
+      <th>申请</th><th>企业</th><th>联系方式</th><th>报价</th><th>状态</th><th>操作</th></tr></thead><tbody>
+      ${items.map(item=>`<tr><td><b>#${Number(item.id)} ${esc(item.plan_name)}·${esc(item.period_label)}</b><div class="sub">${tcFmt(item.created_at)} · ${esc(PURCHASE_SOURCE_LABELS[item.source]||"应用内套餐页")}</div></td>
+        <td>#${Number(item.tenant_id)}</td><td>${esc(item.contact)}</td><td>¥${Number(item.price)}<div class="sub">${Number(item.points)} 点</div></td>
+        <td><span class="tag" style="background:${PURCHASE_STATUS_COLORS[item.status]||"#eee"}">${esc(PURCHASE_STATUS_LABELS[item.status]||item.status)}</span></td>
+        <td><div class="actions">${item.status==="requested"?`<button class="btn sm" onclick="purchaseTransition(${Number(item.id)},'requested','contacted')">标记已联系</button>`:""}
+          ${["requested","contacted"].includes(item.status)?`<button class="btn sm pri" onclick="purchaseTransition(${Number(item.id)},${cp(item.status)},'paid')">确认已到账</button>
+          <button class="btn sm bad" onclick="purchaseTransition(${Number(item.id)},${cp(item.status)},'lost')">结束申请</button>`:""}</div></td></tr>`).join("")}
+      </tbody></table></div>`:`<div class="empty" style="padding:24px">当前筛选下暂无购买申请。</div>`}
+    <div class="actions" style="justify-content:flex-end">
+      <button class="btn sm" ${PURCHASE_ADMIN_OFFSET<=0?"disabled":""} onclick="purchaseAdminPage(${Math.max(0,PURCHASE_ADMIN_OFFSET-50)})">← 上一页</button>
+      <button class="btn sm" ${PURCHASE_ADMIN_OFFSET+items.length>=Number(PURCHASE_CONTEXT.admin?.total||0)?"disabled":""} onclick="purchaseAdminPage(${PURCHASE_ADMIN_OFFSET+50})">下一页 →</button>
+    </div></div>`;
+}
+async function purchaseAdminFilter(status){
+  PURCHASE_ADMIN_STATUS=String(status||"");
+  PURCHASE_ADMIN_OFFSET=0;
+  await billingView();
+}
+async function purchaseAdminPage(offset){
+  PURCHASE_ADMIN_OFFSET=Math.max(0,Number(offset)||0);
+  await billingView();
+  document.getElementById("purchase-admin")?.scrollIntoView({block:"start"});
+}
+async function purchaseTransition(id,expected,target){
+  let note="";
+  if(target==="paid"){
+    const confirmed=await uiConfirm("请先核对线下款项确实到账。确认后系统会立即开通套餐并发放积分，此操作不可撤回。",{
+      title:"确认真实到账",confirmText:"已核验到账并开通",danger:false,
+    });
+    if(!confirmed) return;
+    note="线下到账已人工核验";
+  }else{
+    note=await uiPrompt({
+      title:target==="lost"?"结束购买申请":"记录联系结果",
+      message:target==="lost"?"请填写结束原因，便于复盘。":"可简要记录本次联系结果（选填）。",
+      label:"跟进备注",multiline:true,required:target==="lost",
+      requiredMessage:"结束申请必须填写原因",
+      confirmText:target==="lost"?"确认结束":"标记已联系",
+    });
+    if(note===null) return;
+  }
+  try{
+    await api(`/admin/purchases/${Number(id)}`,{method:"PATCH",body:{
+      expected_status:expected,status:target,note,
+    }});
+    toast(target==="paid"?"✅ 已确认到账，套餐与积分已开通":target==="contacted"?"已记录联系":"申请已结束");
+    await billingView();
+  }catch(e){toast(e.message);}
+}
 async function billingView(){
   trackFunnelSessionOnce("pricing_view","billing");
-  const b = await api("/billing");
-  const digestConf = await api("/notify/daily-digest").catch(()=>({enabled:true}));
+  const [b,digestConf] = await Promise.all([
+    api("/billing"),
+    api("/notify/daily-digest").catch(()=>({enabled:true})),
+    loadPurchaseContext(),
+  ]);
   const tourBanner = ME&&ME.role==="tour" ? `<div class="notice" style="background:#ece3ff;margin-top:0">👀 <b>参观模式</b>:点击员工卡片,了解每位数字员工可以为您的业务提供什么帮助。<a href="/promo#plans" style="text-decoration:underline;font-weight:900">查看套餐</a> 或联系开通企业账号后直接派活。</div>` : "";
   const isRefund = l=>l.delta>0&&String(l.reason||"").startsWith("退回");
   const shown = (BILL_TAB==="in"?b.log.filter(l=>l.delta>0&&!isRefund(l)):BILL_TAB==="out"?b.log.filter(l=>l.delta<0):b.log);
+  const billWindowLabel=b.log_truncated?`最近 ${b.log.length} / ${b.txn_n||b.log.length}`:`全部 ${b.log.length}`;
   const spendActs = (!b.is_platform&&b.spend_by_action)?b.spend_by_action.filter(s=>(s.points||0)>0):[];
   const spendTotal = spendActs.reduce((sum,s)=>sum+(s.points||0),0);
   const expDays = b.plan_expires? Math.ceil((b.plan_expires*1000-Date.now())/86400000) : null;
@@ -4171,6 +4639,7 @@ async function billingView(){
     :`⛔ 套餐 <b>${esc(b.plan||"")}</b> 已到期`},到期后不再按月发点。续费请${
     ME.role==="member"?"联系<b>贵司主账号(企业主)</b>"
     :`联系平台顾问${META?.support_contact?`:<b>${esc(META.support_contact)}</b>`:"(点右下角 💬 留言)"}`}。</div>`:"";
+  const catalogPlans=PURCHASE_CONTEXT.catalog?.plans||b.plans||[];
   $("#main").innerHTML = tourBanner + expBanner + `
   <div class="card" style="background:linear-gradient(120deg,#fff6dc,#fffaf0 60%)">
     <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
@@ -4185,6 +4654,7 @@ async function billingView(){
         <span>累计消耗 <b style="color:#e5484d">-${(b.spent||0).toFixed(0)}</b></span>
         ${(b.refunded_total||0)>0?`<span>失败退回 <b style="color:#b45309">+${(b.refunded_total||0).toFixed(0)}</b></span>`:""}
         <span>共 ${b.txn_n||0} 笔</span></div>`}</div>
+  ${purchaseOwnHtml()}${purchaseAdminHtml()}
   ${spendActs.length?`<div class="card"><h2>💸 近30天花在哪</h2>
     <div class="sub">按功能统计最近 30 天实际消耗的积分,帮您看清钱被哪类动作花掉了。</div>
     ${spendActs.map(s=>`<div style="margin-top:12px">
@@ -4202,11 +4672,12 @@ async function billingView(){
         <td style="color:#b45309">${(m.refunded||0)>0?`+${(m.refunded||0).toFixed(0)}`:"—"}</td></tr>`).join("")}</tbody></table></div></div>`:""}
   <div class="card"><h2 style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">🧾 积分明细(充值 & 消耗记录)
     ${isAdmin()&&!b.is_platform?`<a class="btn sm" style="margin-left:auto" href="/api/records/export.xlsx?kind=billing">⬇️ 导出全部流水</a>`:""}</h2>
+    ${b.log_truncated?`<div class="notice" style="margin:8px 0">页面展示最近 ${b.log.length} 笔，共 ${b.txn_n} 笔；点击“导出全部流水”可核对完整账目。</div>`:""}
     <label style="display:flex;gap:8px;align-items:flex-start;margin:6px 0 4px;cursor:${isAdmin()?"pointer":"default"}">
       <input type="checkbox" style="margin-top:3px" ${digestConf.enabled?"checked":""} ${isAdmin()?"":"disabled"} onchange="digestToggle(this)">
       <span class="sub">📮 每日经营简报(昨日完成/花销/风险,推到站内+企微)${isAdmin()?"":"(仅企业主可改)"}</span></label>
     <div class="tabs">
-      <span class="tb ${BILL_TAB==="all"?"on":""}" onclick="BILL_TAB='all';render()">全部(${b.log.length})</span>
+      <span class="tb ${BILL_TAB==="all"?"on":""}" onclick="BILL_TAB='all';render()">${billWindowLabel}</span>
       <span class="tb ${BILL_TAB==="in"?"on":""}" onclick="BILL_TAB='in';render()">💰 充值记录(${b.log.filter(l=>l.delta>0&&!isRefund(l)).length})</span>
       <span class="tb ${BILL_TAB==="out"?"on":""}" onclick="BILL_TAB='out';render()">🔻 消耗记录(${b.log.filter(l=>l.delta<0).length})</span></div>
     ${shown.length?`<div class="dimwrap" style="margin-top:10px"><table class="dimtable" style="min-width:min(520px,100%)"><thead><tr>
@@ -4222,17 +4693,11 @@ async function billingView(){
     <div class="dimwrap"><table class="dimtable" style="min-width:min(560px,100%)"><thead><tr><th>动作</th><th>消耗</th><th>成本参考</th></tr></thead>
     <tbody>${Object.values(b.prices).map(p=>`<tr><td>${esc(p.label)}</td><td><b>${p.points} 点</b></td><td class="sub">${esc(p.cost||"")}</td></tr>`).join("")}</tbody></table></div></div>
   <div class="card"><h2>📦 套餐(月/季/年)</h2>
-    <div class="sub">季付 9 折,年付 8 折(按活动价再折)。${ME.role==="member"?"充值/续费请联系<b>贵司主账号(企业主)</b>操作;":""}开通请联系平台顾问${META?.support_contact?`:<b style="font-size:15px">${esc(META.support_contact)}</b>(微信/电话均可)`:"(点右下角 💬 留下联系方式,顾问会主动联系您)"}${ME.role==="root"?";root 可在「权限管理→租户管理」给客户开通,并设置对客联系方式":""}。</div>
+    <div class="sub">季付 9 折,年付 8 折(按活动价再折)。${ME.role==="member"?"充值/续费请联系<b>贵司主账号(企业主)</b>操作。":""}${ME.role==="root"?"在上方购买线索中核对客户申请和线下到账；也可在「权限管理→租户管理」人工开通。":"选择套餐后提交购买申请，平台联系并确认线下到账后才会开通，不会在页面内自动扣款。"}</div>
     <div class="grid3" style="grid-template-columns:repeat(auto-fit,minmax(210px,1fr));margin-top:12px">
-    ${b.plans.map((p,i)=>`<div class="topic" style="text-align:center;${i===1?"border-color:#ef476f;border-width:3px":""}">
-      ${i===1?`<div style="color:#ef476f;font-weight:900;font-size:12px">🔥 最多人选</div>`:""}
-      <h3 style="margin:4px 0">${esc(p.name)}</h3>
-      <div class="sub" style="text-decoration:line-through">原价 ¥${p.price}/月</div>
-      <div style="font-size:30px;font-weight:900">¥${p.sale}<span style="font-size:13px;font-weight:400">/月</span></div>
-      <div class="tag" style="margin:6px 0">${p.points} 点/月</div>
-      <div class="sub" style="margin:4px 0"><b>季付 ¥${Math.round(p.sale*3*0.9)}</b>(省¥${p.sale*3-Math.round(p.sale*3*0.9)}) · <b>年付 ¥${Math.round(p.sale*12*0.8)}</b>(省¥${p.sale*12-Math.round(p.sale*12*0.8)})</div>
-      <div class="sub">${esc(p.desc)}</div></div>`).join("")}</div></div>
+    ${catalogPlans.map(p=>purchasePlanHtml(p)).join("")}</div></div>
 `;
+  enhanceResponsiveTables($("#main"));
 }
 async function digestToggle(cb){
   try{
@@ -4345,7 +4810,7 @@ async function meetingsView(mid){
   $("#main").innerHTML = `
   <div class="notice" style="margin-top:0">🪑 <b>AI 结果型会议</b>:不是让数字员工无限聊天，而是强制走完「每人一案并按有效方案排 Top N（最多 3 个）→ 失败/市场/单位经济反向验证 → GO / NO-GO 并执行」。每人 1 点。</div>
   <div class="card"><h2>🎯 发起结果型会议</h2>
-    <label>议题 *</label><textarea id="mt-q" placeholder="例:我想在老小区开一家 60 平的川湘菜馆,预算 40 万,帮我论证可行性和最大风险"></textarea>
+    <label>议题 *</label><textarea id="mt-q" placeholder="例:我们准备在新城市开第二个直营网点,预算 40 万,请判断 GO / NO-GO、最大风险和本周验证动作"></textarea>
     <div class="row"><div><label>已知约束(选填)</label><input id="mt-constraints" placeholder="例:预算40万；30天内开业；不能增加全职员工"></div>
       <div><label>什么算有结果(选填)</label><input id="mt-acceptance" placeholder="例:必须给明确GO/NO-GO、最大风险和本周可执行动作"></div></div>
     <div class="actions" style="margin-top:8px"><button class="btn blue" onclick="mtSuggest(this)">🤖 按议题自动选人</button>
@@ -4432,7 +4897,7 @@ async function mtAssign(mid, i, btn){
   const cur = await api("/meetings/"+mid); const a = (cur.actions||[])[i]; if(!a) return;
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span>`;
   try{ const r = await api("/tasks",{method:"POST",body:{emp_idx:a.idx, brief:{direction:a.task, industry:""}}});
-    toast(`已派给 ${a.who}`); btn.outerHTML=`<span class="tag" style="background:#a7ecc9">✅ 已派 <button type="button" class="link-btn" onclick="openSpec(${Number(a.idx)||0})" style="text-decoration:underline">看进度</button></span>`;
+    toast(`已派给 ${a.who}`); btn.outerHTML=`<span class="tag" style="background:#a7ecc9">✅ 已派 <button type="button" class="link-btn" onclick="openSpec(${Number(a.idx)||0},'task')" style="text-decoration:underline">看进度</button></span>`;
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🚀 派给TA(1点)"; }
 }
 async function mtAssignAll(mid, btn){
@@ -4467,7 +4932,7 @@ async function mtExecute(mid, btn){
 }
 async function mtOpenTask(tid, idx){
   if(idx<100){ MODAL_IDX=idx; MODAL_TAB="solo"; SOLO_TASK=await api("/tasks/"+tid); drawModal(); }
-  else { await openSpec(idx); SPEC_TAB="task"; await specOpenTask(tid); }
+  else { await openSpec(idx,"task"); await specOpenTask(tid); }
 }
 async function mtAsk(mid, btn){
   const q = $("#mt-ask").value.trim(); if(!q) return toast("先写您要追问的话");

@@ -406,6 +406,609 @@ class TrashPurgeCase(unittest.TestCase):
             db.one("SELECT id FROM tv_job WHERE id=?", (inserted["id"],))
         )
 
+    def test_job_purge_applies_documented_retention_matrix(self):
+        self.assertEqual(
+            {
+                "job", "station_run", "asset", "knowledge", "tv_job",
+                "notification", "managed_files",
+            },
+            set(main._JOB_PURGE_RETENTION_MATRIX["delete"]),
+        )
+        self.assertEqual(
+            {"censor_log", "publish_log", "pub_task"},
+            set(main._JOB_PURGE_RETENTION_MATRIX["redact_keep"]),
+        )
+        self.assertEqual(
+            {
+                "billing_log", "billing_operation",
+                "wechat_draft_delivery",
+            },
+            set(main._JOB_PURGE_RETENTION_MATRIX["opaque_keep"]),
+        )
+        secret = "客户新品绝密标题"
+        secret_body = "未公开正文、客户名单与投放素材路径"
+        job_id = self._deleted_job(
+            brief_json=json.dumps({
+                "direction": secret,
+                "material": secret_body,
+                "ref_link": "https://private.example/material",
+            }, ensure_ascii=False),
+        )
+        db.insert("station_run", {
+            "job_id": job_id,
+            "station_idx": 4,
+            "status": "done",
+            "output_json": json.dumps({
+                "title_candidates": [secret],
+                "body": secret_body,
+                "images": [f"/files/job{job_id}/secret.png"],
+            }, ensure_ascii=False),
+            "review_comment": "内部审核意见",
+            "steps_json": json.dumps([{"label": "内部步骤"}], ensure_ascii=False),
+        })
+        asset_id = db.insert("asset", {
+            "tenant_id": 2,
+            "job_id": job_id,
+            "type": "final",
+            "payload_json": json.dumps({
+                "title": secret, "body": secret_body,
+                "file": f"/files/job{job_id}/secret.png",
+            }, ensure_ascii=False),
+        })
+        knowledge_id = db.insert("knowledge", {
+            "tenant_id": 2,
+            "job_id": job_id,
+            "title": f"《{secret}》交付复盘",
+            "content": secret_body,
+            "tags_json": '["自动沉淀"]',
+        })
+
+        tv_id = db.insert("tv_job", {
+            "tenant_id": 2,
+            "job_id": job_id,
+            "params_json": json.dumps({
+                "title": secret,
+                "body": secret_body,
+                "images": [f"/files/job{job_id}/secret.png"],
+            }, ensure_ascii=False),
+            "script": secret_body,
+            "status": "done",
+            "billing_status": "succeeded",
+        })
+        tv_name = f"tv_{tv_id}.mp4"
+        db.update("tv_job", tv_id, {"video_file": f"/files/tv/{tv_name}"})
+        publish_id = db.insert("publish_log", {
+            "tenant_id": 2,
+            "job_id": job_id,
+            "platform": "公众号",
+            "title": secret,
+            "url": "https://private.example/published",
+            "source": "draft",
+            "retro_json": '{"1":{"state":"done"}}',
+        })
+        censor_id = db.insert("censor_log", {
+            "tenant_id": 2,
+            "job_id": job_id,
+            "kind": "pre",
+            "platform": "公众号",
+            "title": secret,
+            "verdict": "pass",
+            "score": 98,
+            "issues_json": json.dumps([{"quote": secret_body}],
+                                      ensure_ascii=False),
+            "report": secret_body,
+        })
+        pub_id = db.insert("pub_task", {
+            "tenant_id": 2,
+            "platform": "xhs",
+            "account": "private-account",
+            "payload_json": json.dumps({
+                "job_id": job_id,
+                "title": secret,
+                "body": secret_body,
+                "images": [f"/files/job{job_id}/secret.png"],
+            }, ensure_ascii=False),
+            "status": "done",
+            "submission_state": "submitted",
+            "log": f"已发布:{secret}",
+        })
+        pub_shot = f"/files/pub/fail_{pub_id}.png"
+        db.update("pub_task", pub_id, {
+            "fail_json": json.dumps({
+                "why": secret_body, "shot": pub_shot,
+            }, ensure_ascii=False),
+        })
+        op_key = "wechat-draft:compliance-anchor"
+        delivery_id = db.insert("wechat_draft_delivery", {
+            "tenant_id": 2,
+            "job_id": job_id,
+            "request_hash": "a" * 64,
+            "request_key": "a" * 20,
+            "title": secret,
+            "status": "done",
+            "billing_status": "succeeded",
+            "billing_points": 1,
+            "op_key": op_key,
+            "media_id": "external-media-anchor",
+            "publish_log_id": publish_id,
+            "report_json": json.dumps({"summary": secret_body},
+                                      ensure_ascii=False),
+            "error": secret_body,
+        })
+        db.insert("billing_operation", {
+            "op_key": op_key,
+            "tenant_id": 2,
+            "job_id": job_id,
+            "action": "wechat_draft",
+            "units": 1,
+            "points": 1,
+            "note": secret,
+            "status": "succeeded",
+            "error": secret_body,
+        })
+        retro_op_key = "retro:compliance-anchor"
+        db.insert("billing_operation", {
+            "op_key": retro_op_key,
+            "tenant_id": 2,
+            "job_id": job_id,
+            "action": "censor_retro",
+            "units": 1,
+            "points": 1,
+            "note": f"自动复盘T+1·《{secret[:14]}》",
+            "status": "succeeded",
+            "error": secret_body,
+        })
+        billing_ids = [
+            db.insert("billing_log", {
+                "tenant_id": 2, "job_id": job_id,
+                "delta": -18, "balance": 82,
+                "reason": f"内容流水线整单 · 工单#{job_id}·{secret}",
+            }),
+            db.insert("billing_log", {
+                "tenant_id": 2, "job_id": job_id,
+                "delta": -1, "balance": 81,
+                "reason": f"一键发公众号草稿箱(含终审) · {secret[:20]}",
+            }),
+            db.insert("billing_log", {
+                "tenant_id": 2, "job_id": job_id,
+                "delta": -1, "balance": 80,
+                "reason": (
+                    f"深度复盘审查 · 自动复盘T+1·《{secret[:14]}》"
+                ),
+            }),
+        ]
+        notice_id = db.insert("notification", {
+            "tenant_id": 2,
+            "job_id": job_id,
+            "kind": "pub",
+            "title": "矩阵发布成功",
+            "body": secret,
+            "link": "#/channels",
+        })
+        retro_notice_id = db.insert("notification", {
+            "tenant_id": 2,
+            "job_id": job_id,
+            "kind": "report",
+            "title": f"《{secret[:20]}》T+1 自动复盘",
+            "body": "复盘指标摘要",
+            "link": "#/censor",
+        })
+        unrelated_notice_id = db.insert("notification", {
+            "tenant_id": 2,
+            "kind": "report",
+            "title": "同租户的无关经营提醒",
+            "body": f"这是一条引用标题“{secret}”的无关提醒",
+            "link": "#/knowledge",
+        })
+
+        # 同标题的别家租户记录必须原样保留。
+        db.insert("tenants", {"id": 3, "name": "别家", "balance": 20})
+        foreign_publish = db.insert("publish_log", {
+            "tenant_id": 3,
+            "job_id": job_id,
+            "platform": "公众号",
+            "title": secret,
+            "url": "https://foreign.example/post",
+            "retro_json": "{}",
+        })
+        foreign_censor = db.insert("censor_log", {
+            "tenant_id": 3,
+            "kind": "pre",
+            "platform": "公众号",
+            "title": secret,
+            "issues_json": '[{"foreign":true}]',
+            "report": "别家正文",
+        })
+
+        job_dir = os.path.join(self.asset_root, f"job{job_id}")
+        tv_dir = os.path.join(self.asset_root, "tv")
+        pub_dir = os.path.join(self.asset_root, "pub")
+        os.makedirs(job_dir, exist_ok=True)
+        os.makedirs(tv_dir, exist_ok=True)
+        os.makedirs(pub_dir, exist_ok=True)
+        with open(os.path.join(job_dir, "secret.png"), "wb") as fh:
+            fh.write(b"job")
+        with open(os.path.join(tv_dir, tv_name), "wb") as fh:
+            fh.write(b"tv")
+        with open(os.path.join(pub_dir, f"fail_{pub_id}.png"), "wb") as fh:
+            fh.write(b"shot")
+
+        result = main.trash_purge("job", job_id)
+
+        self.assertTrue(result["purged"])
+        self.assertEqual(3, result["files_removed"])
+        self.assertEqual(0, result["files_failed"])
+        for table, column, row_id in (
+            ("job", "id", job_id),
+            ("asset", "id", asset_id),
+            ("knowledge", "id", knowledge_id),
+            ("tv_job", "id", tv_id),
+            ("notification", "id", notice_id),
+            ("notification", "id", retro_notice_id),
+        ):
+            self.assertIsNone(
+                db.one(f"SELECT {column} FROM {table} WHERE id=?", (row_id,)),
+                table,
+            )
+        self.assertEqual(
+            0,
+            db.one("SELECT COUNT(*) n FROM station_run WHERE job_id=?",
+                   (job_id,))["n"],
+        )
+
+        censor_row = db.one("SELECT * FROM censor_log WHERE id=?", (censor_id,))
+        self.assertEqual(main._PURGED_CONTENT, censor_row["title"])
+        self.assertEqual("[]", censor_row["issues_json"])
+        self.assertEqual("", censor_row["report"])
+        publish_row = db.one(
+            "SELECT * FROM publish_log WHERE id=?", (publish_id,))
+        self.assertEqual(main._PURGED_CONTENT, publish_row["title"])
+        self.assertEqual("", publish_row["url"])
+        self.assertEqual("{}", publish_row["retro_json"])
+        pub_row = db.one("SELECT * FROM pub_task WHERE id=?", (pub_id,))
+        self.assertEqual(
+            {"job_id": job_id, "purged": True},
+            json.loads(pub_row["payload_json"]),
+        )
+        self.assertEqual("submitted", pub_row["submission_state"])
+        self.assertEqual("done", pub_row["status"])
+        self.assertIsNone(pub_row["account"])
+        self.assertEqual("", pub_row["log"])
+        self.assertEqual("{}", pub_row["fail_json"])
+
+        delivery = db.one(
+            "SELECT * FROM wechat_draft_delivery WHERE id=?", (delivery_id,))
+        self.assertEqual("a" * 64, delivery["request_hash"])
+        self.assertEqual(op_key, delivery["op_key"])
+        self.assertEqual("external-media-anchor", delivery["media_id"])
+        self.assertEqual("done", delivery["status"])
+        self.assertEqual(main._PURGED_CONTENT, delivery["title"])
+        self.assertIsNone(delivery["report_json"])
+        self.assertIsNone(delivery["error"])
+        operation = db.one(
+            "SELECT * FROM billing_operation WHERE op_key=?", (op_key,))
+        self.assertEqual("succeeded", operation["status"])
+        self.assertEqual(1, operation["points"])
+        self.assertEqual(main._PURGED_CONTENT, operation["note"])
+        self.assertIsNone(operation["error"])
+        retro_operation = db.one(
+            "SELECT * FROM billing_operation WHERE op_key=?",
+            (retro_op_key,),
+        )
+        self.assertEqual("censor_retro", retro_operation["action"])
+        self.assertEqual("succeeded", retro_operation["status"])
+        self.assertEqual(1, retro_operation["points"])
+        self.assertEqual(main._PURGED_CONTENT, retro_operation["note"])
+        self.assertIsNone(retro_operation["error"])
+        billing_rows = db.q(
+            "SELECT id,delta,balance,reason FROM billing_log "
+            "WHERE id IN (?,?,?) ORDER BY id",
+            tuple(billing_ids),
+        )
+        self.assertEqual([-18, -1, -1],
+                         [row["delta"] for row in billing_rows])
+        self.assertEqual([82, 81, 80],
+                         [row["balance"] for row in billing_rows])
+        self.assertTrue(all(
+            main._PURGED_CONTENT in row["reason"] for row in billing_rows))
+        self.assertNotIn(
+            secret,
+            json.dumps(
+                [
+                    censor_row, publish_row, pub_row, delivery,
+                    operation, retro_operation, billing_rows,
+                ],
+                ensure_ascii=False,
+            ),
+        )
+        self.assertIsNotNone(
+            db.one(
+                "SELECT id FROM notification WHERE id=?",
+                (unrelated_notice_id,),
+            )
+        )
+        self.assertEqual(
+            secret,
+            db.one("SELECT title FROM publish_log WHERE id=?",
+                   (foreign_publish,))["title"],
+        )
+        self.assertEqual(
+            secret,
+            db.one("SELECT title FROM censor_log WHERE id=?",
+                   (foreign_censor,))["title"],
+        )
+        self.assertFalse(os.path.exists(job_dir))
+        self.assertFalse(os.path.exists(
+            os.path.join(tv_dir, tv_name)))
+        self.assertFalse(os.path.exists(
+            os.path.join(pub_dir, f"fail_{pub_id}.png")))
+
+    def test_same_tenant_same_title_relations_are_never_cross_purged(self):
+        title = "同一个活动标题"
+        job_a = self._deleted_job(
+            brief_json=json.dumps({"direction": title}, ensure_ascii=False)
+        )
+        job_b = db.insert("job", {
+            "tenant_id": 2,
+            "brief_json": json.dumps({"direction": title}, ensure_ascii=False),
+            "status": "done",
+            "billing_status": "succeeded",
+        })
+        censor_a = db.insert("censor_log", {
+            "tenant_id": 2, "job_id": job_a, "kind": "pre",
+            "platform": "公众号", "title": title, "report": "A审查正文",
+            "issues_json": "[]",
+        })
+        censor_b = db.insert("censor_log", {
+            "tenant_id": 2, "job_id": job_b, "kind": "pre",
+            "platform": "公众号", "title": title, "report": "B审查正文",
+            "issues_json": "[]",
+        })
+        notice_a = db.insert("notification", {
+            "tenant_id": 2, "job_id": job_a, "kind": "report",
+            "title": title, "body": "A通知", "link": "#/censor",
+        })
+        notice_b = db.insert("notification", {
+            "tenant_id": 2, "job_id": job_b, "kind": "report",
+            "title": title, "body": "B通知", "link": "#/censor",
+        })
+        bill_a = db.insert("billing_log", {
+            "tenant_id": 2, "job_id": job_a, "delta": -1, "balance": 19,
+            "reason": f"一键发公众号草稿箱(含终审) · {title}",
+        })
+        bill_b = db.insert("billing_log", {
+            "tenant_id": 2, "job_id": job_b, "delta": -1, "balance": 18,
+            "reason": f"一键发公众号草稿箱(含终审) · {title}",
+        })
+        op_a = "same-title-a"
+        op_b = "same-title-b"
+        db.insert("billing_operation", {
+            "op_key": op_a, "tenant_id": 2, "job_id": job_a,
+            "action": "censor_retro", "points": 1, "note": title,
+            "status": "succeeded", "error": "A错误正文",
+        })
+        db.insert("billing_operation", {
+            "op_key": op_b, "tenant_id": 2, "job_id": job_b,
+            "action": "censor_retro", "points": 1, "note": title,
+            "status": "succeeded", "error": "B错误正文",
+        })
+
+        result = main.trash_purge("job", job_a)
+
+        self.assertTrue(result["purged"])
+        self.assertIsNone(db.one(
+            "SELECT id FROM notification WHERE id=?", (notice_a,)))
+        self.assertEqual("B通知", db.one(
+            "SELECT body FROM notification WHERE id=?", (notice_b,))["body"])
+        self.assertEqual(main._PURGED_CONTENT, db.one(
+            "SELECT title FROM censor_log WHERE id=?", (censor_a,))["title"])
+        self.assertEqual("B审查正文", db.one(
+            "SELECT report FROM censor_log WHERE id=?", (censor_b,))["report"])
+        self.assertIn(main._PURGED_CONTENT, db.one(
+            "SELECT reason FROM billing_log WHERE id=?", (bill_a,))["reason"])
+        self.assertEqual(
+            f"一键发公众号草稿箱(含终审) · {title}",
+            db.one("SELECT reason FROM billing_log WHERE id=?", (bill_b,))[
+                "reason"
+            ],
+        )
+        self.assertEqual(main._PURGED_CONTENT, db.one(
+            "SELECT note FROM billing_operation WHERE op_key=?", (op_a,))[
+                "note"
+            ])
+        self.assertEqual(title, db.one(
+            "SELECT note FROM billing_operation WHERE op_key=?", (op_b,))[
+                "note"
+            ])
+        self.assertIsNotNone(db.one(
+            "SELECT id FROM job WHERE id=?", (job_b,)))
+
+    def test_unattributed_legacy_title_record_blocks_without_mutation(self):
+        title = "历史同标题"
+        job_id = self._deleted_job(
+            brief_json=json.dumps({"direction": title}, ensure_ascii=False)
+        )
+        legacy = db.insert("censor_log", {
+            "tenant_id": 2,
+            "kind": "pre",
+            "platform": "公众号",
+            "title": title,
+            "issues_json": '[{"legacy":true}]',
+            "report": "无法证明属于哪一单",
+        })
+
+        with self.assertRaises(HTTPException) as ctx:
+            main.trash_purge("job", job_id)
+
+        self.assertEqual(409, ctx.exception.status_code)
+        self.assertIn("无法安全归属", str(ctx.exception.detail))
+        self.assertEqual(title, db.one(
+            "SELECT title FROM censor_log WHERE id=?", (legacy,))["title"])
+        retained = db.one(
+            "SELECT delete_reason FROM job WHERE id=?", (job_id,))
+        self.assertFalse(main._is_purge_marker(retained["delete_reason"]))
+
+    def test_unattributed_legacy_notification_blocks_without_mutation(self):
+        title = "历史通知标题"
+        job_id = self._deleted_job(
+            brief_json=json.dumps({"direction": title}, ensure_ascii=False)
+        )
+        legacy = db.insert("notification", {
+            "tenant_id": 2,
+            "kind": "report",
+            "title": f"《{title}》T+1 自动复盘",
+            "body": "无法证明属于哪一单的历史通知",
+            "link": "#/censor",
+        })
+
+        with self.assertRaises(HTTPException) as ctx:
+            main.trash_purge("job", job_id)
+
+        self.assertEqual(409, ctx.exception.status_code)
+        self.assertIn("无法安全归属", str(ctx.exception.detail))
+        self.assertEqual(
+            f"《{title}》T+1 自动复盘",
+            db.one(
+                "SELECT title FROM notification WHERE id=?", (legacy,)
+            )["title"],
+        )
+        retained = db.one(
+            "SELECT delete_reason FROM job WHERE id=?", (job_id,))
+        self.assertFalse(main._is_purge_marker(retained["delete_reason"]))
+
+    def test_legacy_spaced_job_refund_is_redacted_without_cross_purge(self):
+        job_id = self._deleted_job()
+        linked = db.insert("billing_log", {
+            "tenant_id": 2,
+            "delta": 18,
+            "balance": 38,
+            "reason": (
+                f"退回:内容流水线整单 · 老板取消工单 #{job_id}"
+            ),
+        })
+        other_reason = (
+            f"退回:内容流水线整单 · 老板取消工单 #{job_id}0"
+        )
+        unrelated = db.insert("billing_log", {
+            "tenant_id": 2,
+            "delta": 18,
+            "balance": 56,
+            "reason": other_reason,
+        })
+
+        result = main.trash_purge("job", job_id)
+
+        self.assertTrue(result["purged"])
+        self.assertEqual(
+            f"退回:内容流水线整单 · {main._PURGED_CONTENT}",
+            db.one(
+                "SELECT reason FROM billing_log WHERE id=?", (linked,)
+            )["reason"],
+        )
+        self.assertEqual(
+            other_reason,
+            db.one(
+                "SELECT reason FROM billing_log WHERE id=?", (unrelated,)
+            )["reason"],
+        )
+
+    def test_repeated_purge_is_idempotent_and_tenant_scoped(self):
+        job_id = self._deleted_job()
+        first = main.trash_purge("job", job_id)
+        second = main.trash_purge("job", job_id)
+        self.assertTrue(first["purged"])
+        self.assertEqual(
+            {"ok": True, "purged": True, "kind": "job", "id": job_id,
+             "files_removed": 0, "files_failed": 0},
+            second,
+        )
+        self.assertEqual(
+            "1",
+            db.get_setting(main._purge_tombstone_key("job", 2, job_id)),
+        )
+
+        db.insert("tenants", {"id": 3, "name": "别家", "balance": 20})
+        auth.set_current({
+            "id": 30, "tenant_id": 3, "username": "foreign-owner",
+            "role": "owner", "modules": [],
+        })
+        with self.assertRaises(HTTPException) as ctx:
+            main.trash_purge("job", job_id)
+        self.assertEqual(404, ctx.exception.status_code)
+
+    def test_unsafe_publish_screenshot_blocks_purge_at_file_boundary(self):
+        job_id = self._deleted_job(
+            brief_json=json.dumps({"direction": "边界测试"}),
+        )
+        pub_id = db.insert("pub_task", {
+            "tenant_id": 2,
+            "platform": "xhs",
+            "payload_json": json.dumps({
+                "job_id": job_id, "title": "边界测试",
+            }),
+            "status": "failed",
+            "submission_state": "not_submitted",
+        })
+        target = os.path.join(self.tmp.name, "foreign-sensitive.png")
+        with open(target, "wb") as fh:
+            fh.write(b"foreign")
+        pub_dir = os.path.join(self.asset_root, "pub")
+        os.makedirs(pub_dir, exist_ok=True)
+        shot = os.path.join(pub_dir, f"fail_{pub_id}.png")
+        os.symlink(target, shot)
+        db.update("pub_task", pub_id, {
+            "fail_json": json.dumps({
+                "shot": f"/files/pub/fail_{pub_id}.png",
+            }),
+        })
+
+        with self.assertRaises(HTTPException) as ctx:
+            main.trash_purge("job", job_id)
+
+        self.assertEqual(409, ctx.exception.status_code)
+        self.assertTrue(os.path.isfile(target))
+        self.assertTrue(os.path.islink(shot))
+        self.assertIsNotNone(db.one("SELECT id FROM job WHERE id=?", (job_id,)))
+        self.assertIsNotNone(
+            db.one("SELECT id FROM pub_task WHERE id=?", (pub_id,)))
+
+    def test_active_delivery_anchor_blocks_destructive_purge(self):
+        job_id = self._deleted_job()
+        delivery_id = db.insert("wechat_draft_delivery", {
+            "tenant_id": 2,
+            "job_id": job_id,
+            "request_hash": "b" * 64,
+            "request_key": "b" * 20,
+            "title": "正在投递",
+            "status": "submitting",
+            "billing_status": "charged",
+            "op_key": "wechat-active-anchor",
+        })
+
+        with self.assertRaises(HTTPException) as ctx:
+            main.trash_purge("job", job_id)
+
+        self.assertEqual(409, ctx.exception.status_code)
+        self.assertIn("对账", str(ctx.exception.detail))
+        self.assertEqual(
+            "正在投递",
+            db.one(
+                "SELECT title FROM wechat_draft_delivery WHERE id=?",
+                (delivery_id,),
+            )["title"],
+        )
+        self.assertIsNotNone(db.one("SELECT id FROM job WHERE id=?", (job_id,)))
+
+    def test_irreversible_delete_copy_discloses_retained_anchors(self):
+        app_js = os.path.join(
+            os.path.dirname(__file__), "..", "static", "app.js"
+        )
+        with open(app_js, encoding="utf-8") as handle:
+            source = handle.read()
+        self.assertIn("去标识化账务与审计锚点", source)
+        self.assertIn("业务正文、客户素材和交付文件将永久删除", source)
+        self.assertIn('toast("业务内容已彻底删除")', source)
+
 
 if __name__ == "__main__":
     unittest.main()

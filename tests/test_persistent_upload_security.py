@@ -1340,9 +1340,8 @@ class PersistentUploadSecurityCase(unittest.TestCase):
             "_create_charged_avatar_job",
             side_effect=delayed_create,
         ), mock.patch.object(
-            self.main.asyncio,
-            "create_task",
-            side_effect=discard_task,
+            self.main,
+            "_start_avatar_job_worker",
         ):
             creator = threading.Thread(
                 target=create_job,
@@ -1678,9 +1677,8 @@ class PersistentUploadSecurityCase(unittest.TestCase):
             "_create_charged_tv_job",
             side_effect=delayed_create,
         ), mock.patch.object(
-            self.main.asyncio,
-            "create_task",
-            side_effect=discard_task,
+            self.main,
+            "_start_text_video_worker",
         ):
             creator = threading.Thread(target=create_job)
             creator.start()

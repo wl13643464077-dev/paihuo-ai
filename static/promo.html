@@ -67,11 +67,28 @@ p.sub{text-align:center;color:#8b7355;margin-bottom:36px;font-size:15px}
 .plan .old{color:#a4947c;text-decoration:line-through;font-size:14px;margin-top:12px}
 .plan .price{font-size:38px;font-weight:900;margin:2px 0 2px}
 .plan .price small{font-size:14px;font-weight:400;color:#8b7355}
+.plan select{width:100%;min-height:44px;margin-top:14px;border:2px solid var(--ink);border-radius:11px;padding:8px 10px;background:#fffdf7;color:var(--ink);font:inherit}
+.plan-action{width:100%;min-height:46px;margin-top:10px;border:3px solid var(--ink);border-radius:12px;background:var(--gold);color:var(--ink);font-size:15px;font-weight:900;cursor:pointer;box-shadow:4px 4px 0 rgba(51,41,31,.18)}
+.plan-action:hover{transform:translateY(-2px);box-shadow:6px 6px 0 rgba(51,41,31,.18)}
+.plan .quote{min-height:20px;margin-top:8px;color:#7d6549;font-size:13px;font-weight:700}
 .plan .pts{background:#2b2317;color:var(--gold);display:inline-block;border-radius:9px;padding:3px 14px;font-size:13px;margin:8px 0 12px}
 .plan p{font-size:13px;color:#6b5d49;line-height:1.7}
+.trial-fields{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+.trial-fields input{min-height:44px;width:100%}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 footer{margin-top:100px;background:#2b2317;color:#cbb994;text-align:center;padding:36px 20px;font-size:13px;line-height:2}
 footer a{color:var(--gold)}
-@media(max-width:720px){nav .in a:not(.cta):not(.logo){display:none}nav .in{gap:8px}}
+@media(max-width:720px){
+  nav .in a:not(.cta):not(.logo){display:none}
+  nav .in{gap:8px}
+  .trial-fields{grid-template-columns:1fr}
+  .hero{padding-top:64px}
+  .hero .big{padding:14px 22px;letter-spacing:2px}
+}
+@media(prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto}
+  *,*:before,*:after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
+}
 </style>
 </head>
 <body>
@@ -83,8 +100,9 @@ footer a{color:var(--gold)}
   <div class="hero">
     <h1><span>老板会派活</span><br>数字员工去干活</h1>
     <p>派活 PaiHuo · 430 位 AI 数字员工听您调遣 · 覆盖 <b>11 个连锁行业</b>,从内容营销到门店经营,一句话派活即出方案</p>
-    <a class="big" href="/login">📝 免费申请开通(自动开号)</a>
-    <div style="margin-top:10px"><a href="/login" style="font-weight:800;text-decoration:underline">已有账号?直接登录 →</a>
+    <a class="big" href="/login">📝 免费申请开通</a>
+    <div style="margin-top:10px;color:#6b5d49;font-size:13px">符合体验条件即时开通；其他申请转人工审核并明确反馈</div>
+    <div style="margin-top:8px"><a href="/login" style="font-weight:800;text-decoration:underline">已有账号?直接登录 →</a>
       <span style="margin:0 6px;opacity:.5">·</span>
       <a href="#try" style="font-weight:800;text-decoration:underline">先进来参观看看 →</a></div>
     <div style="margin-top:46px;opacity:0;transform:translateY(30px);transition:.8s" class="heroimg">
@@ -138,7 +156,7 @@ footer a{color:var(--gold)}
   <h2 class="sec" id="who">👔 谁在用派活</h2>
   <p class="sub">连锁品牌老板 · 单店/多店门店老板 · 想创业开店的人 · 代运营/咨询服务商</p>
   <div class="grid who" style="max-width:900px;margin:0 auto">
-    <div class="feat"><div class="ic">🏪</div><h3>门店/连锁老板</h3><p>选址、菜单/服务设计、食安合规、供应链、门店运营、活动策划、财务复盘——整条经营链都有专家兜着,决策不再靠拍脑袋。</p></div>
+    <div class="feat"><div class="ic">🏪</div><h3>门店/连锁老板</h3><p>选址、商品/服务设计、经营合规、供应链、门店运营、活动策划、财务复盘——整条经营链都有专家兜着,决策不再靠拍脑袋。</p></div>
     <div class="feat"><div class="ic">📱</div><h3>做内容/私域的老板</h3><p>10 工位流水线全自动出多平台成品,公众号排版+草稿箱一键进,文案一键变短视频,vlog 智能混剪,发完还有自动复盘。</p></div>
     <div class="feat"><div class="ic">🚀</div><h3>想创业开店的人</h3><p>还没开店就能先让「市场机会/选址/单店模型」专家帮你算清楚能不能干、怎么干,少交学费。</p></div>
     <div class="feat"><div class="ic">🤝</div><h3>代运营/咨询服务商</h3><p>给客户做方案、做内容、做诊断的服务商,把派活当自己的后台军团:一个人同时服务十个客户,交付又快又专业。</p></div>
@@ -183,8 +201,8 @@ footer a{color:var(--gold)}
       <p>办公室楼层实时直播每个员工在干什么、写了多少字;关键节点等您拍板,也可以完全托管。企业主账号可开副账号,按板块分配权限,数据完全隔离。</p>
       <span class="tagline">多账号 · 板块权限 · 数据隔离</span></div>
     <div class="feat"><div class="ic">⚡</div><h3>开箱即用,无需配置</h3>
-      <p>不用申请任何 API、不用懂技术。在登录页在线申请、自动开号,按点数计费透明可查,套餐月付季付年付随选。</p>
-      <span class="tagline">充值即用 · 无需任何 API 配置</span></div>
+      <p>不用申请任何 API、不用懂技术。在登录页在线申请,符合体验条件即时开通,其他申请进入人工审核;按点数计费透明可查,套餐月付季付年付随选。</p>
+      <span class="tagline">在线申请 · 计费透明 · 无需 API 配置</span></div>
   </div>
 
   <div style="text-align:center;margin-top:70px">
@@ -196,7 +214,7 @@ footer a{color:var(--gold)}
   <h2 class="sec" id="flow">🚀 老板只需要三步</h2>
   <p class="sub">剩下的交给数字员工们接力</p>
   <div class="flow">
-    <div class="fstep"><div class="e">🏭</div><b>选板块</b><span>内容 / 餐饮 / 数字人</span></div>
+    <div class="fstep"><div class="e">🏭</div><b>选板块</b><span>内容生产 / 产业专家 / 数字人</span></div>
     <div class="fstep"><div class="e">🗣</div><b>说需求</b><span>一句话+选行业</span></div>
     <div class="fstep"><div class="e">🤖</div><b>员工接力</b><span>检索·撰写·设计·质检</span></div>
     <div class="fstep"><div class="e">👍</div><b>您拍板</b><span>或完全托管不打扰</span></div>
@@ -207,31 +225,43 @@ footer a{color:var(--gold)}
   <p class="sub">留个联系方式,直接进办公室逛:430位数字员工长什么样、怎么干活,一目了然</p>
   <div style="max-width:640px;margin:0 auto">
     <div id="try-form" style="background:#fffdf7;border:3px solid var(--ink);border-radius:20px;padding:24px;box-shadow:5px 5px 0 rgba(51,41,31,.15)">
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
-        <input id="g-phone" placeholder="手机号 *" style="border:2.5px solid var(--ink);border-radius:11px;padding:10px 12px;font-size:14px">
-        <input id="g-name" placeholder="怎么称呼您" style="border:2.5px solid var(--ink);border-radius:11px;padding:10px 12px;font-size:14px">
-        <input id="g-co" placeholder="您的企业/行业" style="border:2.5px solid var(--ink);border-radius:11px;padding:10px 12px;font-size:14px">
+      <div class="trial-fields">
+        <label class="sr-only" for="g-phone">手机号</label>
+        <input id="g-phone" placeholder="手机号 *" inputmode="tel" autocomplete="tel" style="border:2.5px solid var(--ink);border-radius:11px;padding:10px 12px;font-size:14px">
+        <label class="sr-only" for="g-name">怎么称呼您</label>
+        <input id="g-name" placeholder="怎么称呼您" autocomplete="name" style="border:2.5px solid var(--ink);border-radius:11px;padding:10px 12px;font-size:14px">
+        <label class="sr-only" for="g-co">您的企业或行业</label>
+        <input id="g-co" placeholder="您的企业/行业" autocomplete="organization" style="border:2.5px solid var(--ink);border-radius:11px;padding:10px 12px;font-size:14px">
       </div>
       <button onclick="guestTry(this)" style="margin-top:12px;width:100%;border:3px solid var(--ink);border-radius:13px;padding:12px;font-size:16px;font-weight:900;background:var(--gold);cursor:pointer;box-shadow:4px 4px 0 rgba(51,41,31,.2)">🎁 进入办公室参观</button>
-      <div id="g-err" style="color:#e5484d;font-size:13px;margin-top:8px;min-height:16px;font-weight:700"></div>
+      <div id="g-err" role="status" aria-live="polite" style="color:#e5484d;font-size:13px;margin-top:8px;min-height:16px;font-weight:700"></div>
     </div>
   </div>
 
   <h2 class="sec" id="plans">💎 套餐与定价</h2>
   <p class="sub">按点数计费,充值越多单价越低 · 内容整单 18 点 / 专家任务 1 点 / 数字人视频 12 点 · 季付 9 折,年付 8 折</p>
+  <p class="sub" style="margin-top:8px">这里提交的是购买意向,不是在线支付；平台联系并确认线下到账后,才会开通套餐和积分。</p>
   <div class="plans">
-    <div class="plan"><h3>体验版</h3><div class="old">原价 ¥99/月</div>
-      <div class="price">¥69<small>/月</small></div><div class="pts">每月 150 点</div>
-      <p>季付 ¥186 · 年付 ¥662<br>先试试水:每月约 5 单内容 + 3 条数字人视频</p></div>
-    <div class="plan hot"><div class="hotbadge">🔥 最多人选</div><h3>创业版</h3><div class="old">原价 ¥299/月</div>
-      <div class="price">¥199<small>/月</small></div><div class="pts">每月 500 点</div>
-      <p>季付 ¥537 · 年付 ¥1910<br>一人公司日更标配:每月约 15 单内容 + 10 条数字人 + 专家任务按需派发</p></div>
-    <div class="plan"><h3>企业版</h3><div class="old">原价 ¥899/月</div>
-      <div class="price">¥599<small>/月</small></div><div class="pts">每月 1800 点</div>
-      <p>季付 ¥1617 · 年付 ¥5750<br>小团队矩阵运营:多账号分权,内容矩阵 + 数字人矩阵</p></div>
-    <div class="plan"><h3>旗舰版</h3><div class="old">原价 ¥2999/月</div>
-      <div class="price">¥1999<small>/月</small></div><div class="pts">每月 7000 点</div>
-      <p>季付 ¥5397 · 年付 ¥19190<br>MCN / 连锁多门店:全板块放开跑,专属服务</p></div>
+    <div class="plan" data-plan="trial"><h3>体验版</h3><div class="old">实时原价加载中</div>
+      <div class="price">—<small>/月</small></div><div class="pts">积分方案加载中</div>
+      <p class="desc">先试试水:每月约 5 单内容 + 3 条数字人视频</p>
+      <label class="sr-only" for="period-trial">体验版购买周期</label><select id="period-trial" class="plan-period" aria-label="体验版购买周期" disabled><option value="month">报价加载中</option></select>
+      <div class="quote" aria-live="polite"></div><button class="plan-action" type="button" onclick="startPurchase('trial')">登录后查看实时报价</button></div>
+    <div class="plan hot" data-plan="startup"><div class="hotbadge">🔥 最多人选</div><h3>创业版</h3><div class="old">实时原价加载中</div>
+      <div class="price">—<small>/月</small></div><div class="pts">积分方案加载中</div>
+      <p class="desc">一人公司日更标配:每月约 15 单内容 + 10 条数字人 + 专家任务按需派发</p>
+      <label class="sr-only" for="period-startup">创业版购买周期</label><select id="period-startup" class="plan-period" aria-label="创业版购买周期" disabled><option value="month">报价加载中</option></select>
+      <div class="quote" aria-live="polite"></div><button class="plan-action" type="button" onclick="startPurchase('startup')">登录后查看实时报价</button></div>
+    <div class="plan" data-plan="biz"><h3>企业版</h3><div class="old">实时原价加载中</div>
+      <div class="price">—<small>/月</small></div><div class="pts">积分方案加载中</div>
+      <p class="desc">小团队矩阵运营:多账号分权,内容矩阵 + 数字人矩阵</p>
+      <label class="sr-only" for="period-biz">企业版购买周期</label><select id="period-biz" class="plan-period" aria-label="企业版购买周期" disabled><option value="month">报价加载中</option></select>
+      <div class="quote" aria-live="polite"></div><button class="plan-action" type="button" onclick="startPurchase('biz')">登录后查看实时报价</button></div>
+    <div class="plan" data-plan="flagship"><h3>旗舰版</h3><div class="old">实时原价加载中</div>
+      <div class="price">—<small>/月</small></div><div class="pts">积分方案加载中</div>
+      <p class="desc">MCN / 连锁多门店:全板块放开跑,专属服务</p>
+      <label class="sr-only" for="period-flagship">旗舰版购买周期</label><select id="period-flagship" class="plan-period" aria-label="旗舰版购买周期" disabled><option value="month">报价加载中</option></select>
+      <div class="quote" aria-live="polite"></div><button class="plan-action" type="button" onclick="startPurchase('flagship')">登录后查看实时报价</button></div>
   </div>
 </div>
 
@@ -252,6 +282,54 @@ function publicFunnel(event,dimension){
     body:JSON.stringify({event,dimension})}).catch(()=>{});
 }
 publicFunnel("landing_view","promo");
+let purchaseCatalog = null;
+function updatePlanQuote(card){
+  if(!purchaseCatalog||!card) return;
+  const planKey=card.dataset.plan, period=card.querySelector(".plan-period")?.value||"month";
+  const plan=purchaseCatalog.plans.find(item=>item.key===planKey);
+  const quote=purchaseCatalog.quotes.find(item=>item.plan===planKey&&item.period===period);
+  if(!plan||!quote) return;
+  card.querySelector("h3").textContent=plan.name;
+  card.querySelector(".old").textContent=`原价 ¥${plan.price}/月`;
+  card.querySelector(".price").innerHTML=`¥${plan.sale}<small>/月</small>`;
+  card.querySelector(".pts").textContent=`每月 ${plan.points} 点`;
+  card.querySelector(".desc").textContent=plan.desc||"";
+  card.querySelector(".quote").textContent=`${quote.period_label}合计 ¥${quote.price} · ${quote.points} 点`;
+  card.querySelector(".plan-action").textContent=`申请购买${plan.name}`;
+}
+async function hydratePurchaseCatalog(){
+  try{
+    const response=await fetch("/api/purchases/catalog");
+    if(!response.ok) throw new Error("catalog unavailable");
+    const catalog=await response.json();
+    if(!Array.isArray(catalog.plans)||!Array.isArray(catalog.periods)||!Array.isArray(catalog.quotes)) return;
+    purchaseCatalog=catalog;
+    document.querySelectorAll(".plan[data-plan]").forEach(card=>{
+      const select=card.querySelector(".plan-period");
+      select.innerHTML=catalog.periods.map(period=>`<option value="${period.key}">${period.label}</option>`).join("");
+      select.value="month";
+      select.disabled=false;
+      select.addEventListener("change",()=>updatePlanQuote(card));
+      updatePlanQuote(card);
+    });
+  }catch(_){
+    document.querySelectorAll(".plan[data-plan]").forEach(card=>{
+      card.querySelector(".old").textContent="实时价格暂不可用";
+      card.querySelector(".price").innerHTML="—<small>/月</small>";
+      card.querySelector(".pts").textContent="登录后获取服务端报价";
+      card.querySelector(".quote").textContent="请登录后获取实时服务端报价，提交前会再次核价";
+      card.querySelector(".plan-action").textContent="登录后查看实时报价";
+    });
+  }
+}
+function startPurchase(planKey){
+  const card=document.querySelector(`.plan[data-plan="${planKey}"]`);
+  const period=card?.querySelector(".plan-period")?.value||"month";
+  const payload={plan:planKey,period,source:"promo",created_at:Date.now()};
+  try{localStorage.setItem("paihuo:pending-purchase",JSON.stringify(payload));}catch(_){}
+  location.href=`/login?plan=${encodeURIComponent(planKey)}&period=${encodeURIComponent(period)}&source=promo#apply`;
+}
+hydratePurchaseCatalog();
 const plans = document.getElementById("plans");
 if(plans){
   const planObserver = new IntersectionObserver(entries=>{

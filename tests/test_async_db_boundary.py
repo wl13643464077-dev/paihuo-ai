@@ -622,6 +622,18 @@ class AppCoroutineSourceTests(unittest.TestCase):
                         and isinstance(call.args[0], ast.Name)
                     ):
                         safe_names.add(call.args[0].id)
+                    if (
+                        isinstance(func, ast.Name)
+                        and func.id == "_run_db_then_start_worker_safely"
+                    ):
+                        if isinstance(call.args[0], ast.Name):
+                            safe_names.add(call.args[0].id)
+                        for keyword in call.keywords:
+                            if (
+                                keyword.arg == "settle_unstarted"
+                                and isinstance(keyword.value, ast.Name)
+                            ):
+                                safe_names.add(keyword.value.id)
                 for nested in (
                     node for node in ast.walk(coroutine)
                     if isinstance(node, ast.FunctionDef)

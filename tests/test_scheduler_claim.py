@@ -110,6 +110,12 @@ class SchedulerClaimCase(unittest.TestCase):
                 "WHERE tenant_id=2 AND delta<0"
             )["n"],
         )
+        ledger = db.one(
+            "SELECT job_id,reason FROM billing_log "
+            "WHERE tenant_id=2 AND delta<0"
+        )
+        self.assertEqual(first_job, ledger["job_id"])
+        self.assertIn("定时·日更", ledger["reason"])
 
     def test_orphan_pending_occurrence_is_resumed_instead_of_duplicated(self):
         db.insert("tenants", {"id": 2, "name": "企业", "balance": 100})

@@ -284,6 +284,13 @@ class PublicationRetroBillingCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(10, billing.balance(2))
 
     async def test_tick_marks_no_data_notified_and_sends_human_fallback(self):
+        job_id = db.insert("job", {
+            "tenant_id": 2,
+            "brief_json": '{"direction":"待复盘内容"}',
+            "status": "done",
+            "billing_status": "succeeded",
+        })
+        db.update("publish_log", self.pid, {"job_id": job_id})
         self.make_due()
         fake_datetime = type(
             "NoonDateTime",
@@ -302,6 +309,7 @@ class PublicationRetroBillingCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("notified", state["state"])
         pushed.assert_called_once()
         self.assertEqual("retro_due", pushed.call_args.args[1])
+        self.assertEqual(job_id, pushed.call_args.args[2]["job_id"])
         self.assertEqual(10, billing.balance(2))
 
     async def test_tenant_auto_retro_switch_pauses_tick_and_reminders(self):

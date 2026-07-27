@@ -108,6 +108,62 @@ class TextVideoSettlementCase(unittest.TestCase):
             "SELECT COUNT(*) AS n FROM billing_log "
             "WHERE tenant_id=2 AND delta=-3")["n"])
 
+    def test_job_linked_charge_and_refund_keep_explicit_attribution(self):
+        from app import main
+
+        job_id = db.insert("job", {
+            "tenant_id": 2,
+            "brief_json": '{"direction":"关联成片"}',
+            "status": "done",
+            "billing_status": "succeeded",
+        })
+        tvid = main._create_charged_tv_job(
+            self._params(),
+            tenant_id=2,
+            job_id=job_id,
+            note="关联成片",
+        )
+        self.assertTrue(textvideo.settle_failure(tvid, "渲染失败"))
+        rows = db.q(
+            "SELECT job_id,delta FROM billing_log "
+            "WHERE tenant_id=2 ORDER BY id"
+        )
+        self.assertEqual(
+            [(job_id, -3), (job_id, 3)],
+            [(row["job_id"], row["delta"]) for row in rows],
+        )
+
+    def test_job_linked_delivery_notification_keeps_explicit_attribution(self):
+        from app import main
+
+        job_id = db.insert("job", {
+            "tenant_id": 2,
+            "brief_json": '{"direction":"关联通知成片"}',
+            "status": "done",
+            "billing_status": "succeeded",
+        })
+        tvid = main._create_charged_tv_job(
+            self._params(),
+            tenant_id=2,
+            job_id=job_id,
+            note="关联通知成片",
+        )
+
+        async def fake_build(*_args, **_kwargs):
+            _path, url = self._write_video(tvid)
+            return url
+
+        async def exercise():
+            with mock.patch.object(
+                textvideo, "build", side_effect=fake_build
+            ), mock.patch("app.notify.push") as pushed:
+                await textvideo.run_job(tvid, lambda _event: None)
+                return pushed
+
+        pushed = asyncio.run(exercise())
+        pushed.assert_called_once()
+        self.assertEqual(job_id, pushed.call_args.args[2]["job_id"])
+
     def test_insufficient_points_leaves_no_job_or_partial_debit(self):
         db.update("tenants", 2, {"balance": 2})
         with self.assertRaises(HTTPException) as raised:

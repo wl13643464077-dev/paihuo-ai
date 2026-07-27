@@ -30,7 +30,7 @@ _all_connections: set[sqlite3.Connection] = set()
 # schema lock to finish.
 _generation_lock = threading.RLock()
 _generation_switching = threading.Event()
-LATEST_SCHEMA_VERSION = 48
+LATEST_SCHEMA_VERSION = 50
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version(
@@ -198,19 +198,19 @@ def _validate_migrated_database(c) -> None:
         "knowledge": {"id", "tenant_id", "title", "content", "deleted_at"},
         "avatar_job": {
             "id", "tenant_id", "params_json", "status", "billing_status",
-            "retry_count", "deleted_at",
+            "retry_count", "deleted_at", "created_by",
         },
         "meeting": {
             "id", "tenant_id", "question", "status", "phase",
-            "billing_status", "retry_count",
+            "billing_status", "retry_count", "created_by",
         },
         "tv_job": {
             "id", "tenant_id", "params_json", "status", "billing_status",
-            "retry_count",
+            "retry_count", "created_by",
         },
         "tool_job": {
             "id", "tenant_id", "kind", "status", "billing_status",
-            "retry_count", "retry_started_at",
+            "retry_count", "retry_started_at", "created_by",
         },
         "pub_task": {
             "id", "tenant_id", "platform", "status", "retry_count",
@@ -218,14 +218,28 @@ def _validate_migrated_database(c) -> None:
         },
         "notification": {
             "id", "tenant_id", "kind", "title", "body", "link",
-            "read_at", "created_at",
+            "job_id", "user_id", "read_by", "read_at", "created_at",
         },
         "funnel_event": {
             "day", "event", "dimension", "tenant_id", "actor_hash", "hits",
             "first_at", "last_at",
         },
         "billing_operation": {
-            "op_key", "tenant_id", "action", "points", "status",
+            "op_key", "tenant_id", "job_id", "action", "points", "status",
+        },
+        "billing_log": {
+            "id", "tenant_id", "job_id", "delta", "balance", "reason",
+        },
+        "censor_log": {
+            "id", "tenant_id", "job_id", "kind", "title", "report",
+        },
+        "purchase_intent": {
+            "id", "tenant_id", "created_by", "request_key",
+            "plan_key", "period_key", "plan_name", "period_label",
+            "quoted_price", "quoted_points", "contact", "customer_note",
+            "status", "handler_note", "handled_by", "contacted_at",
+            "lost_at", "paid_at", "subscription_op_key", "receipt_json",
+            "created_at", "updated_at",
         },
         "wechat_draft_delivery": {
             "id", "tenant_id", "job_id", "request_hash", "status",
@@ -242,6 +256,24 @@ def _validate_migrated_database(c) -> None:
         if table not in tables:
             raise RuntimeError(f"数据库迁移后结构不完整：缺少核心表 {table}")
         _require_columns(c, table, required, "迁移后")
+    indexes = {
+        str(row["name"])
+        for row in c.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        )
+    }
+    required_indexes = {
+        "idx_purchase_intent_request",
+        "idx_purchase_intent_owner_created",
+        "idx_purchase_intent_admin_status",
+        "idx_purchase_intent_subscription_op",
+    }
+    missing_indexes = sorted(required_indexes - indexes)
+    if missing_indexes:
+        raise RuntimeError(
+            "数据库迁移后结构不完整：purchase_intent 缺少索引 "
+            + ",".join(missing_indexes)
+        )
 
 
 def _initialize_anchor():
@@ -299,6 +331,7 @@ def _initialize_anchor():
         CREATE TABLE IF NOT EXISTS notification(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           tenant_id INTEGER NOT NULL,
+          job_id INTEGER,
           kind TEXT NOT NULL,
           title TEXT NOT NULL,
           body TEXT NOT NULL DEFAULT '',
@@ -475,12 +508,14 @@ def _initialize_anchor():
         CREATE TABLE IF NOT EXISTS billing_log(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           tenant_id INTEGER NOT NULL,
+          job_id INTEGER,
           delta REAL NOT NULL, balance REAL NOT NULL,
           reason TEXT, created_at REAL, updated_at REAL
         );
         CREATE TABLE IF NOT EXISTS billing_operation(
           op_key TEXT PRIMARY KEY,
           tenant_id INTEGER NOT NULL,
+          job_id INTEGER,
           action TEXT NOT NULL,
           units INTEGER NOT NULL DEFAULT 1,
           points REAL NOT NULL DEFAULT 0,
@@ -491,6 +526,40 @@ def _initialize_anchor():
         );
         CREATE INDEX IF NOT EXISTS idx_billing_operation_status
           ON billing_operation(status, created_at);
+        CREATE TABLE IF NOT EXISTS purchase_intent(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tenant_id INTEGER NOT NULL,
+          created_by INTEGER NOT NULL,
+          request_key TEXT NOT NULL,
+          plan_key TEXT NOT NULL,
+          period_key TEXT NOT NULL,
+          plan_name TEXT NOT NULL,
+          period_label TEXT NOT NULL,
+          quoted_price REAL NOT NULL,
+          quoted_points REAL NOT NULL,
+          contact TEXT NOT NULL,
+          customer_note TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'requested'
+            CHECK(status IN ('requested','contacted','lost','paid')),
+          handler_note TEXT,
+          handled_by INTEGER,
+          contacted_at REAL,
+          lost_at REAL,
+          paid_at REAL,
+          subscription_op_key TEXT,
+          receipt_json TEXT,
+          created_at REAL,
+          updated_at REAL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_purchase_intent_request
+          ON purchase_intent(tenant_id,request_key);
+        CREATE INDEX IF NOT EXISTS idx_purchase_intent_owner_created
+          ON purchase_intent(tenant_id,created_by,id DESC);
+        CREATE INDEX IF NOT EXISTS idx_purchase_intent_admin_status
+          ON purchase_intent(status,tenant_id,id DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_purchase_intent_subscription_op
+          ON purchase_intent(subscription_op_key)
+          WHERE subscription_op_key IS NOT NULL;
         CREATE TABLE IF NOT EXISTS wechat_draft_delivery(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           tenant_id INTEGER NOT NULL,
@@ -545,6 +614,7 @@ def _initialize_anchor():
         CREATE TABLE IF NOT EXISTS censor_log(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           tenant_id INTEGER NOT NULL,
+          job_id INTEGER,
           kind TEXT NOT NULL DEFAULT 'pre',      -- pre:发前审查 / retro:发后复盘
           platform TEXT, title TEXT,
           verdict TEXT, score REAL,
@@ -771,6 +841,16 @@ def _initialize_anchor():
         for tbl in ("avatar_job", "meeting", "tv_job", "tool_job"):
             _add_column(_conn, tbl, "created_by", "INTEGER")
         _add_column(_conn, "station_run", "reviewed_by", "INTEGER")
+        # v50:工单派生的通知、审查与账务记录必须显式归因。历史记录留空，
+        # 硬删时只接受显式 job_id 或可证明的旧版锚点，绝不再按标题猜关联。
+        for table in (
+                "notification", "censor_log", "billing_log",
+                "billing_operation"):
+            _add_column(_conn, table, "job_id", "INTEGER")
+            _conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{table}_tenant_job "
+                f"ON {table}(tenant_id, job_id)"
+            )
         # v47:会话签名密钥只能由 root-owned systemd EnvironmentFile 注入。
         # 清除旧版写入业务库的全局密钥，避免只读数据库泄漏演变为会话伪造。
         _conn.execute(
@@ -786,14 +866,21 @@ def _initialize_anchor():
                       "WHERE status='done' AND phase='queued' AND decision IS NULL")
         _conn.execute("UPDATE meeting SET phase='failed' "
                       "WHERE status='failed' AND phase='queued'")
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(48,'collaboration-soft-delete-schedule-fail-streak',?)",
+            (time.time(),),
+        )
         _validate_migrated_database(_conn)
         _conn.execute(
-            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) VALUES(?,?,?)",
-            (
-                LATEST_SCHEMA_VERSION,
-                "collaboration-soft-delete-schedule-fail-streak",
-                time.time(),
-            ),
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(49,'purchase-intent-commercial-loop',?)",
+            (time.time(),),
+        )
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(50,'explicit-job-attribution-for-safe-purge',?)",
+            (time.time(),),
         )
         _conn.execute(f"PRAGMA user_version={LATEST_SCHEMA_VERSION}")
         _conn.commit()

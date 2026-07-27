@@ -99,6 +99,34 @@ class RecoverableLifecycleCase(unittest.TestCase):
         worker.assert_awaited_once()
         self.assertFalse(taskrunner.prepare_retry(task_id, 2))
 
+    def test_industry_retry_and_restore_emit_exact_sse_scope(self):
+        retry_id = self._failed_task(emp_idx=1601)
+        with patch.object(
+            taskrunner, "run_task", new=AsyncMock()
+        ), patch.object(main.engine, "broadcast") as broadcast:
+            asyncio.run(main.task_retry(retry_id))
+        retry_event = broadcast.call_args.args[0]
+        self.assertEqual(2, retry_event["tenant_id"])
+        self.assertEqual(("auto",), retry_event["_required_modules"])
+
+        restore_id = db.insert(
+            "task",
+            {
+                "tenant_id": 2,
+                "emp_idx": 1601,
+                "brief_json": json.dumps({"direction": "恢复行业任务"}),
+                "status": "done",
+                "billing_status": "included",
+                "deleted_at": 123,
+                "delete_reason": "用户移入回收站",
+            },
+        )
+        with patch.object(main.engine, "broadcast") as broadcast:
+            main.trash_restore("task", restore_id)
+        restore_event = broadcast.call_args.args[0]
+        self.assertEqual(2, restore_event["tenant_id"])
+        self.assertEqual(("auto",), restore_event["_required_modules"])
+
     def test_avatar_retry_reuses_same_record_without_balance_change(self):
         job_id = self._failed_avatar()
         before = billing.balance(2)

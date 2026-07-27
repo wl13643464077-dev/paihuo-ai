@@ -207,6 +207,7 @@ async def _auto_retro_result(tid: int, row: dict, day: int) -> str:
             claim_start,
             note=f"自动复盘T+{day}·《{(row.get('title') or '')[:14]}》",
             op_key=op_key,
+            job_id=row.get("job_id"),
         )
     except billing.InsufficientPoints:
         await db.arun(
@@ -294,6 +295,7 @@ async def _auto_retro_result(tid: int, row: dict, day: int) -> str:
             values = censor.retro_log_values(
                 tid, "公众号", row["title"], result
             )
+            values["job_id"] = row.get("job_id")
             columns = ",".join(values)
             placeholders = ",".join("?" for _ in values)
             connection.execute(
@@ -317,6 +319,7 @@ async def _auto_retro_result(tid: int, row: dict, day: int) -> str:
                 tid,
                 "report",
                 {
+                    "job_id": row.get("job_id"),
                     "report_name": f"《{row['title'][:20]}》T+{day} 自动复盘",
                     "summary": (
                         f"{data_text};评级:{result.get('grade', '—')}"
@@ -504,6 +507,7 @@ async def tick():
                             tid,
                             "retro_due",
                             {
+                                "job_id": row.get("job_id"),
                                 "title": row["title"],
                                 "platform": row["platform"],
                                 "day": f"T+{d}",
