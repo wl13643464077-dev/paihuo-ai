@@ -36,6 +36,11 @@ logging.basicConfig(
 log = logging.getLogger("main")
 app = FastAPI(title="派活 PaiHuo — 老板会派活，数字员工去干活")
 
+
+def _read_file_bytes(path: str) -> bytes:
+    with open(path, "rb") as handle:
+        return handle.read()
+
 # 全站 55 处 raise HTTPException(404) 之类的裸状态码,默认 detail 是英文
 # ("Not Found"/"Forbidden"…),前端会原样弹给老板。统一在出口翻译成人话;
 # 带自定义中文 detail 的异常原样放行。
@@ -280,8 +285,8 @@ def ops_metrics():
 
 @app.on_event("startup")
 async def _startup():
-    db.conn()
-    secret_migration = secureconfig.migrate_legacy_secrets()
+    await asyncio.to_thread(db.conn)
+    secret_migration = await db.arun(secureconfig.migrate_legacy_secrets)
     if isinstance(secret_migration, dict):
         # 只记录聚合计数，绝不把 key、租户、密文或原始凭据写进 journal。
         log.info(
@@ -299,7 +304,7 @@ async def _startup():
             bool(secret_migration.get("field_migration_complete")),
             bool(secret_migration.get("field_migration_skipped")),
         )
-    auth.bootstrap()
+    await db.arun(auth.bootstrap)
     # 组件量规:读取时惰性求值,记录侧零开销。
     obs.register_gauge("engine_queue_depth", lambda: engine.queue.qsize())
     obs.register_gauge("engine_job_locks", lambda: len(engine.locks))
@@ -308,7 +313,8 @@ async def _startup():
         "db_pool_backlog",
         lambda: db._pool()._work_queue.qsize(),
     )
-    recovered_asset_transactions = avatar.recover_asset_transactions(
+    recovered_asset_transactions = await asyncio.to_thread(
+        avatar.recover_asset_transactions,
         raise_on_blocked=True,
     )
     if recovered_asset_transactions["recovered"]:
@@ -323,7 +329,7 @@ async def _startup():
         log.warning("candidate running without background workers")
         return
     draft_conflicts = db.jloads(
-        db.get_setting("wechat_delivery_migration_conflicts"), []
+        await db.aget_setting("wechat_delivery_migration_conflicts"), []
     ) or []
     if draft_conflicts:
         log.error(
@@ -331,26 +337,31 @@ async def _startup():
             "review /api/admin/wechat-delivery-alerts before clearing them",
             len(draft_conflicts),
         )
-    recovered_interventions = meeting.recover_interventions()
+    recovered_interventions = await db.arun(meeting.recover_interventions)
     if recovered_interventions:
         log.warning(
             "recovered %d interrupted meeting interventions",
             recovered_interventions,
         )
-    recovered_retros = pubtrack.recover_interrupted()
+    recovered_retros = await db.arun(pubtrack.recover_interrupted)
     if recovered_retros:
         log.warning("recovered %d interrupted publication retros", recovered_retros)
-    recovered_drafts, protected_draft_ops = _recover_wechat_deliveries()
+    recovered_drafts, protected_draft_ops = await db.arun(
+        _recover_wechat_deliveries
+    )
     if recovered_drafts:
         log.warning("recovered %d interrupted wechat deliveries", recovered_drafts)
-    settled_subscriptions = billing.settle_legacy_subscriptions()
+    settled_subscriptions = await db.arun(
+        billing.settle_legacy_subscriptions
+    )
     if settled_subscriptions:
         log.info(
             "settled %d legacy successful subscription operations",
             settled_subscriptions,
         )
-    recovered_billing = billing.recover_interrupted_operations(
-        exclude_op_keys=protected_draft_ops
+    recovered_billing = await db.arun(
+        billing.recover_interrupted_operations,
+        exclude_op_keys=protected_draft_ops,
     )
     if recovered_billing:
         log.warning("recovered %d interrupted billed operations", recovered_billing)
@@ -910,7 +921,9 @@ async def feedback_submit(request: Request, body: dict):
         raise HTTPException(429, "今天反馈次数已达上限,明天再来或直接联系顾问")
     _feedback_ips[client_ip] = (used + 1, day_no)
     u = auth.current() or {}
-    t = db.one("SELECT name FROM tenants WHERE id=?", (u.get("tenant_id", 1),)) or {}
+    t = await db.aone(
+        "SELECT name FROM tenants WHERE id=?", (u.get("tenant_id", 1),)
+    ) or {}
     who = f"{t.get('name','')}·{u.get('username','?')}({u.get('role','')})"
     try:
         from . import mailer
@@ -2151,19 +2164,29 @@ def _create_charged_content_job(data: dict, note: str) -> int:
 async def create_job(body: dict):
     _need_module("content")
     brief = _validated_brief(body.get("brief"))
-    running = db.q("SELECT id FROM job WHERE tenant_id=? AND deleted_at IS NULL AND "
-                   "status NOT IN ('done','cancelled','failed')", (TEN(),))
+    running = await db.aq(
+        "SELECT id FROM job WHERE tenant_id=? AND deleted_at IS NULL AND "
+        "status NOT IN ('done','cancelled','failed')",
+        (TEN(),),
+    )
     if len(running) >= 3:
         raise HTTPException(429, "并行工单已达上限(3),请先处理进行中的工单")
-    profile_id = _profile_id_for_tenant(body.get("profile_id"))
-    job_id = _create_charged_content_job({
-        "brief_json": json.dumps(brief, ensure_ascii=False),
-        "profile_id": profile_id, "tenant_id": TEN(),
-        "mode": _validated_mode(body.get("mode")),
-    }, note=brief["direction"][:20])
+    profile_id = await db.arun(
+        _profile_id_for_tenant, body.get("profile_id")
+    )
+    job_id = await db.arun(
+        _create_charged_content_job,
+        {
+            "brief_json": json.dumps(brief, ensure_ascii=False),
+            "profile_id": profile_id,
+            "tenant_id": TEN(),
+            "mode": _validated_mode(body.get("mode")),
+        },
+        note=brief["direction"][:20],
+    )
     engine.notify(job_id)
     engine.touch(job_id)
-    funnel.record_first_work(TEN(), "content")
+    await db.arun(funnel.record_first_work, TEN(), "content")
     return {"job_id": job_id}
 
 
@@ -2838,8 +2861,8 @@ async def task_center_retry(kind: str, rid: int):
     now = time.time()
 
     if kind == "content":
-        row = _job_or_404(rid)
-        usable = engine._has_usable_delivery(rid)
+        row = await db.arun(_job_or_404, rid)
+        usable = await db.arun(engine._has_usable_delivery, rid)
         meta = taskcenter.retry_meta(
             kind, row, usable_delivery=usable)
         if not meta["retryable"]:
@@ -2850,47 +2873,52 @@ async def task_center_retry(kind: str, rid: int):
             if row.get("billing_status") == "charged"
             else 0
         )
-        with db.atomic() as connection:
-            if connection.execute(
-                "SELECT id FROM wechat_draft_delivery "
-                "WHERE tenant_id=? AND job_id=? AND status IN "
-                "('pending_charge','processing','submitting','submitted') "
-                "LIMIT 1",
-                (TEN(), rid),
-            ).fetchone():
-                raise HTTPException(
-                    409,
-                    "该工单的公众号草稿仍在投递或对账，"
-                    "收口前不能重跑内容。",
+        tenant_id = TEN()
+
+        def _retry_content():
+            with db.atomic() as connection:
+                if connection.execute(
+                    "SELECT id FROM wechat_draft_delivery "
+                    "WHERE tenant_id=? AND job_id=? AND status IN "
+                    "('pending_charge','processing','submitting','submitted') "
+                    "LIMIT 1",
+                    (tenant_id, rid),
+                ).fetchone():
+                    raise HTTPException(
+                        409,
+                        "该工单的公众号草稿仍在投递或对账，"
+                        "收口前不能重跑内容。",
+                    )
+                changed = connection.execute(
+                    "UPDATE job SET status='running',billing_status='charged',"
+                    "billing_points=?,retry_count=retry_count+1,gate_json=NULL,"
+                    "updated_at=? WHERE id=? AND tenant_id=? AND deleted_at IS NULL "
+                    "AND status='failed' AND billing_status=? AND retry_count=?",
+                    (
+                        next_points,
+                        now,
+                        rid,
+                        tenant_id,
+                        row.get("billing_status"),
+                        retries,
+                    ),
                 )
-            changed = connection.execute(
-                "UPDATE job SET status='running',billing_status='charged',"
-                "billing_points=?,retry_count=retry_count+1,gate_json=NULL,"
-                "updated_at=? WHERE id=? AND tenant_id=? AND deleted_at IS NULL "
-                "AND status='failed' AND billing_status=? AND retry_count=?",
-                (
-                    next_points,
-                    now,
-                    rid,
-                    TEN(),
-                    row.get("billing_status"),
-                    retries,
-                ),
-            )
-            if changed.rowcount != 1:
-                raise HTTPException(
-                    409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
-            # 仅复位每个工位的最新失败版本；已完成版本继续作为流水线交接物。
-            connection.execute(
-                "UPDATE station_run SET status='rejected',"
-                "review_comment='免费重试：沿用原工单重新执行',updated_at=? "
-                "WHERE job_id=? AND status='failed' AND NOT EXISTS ("
-                "SELECT 1 FROM station_run newer "
-                "WHERE newer.job_id=station_run.job_id "
-                "AND newer.station_idx=station_run.station_idx "
-                "AND newer.version>station_run.version)",
-                (now, rid),
-            )
+                if changed.rowcount != 1:
+                    raise HTTPException(
+                        409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
+                # 仅复位每个工位的最新失败版本；已完成版本继续作为流水线交接物。
+                connection.execute(
+                    "UPDATE station_run SET status='rejected',"
+                    "review_comment='免费重试：沿用原工单重新执行',updated_at=? "
+                    "WHERE job_id=? AND status='failed' AND NOT EXISTS ("
+                    "SELECT 1 FROM station_run newer "
+                    "WHERE newer.job_id=station_run.job_id "
+                    "AND newer.station_idx=station_run.station_idx "
+                    "AND newer.version>station_run.version)",
+                    (now, rid),
+                )
+
+        await db.arun(_retry_content)
         engine.notify(rid)
         engine.touch(rid)
         return {
@@ -2899,7 +2927,7 @@ async def task_center_retry(kind: str, rid: int):
         }
 
     if kind == "video":
-        row = db.one(
+        row = await db.aone(
             "SELECT * FROM tv_job WHERE id=? AND tenant_id=?", (rid, TEN()))
         if not row:
             raise HTTPException(404)
@@ -2907,7 +2935,7 @@ async def task_center_retry(kind: str, rid: int):
         if not meta["retryable"]:
             _raise_retry_denied(meta)
         retries = int(row.get("retry_count") or 0)
-        changed = db.execute(
+        changed = await db.aexecute(
             "UPDATE tv_job SET status='queued',billing_status='charged',"
             "billing_points=0,retry_count=retry_count+1,steps_json='[]',"
             "script=NULL,video_file=NULL,error=NULL,updated_at=? "
@@ -2921,7 +2949,7 @@ async def task_center_retry(kind: str, rid: int):
             raise HTTPException(
                 409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
         from . import textvideo
-        textvideo.cleanup_job_assets(rid, row)
+        await asyncio.to_thread(textvideo.cleanup_job_assets, rid, row)
         asyncio.create_task(textvideo.run_job(rid, engine.broadcast))
         engine.broadcast({"type": "tv_done", "tv_id": rid, "tenant_id": TEN()})
         return {
@@ -2930,7 +2958,7 @@ async def task_center_retry(kind: str, rid: int):
         }
 
     if kind == "tool":
-        row = db.one(
+        row = await db.aone(
             "SELECT * FROM tool_job WHERE id=? AND tenant_id=?", (rid, TEN()))
         if not row:
             raise HTTPException(404)
@@ -2939,7 +2967,7 @@ async def task_center_retry(kind: str, rid: int):
             _raise_retry_denied(meta)
         retries = int(row.get("retry_count") or 0)
         try:
-            changed = db.execute(
+            changed = await db.aexecute(
                 "UPDATE tool_job SET status='running',billing_status='charged',"
                 "billing_points=0,retry_count=retry_count+1,"
                 "retry_started_at=?,result_json=NULL,error=NULL,"
@@ -2964,51 +2992,60 @@ async def task_center_retry(kind: str, rid: int):
         }
 
     if kind == "meeting":
-        row = _meeting_row_or_404(rid)
+        row = await db.arun(_meeting_row_or_404, rid)
         meta = taskcenter.retry_meta(kind, row)
         if not meta["retryable"]:
             _raise_retry_denied(meta)
         retries = int(row.get("retry_count") or 0)
-        with db.atomic() as connection:
-            current = connection.execute(
-                "SELECT execution_task_ids_json FROM meeting "
-                "WHERE id=? AND tenant_id=?",
-                (rid, TEN()),
-            ).fetchone()
-            execution_ids = db.jloads(
-                current["execution_task_ids_json"] if current else None,
-                [],
-            ) or []
-            has_derived = bool(execution_ids) or bool(connection.execute(
-                "SELECT id FROM task WHERE tenant_id=? "
-                "AND source_meeting_id=? AND deleted_at IS NULL LIMIT 1",
-                (TEN(), rid),
-            ).fetchone())
-            if has_derived:
-                raise HTTPException(
-                    409,
-                    "会议已经生成执行任务，不能重开整场会议；"
-                    "请到任务中心重试具体失败任务。",
+        tenant_id = TEN()
+
+        def _retry_meeting():
+            with db.atomic() as connection:
+                current = connection.execute(
+                    "SELECT execution_task_ids_json FROM meeting "
+                    "WHERE id=? AND tenant_id=?",
+                    (rid, tenant_id),
+                ).fetchone()
+                execution_ids = db.jloads(
+                    current["execution_task_ids_json"] if current else None,
+                    [],
+                ) or []
+                has_derived = bool(execution_ids) or bool(connection.execute(
+                    "SELECT id FROM task WHERE tenant_id=? "
+                    "AND source_meeting_id=? AND deleted_at IS NULL LIMIT 1",
+                    (tenant_id, rid),
+                ).fetchone())
+                if has_derived:
+                    raise HTTPException(
+                        409,
+                        "会议已经生成执行任务，不能重开整场会议；"
+                        "请到任务中心重试具体失败任务。",
+                    )
+                changed = connection.execute(
+                    "UPDATE meeting SET status='queued',phase='queued',round_no=0,"
+                    "messages_json='[]',actions_json=NULL,summary_md=NULL,"
+                    "decision=NULL,consensus_md=NULL,next_action=NULL,"
+                    "proposals_json='[]',validations_json='[]',"
+                    "execution_task_ids_json='[]',intervention_count=0,"
+                    "intervention_state=NULL,intervention_op_key=NULL,"
+                    "intervention_snapshot_json=NULL,intervention_question=NULL,"
+                    "intervention_started_at=NULL,billing_status='included',"
+                    "retry_count=retry_count+1,updated_at=? "
+                    "WHERE id=? AND tenant_id=? AND status='failed' "
+                    "AND phase='failed' AND billing_status=? AND retry_count=?",
+                    (
+                        now,
+                        rid,
+                        tenant_id,
+                        row.get("billing_status"),
+                        retries,
+                    ),
                 )
-            changed = connection.execute(
-                "UPDATE meeting SET status='queued',phase='queued',round_no=0,"
-                "messages_json='[]',actions_json=NULL,summary_md=NULL,"
-                "decision=NULL,consensus_md=NULL,next_action=NULL,"
-                "proposals_json='[]',validations_json='[]',"
-                "execution_task_ids_json='[]',intervention_count=0,"
-                "intervention_state=NULL,intervention_op_key=NULL,"
-                "intervention_snapshot_json=NULL,intervention_question=NULL,"
-                "intervention_started_at=NULL,billing_status='included',"
-                "retry_count=retry_count+1,updated_at=? "
-                "WHERE id=? AND tenant_id=? AND status='failed' "
-                "AND phase='failed' AND billing_status=? AND retry_count=?",
-                (
-                    now, rid, TEN(), row.get("billing_status"), retries,
-                ),
-            )
-            if changed.rowcount != 1:
-                raise HTTPException(
-                    409, "会议状态刚刚发生变化，请刷新后再重试")
+                if changed.rowcount != 1:
+                    raise HTTPException(
+                        409, "会议状态刚刚发生变化，请刷新后再重试")
+
+        await db.arun(_retry_meeting)
         asyncio.create_task(meeting.run(rid, engine.broadcast))
         engine.broadcast({"type": "meeting_update", "meeting_id": rid})
         return {
@@ -3017,7 +3054,7 @@ async def task_center_retry(kind: str, rid: int):
         }
 
     if kind == "publish":
-        row = db.one(
+        row = await db.aone(
             "SELECT * FROM pub_task WHERE id=? AND tenant_id=?", (rid, TEN()))
         if not row:
             raise HTTPException(404)
@@ -3025,7 +3062,7 @@ async def task_center_retry(kind: str, rid: int):
         if not meta["retryable"]:
             _raise_retry_denied(meta)
         retries = int(row.get("retry_count") or 0)
-        changed = db.execute(
+        changed = await db.aexecute(
             "UPDATE pub_task SET status='queued',fail_json=NULL,"
             "retry_count=retry_count+1,submit_started_at=NULL,updated_at=? "
             "WHERE id=? AND tenant_id=? AND status='failed' "
@@ -3043,7 +3080,7 @@ async def task_center_retry(kind: str, rid: int):
             "note": "已按原发布单免费重新排队",
         }
 
-    row = db.one(
+    row = await db.aone(
         "SELECT * FROM wechat_draft_delivery WHERE id=? AND tenant_id=?",
         (rid, TEN()),
     )
@@ -3148,11 +3185,11 @@ async def task_redo(tid: int, body: dict):
 @app.post("/api/tasks/{tid}/retry")
 async def task_retry(tid: int):
     """失败任务原单免费重试；用 CAS 防止双击或并发重复开工。"""
-    task = _task_row_or_404(tid)
+    task = await db.arun(_task_row_or_404, tid)
     if task.get("status") != "failed":
         raise HTTPException(409, "只有失败任务可以免费重试")
-    if not taskrunner.prepare_retry(tid, TEN()):
-        current = db.one(
+    if not await db.arun(taskrunner.prepare_retry, tid, TEN()):
+        current = await db.aone(
             "SELECT retry_count FROM task WHERE id=? AND tenant_id=?",
             (tid, TEN()),
         ) or {}
@@ -3163,7 +3200,9 @@ async def task_retry(tid: int):
     engine.broadcast(
         {"type": "task_update", "task_id": tid, "idx": task["emp_idx"]}
     )
-    row = db.one("SELECT retry_count FROM task WHERE id=?", (tid,)) or {}
+    row = await db.aone(
+        "SELECT retry_count FROM task WHERE id=?", (tid,)
+    ) or {}
     return {
         "ok": True,
         "task_id": tid,
@@ -3469,7 +3508,7 @@ def knowledge_detail(kid: int):
 @app.post("/api/knowledge/{kid}/analyze")
 async def knowledge_analyze(kid: int):
     _need_module("library")
-    row = db.one(
+    row = await db.aone(
         "SELECT tenant_id FROM knowledge WHERE id=? AND deleted_at IS NULL",
         (kid,),
     )
@@ -3484,8 +3523,10 @@ async def knowledge_analyze(kid: int):
 @app.post("/api/assets/{aid}/analyze")
 async def asset_analyze(aid: int):
     _need_module("library")
-    row = db.one("SELECT tenant_id FROM asset WHERE id=? AND deleted_at IS NULL",
-                 (aid,))
+    row = await db.aone(
+        "SELECT tenant_id FROM asset WHERE id=? AND deleted_at IS NULL",
+        (aid,),
+    )
     if not row or row.get("tenant_id", 1) != TEN():
         raise HTTPException(404)
     try:
@@ -4013,10 +4054,16 @@ async def company_distill():
     """把企业资料 + 沉淀库里的企业知识,提炼成固定的「企业档案」,自动注入每个数字员工."""
     _need_admin()
     tid = TEN()
-    materials = db.get_setting(f"company_materials:{tid}") or ""
-    kb = db.q("SELECT title, content FROM knowledge WHERE tenant_id=? "
-              "AND deleted_at IS NULL "
-              "ORDER BY pinned DESC, id DESC LIMIT 20", (tid,))
+    materials, kb = await asyncio.gather(
+        db.aget_setting(f"company_materials:{tid}"),
+        db.aq(
+            "SELECT title, content FROM knowledge WHERE tenant_id=? "
+            "AND deleted_at IS NULL "
+            "ORDER BY pinned DESC, id DESC LIMIT 20",
+            (tid,),
+        ),
+    )
+    materials = materials or ""
     kb_text = "\n".join(f"- {r['title']}:{(r['content'] or '')[:300]}" for r in kb)
     corpus = (materials + ("\n\n【沉淀库里的企业知识】\n" + kb_text if kb_text else "")).strip()
     if len(corpus) < 30:
@@ -4038,7 +4085,9 @@ async def company_distill():
         )
     prof = {k: str(r["data"].get(k) or "").strip()[:600] for k in _COMPANY_FIELDS}
     prof["updated_at"] = time.time()
-    db.set_setting(f"company_profile:{tid}", json.dumps(prof, ensure_ascii=False))
+    await db.aset_setting(
+        f"company_profile:{tid}", json.dumps(prof, ensure_ascii=False)
+    )
     return {"profile": prof, "cost_usd": r.get("cost_usd", 0)}
 
 
@@ -4703,9 +4752,11 @@ async def _avatar_script_from_link_work(body: dict, url: str, dur: int) -> dict:
     style = (body.get("style") or "").strip()
     persona_txt = ""
     if body.get("profile_id"):
-        p = db.one("SELECT * FROM account_profile WHERE id=? AND tenant_id=? "
-                   "AND deleted_at IS NULL",
-                   (body["profile_id"], TEN()))
+        p = await db.aone(
+            "SELECT * FROM account_profile WHERE id=? AND tenant_id=? "
+            "AND deleted_at IS NULL",
+            (body["profile_id"], TEN()),
+        )
         if p:
             per = db.jloads(p["persona_json"], {})
             persona_txt = ("\n改写要贴合这个人设(像TA本人说话):"
@@ -5150,7 +5201,7 @@ def avatar_jobs(limit: int | None = None, offset: int = 0):
 @app.post("/api/avatar/jobs/{jid}/retry")
 async def avatar_job_retry(jid: int):
     _need_module("avatar")
-    row = db.one(
+    row = await db.aone(
         "SELECT tenant_id,status FROM avatar_job "
         "WHERE id=? AND deleted_at IS NULL",
         (jid,),
@@ -5159,8 +5210,8 @@ async def avatar_job_retry(jid: int):
         raise HTTPException(404)
     if row.get("status") != "failed":
         raise HTTPException(409, "只有失败任务可以免费重试")
-    if not avatar.prepare_retry(jid, TEN()):
-        current = db.one(
+    if not await db.arun(avatar.prepare_retry, jid, TEN()):
+        current = await db.aone(
             "SELECT retry_count FROM avatar_job WHERE id=? AND tenant_id=?",
             (jid, TEN()),
         ) or {}
@@ -5169,7 +5220,7 @@ async def avatar_job_retry(jid: int):
         raise HTTPException(409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
     asyncio.create_task(avatar.run_job(jid, engine.broadcast))
     engine.broadcast({"type": "avatar_update", "job_id": jid})
-    current = db.one(
+    current = await db.aone(
         "SELECT retry_count FROM avatar_job WHERE id=?", (jid,)
     ) or {}
     return {
@@ -5559,25 +5610,29 @@ def meeting_get(mid: int):
 
 @app.post("/api/meetings/{mid}/execute")
 async def meeting_execute(mid: int):
-    m = _meeting_row_or_404(mid)
+    m = await db.arun(_meeting_row_or_404, mid)
     if m.get("phase") == "completed":
         return {
             "ok": True,
-            "task_ids": meeting.validated_execution_task_ids(m, repair=True),
+            "task_ids": await db.arun(
+                meeting.validated_execution_task_ids, m, repair=True
+            ),
         }
-    if not meeting.claim_execution(mid):
+    if not await db.arun(meeting.claim_execution, mid):
         raise HTTPException(409, "会议尚未形成可执行决定,或执行已经启动")
     try:
         task_ids = await meeting.execute_actions(mid, engine.broadcast)
     except Exception:
-        db.update("meeting", mid, {"status": "done", "phase": "awaiting_execution"})
+        await db.aupdate(
+            "meeting", mid, {"status": "done", "phase": "awaiting_execution"}
+        )
         raise HTTPException(500, "派活启动失败,请稍后重试")
     return {"ok": True, "task_ids": task_ids}
 
 
 @app.post("/api/meetings/{mid}/ask")
 async def meeting_ask(mid: int, body: dict):
-    m = _meeting_row_or_404(mid)
+    m = await db.arun(_meeting_row_or_404, mid)
     q = (body.get("question") or "").strip()
     if not q:
         raise HTTPException(400, "先输入您想追问或挑战的话")
@@ -5586,7 +5641,9 @@ async def meeting_ask(mid: int, body: dict):
     # 追问会让全部参会成员各答一轮,按人头扣(原来只扣1点,6人会每次追问漏收5点)
     n = len(db.jloads(m.get("emp_idxs_json"), [])) or 1
     try:
-        billing_op = meeting.begin_intervention(mid, q, n)
+        billing_op = await db.arun(
+            meeting.begin_intervention, mid, q, n
+        )
     except billing.InsufficientPoints as e:
         raise HTTPException(402, str(e))
     if not billing_op:
@@ -5744,21 +5801,32 @@ async def guest_apply(body: dict, request: Request):
     company = (body.get("company") or "").strip()[:60]
     note = (body.get("note") or "").strip()[:200]
     # 手机号去重:已有账号 / 已有待处理或已开通的申请 → 不重复建单,引导登录或联系客服
-    if db.one("SELECT id FROM users WHERE username=?", (phone,)) or \
-       db.one("SELECT id FROM account_apply WHERE phone=? AND (status=0 OR username IS NOT NULL)",
-              (phone,)):
+    existing_user, existing_apply = await asyncio.gather(
+        db.aone("SELECT id FROM users WHERE username=?", (phone,)),
+        db.aone(
+            "SELECT id FROM account_apply "
+            "WHERE phone=? AND (status=0 OR username IS NOT NULL)",
+            (phone,),
+        ),
+    )
+    if existing_user or existing_apply:
         return {"ok": True, "msg": "这个手机号已申请过 / 已有账号啦:直接登录就行;"
                                    "忘了密码或还没收到账号,联系客服帮您处理"}
     # 同IP日限:防脚本刷号(不重复的申请才计次,已去重的重复提交不占额度)
     if _apply_ip_over_limit(_client_ip(request)):
         return {"ok": True, "msg": "今天的申请次数已达上限,明天再试,或直接联系客服帮您开通"}
-    recent = db.one("SELECT id FROM account_apply WHERE phone=? AND created_at>?",
-                    (phone, time.time() - 3600))
+    recent = await db.aone(
+        "SELECT id FROM account_apply WHERE phone=? AND created_at>?",
+        (phone, time.time() - 3600),
+    )
     if recent:
         return {"ok": True, "msg": "申请已收到,我们会在 1 个工作日内联系您开通账号"}
-    aid = db.insert("account_apply", {"phone": phone, "name": name,
-                                      "company": company, "note": note})
-    funnel.record_safe(
+    aid = await db.ainsert(
+        "account_apply",
+        {"phone": phone, "name": name, "company": company, "note": note},
+    )
+    await db.arun(
+        funnel.record_safe,
         "lead_submitted",
         "account_apply",
         tenant_id=0,
@@ -5771,8 +5839,12 @@ async def guest_apply(body: dict, request: Request):
     except Exception:
         pass
     # V26:老板开了「自动开通体验账号」→ 当场开好,凭据直接给客户(自助试用,不用等)
-    if db.get_setting("auto_approve_apply") == "1":
-        cap = int(float(db.get_setting("auto_approve_daily_cap") or 20))
+    auto_approve, daily_cap = await asyncio.gather(
+        db.aget_setting("auto_approve_apply"),
+        db.aget_setting("auto_approve_daily_cap"),
+    )
+    if auto_approve == "1":
+        cap = int(float(daily_cap or 20))
         today = int(time.time() // 86400)
         if _auto_opens[1] != today:
             _auto_opens[0], _auto_opens[1] = 0, today
@@ -5780,9 +5852,14 @@ async def guest_apply(body: dict, request: Request):
             # 当天自动名额已满 → 申请保留为待处理,转老板人工「⚡一键开通」
             return {"ok": True, "msg": "今日体验名额已满,已转人工,我们会尽快为您开通"}
         try:
-            a = db.one("SELECT * FROM account_apply WHERE id=?", (aid,))
-            trial = float(db.get_setting("trial_points") or 20)
-            r = _open_account_from_apply(a, trial_points=trial)
+            a, trial_setting = await asyncio.gather(
+                db.aone("SELECT * FROM account_apply WHERE id=?", (aid,)),
+                db.aget_setting("trial_points"),
+            )
+            trial = float(trial_setting or 20)
+            r = await db.arun(
+                _open_account_from_apply, a, trial_points=trial
+            )
             _auto_opens[0] += 1
             return {"ok": True, "auto": True,
                     "msg": f"体验账号已自动开通,已赠 {trial:.0f} 点体验点,登录就能派活!",
@@ -5816,7 +5893,7 @@ async def guest_register(body: dict, request: Request):
     phone = (body.get("phone") or "").strip()
     if not (phone.isdigit() and len(phone) == 11):
         raise HTTPException(400, "请填 11 位手机号")
-    old = db.one("SELECT * FROM guests WHERE phone=?", (phone,))
+    old = await db.aone("SELECT * FROM guests WHERE phone=?", (phone,))
     if old and old["used"]:
         raise HTTPException(403, "这个手机号已经体验过啦,想继续用请联系我们开通账号")
     created = False
@@ -5825,16 +5902,20 @@ async def guest_register(body: dict, request: Request):
     else:
         if not _claim_guest_trial_slot(_client_ip(request)):
             raise HTTPException(429, "今日免费体验名额已达上限，请明天再试或申请正式账号")
-        with db.atomic() as connection:
-            existing = connection.execute(
-                "SELECT id,used FROM guests WHERE phone=? ORDER BY id LIMIT 1",
-                (phone,),
-            ).fetchone()
-            if existing:
-                if existing["used"]:
-                    raise HTTPException(403, "这个手机号已经体验过啦,想继续用请联系我们开通账号")
-                gid = existing["id"]
-            else:
+        def _register_guest():
+            with db.atomic() as connection:
+                existing = connection.execute(
+                    "SELECT id,used FROM guests WHERE phone=? "
+                    "ORDER BY id LIMIT 1",
+                    (phone,),
+                ).fetchone()
+                if existing:
+                    if existing["used"]:
+                        raise HTTPException(
+                            403,
+                            "这个手机号已经体验过啦,想继续用请联系我们开通账号",
+                        )
+                    return existing["id"], False
                 now = time.time()
                 cursor = connection.execute(
                     "INSERT INTO guests(phone,company,name,created_at,updated_at) "
@@ -5847,10 +5928,12 @@ async def guest_register(body: dict, request: Request):
                         now,
                     ),
                 )
-                gid = cursor.lastrowid
-                created = True
+                return cursor.lastrowid, True
+
+        gid, created = await db.arun(_register_guest)
     if created:
-        funnel.record_safe(
+        await db.arun(
+            funnel.record_safe,
             "lead_submitted",
             "guest_trial",
             tenant_id=0,
@@ -5886,13 +5969,13 @@ async def guest_try(request: Request, body: dict):
         raise HTTPException(401, "请先填写信息领取体验")
     if sig != _guest_sign(gid):
         raise HTTPException(401, "体验凭证无效")
-    g = db.one("SELECT * FROM guests WHERE id=?", (gid,))
+    g = await db.aone("SELECT * FROM guests WHERE id=?", (gid,))
     if not g or g["used"]:
         raise HTTPException(403, "体验次数已用完,联系我们开通账号继续用")
     q = (body.get("question") or "").strip()[:500]
     if not q:
         raise HTTPException(400, "先输入您想问的问题")
-    claimed = db.execute(
+    claimed = await db.aexecute(
         "UPDATE guests SET used=1,updated_at=? WHERE id=? AND used=0",
         (time.time(), gid),
     )
@@ -5908,7 +5991,7 @@ async def guest_try(request: Request, body: dict):
             None, prompt, timeout=180, token=f"guest:{gid}"
         )
     except Exception:
-        db.execute(
+        await db.aexecute(
             "UPDATE guests SET used=0,updated_at=? WHERE id=? AND used=1",
             (time.time(), gid),
         )
@@ -6157,8 +6240,10 @@ def delete_profile(pid: int):
 async def distill(pid: int):
     """喂历史作品 → 提炼文风特征(nuwa-skill 的建档职责)."""
     _need_module("content")
-    p = db.one("SELECT * FROM account_profile WHERE id=? AND deleted_at IS NULL",
-               (pid,))
+    p = await db.aone(
+        "SELECT * FROM account_profile WHERE id=? AND deleted_at IS NULL",
+        (pid,),
+    )
     if not p or p.get("tenant_id", 1) != TEN():
         raise HTTPException(404)
     persona = db.jloads(p["persona_json"])
@@ -6173,7 +6258,11 @@ async def distill(pid: int):
 历史作品:
 {corpus[:8000]}""", timeout=300)
     persona.update({k: v for k, v in r["data"].items() if v})
-    db.update("account_profile", pid, {"persona_json": json.dumps(persona, ensure_ascii=False)})
+    await db.aupdate(
+        "account_profile",
+        pid,
+        {"persona_json": json.dumps(persona, ensure_ascii=False)},
+    )
     return {"persona": persona, "cost_usd": r["cost_usd"]}
 
 
@@ -6910,32 +6999,36 @@ def admin_wechat_delivery_alerts():
 @app.post("/api/jobs/{job_id}/wechat-draft")
 async def job_wechat_draft(job_id: int, body: dict):
     _need_module("content")
-    _job_or_404(job_id)
+    await db.arun(_job_or_404, job_id)
     theme = body.get("theme") or mplayout.DEFAULT_THEME
     tid = TEN()
-    conf = wechat.get_conf(tid if tid != 1 else 1)
+    conf = await db.arun(wechat.get_conf, tid if tid != 1 else 1)
     if not (conf.get("appid") and conf.get("secret")):
         raise HTTPException(400, "还没配置公众号:去「📣 发布渠道」页填 AppID/AppSecret(1分钟搞定)")
-    p = _mp_payload(job_id, theme)
+    p = await db.arun(_mp_payload, job_id, theme)
     request_hash = _wechat_delivery_hash(job_id, theme, p)
     # 先处理同工单的任意旧投递。老板若在不确定期间改了正文/hash，也不能
     # 绕过旧锚点再扣一次，必须先核对或人工解锁旧投递。
-    existing = (
-        _wechat_delivery_active(tid, job_id)
-        or _wechat_delivery_latest(tid, job_id, request_hash)
-    )
+    existing = await db.arun(_wechat_delivery_active, tid, job_id)
+    if not existing:
+        existing = await db.arun(
+            _wechat_delivery_latest, tid, job_id, request_hash
+        )
     if existing and existing["status"] in ("done", "blocked"):
         return _wechat_delivery_result(existing)
     if existing and existing["status"] == "submitted":
         try:
-            if not _finalize_wechat_delivery(existing):
+            if not await db.arun(_finalize_wechat_delivery, existing):
                 raise RuntimeError("草稿台账结算状态冲突")
         except Exception as exc:
             raise HTTPException(
                 503, "文章已经进入公众号草稿箱✅ 系统记录稍后自动补齐;请勿再点发送,不会重复扣点"
             ) from exc
         return _wechat_delivery_result(
-            db.one("SELECT * FROM wechat_draft_delivery WHERE id=?", (existing["id"],))
+            await db.aone(
+                "SELECT * FROM wechat_draft_delivery WHERE id=?",
+                (existing["id"],),
+            )
         )
     if existing and existing["status"] == "submitting":
         try:
@@ -6950,26 +7043,30 @@ async def job_wechat_draft(job_id: int, body: dict):
             raise HTTPException(
                 409, "上次投递结果仍待确认；请先查看公众号草稿箱，系统不会重复创建"
             )
-        if not _mark_wechat_submitted(
+        if not await db.arun(
+                _mark_wechat_submitted,
                 existing["id"], existing["op_key"], media_id):
             raise HTTPException(409, "这篇的发送状态刚刚更新了,刷新页面看最新结果;确实没送达的话再重试,不会重复扣点")
-        existing = db.one(
+        existing = await db.aone(
             "SELECT * FROM wechat_draft_delivery WHERE id=?", (existing["id"],)
         )
         try:
-            _finalize_wechat_delivery(existing)
+            await db.arun(_finalize_wechat_delivery, existing)
         except Exception as exc:
             raise HTTPException(
                 503, "文章已确认在公众号草稿箱✅ 系统记录稍后自动补齐,请勿重复发送"
             ) from exc
         return _wechat_delivery_result(
-            db.one("SELECT * FROM wechat_draft_delivery WHERE id=?", (existing["id"],))
+            await db.aone(
+                "SELECT * FROM wechat_draft_delivery WHERE id=?",
+                (existing["id"],),
+            )
         )
     if existing and existing["status"] in ("processing", "pending_charge"):
         raise HTTPException(409, "这篇内容正在发送公众号草稿箱，请勿重复点击")
     try:
-        delivery, created = _create_wechat_delivery(
-            tid, job_id, request_hash, p["title"]
+        delivery, created = await db.arun(
+            _create_wechat_delivery, tid, job_id, request_hash, p["title"]
         )
     except billing.InsufficientPoints as exc:
         raise HTTPException(402, str(exc)) from exc
@@ -6988,10 +7085,11 @@ async def job_wechat_draft(job_id: int, body: dict):
             save=False,
         )
         if report["verdict"] == "block":
-            if not _complete_blocked_wechat_delivery(delivery, report):
+            if not await db.arun(
+                    _complete_blocked_wechat_delivery, delivery, report):
                 raise RuntimeError("草稿审查结算状态冲突")
             return _wechat_delivery_result(
-                db.one(
+                await db.aone(
                     "SELECT * FROM wechat_draft_delivery WHERE id=?",
                     (delivery["id"],),
                 )
@@ -7004,9 +7102,10 @@ async def job_wechat_draft(job_id: int, body: dict):
                 allowed_extensions=(".png", ".jpg", ".jpeg", ".webp"),
             )
             try:
-                with open(lp, "rb") as f:
-                    wx_url = await wechat.upload_content_img(tid, f.read(),
-                                                             os.path.basename(lp))
+                image_bytes = await asyncio.to_thread(_read_file_bytes, lp)
+                wx_url = await wechat.upload_content_img(
+                    tid, image_bytes, os.path.basename(lp)
+                )
                 html = html.replace(im["url"], wx_url)
             except wechat.WeChatError:
                 raise
@@ -7021,16 +7120,19 @@ async def job_wechat_draft(job_id: int, body: dict):
             allowed_extensions=(".png", ".jpg", ".jpeg"),
         ) if p["cover_rel"] else None)
         if cover_lp:
-            with open(cover_lp, "rb") as f:
-                cover_bytes = f.read()
+            cover_bytes = await asyncio.to_thread(
+                _read_file_bytes, cover_lp
+            )
         else:
             color = (mplayout.THEMES.get(theme) or {}).get("color", "#ff7f2a")
-            cover_bytes = wechat.make_cover_png(p["title"], color)
+            cover_bytes = await asyncio.to_thread(
+                wechat.make_cover_png, p["title"], color
+            )
         thumb_id = await wechat.upload_thumb(tid, cover_bytes)
         # ④ 进草稿箱 + 登记发布台账(T+1/3/7 自动复盘的钟表从此起算)
         marker = f"<!-- paihuo-draft:{delivery['request_key']} -->"
         html = html + "\n" + marker
-        changed = db.execute(
+        changed = await db.aexecute(
             "UPDATE wechat_draft_delivery SET status='submitting',report_json=?,"
             "updated_at=? WHERE id=? AND op_key=? AND status='processing' "
             "AND billing_status='charged'",
@@ -7075,30 +7177,33 @@ async def job_wechat_draft(job_id: int, body: dict):
                 raise HTTPException(
                     503, "微信未返回草稿编号，已暂停重复投递；稍后重试会先自动对账"
                 )
-        if not _mark_wechat_submitted(
+        if not await db.arun(
+                _mark_wechat_submitted,
                 delivery["id"], delivery["op_key"], media_id):
             raise HTTPException(
                 503, "文章已经进入公众号草稿箱✅ 系统记录稍后自动补齐;请勿再点发送,不会重复扣点"
             )
-        delivery = db.one(
+        delivery = await db.aone(
             "SELECT * FROM wechat_draft_delivery WHERE id=?", (delivery["id"],)
         )
         try:
-            if not _finalize_wechat_delivery(delivery):
+            if not await db.arun(_finalize_wechat_delivery, delivery):
                 raise RuntimeError("草稿台账结算状态冲突")
         except Exception as exc:
             raise HTTPException(
                 503, "草稿已进入公众号，平台台账正在补记；稍后重试不会重复发送"
             ) from exc
         return _wechat_delivery_result(
-            db.one(
+            await db.aone(
                 "SELECT * FROM wechat_draft_delivery WHERE id=?",
                 (delivery["id"],),
             )
         )
     except wechat.WeChatError as e:
         try:
-            settled = _fail_wechat_delivery(delivery, f"微信明确拒绝:{e}")
+            settled = await db.arun(
+                _fail_wechat_delivery, delivery, f"微信明确拒绝:{e}"
+            )
         except Exception as settle_error:
             log.error(
                 "wechat delivery %s refund failed error_type=%s",
@@ -7114,7 +7219,11 @@ async def job_wechat_draft(job_id: int, body: dict):
     except asyncio.CancelledError:
         if not external_started:
             try:
-                _fail_wechat_delivery(delivery, "请求中断，尚未提交微信")
+                await db.arun(
+                    _fail_wechat_delivery,
+                    delivery,
+                    "请求中断，尚未提交微信",
+                )
             except Exception as refund_exc:
                 log.error(
                     "cancelled wechat delivery %s refund failed error_type=%s",
@@ -7125,7 +7234,9 @@ async def job_wechat_draft(job_id: int, body: dict):
     except HTTPException as exc:
         if not external_started:
             try:
-                settled = _fail_wechat_delivery(delivery, "投递前校验失败")
+                settled = await db.arun(
+                    _fail_wechat_delivery, delivery, "投递前校验失败"
+                )
             except Exception as settle_error:
                 log.error(
                     "wechat delivery %s refund failed error_type=%s",
@@ -7141,7 +7252,8 @@ async def job_wechat_draft(job_id: int, body: dict):
     except Exception as exc:
         if not external_started:
             try:
-                settled = _fail_wechat_delivery(
+                settled = await db.arun(
+                    _fail_wechat_delivery,
                     delivery,
                     "投递前失败，尚未提交微信",
                 )
@@ -7485,12 +7597,16 @@ async def imagehunt_thumb(u: str, f: str = ""):
 async def job_add_image(job_id: int, body: dict):
     """把老板在真实图库挑中的图下载入工单素材,追加到多媒体师产出."""
     _need_module("content")
-    _job_or_404(job_id)
+    await db.arun(_job_or_404, job_id)
     url = (body.get("url") or "").strip()
     if not url.startswith("http"):
         raise HTTPException(400, "图片地址无效")
-    r = db.one("SELECT * FROM station_run WHERE job_id=? AND station_idx=5 "
-               "AND status IN ('done','awaiting_review') ORDER BY version DESC LIMIT 1", (job_id,))
+    r = await db.aone(
+        "SELECT * FROM station_run WHERE job_id=? AND station_idx=5 "
+        "AND status IN ('done','awaiting_review') "
+        "ORDER BY version DESC LIMIT 1",
+        (job_id,),
+    )
     if not r:
         raise HTTPException(400, "该工单的多媒体师还没有产出,等配图工位完成后再补图")
     try:
@@ -7502,12 +7618,18 @@ async def job_add_image(job_id: int, body: dict):
             "这张图抓不下来（可能防盗链较严），请换一张重试",
         )
     name = f"media_add_{int(time.time())}.jpg"
-    fpath = imagehunt._save_job_file(job_id, name, data)
+    fpath = await asyncio.to_thread(
+        imagehunt._save_job_file, job_id, name, data
+    )
     out = db.jloads(r["output_json"], {})
     entry = {"slot": "真实图补充", "desc": (body.get("query") or "")[:40], "platform": "通用",
              "file": fpath, "engine": "真实图·全网抓取", "source": body.get("page") or url}
     out["images"] = (out.get("images") or []) + [entry]
-    db.update("station_run", r["id"], {"output_json": json.dumps(out, ensure_ascii=False)})
+    await db.aupdate(
+        "station_run",
+        r["id"],
+        {"output_json": json.dumps(out, ensure_ascii=False)},
+    )
     engine.touch(job_id)
     return {"ok": True, "image": entry}
 
@@ -8085,7 +8207,10 @@ def publog_mark(pid: int):
 async def publog_pull(pid: int):
     """立即尝试自动拉数据+复盘(公众号需配好API且文章已群发)."""
     _need_module("content")
-    r = db.one("SELECT * FROM publish_log WHERE id=? AND tenant_id=?", (pid, TEN()))
+    r = await db.aone(
+        "SELECT * FROM publish_log WHERE id=? AND tenant_id=?",
+        (pid, TEN()),
+    )
     if not r:
         raise HTTPException(404)
     days = max(1, round((time.time() - (r["published_at"] or time.time())) / 86400))
@@ -8359,7 +8484,7 @@ def _persist_tool_result(connection, row: dict, result: dict, now: float) -> boo
 
 async def _tool_worker(jid: int):
     try:
-        row = db.one("SELECT * FROM tool_job WHERE id=?", (jid,))
+        row = await db.aone("SELECT * FROM tool_job WHERE id=?", (jid,))
     except Exception as exc:
         try:
             log.error(
@@ -8385,7 +8510,8 @@ async def _tool_worker(jid: int):
         if now - progress_last["at"] < 8:
             return
         try:
-            db.execute(
+            db.submit_write(
+                db.execute,
                 "UPDATE tool_job SET progress=?, updated_at=? "
                 "WHERE id=? AND status='running'",
                 (label, now, jid),
@@ -8404,14 +8530,26 @@ async def _tool_worker(jid: int):
         r = dict(r)
         r.pop("cost_usd", None)
         r.pop("tokens", None)
-        with db.atomic() as connection:
-            changed = _persist_tool_result(connection, row, r, time.time())
+        def _commit_result():
+            with db.atomic() as connection:
+                return _persist_tool_result(
+                    connection, row, r, time.time()
+                )
+
+        changed = await db.arun(_commit_result)
         if changed:
             try:
-                notify.push(
-                    tid, "report",
-                    {"report_name": f"{TOOL_KINDS.get(kind, kind)}跑完了",
-                     "summary": "结果已经摆在工具箱里,回来就能看", "link": "#/tools"},
+                await asyncio.to_thread(
+                    notify.push,
+                    tid,
+                    "report",
+                    {
+                        "report_name": (
+                            f"{TOOL_KINDS.get(kind, kind)}跑完了"
+                        ),
+                        "summary": "结果已经摆在工具箱里,回来就能看",
+                        "link": "#/tools",
+                    },
                 )
             except Exception as exc:
                 try:
@@ -8424,24 +8562,32 @@ async def _tool_worker(jid: int):
                     pass
     except asyncio.TimeoutError:
         minutes = max(1, round(TOOL_TIMEOUTS.get(kind, 360) / 60))
-        _settle_tool_failure(
-            row, f"运行超过{minutes}分钟仍未完成，已自动结束并退回点数，请重试",
-            "超时自动退回"
+        await db.arun(
+            _settle_tool_failure,
+            row,
+            f"运行超过{minutes}分钟仍未完成，已自动结束并退回点数，请重试",
+            "超时自动退回",
         )
         try:
             log.warning("tool_job %s(%s) timed out", jid, kind)
         except Exception:
             pass
     except asyncio.CancelledError:
-        _settle_tool_failure(
-            row, "任务被服务中断，已自动结束，请重新发起", "服务中断退回"
+        await db.arun(
+            _settle_tool_failure,
+            row,
+            "任务被服务中断，已自动结束，请重新发起",
+            "服务中断退回",
         )
         raise
     except Exception as e:
         # 先收口状态和退款，再记日志；即使日志组件自身出错，用户也不会再看到永久 running。
         public_error = providers.public_failure_message(e)
-        _settle_tool_failure(
-            row, public_error, "后台任务失败退回"
+        await db.arun(
+            _settle_tool_failure,
+            row,
+            public_error,
+            "后台任务失败退回",
         )
         try:
             log.error(
@@ -8644,9 +8790,11 @@ async def warmup_gen(body: dict):
     _tool_require_idle("warm")
     persona_text = ""
     if body.get("profile_id"):
-        pr = db.one("SELECT * FROM account_profile WHERE id=? AND tenant_id=? "
-                    "AND deleted_at IS NULL",
-                    (body["profile_id"], TEN()))
+        pr = await db.aone(
+            "SELECT * FROM account_profile WHERE id=? AND tenant_id=? "
+            "AND deleted_at IS NULL",
+            (body["profile_id"], TEN()),
+        )
         if pr:
             persona_text = registry._persona_text({"persona": db.jloads(pr["persona_json"], {})})
     return _tool_enqueue("warm", {"platform": body.get("platform") or "小红书",

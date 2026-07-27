@@ -232,7 +232,9 @@ async def check(tid: int, title: str, body: str, platform: str = "公众号",
                         "block": "⛔ 存在高危内容,已拦截发布"}[verdict],
               "cost_usd": cost, "tokens": tokens}
     if save:
-        db.insert("censor_log", check_log_values(tid, title, platform, report))
+        await db.ainsert(
+            "censor_log", check_log_values(tid, title, platform, report)
+        )
     return report
 
 
@@ -272,5 +274,7 @@ async def retro(tid: int, platform: str, title: str, data_text: str,
         progress=progress, token=token)
     d = r["data"]
     if save:
-        db.insert("censor_log", retro_log_values(tid, platform, title, d))
+        await db.ainsert(
+            "censor_log", retro_log_values(tid, platform, title, d)
+        )
     return {**d, "cost_usd": r["cost_usd"], "tokens": r["tokens"]}

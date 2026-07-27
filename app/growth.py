@@ -96,10 +96,11 @@ async def private_calendar(tid: int, industry: str, focus: str, year_month: str,
     fests = [f"{d:02d}日:{FESTIVALS[f'{m:02d}-{d:02d}']}" for d in range(1, ndays + 1)
              if f"{m:02d}-{d:02d}" in FESTIVALS]
     from .skills.registry import company_block
+    company_context = await db.arun(company_block, tid)
     r = await providers.call_text_json(
         8,
         f"""你是私域运营操盘手。为一位「{industry}」行业的老板生成 {year_month} 月(共{ndays}天)的私域内容日历。
-{company_block(tid)}
+{company_context}
 老板补充要求:{focus or '无'}
 本月营销节点:{'、'.join(fests) or '无特别节点'}
 
@@ -109,7 +110,9 @@ async def private_calendar(tid: int, industry: str, focus: str, year_month: str,
         timeout=900)
     data = _normalize_calendar(r.get("data"), y, m, ndays)
     if save:
-        db.set_setting(f"pcal:{tid}:{year_month}", json.dumps(data, ensure_ascii=False))
+        await db.aset_setting(
+            f"pcal:{tid}:{year_month}", json.dumps(data, ensure_ascii=False)
+        )
     return {**data, "cost_usd": r["cost_usd"], "tokens": r["tokens"]}
 
 
@@ -134,7 +137,7 @@ def save_calendar_edits(tid: int, year_month: str, days: list) -> dict:
 
 async def calendar_to_feishu(tid: int, year_month: str) -> dict:
     """日历同步到租户的飞书多维表格(表名:私域日历YYYY-MM)."""
-    cur = get_calendar(tid, year_month)
+    cur = await db.arun(get_calendar, tid, year_month)
     if not cur:
         raise ValueError("该月还没生成过日历")
     from . import feishu
@@ -158,7 +161,9 @@ def hot_channels_saved(tid: int) -> list:
 async def hot_pick(tid: int, industry: str, channels: list = None,
                    save: bool = True) -> dict:
     """今日必发:只扫用户勾选的渠道,给 3 个今天就该发的选题(带一键开工参数)."""
-    channels = [c for c in (channels or []) if c in HOT_CHANNELS] or hot_channels_saved(tid)
+    channels = [c for c in (channels or []) if c in HOT_CHANNELS]
+    if not channels:
+        channels = await db.arun(hot_channels_saved, tid)
     today = datetime.now(TZ).strftime("%Y-%m-%d")
     r = await providers.call_text_json(
         0,
@@ -171,9 +176,13 @@ async def hot_pick(tid: int, industry: str, channels: list = None,
     data = {**r["data"], "date": today, "industry": industry, "channels": channels,
             "festivals": upcoming_festivals(7)}
     if save:
-        db.set_setting(f"hotpick_channels:{tid}", json.dumps(channels, ensure_ascii=False))
-        db.set_setting(f"hotpick:{tid}:{today}:{industry}",
-                       json.dumps(data, ensure_ascii=False))
+        await db.aset_setting(
+            f"hotpick_channels:{tid}", json.dumps(channels, ensure_ascii=False)
+        )
+        await db.aset_setting(
+            f"hotpick:{tid}:{today}:{industry}",
+            json.dumps(data, ensure_ascii=False),
+        )
     return {**data, "cost_usd": r["cost_usd"], "tokens": r["tokens"]}
 
 
@@ -191,7 +200,7 @@ def save_hot_daily(tid: int, enabled: bool, industry: str, channels: list):
 
 async def hot_daily_run(tid: int, save: bool = True):
     """每日自动扫描:扫完把 3 个选题推到老板微信."""
-    conf = hot_daily_conf(tid)
+    conf = await db.arun(hot_daily_conf, tid)
     data = await hot_pick(
         tid,
         conf.get("industry") or "通用",
@@ -202,13 +211,23 @@ async def hot_daily_run(tid: int, save: bool = True):
         return data
     picks = data.get("picks") or []
     from . import notify
-    notify.push(tid, "report", {
-        "report_name": f"今日必发({conf.get('industry', '通用')})",
-        "summary": " / ".join(f"{i + 1}.{(p.get('title') or '')[:20]}" for i, p in enumerate(picks))
-                   + " —— 进工具箱看理由,看中一键开工",
-        "link": "#/tools"})
+    await asyncio.to_thread(
+        notify.push,
+        tid,
+        "report",
+        {
+            "report_name": f"今日必发({conf.get('industry', '通用')})",
+            "summary": " / ".join(
+                f"{i + 1}.{(p.get('title') or '')[:20]}"
+                for i, p in enumerate(picks)
+            ) + " —— 进工具箱看理由,看中一键开工",
+            "link": "#/tools",
+        },
+    )
     conf["last_ymd"] = datetime.now(TZ).strftime("%Y-%m-%d")
-    db.set_setting(f"hot_daily:{tid}", json.dumps(conf, ensure_ascii=False))
+    await db.aset_setting(
+        f"hot_daily:{tid}", json.dumps(conf, ensure_ascii=False)
+    )
     return data
 
 
@@ -836,7 +855,7 @@ def save_watch(tid: int, targets: list, enabled: bool):
 
 
 async def bench_report(tid: int, save: bool = True) -> dict:
-    conf = watch_conf(tid)
+    conf = await db.arun(watch_conf, tid)
     if not conf.get("targets"):
         raise ValueError("先在工具箱里添加要盯的对标账号")
     tg = "\n".join(f"- {t['name']}({t.get('platform', '')}){(':' + t['note']) if t.get('note') else ''}"
@@ -857,15 +876,32 @@ async def bench_report(tid: int, save: bool = True) -> dict:
                f"- 来源:{it.get('evidence', '')}", f"- 抄作业:{it.get('steal', '')}", ""]
     md += ["## 我们该做的"] + [f"- {a}" for a in data.get("actions", [])]
     if save:      # 定时自动跑:落沉淀库+推微信;手动跑:当页看,老板自己决定沉不沉淀
-        db.insert("knowledge", {"title": f"竞品盯梢周报 {today}", "content": "\n".join(md),
-                                "tags_json": json.dumps(["竞品盯梢"], ensure_ascii=False),
-                                "source": "auto", "tenant_id": tid})
+        await db.ainsert(
+            "knowledge",
+            {
+                "title": f"竞品盯梢周报 {today}",
+                "content": "\n".join(md),
+                "tags_json": json.dumps(["竞品盯梢"], ensure_ascii=False),
+                "source": "auto",
+                "tenant_id": tid,
+            },
+        )
         from . import notify
-        notify.push(tid, "report", {"report_name": "竞品盯梢周报",
-                                    "summary": data.get("summary", ""), "link": "#/knowledge"})
+        await asyncio.to_thread(
+            notify.push,
+            tid,
+            "report",
+            {
+                "report_name": "竞品盯梢周报",
+                "summary": data.get("summary", ""),
+                "link": "#/knowledge",
+            },
+        )
     if save:
         conf["last_run"] = time.time()
-        db.set_setting(f"bench_watch:{tid}", json.dumps(conf, ensure_ascii=False))
+        await db.aset_setting(
+            f"bench_watch:{tid}", json.dumps(conf, ensure_ascii=False)
+        )
     return {**data, "md": "\n".join(md), "cost_usd": r["cost_usd"], "tokens": r["tokens"]}
 
 

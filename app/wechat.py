@@ -85,14 +85,16 @@ def _raise_if_err(d: dict):
 
 
 async def token(tid: int, force: bool = False) -> str:
-    conf = get_conf(tid)
+    conf = await db.arun(get_conf, tid)
     if not (conf.get("appid") and conf.get("secret")):
         raise WeChatError(
             0,
             "还没配置公众号 AppID/AppSecret(发布渠道页配置)",
             public=True,
         )
-    cache = db.jloads(db.get_setting(f"wechat_token:{tid}"), {}) or {}
+    cache = db.jloads(
+        await db.aget_setting(f"wechat_token:{tid}"), {}
+    ) or {}
     if not force and cache.get("token") and cache.get("exp", 0) > time.time() + 120:
         return cache["token"]
     async with httpx.AsyncClient(timeout=30) as cli:
@@ -105,8 +107,15 @@ async def token(tid: int, force: bool = False) -> str:
     tok = d.get("access_token")
     if not tok:
         raise WeChatError(0)
-    db.set_setting(f"wechat_token:{tid}",
-                   json.dumps({"token": tok, "exp": time.time() + int(d.get("expires_in", 7200))}))
+    await db.aset_setting(
+        f"wechat_token:{tid}",
+        json.dumps(
+            {
+                "token": tok,
+                "exp": time.time() + int(d.get("expires_in", 7200)),
+            }
+        ),
+    )
     return tok
 
 

@@ -397,16 +397,18 @@ def settle_failure(meeting_id: int, message: str) -> bool:
 
 async def run(meeting_id: int, broadcast):
     """执行一次三轮收敛会议。条件 UPDATE 保证快速连点/重启不会重复开会。"""
-    claimed = db.execute(
+    claimed = await db.aexecute(
         "UPDATE meeting SET status='running', phase='brainstorm', round_no=1, summary_md=NULL, "
         "updated_at=? WHERE id=? AND status='queued'", (time.time(), meeting_id))
     if not claimed:
         return
-    m = db.one("SELECT * FROM meeting WHERE id=?", (meeting_id,))
+    m = await db.aone("SELECT * FROM meeting WHERE id=?", (meeting_id,))
     idxs = db.jloads(m.get("emp_idxs_json"), [])
     members = [b for b in (emp_brief(i) for i in idxs) if b]
     names = "、".join(x["name"] for x in members)
-    company = registry.company_block(m.get("tenant_id") or 1)
+    company = await db.arun(
+        registry.company_block, m.get("tenant_id") or 1
+    )
     scope = (f"\n已知约束：{m.get('constraints') or '未单独说明'}"
              f"\n验收标准：{m.get('acceptance_criteria') or '由会议提出可核验标准'}")
     proposals, ranking, validations, actions = [], [], [], []
@@ -468,7 +470,11 @@ async def run(meeting_id: int, broadcast):
             proposals.append(proposal)
             _push(meeting_id, broadcast, member["name"], _proposal_markdown(proposal),
                   member["color"], member["emoji"], kind="proposal", phase="brainstorm", round_no=1)
-        db.update("meeting", meeting_id, {"proposals_json": json.dumps(proposals, ensure_ascii=False)})
+        await db.aupdate(
+            "meeting",
+            meeting_id,
+            {"proposals_json": json.dumps(proposals, ensure_ascii=False)},
+        )
         if not proposals:
             raise RuntimeError("没有形成任何有效提案")
 
@@ -512,9 +518,18 @@ async def run(meeting_id: int, broadcast):
             m["question"], m.get("constraints") or "", m.get("acceptance_criteria") or "",
             proposals, ranking, selected, [], "", "第一轮已经完成，候选范围不再扩大。",
             f"集中验证 P{selected['id']}" if selected else "补齐第二个可比较方案", [])
-        db.update("meeting", meeting_id, {"consensus_md": checkpoint,
-                                          "next_action": (f"集中验证 P{selected['id']}"
-                                                          if selected else "补齐第二个可比较方案")})
+        await db.aupdate(
+            "meeting",
+            meeting_id,
+            {
+                "consensus_md": checkpoint,
+                "next_action": (
+                    f"集中验证 P{selected['id']}"
+                    if selected
+                    else "补齐第二个可比较方案"
+                ),
+            },
+        )
         _emit(broadcast, {"type": "meeting_update", "meeting_id": meeting_id})
 
         # 少于两个方案也不回到闲聊：直接产生“补证据”任务并收口。
@@ -524,7 +539,9 @@ async def run(meeting_id: int, broadcast):
             actions = _fallback_action(members, selected, decision)
             next_action = actions[0]["task"]
         else:
-            db.update("meeting", meeting_id, {"phase": "validate", "round_no": 2})
+            await db.aupdate(
+                "meeting", meeting_id, {"phase": "validate", "round_no": 2}
+            )
             _emit(broadcast, {"type": "meeting_update", "meeting_id": meeting_id})
             _push(meeting_id, broadcast, "系统",
                   f"第 2 轮｜集中验证 P{selected['id']}：失败预演 + 市场证据 + 单位经济。",
@@ -579,7 +596,7 @@ async def run(meeting_id: int, broadcast):
                       member["color"], member["emoji"], kind="validation",
                       phase="validate", round_no=2)
             if not successful_validations:
-                db.update(
+                await db.aupdate(
                     "meeting", meeting_id,
                     {"validations_json": json.dumps(validations, ensure_ascii=False)},
                 )
@@ -588,9 +605,17 @@ async def run(meeting_id: int, broadcast):
                 m["question"], m.get("constraints") or "", m.get("acceptance_criteria") or "",
                 proposals, ranking, selected, validations, "", "三类反向验证已经完成。",
                 "主持人依据证据做最终决定", [])
-            db.update("meeting", meeting_id,
-                      {"validations_json": json.dumps(validations, ensure_ascii=False),
-                       "consensus_md": checkpoint, "next_action": "主持人依据证据做最终决定"})
+            await db.aupdate(
+                "meeting",
+                meeting_id,
+                {
+                    "validations_json": json.dumps(
+                        validations, ensure_ascii=False
+                    ),
+                    "consensus_md": checkpoint,
+                    "next_action": "主持人依据证据做最终决定",
+                },
+            )
             _emit(broadcast, {"type": "meeting_update", "meeting_id": meeting_id})
 
             roster = "\n".join(f"{member['idx']}={member['name']}" for member in members)
@@ -643,12 +668,21 @@ GO 要派 1-3 个能产出实物的执行任务；NEED_INFO 要派 1-2 个最小
             m["question"], m.get("constraints") or "", m.get("acceptance_criteria") or "",
             proposals, ranking, selected, validations, decision, summary, next_action, actions)
         phase = "execute" if decision in {"GO", "NEED_INFO"} and actions else "stopped"
-        db.update("meeting", meeting_id, {
-            "phase": phase, "round_no": 3, "decision": decision,
-            "actions_json": json.dumps(actions, ensure_ascii=False),
-            "consensus_md": consensus, "next_action": next_action,
-            "summary_md": _digest(decision, selected, summary, next_action),
-        })
+        await db.aupdate(
+            "meeting",
+            meeting_id,
+            {
+                "phase": phase,
+                "round_no": 3,
+                "decision": decision,
+                "actions_json": json.dumps(actions, ensure_ascii=False),
+                "consensus_md": consensus,
+                "next_action": next_action,
+                "summary_md": _digest(
+                    decision, selected, summary, next_action
+                ),
+            },
+        )
         _emit(broadcast, {"type": "meeting_update", "meeting_id": meeting_id})
         action_lines = "\n".join(f"- **{a['who']}**：{a['task']}" for a in actions)
         _push(meeting_id, broadcast, "会议主持人",
@@ -662,29 +696,43 @@ GO 要派 1-3 个能产出实物的执行任务；NEED_INFO 要派 1-2 个最小
             await execute_actions(meeting_id, broadcast)
         else:
             final_phase = "awaiting_execution" if phase == "execute" else "stopped"
-            with db.atomic():
-                current = db.one(
+            def _finalize_meeting():
+                with db.atomic():
+                    current = db.one(
                     "SELECT billing_status FROM meeting WHERE id=?", (meeting_id,)
-                ) or {}
-                billing_status = (
-                    "succeeded"
-                    if current.get("billing_status") == "charged"
-                    else current.get("billing_status") or "included"
-                )
-                db.update("meeting", meeting_id, {
-                    "status": "done",
-                    "phase": final_phase,
-                    "billing_status": billing_status,
-                })
+                    ) or {}
+                    billing_status = (
+                        "succeeded"
+                        if current.get("billing_status") == "charged"
+                        else current.get("billing_status") or "included"
+                    )
+                    db.update("meeting", meeting_id, {
+                        "status": "done",
+                        "phase": final_phase,
+                        "billing_status": billing_status,
+                    })
+
+            await db.arun(_finalize_meeting)
         # 会议纪要入资产库是非关键副作用，失败不能把已交付会议回滚成失败或误退款。
         try:
-            db.insert("asset", {"type": "report", "tenant_id": m.get("tenant_id") or 1,
-                                "payload_json": json.dumps({
-                                    "title": f"结果型会议：{m['question'][:24]}",
-                                    "emp": "会议主持人", "dept": "AI 会议室",
-                                    "group": names[:40], "meeting_id": meeting_id,
-                                    "brief": f"{decision} · {next_action[:80]}"},
-                                    ensure_ascii=False)})
+            await db.ainsert(
+                "asset",
+                {
+                    "type": "report",
+                    "tenant_id": m.get("tenant_id") or 1,
+                    "payload_json": json.dumps(
+                        {
+                            "title": f"结果型会议：{m['question'][:24]}",
+                            "emp": "会议主持人",
+                            "dept": "AI 会议室",
+                            "group": names[:40],
+                            "meeting_id": meeting_id,
+                            "brief": f"{decision} · {next_action[:80]}",
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            )
         except Exception as exc:
             log.error(
                 "meeting %s asset indexing failed error_type=%s",
@@ -710,7 +758,7 @@ GO 要派 1-3 个能产出实物的执行任务；NEED_INFO 要派 1-2 个最小
                 meeting_id,
                 type(persist_exc).__name__,
             )
-        settle_failure(meeting_id, public_error)
+        await db.arun(settle_failure, meeting_id, public_error)
     finally:
         # 逐句发言是异步落库的;协程结束前冲刷,保证「run() 返回即逐字稿已持久」。
         await db.adrain()
@@ -736,15 +784,13 @@ def _task_matches_action(task_row: dict, action: dict) -> bool:
     )
 
 
-async def execute_actions(meeting_id: int, broadcast) -> list[int]:
-    """把会议行动变成真实 task 并启动；唯一索引保证重复调用/重启不会重复派活。"""
-    from . import taskrunner
-
+def _prepare_execution_actions(meeting_id: int) -> tuple[list[int], list[int]]:
+    """事务内完成会议派活，供异步入口整体卸载到 DB 线程。"""
     started, task_ids = [], []
     with db.atomic():
         m = db.one("SELECT * FROM meeting WHERE id=?", (meeting_id,))
         if not m or _decision(m.get("decision")) not in {"GO", "NEED_INFO"}:
-            return []
+            return started, task_ids
         meeting_tenant_id = int(m.get("tenant_id") or 1)
         members = [
             b for b in (
@@ -763,7 +809,7 @@ async def execute_actions(meeting_id: int, broadcast) -> list[int]:
                 "phase": "stopped",
                 "billing_status": billing_status,
             })
-            return []
+            return started, task_ids
         raw_already = [
             int(value)
             for value in db.jloads(m.get("execution_task_ids_json"), [])
@@ -796,7 +842,7 @@ async def execute_actions(meeting_id: int, broadcast) -> list[int]:
         if m.get("phase") == "completed" and len(already) == len(actions):
             if m.get("billing_status") == "charged":
                 db.update("meeting", meeting_id, {"billing_status": "succeeded"})
-            return already
+            return started, already
         db.update("meeting", meeting_id, {"status": "running", "phase": "executing"})
         allowed_actions = {action["key"]: action for action in actions}
         existing = {
@@ -876,6 +922,16 @@ async def execute_actions(meeting_id: int, broadcast) -> list[int]:
             "billing_status": billing_status,
             "next_action": "跟踪已启动任务的交付与验收，不再继续讨论",
         })
+    return started, task_ids
+
+
+async def execute_actions(meeting_id: int, broadcast) -> list[int]:
+    """把会议行动变成真实 task 并启动；唯一索引保证重复调用/重启不会重复派活。"""
+    from . import taskrunner
+
+    started, task_ids = await db.arun(
+        _prepare_execution_actions, meeting_id
+    )
     if task_ids:
         try:
             _push(meeting_id, broadcast, "系统",
@@ -1160,11 +1216,15 @@ def recover_interventions() -> int:
 
 async def ask(meeting_id: int, question: str, broadcast, billing_op: str = None):
     """老板介入不是新一轮闲聊：员工补证据，主持人立即重做决策并更新共识。"""
-    m = db.one("SELECT * FROM meeting WHERE id=?", (meeting_id,))
+    m = await db.aone("SELECT * FROM meeting WHERE id=?", (meeting_id,))
     if not m or m.get("status") != "running":
         if billing_op:
             from . import billing
-            billing.fail_operation(billing_op, "会议状态变化，追问未执行")
+            await db.arun(
+                billing.fail_operation,
+                billing_op,
+                "会议状态变化，追问未执行",
+            )
         return
     members = [b for b in (emp_brief(i) for i in db.jloads(m.get("emp_idxs_json"), [])) if b]
     persisted = bool(
@@ -1180,7 +1240,7 @@ async def ask(meeting_id: int, question: str, broadcast, billing_op: str = None)
     state_update = {"phase": "validate", "round_no": 2}
     if not persisted:
         state_update["intervention_count"] = count
-    db.update("meeting", meeting_id, state_update)
+    await db.aupdate("meeting", meeting_id, state_update)
     _push(meeting_id, broadcast, "老板", question, "#c99a1e", "👔", kind="intervention",
           phase="validate", round_no=2)
     execute_after = False
@@ -1272,13 +1332,14 @@ async def ask(meeting_id: int, question: str, broadcast, billing_op: str = None)
             "status": "running" if execute_after else "done",
         }
         if persisted:
-            if not finish_intervention(meeting_id, billing_op, final_fields):
+            if not await db.arun(
+                    finish_intervention, meeting_id, billing_op, final_fields):
                 raise RuntimeError("会议追问终态结算冲突")
         else:
-            db.update("meeting", meeting_id, final_fields)
+            await db.aupdate("meeting", meeting_id, final_fields)
             if billing_op:
                 from . import billing
-                billing.complete_operation(billing_op)
+                await db.arun(billing.complete_operation, billing_op)
         _push(meeting_id, broadcast, "会议主持人",
               f"**介入后决策：{decision}**\n\n{summary}\n\n**Next Action：** {next_action}",
               "#2b2317", "🎙️", kind="decision", phase=phase, round_no=3)
@@ -1289,18 +1350,39 @@ async def ask(meeting_id: int, question: str, broadcast, billing_op: str = None)
             type(exc).__name__,
         )
         if persisted:
-            abort_intervention(meeting_id, billing_op, "会议重新验证失败")
+            await db.arun(
+                abort_intervention,
+                meeting_id,
+                billing_op,
+                "会议重新验证失败",
+            )
         else:
-            db.update("meeting", meeting_id, {"status": "done", "phase": previous_phase,
-                                              "intervention_count": max(0, count - 1)})
+            await db.aupdate(
+                "meeting",
+                meeting_id,
+                {
+                    "status": "done",
+                    "phase": previous_phase,
+                    "intervention_count": max(0, count - 1),
+                },
+            )
             try:
                 from . import billing
                 if billing_op:
-                    billing.fail_operation(billing_op, "会议重新验证失败")
+                    await db.arun(
+                        billing.fail_operation,
+                        billing_op,
+                        "会议重新验证失败",
+                    )
                 else:
                     # 兼容升级前已经排队、没有 operation 记录的旧追问。
-                    billing.refund("expert_task", m.get("tenant_id") or 1,
-                                   note="会议重新验证失败", n=max(1, len(members)))
+                    await db.arun(
+                        billing.refund,
+                        "expert_task",
+                        m.get("tenant_id") or 1,
+                        note="会议重新验证失败",
+                        n=max(1, len(members)),
+                    )
             except Exception as refund_exc:
                 log.warning(
                     "meeting intervention refund failed meeting=%s error_type=%s",
@@ -1322,7 +1404,7 @@ async def ask(meeting_id: int, question: str, broadcast, billing_op: str = None)
                 meeting_id,
                 type(exc).__name__,
             )
-            db.execute(
+            await db.aexecute(
                 "UPDATE meeting SET status='done',phase='awaiting_execution',updated_at=? "
                 "WHERE id=? AND status='running' AND phase IN ('execute','executing')",
                 (time.time(), meeting_id),

@@ -7,12 +7,14 @@ SSE、全部请求)一起冻住。修复方式是 db 异步门面(专用有界�
 
 - 门面语义:aq/aone/aexecute/arun 与同步版结果一致,事务整体进池;
 - 核心断言:另一线程持有写锁时,事件循环仍能按时跳动;
-- 引擎协程的源码不再包含直连写调用。
+- submit_write 严格 FIFO，旧进度不能覆盖新进度，同时不占用并发读池;
+- 全 app 协程的源码不再包含直连同步 DB 调用。
 """
 import asyncio
+import ast
+import contextvars
 import json
 import os
-import re
 import sqlite3
 import tempfile
 import threading
@@ -88,16 +90,39 @@ class AsyncFacadeSemanticsTests(_DbCase):
 
         asyncio.run(scenario())
 
-    def test_adrain_flushes_all_prior_submit_writes(self):
-        """收尾冲刷:adrain 返回后,此前提交的异步写必须全部落地。"""
+    def test_arun_preserves_request_context(self):
+        """租户/用户 ContextVar 必须随 DB 卸载传播，不能在线程池里退回默认租户。"""
+        marker = contextvars.ContextVar("marker", default="missing")
+
+        async def scenario():
+            token = marker.set("tenant-42")
+            try:
+                self.assertEqual(
+                    "tenant-42",
+                    await db.arun(marker.get),
+                )
+            finally:
+                marker.reset(token)
+
+        asyncio.run(scenario())
+
+    def test_adrain_flushes_all_prior_submit_writes_in_order(self):
+        """收尾冲刷后必须是最后快照，不能被较早的慢写反向覆盖。"""
         async def scenario():
             tid = await db.ainsert("tenants", {"name": "初始"})
+
+            def _snapshot(version):
+                # 第一帧刻意很慢。多 worker 会让后续帧先提交、最终又被第一帧覆盖；
+                # FIFO 单写队列必须仍以最后提交的第 7 版收口。
+                if version == 0:
+                    time.sleep(0.15)
+                db.update("tenants", tid, {"name": f"第{version}版"})
+
             for n in range(8):
-                db.submit_write(db.update, "tenants", tid, {"name": f"第{n}版"})
+                db.submit_write(_snapshot, n)
             await db.adrain()
             row = await db.aone("SELECT name FROM tenants WHERE id=?", (tid,))
-            self.assertTrue(str(row["name"]).startswith("第"),
-                            f"冲刷后仍是初始值: {row['name']}")
+            self.assertEqual("第7版", row["name"])
 
         asyncio.run(scenario())
 
@@ -139,6 +164,34 @@ class AsyncFacadeSemanticsTests(_DbCase):
             self.fail("submit_write 的写入始终未落库")
 
         asyncio.run(scenario())
+
+    def test_ordered_writes_do_not_consume_read_workers(self):
+        """单写队列被慢快照占住时，读仍从并发池立即返回。"""
+        entered = threading.Event()
+        release = threading.Event()
+
+        async def scenario():
+            tid = await db.ainsert("tenants", {"name": "可读"})
+
+            def _slow_snapshot():
+                entered.set()
+                release.wait(timeout=5)
+                db.update("tenants", tid, {"name": "写完"})
+
+            db.submit_write(_slow_snapshot)
+            self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+            row = await asyncio.wait_for(
+                db.aone("SELECT name FROM tenants WHERE id=?", (tid,)),
+                timeout=1,
+            )
+            self.assertEqual("可读", row["name"])
+            release.set()
+            await db.adrain()
+
+        try:
+            asyncio.run(scenario())
+        finally:
+            release.set()
 
 
 class EventLoopFreezeTests(_DbCase):
@@ -194,45 +247,132 @@ class EventLoopFreezeTests(_DbCase):
         """池子必须有界:SQLite 只有一个写者,无界线程只会排队占资源。"""
         pool = db._pool()
         self.assertLessEqual(pool._max_workers, 8)
+        self.assertEqual(1, db._ordered_write_pool()._max_workers)
 
 
-class EngineCoroutineSourceTests(unittest.TestCase):
-    """引擎协程内不得再出现直连写调用(读在 WAL 下不等写锁,允许保留)。"""
+class AppCoroutineSourceTests(unittest.TestCase):
+    """整个 app 的协程都必须遵守同步 SQLite 边界。"""
+
+    SYNC_DB_CALLS = {
+        "q", "one", "execute", "update", "insert",
+        "get_setting", "set_setting", "atomic", "conn",
+    }
 
     @classmethod
     def setUpClass(cls):
-        path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "app", "engine.py",
+        cls.app_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app"
         )
-        with open(path, encoding="utf-8") as handle:
-            cls.source = handle.read()
+        engine_path = os.path.join(cls.app_dir, "engine.py")
+        with open(engine_path, encoding="utf-8") as handle:
+            cls.engine_source = handle.read()
 
-    def _async_bodies(self):
-        """粗粒度切出每个 async def 的函数体(到下一个同级 def 为止)。"""
-        pattern = re.compile(
-            r"^    async def (\w+).*?(?=^    (?:async )?def |\Z)",
-            re.M | re.S,
-        )
-        return {m.group(1): m.group(0) for m in pattern.finditer(self.source)}
+    @classmethod
+    def _db_calls(cls, node):
+        calls = []
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Call):
+                continue
+            func = child.func
+            if (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "db"
+                and func.attr in cls.SYNC_DB_CALLS
+            ):
+                calls.append((child.lineno, func.attr))
+        return calls
 
-    def test_async_methods_have_no_direct_write_calls(self):
+    def test_all_app_coroutines_have_no_inline_sync_db_calls(self):
         offenders = []
-        for name, body in self._async_bodies().items():
-            # 嵌套的同步事务闭包(def _xx_tx)里的写是合法的——它们经 arun 进池。
-            stripped = re.sub(
-                r"^\s+def _\w+\(.*?(?=^\s{8}\w|\Z)", "", body, flags=re.M | re.S)
-            for bad in ("db.execute(", "db.update(", "db.insert(",
-                        "with db.atomic()"):
-                if bad in stripped:
-                    offenders.append(f"{name}: {bad}")
+        for filename in sorted(os.listdir(self.app_dir)):
+            if not filename.endswith(".py"):
+                continue
+            path = os.path.join(self.app_dir, filename)
+            with open(path, encoding="utf-8") as handle:
+                tree = ast.parse(handle.read(), filename=path)
+            for coroutine in (
+                node for node in ast.walk(tree)
+                if isinstance(node, ast.AsyncFunctionDef)
+            ):
+                calls = []
+
+                class DirectVisitor(ast.NodeVisitor):
+                    def visit_AsyncFunctionDef(self, node):
+                        if node is coroutine:
+                            self.generic_visit(node)
+
+                    def visit_FunctionDef(self, node):
+                        return
+
+                    def visit_Lambda(self, node):
+                        return
+
+                    def visit_Call(self, node):
+                        func = node.func
+                        if (
+                            isinstance(func, ast.Attribute)
+                            and isinstance(func.value, ast.Name)
+                            and func.value.id == "db"
+                            and func.attr in self_outer.SYNC_DB_CALLS
+                        ):
+                            calls.append((node.lineno, func.attr))
+                        self.generic_visit(node)
+
+                self_outer = self
+                DirectVisitor().visit(coroutine)
+                offenders.extend(
+                    f"{filename}:{line} {coroutine.name}:db.{name}"
+                    for line, name in calls
+                )
         self.assertEqual(
             [], offenders,
-            "引擎协程存在未经门面的直连写调用(会在写锁竞争时冻结事件循环)",
+            "app 协程存在未经门面的同步 DB 调用(会在锁竞争/磁盘 I/O 时冻结事件循环)",
+        )
+
+    def test_nested_db_transactions_are_only_dispatched_through_facade(self):
+        """协程内同步事务闭包只能作为 arun/submit_write 的工作项，不能直接调用。"""
+        offenders = []
+        for filename in sorted(os.listdir(self.app_dir)):
+            if not filename.endswith(".py"):
+                continue
+            path = os.path.join(self.app_dir, filename)
+            with open(path, encoding="utf-8") as handle:
+                tree = ast.parse(handle.read(), filename=path)
+            for coroutine in (
+                node for node in ast.walk(tree)
+                if isinstance(node, ast.AsyncFunctionDef)
+            ):
+                safe_names = set()
+                for call in ast.walk(coroutine):
+                    if not isinstance(call, ast.Call) or not call.args:
+                        continue
+                    func = call.func
+                    if (
+                        isinstance(func, ast.Attribute)
+                        and isinstance(func.value, ast.Name)
+                        and func.value.id == "db"
+                        and func.attr in {"arun", "submit_write"}
+                        and isinstance(call.args[0], ast.Name)
+                    ):
+                        safe_names.add(call.args[0].id)
+                for nested in (
+                    node for node in ast.walk(coroutine)
+                    if isinstance(node, ast.FunctionDef)
+                ):
+                    calls = self._db_calls(nested)
+                    if calls and nested.name not in safe_names:
+                        offenders.append(
+                            f"{filename}:{nested.lineno} "
+                            f"{coroutine.name}.{nested.name}"
+                        )
+        self.assertEqual(
+            [], offenders,
+            "协程中的同步 DB 闭包没有交给 arun/submit_write",
         )
 
     def test_progress_recorder_does_not_write_inline(self):
-        recorder = self.source.split("def _recorder", 1)[1].split(
+        recorder = self.engine_source.split("def _recorder", 1)[1].split(
             "async def start", 1)[0]
         self.assertNotIn(
             "db.update(", recorder.replace("db.submit_write(db.update,", ""),

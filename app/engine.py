@@ -255,7 +255,9 @@ class Engine:
                         type(e).__name__,
                     )
             # 工单进入终态后回收它的锁,别让 self.locks 随历史工单无限增长(内存泄漏)
-            j = db.one("SELECT status FROM job WHERE id=?", (job_id,))
+            j = await db.aone(
+                "SELECT status FROM job WHERE id=?", (job_id,)
+            )
             if (not j or j["status"] in ("done", "cancelled", "failed")) and not lock.locked():
                 self.locks.pop(job_id, None)
 
@@ -513,21 +515,23 @@ class Engine:
     async def _advance_once(self, job_id: int) -> bool:
         """从工位0重扫描一遍,处理第一个可推进的工位。
         返回 True 表示本轮无需继续(等待用户/失败/全部完成)。"""
-        job = db.one("SELECT * FROM job WHERE id=?", (job_id,))
+        job = await db.aone("SELECT * FROM job WHERE id=?", (job_id,))
         if not job or job["status"] in ("done", "cancelled", "failed", "paused"):
             return True
         brief = db.jloads(job["brief_json"])
         profile = None
         if job["profile_id"]:
-            p = db.one("SELECT * FROM account_profile WHERE id=? AND tenant_id=?",
-                       (job["profile_id"], job.get("tenant_id") or 1))
+            p = await db.aone(
+                "SELECT * FROM account_profile WHERE id=? AND tenant_id=?",
+                (job["profile_id"], job.get("tenant_id") or 1),
+            )
             if p:
                 profile = {"name": p["name"], "persona": db.jloads(p["persona_json"])}
 
         idx = 0
         while idx <= LAST_IDX:
             cfg = registry.BY_IDX[idx]
-            run = self._latest_run(job_id, idx)
+            run = await db.arun(self._latest_run, job_id, idx)
 
             if run and run["status"] in ("done", "skipped"):
                 idx += 1
@@ -901,7 +905,7 @@ class Engine:
         ctx = {
             "job_id": job_id, "tenant_id": tenant_id,
             "brief": brief, "profile": profile,
-            "outputs": self.collect_outputs(job_id),
+            "outputs": await db.arun(self.collect_outputs, job_id),
             "model": providers.text_model_for(idx),
             "version": version, "today": time.strftime("%Y-%m-%d"),
             "revision_note": revision_note, "prev_output": prev_output,
@@ -914,7 +918,7 @@ class Engine:
         else:
             progress("start", f"v{version} 开始执行(岗位:{cfg['name']} / Skill:{cfg['skill']})")
         for attempt in range(MAX_RETRY + 1):
-            before = db.one(
+            before = await db.aone(
                 "SELECT status,billing_status FROM job WHERE id=?", (job_id,))
             if not self._job_row_executable(before):
                 await db.aexecute(
@@ -930,7 +934,7 @@ class Engine:
                 r = await cfg["run"](ctx)
 
                 # provider 可能不响应 kill；返回后先重新确认业务终态，再读取/落库结果。
-                after_provider = db.one(
+                after_provider = await db.aone(
                     "SELECT status,billing_status FROM job WHERE id=?", (job_id,))
                 if not self._job_row_executable(after_provider):
                     await db.aexecute(
@@ -1007,7 +1011,7 @@ class Engine:
                     return result_state
                 return True
             except (llm.LLMError, KeyError, TypeError, ValueError) as e:
-                jnow = db.one(
+                jnow = await db.aone(
                     "SELECT status,billing_status FROM job WHERE id=?", (job_id,))
                 if not jnow or jnow["status"] in (
                         "cancelled", "done", "failed") or (

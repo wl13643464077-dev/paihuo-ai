@@ -34,20 +34,26 @@ async def _run_billed(
     副作用放在 after_success，失败只记日志，不能把已经交付的结果再退款。
     """
     from . import billing
-    op_key = billing.start_operation(action, tid=tid, note=note)
+    op_key = await db.arun(
+        billing.start_operation, action, tid=tid, note=note
+    )
     try:
         result = await runner()
         if commit is None:
-            completed = billing.complete_operation(op_key)
+            completed = await db.arun(billing.complete_operation, op_key)
         else:
-            completed = billing.complete_operation_if_claimed(
-                op_key, lambda connection: bool(commit(connection, result))
+            completed = await db.arun(
+                billing.complete_operation_if_claimed,
+                op_key,
+                lambda connection: bool(commit(connection, result)),
             )
         if not completed:
             raise RuntimeError("周期任务结算状态冲突")
     except BaseException as exc:
         try:
-            billing.fail_operation(op_key, "周期任务失败自动退回")
+            await db.arun(
+                billing.fail_operation, op_key, "周期任务失败自动退回"
+            )
         except Exception as settlement_exc:
             log.error(
                 "periodic billing settlement failed op=%s error_type=%s",
@@ -57,7 +63,7 @@ async def _run_billed(
         raise
     if after_success is not None:
         try:
-            after_success(result)
+            await asyncio.to_thread(after_success, result)
         except Exception as exc:
             log.error(
                 "periodic post-commit notification failed action=%s tid=%s "
@@ -542,9 +548,10 @@ async def _periodic():
     now = datetime.now(TZ)
     if 7 <= now.hour <= 9:                                # 每日必发:一天一次
         today = now.strftime("%Y-%m-%d")
-        for r in db.q("SELECT key FROM app_setting WHERE key LIKE 'hot_daily:%'"):
+        for r in await db.aq(
+                "SELECT key FROM app_setting WHERE key LIKE 'hot_daily:%'"):
             tid = int(r["key"].split(":")[1])
-            conf = growth.hot_daily_conf(tid)
+            conf = await db.arun(growth.hot_daily_conf, tid)
             if not conf.get("enabled") or conf.get("last_ymd") == today:
                 continue
             try:
@@ -553,7 +560,10 @@ async def _periodic():
             except billing.InsufficientPoints:
                 conf["enabled"] = False
                 conf["note"] = "点数不足已暂停"
-                db.set_setting(f"hot_daily:{tid}", __import__("json").dumps(conf, ensure_ascii=False))
+                await db.aset_setting(
+                    f"hot_daily:{tid}",
+                    __import__("json").dumps(conf, ensure_ascii=False),
+                )
             except Exception as exc:
                 log.error(
                     "hot daily tid=%s failed error_type=%s",
@@ -562,16 +572,17 @@ async def _periodic():
                 )
     if 8 <= now.hour <= 10:                              # 昨日经营简报:一天一次
         try:
-            _run_daily_digest(now)
+            await asyncio.to_thread(_run_daily_digest, now)
         except Exception as exc:
             log.error(
                 "daily digest tick failed error_type=%s",
                 type(exc).__name__,
             )
     if now.weekday() == 0 and 9 <= now.hour <= 11:      # 周一上午出周报
-        for r in db.q("SELECT key FROM app_setting WHERE key LIKE 'bench_watch:%'"):
+        for r in await db.aq(
+                "SELECT key FROM app_setting WHERE key LIKE 'bench_watch:%'"):
             tid = int(r["key"].split(":")[1])
-            conf = growth.watch_conf(tid)
+            conf = await db.arun(growth.watch_conf, tid)
             if not (conf.get("enabled") and conf.get("targets")):
                 continue
             if conf.get("last_run") and time.time() - conf["last_run"] < 3 * 86400:
@@ -581,7 +592,10 @@ async def _periodic():
                 log.info("bench weekly report done tid=%s", tid)
             except billing.InsufficientPoints:
                 conf["enabled"] = False
-                db.set_setting(f"bench_watch:{tid}", __import__("json").dumps(conf, ensure_ascii=False))
+                await db.aset_setting(
+                    f"bench_watch:{tid}",
+                    __import__("json").dumps(conf, ensure_ascii=False),
+                )
             except Exception as exc:
                 log.error(
                     "bench weekly tid=%s failed error_type=%s",
@@ -595,7 +609,7 @@ async def loop(engine):
     last_periodic = 0.0
     while True:
         try:
-            _tick(engine)
+            await asyncio.to_thread(_tick, engine)
         except Exception as exc:
             log.error(
                 "scheduler tick failed error_type=%s",

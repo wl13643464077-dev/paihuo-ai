@@ -348,7 +348,7 @@ async def run_task(pid: int, broadcast=None):
     async with _sem():
         # 必须在 semaphore 内 CAS。否则两个 worker 都可能在排队前读到 queued，
         # 随后依次进入浏览器并真实发布两次。
-        started = db.execute(
+        started = await db.aexecute(
             "UPDATE pub_task SET status='running',updated_at=? "
             "WHERE id=? AND status='queued' "
             "AND submission_state='not_submitted'",
@@ -356,7 +356,7 @@ async def run_task(pid: int, broadcast=None):
         )
         if started != 1:
             return
-        row = db.one("SELECT * FROM pub_task WHERE id=?", (pid,))
+        row = await db.aone("SELECT * FROM pub_task WHERE id=?", (pid,))
         if not row:
             return
         await _run_task_inner(pid, row, broadcast)
@@ -366,7 +366,7 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
     tid = row["tenant_id"]
     payload = db.jloads(row["payload_json"], {})
     p = PLATFORMS[row["platform"]]
-    accs = accounts(tid)
+    accs = await db.arun(accounts, tid)
     acc = next((a for a in accs if a["id"] == row["account"]), None)
     shot_url = ""
     try:
@@ -376,7 +376,7 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
         alive, _ = await _probe_login(acc)
         if alive is False:
             acc["status"] = "expired"
-            _save(tid, accs)
+            await db.arun(_save, tid, accs)
             raise ValueError("登录态失效:重新绑定 Cookie")
         from playwright.async_api import async_playwright
         domain = ".xiaohongshu.com" if row["platform"] == "xhs" else ".douyin.com"
@@ -391,7 +391,7 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
                 note = await (_publish_xhs(pg, pid, payload) if row["platform"] == "xhs"
                               else _publish_douyin(pg, pid, payload))
                 _log(pid, f"✅ {note}")
-                db.update(
+                await db.aupdate(
                     "pub_task",
                     pid,
                     {
@@ -414,7 +414,7 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
     except Exception as e:
         kind = _classify(e)
         why, fix = FAIL_GUIDE[kind]
-        current = db.one(
+        current = await db.aone(
             "SELECT submission_state FROM pub_task WHERE id=?", (pid,)) or {}
         if current.get("submission_state") != "not_submitted":
             fix = (
@@ -425,15 +425,37 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
                 "err": "自动发布没有成功，内容未发出；可重试，或用「一键复制」手动发布",
                 "shot": shot_url, "home": p["home"]}
         _log(pid, f"❌ {why} → {fix}")
-        db.update("pub_task", pid, {"status": "failed",
-                                    "fail_json": json.dumps(fail, ensure_ascii=False)})
-        notify.push(tid, "pub", {"ok": False, "platform": p["name"],
-                                 "title": payload.get("title") or "", "why": why, "fix": fix})
+        await db.aupdate(
+            "pub_task",
+            pid,
+            {
+                "status": "failed",
+                "fail_json": json.dumps(fail, ensure_ascii=False),
+            },
+        )
+        await asyncio.to_thread(
+            notify.push,
+            tid,
+            "pub",
+            {
+                "ok": False,
+                "platform": p["name"],
+                "title": payload.get("title") or "",
+                "why": why,
+                "fix": fix,
+            },
+        )
     else:
         # 发成功自动登记发布台账:T+1/3/7 审查官自动来复盘,不用老板记着
         try:
-            pubtrack.add_entry(tid, p["name"], payload.get("title") or "",
-                               job_id=payload.get("job_id"), source="matrix")
+            await db.arun(
+                pubtrack.add_entry,
+                tid,
+                p["name"],
+                payload.get("title") or "",
+                job_id=payload.get("job_id"),
+                source="matrix",
+            )
             _log(pid, "已自动登记发布台账,T+1/3/7 审查官自动复盘")
         except Exception as exc:
             log.debug(
@@ -441,8 +463,16 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
                 pid,
                 type(exc).__name__,
             )
-        notify.push(tid, "pub", {"ok": True, "platform": p["name"],
-                                 "title": payload.get("title") or ""})
+        await asyncio.to_thread(
+            notify.push,
+            tid,
+            "pub",
+            {
+                "ok": True,
+                "platform": p["name"],
+                "title": payload.get("title") or "",
+            },
+        )
     finally:
         # 发布日志是异步落库的;结束前冲刷,保证任务终态可见时日志已完整。
         await db.adrain()

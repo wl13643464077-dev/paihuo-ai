@@ -48,7 +48,7 @@ async def _create(cli, key, wf, img, aud):
              {"nodeId": "474", "fieldName": "audio", "fieldValue": aud},
              {"nodeId": "484", "fieldName": "audio", "fieldValue": aud}]
     body = {"apiKey": key, "workflowId": wf, "nodeInfoList": nodes,
-            "instanceType": db.get_setting("runninghub_instance") or "plus"}
+            "instanceType": await db.aget_setting("runninghub_instance") or "plus"}
     r = await cli.post(f"{BASE}/task/openapi/create", json=body)
     return r.json()
 

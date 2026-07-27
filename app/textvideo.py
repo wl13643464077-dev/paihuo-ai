@@ -1265,8 +1265,14 @@ def _steps_append(tvid: int, msg: str):
         # BEGIN IMMEDIATE 保证两次追加都不丢。
         with db.atomic() as c:
             r = c.execute(
-                "SELECT steps_json FROM tv_job WHERE id=?", (tvid,)).fetchone()
-            if not r:
+                "SELECT steps_json,status,billing_status FROM tv_job WHERE id=?",
+                (tvid,),
+            ).fetchone()
+            if (
+                not r
+                or r["status"] != "running"
+                or r["billing_status"] != "charged"
+            ):
                 return
             steps = db.jloads(r["steps_json"], [])
             steps.append({"t": ts, "msg": msg})
@@ -1490,10 +1496,16 @@ class _Cancelled(Exception):
     pass
 
 
+def _write_hunt_image(path: str, data: bytes) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.write(data)
+
+
 async def run_job(tvid: int, broadcast=None):
     _active_enter(tvid)
     try:
-        row = db.one("SELECT * FROM tv_job WHERE id=?", (tvid,))
+        row = await db.aone("SELECT * FROM tv_job WHERE id=?", (tvid,))
         if not row or row.get("status") != "queued" \
                 or row.get("billing_status") != "charged":
             return
@@ -1502,14 +1514,14 @@ async def run_job(tvid: int, broadcast=None):
         async with _BUILD_SEM:
             # 只有 queued→running 的 CAS 胜者能执行。重复调度、重启恢复和
             # 两个 worker 同时撞上时，其余调用会在产生供应商成本前退出。
-            started = db.execute(
+            started = await db.aexecute(
                 "UPDATE tv_job SET status='running',updated_at=? "
                 "WHERE id=? AND status='queued' AND billing_status='charged'",
                 (time.time(), tvid),
             )
             if started != 1:
                 return
-            row = db.one("SELECT * FROM tv_job WHERE id=?", (tvid,))
+            row = await db.aone("SELECT * FROM tv_job WHERE id=?", (tvid,))
             if not row:
                 return
             await _run_job_inner(
@@ -1521,16 +1533,13 @@ async def run_job(tvid: int, broadcast=None):
             )
     finally:
         _active_leave(tvid)
-        _finalize_requested_delete(tvid)
+        await asyncio.to_thread(_finalize_requested_delete, tvid)
 
 
 async def _run_job_inner(tvid: int, row: dict, p: dict, tid: int, broadcast):
     def progress(msg):
-        state = db.one(
-            "SELECT status,billing_status FROM tv_job WHERE id=?", (tvid,))
-        if not state or state.get("status") != "running" \
-                or state.get("billing_status") != "charged":
-            raise _Cancelled()
+        # _steps_append 自己在 FIFO 写队列的事务里核对运行态；进度回调不能
+        # 在事件循环上做同步 SELECT。
         _steps_append(tvid, msg)
         _safe_broadcast(
             broadcast,
@@ -1584,9 +1593,7 @@ async def _run_job_inner(tvid: int, row: dict, p: dict, tid: int, broadcast):
                     got = await imagehunt._grab_first_ok(cands, 4)
                     for i, (data, _c) in enumerate(got):
                         lp = os.path.join(ASSET_DIR, "tv", f"hunt_{tvid}_{i}.jpg")
-                        os.makedirs(os.path.dirname(lp), exist_ok=True)
-                        with open(lp, "wb") as f:
-                            f.write(data)
+                        await asyncio.to_thread(_write_hunt_image, lp, data)
                         images.append(lp)
                     progress(f"抓到 {len(images)} 张真实图")
                 except Exception:
@@ -1605,22 +1612,29 @@ async def _run_job_inner(tvid: int, row: dict, p: dict, tid: int, broadcast):
                 end_text=p.get("end_text") or "",
             )
 
-        delivered = db.execute(
+        delivered = await db.aexecute(
             "UPDATE tv_job SET status='done',billing_status='succeeded',"
             "video_file=?,script=?,error=NULL,updated_at=? "
             "WHERE id=? AND status='running' AND billing_status='charged'",
             (produced_file, script, time.time(), tvid),
         )
         if delivered != 1:
-            cleanup_job_assets(tvid, row, produced_file)
+            await asyncio.to_thread(
+                cleanup_job_assets, tvid, row, produced_file
+            )
             raise _Cancelled()
-        _cleanup_hunt_assets(tvid)
+        await asyncio.to_thread(_cleanup_hunt_assets, tvid)
 
         # 通知、WebSocket 推送是旁路。数据库中的交付与计费终态已经在上面的
         # 单条条件 UPDATE 中同时提交，旁路故障只能记日志，不能触发退款。
         from . import notify
         try:
-            notify.push(tid, "video", {"title": title, "file": produced_file})
+            await asyncio.to_thread(
+                notify.push,
+                tid,
+                "video",
+                {"title": title, "file": produced_file},
+            )
         except Exception as exc:
             log.error(
                 "tv_job %s notification failed error_type=%s",
@@ -1628,7 +1642,9 @@ async def _run_job_inner(tvid: int, row: dict, p: dict, tid: int, broadcast):
                 type(exc).__name__,
             )
     except _Cancelled:
-        cleanup_job_assets(tvid, row, produced_file)
+        await asyncio.to_thread(
+            cleanup_job_assets, tvid, row, produced_file
+        )
         log.info("tv_job %s cancelled before delivery commit", tvid)
     except Exception as e:
         log.error(
@@ -1636,13 +1652,20 @@ async def _run_job_inner(tvid: int, row: dict, p: dict, tid: int, broadcast):
             tvid,
             type(e).__name__,
         )
-        cleanup_job_assets(tvid, row, produced_file)
+        await asyncio.to_thread(
+            cleanup_job_assets, tvid, row, produced_file
+        )
         public_error = providers.public_failure_message(
             e,
             "成片生成失败，点数已自动退回；可从原任务免费重试",
         )
         try:
-            settle_failure(tvid, public_error, terminal_status="failed")
+            await db.arun(
+                settle_failure,
+                tvid,
+                public_error,
+                terminal_status="failed",
+            )
         except Exception as settlement_exc:
             log.error(
                 "tv_job %s failure settlement failed error_type=%s",

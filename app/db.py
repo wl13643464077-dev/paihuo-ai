@@ -1045,6 +1045,8 @@ def jloads(s, default=None):
 # 覆盖「读 + 写 + 看门狗 + 后台任务」的并发形态。
 _async_pool = None
 _async_pool_lock = threading.Lock()
+_write_pool = None
+_write_pool_lock = threading.Lock()
 
 
 def _pool():
@@ -1058,6 +1060,24 @@ def _pool():
     return _async_pool
 
 
+def _ordered_write_pool():
+    """Return the FIFO executor used exclusively by ``submit_write``.
+
+    SQLite can commit only one writer at a time.  Sending progress snapshots to
+    the four-worker read pool let a newer snapshot commit first and an older
+    snapshot overwrite it afterwards.  A dedicated single worker preserves
+    submission order while ``arun``/``aq`` keep using the concurrent pool.
+    """
+    global _write_pool
+    if _write_pool is None:
+        with _write_pool_lock:
+            if _write_pool is None:
+                from concurrent.futures import ThreadPoolExecutor
+                _write_pool = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="dbio-write")
+    return _write_pool
+
+
 async def arun(fn, *args, **kwargs):
     """在 db 线程池里执行任意同步函数(含整段 with atomic() 的事务体)。
 
@@ -1065,10 +1085,12 @@ async def arun(fn, *args, **kwargs):
     情况下 await),所以传入的是完整的同步函数而非单条语句。
     """
     import asyncio
+    import contextvars
     import functools
     loop = asyncio.get_running_loop()
     call = functools.partial(fn, *args, **kwargs) if (args or kwargs) else fn
-    return await loop.run_in_executor(_pool(), call)
+    context = contextvars.copy_context()
+    return await loop.run_in_executor(_pool(), context.run, call)
 
 
 _pending_writes: list = []
@@ -1076,10 +1098,12 @@ _pending_lock = threading.Lock()
 
 
 def submit_write(fn, *args, **kwargs):
-    """不等待结果地把一次写操作投给 db 线程池(节流型进度落库用)。
+    """不等待结果地把一次写操作投给 FIFO 单写队列(节流型进度落库用)。
 
     只适用于「丢了也无碍、下次会整体重写」的快照类写入;需要结果或需要
-    顺序保证的写仍然要走 arun。异常在池线程里记日志,不向上冒泡。
+    返回值的写仍然要走 arun。提交到本门面的快照严格按调用顺序执行，
+    因而同一实体的旧进度不可能在新进度之后反向覆盖。异常在单写线程里
+    记日志,不向上冒泡。
     需要「先前的异步写都已落地」时,用 adrain() 冲刷。
     """
     import functools
@@ -1105,7 +1129,7 @@ def submit_write(fn, *args, **kwargs):
             logging.getLogger("db").warning(
                 "submit_write failed error_type=%s", type(exc).__name__)
 
-    future = _pool().submit(_guarded)
+    future = _ordered_write_pool().submit(_guarded)
     with _pending_lock:
         _pending_writes.append(future)
         if len(_pending_writes) > 64:      # 顺手清掉已完成的,防列表无限增长
@@ -1151,12 +1175,18 @@ async def aset_setting(key, value):
 
 
 def _shutdown_async_pool(wait: bool = True):
-    """停掉异步写池。默认等在途任务收尾——不等就关连接会段错误。"""
-    global _async_pool
-    pool = None
+    """停掉异步 DB 池。默认等在途任务收尾——不等就关连接会段错误。"""
+    global _async_pool, _write_pool
+    pool = write_pool = None
+    with _write_pool_lock:
+        write_pool = _write_pool
+        _write_pool = None
     with _async_pool_lock:
         pool = _async_pool
         _async_pool = None
+    # submit_write 可能正使用自己的线程本地连接，必须先等它排空。
+    if write_pool is not None:
+        write_pool.shutdown(wait=wait)
     if pool is not None:
         pool.shutdown(wait=wait)
 
