@@ -135,7 +135,7 @@ async def _probe_login(acc: dict):
 
 async def check_account(tid: int, acc_id: str) -> dict:
     """验证 Cookie 是否还活着(不发内容,只查登录态)."""
-    accs = accounts(tid)
+    accs = await db.arun(accounts, tid)
     acc = next((a for a in accs if a["id"] == acc_id), None)
     if not acc:
         raise ValueError("账号不存在")
@@ -144,7 +144,7 @@ async def check_account(tid: int, acc_id: str) -> dict:
     acc["status"] = "ok" if ok else "expired"
     acc["nickname"] = nickname
     acc["checked_at"] = time.time()
-    _save(tid, accs)
+    await db.arun(_save, tid, accs)
     if not ok:
         raise ValueError("登录态无效或已过期:重新登录该平台后,按向导重新复制 Cookie 绑定")
     return {"ok": True, "nickname": nickname,
@@ -173,17 +173,13 @@ def enqueue(tid: int, platform: str, acc_id: str, payload: dict) -> int:
 
 def _log(pid: int, msg: str):
     line = f"[{time.strftime('%H:%M:%S')}] {msg}\n"
-
-    def _tx():
-        # 追加语义的读-改-写放同一事务,进池后与相邻日志并发也不丢行。
-        with db.atomic() as c:
-            r = c.execute("SELECT log FROM pub_task WHERE id=?", (pid,)).fetchone()
-            text = ((r["log"] if r else "") or "") + line
-            c.execute("UPDATE pub_task SET log=?,updated_at=? WHERE id=?",
-                      (text[-4000:], time.time(), pid))
-
-    # 发布协程在事件循环上跑;日志落库进 db 线程池,防写锁竞争冻结循环。
-    db.submit_write(_tx)
+    # 追加日志是可追溯业务证据，不是可丢进度快照。异步调用方必须用
+    # ``await db.arun(_log, ...)`` 等待完整事务并接收写失败。
+    with db.atomic() as c:
+        r = c.execute("SELECT log FROM pub_task WHERE id=?", (pid,)).fetchone()
+        text = ((r["log"] if r else "") or "") + line
+        c.execute("UPDATE pub_task SET log=?,updated_at=? WHERE id=?",
+                  (text[-4000:], time.time(), pid))
     # The persisted progress belongs to the current tenant and is shown in the
     # task UI.  The host journal receives only a stable event: account names,
     # content, screenshots and provider text must never be copied there.
@@ -222,7 +218,7 @@ async def _publish_xhs(pg, pid: int, payload: dict):
     await pg.wait_for_timeout(4000)
     if "login" in pg.url or await pg.locator("text=扫码登录").count():
         raise ValueError("登录态失效:重新绑定 Cookie")
-    _log(pid, "已进入发布页,切换到图文…")
+    await db.arun(_log, pid, "已进入发布页,切换到图文…")
     tab = pg.locator("text=上传图文")
     if await tab.count():
         await tab.first.click()
@@ -232,7 +228,7 @@ async def _publish_xhs(pg, pid: int, payload: dict):
         raise ValueError("没有可上传的图片(需要至少1张本地图)")
     inp = pg.locator("input[type=file]")
     await inp.first.set_input_files(imgs)
-    _log(pid, f"已上传 {len(imgs)} 张图,等待处理…")
+    await db.arun(_log, pid, f"已上传 {len(imgs)} 张图,等待处理…")
     await pg.wait_for_timeout(6000)
     title_box = pg.locator("input[placeholder*='标题'], input[placeholder*='填写标题']")
     if await title_box.count():
@@ -241,12 +237,12 @@ async def _publish_xhs(pg, pid: int, payload: dict):
     if await body_box.count():
         await body_box.first.click()
         await pg.keyboard.insert_text((payload.get("body") or "")[:990])
-    _log(pid, "标题正文已填充，准备提交…")
+    await db.arun(_log, pid, "标题正文已填充，准备提交…")
     btn = pg.locator("button:has-text('发布')")
     if not await btn.count():
         raise ValueError("没找到发布按钮(平台可能改版)")
-    _mark_submission_uncertain(pid)
-    _log(pid, "提交发布…")
+    await db.arun(_mark_submission_uncertain, pid)
+    await db.arun(_log, pid, "提交发布…")
     await btn.first.click()
     await pg.wait_for_timeout(6000)
     if await pg.locator("text=发布成功").count() or "success" in pg.url:
@@ -266,7 +262,7 @@ async def _publish_douyin(pg, pid: int, payload: dict):
         raise ValueError("没有可上传的视频文件")
     inp = pg.locator("input[type=file]")
     await inp.first.set_input_files(video)
-    _log(pid, "视频上传中(等转码)…")
+    await db.arun(_log, pid, "视频上传中(等转码)…")
     await pg.wait_for_timeout(20000)
     cap = pg.locator("div[contenteditable='true'], input[placeholder*='标题']")
     if await cap.count():
@@ -275,8 +271,8 @@ async def _publish_douyin(pg, pid: int, payload: dict):
     btn = pg.locator("button:has-text('发布')")
     if not await btn.count():
         raise ValueError("没找到发布按钮(平台可能改版)")
-    _mark_submission_uncertain(pid)
-    _log(pid, "提交发布…")
+    await db.arun(_mark_submission_uncertain, pid)
+    await db.arun(_log, pid, "提交发布…")
     await btn.first.click()
     await pg.wait_for_timeout(8000)
     return "已提交发布(去抖音后台确认状态)"
@@ -380,7 +376,9 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
             raise ValueError("登录态失效:重新绑定 Cookie")
         from playwright.async_api import async_playwright
         domain = ".xiaohongshu.com" if row["platform"] == "xhs" else ".douyin.com"
-        _log(pid, f"启动无头浏览器,载入「{acc['name']}」登录态…")
+        await db.arun(
+            _log, pid, f"启动无头浏览器,载入「{acc['name']}」登录态…"
+        )
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(args=["--no-sandbox"])
             ctx = await browser.new_context(viewport={"width": 1440, "height": 900},
@@ -390,7 +388,7 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
             try:
                 note = await (_publish_xhs(pg, pid, payload) if row["platform"] == "xhs"
                               else _publish_douyin(pg, pid, payload))
-                _log(pid, f"✅ {note}")
+                await db.arun(_log, pid, f"✅ {note}")
                 await db.aupdate(
                     "pub_task",
                     pid,
@@ -405,9 +403,10 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
                 try:
                     await pg.screenshot(path=os.path.join(shot_dir, f"fail_{pid}.png"))
                     shot_url = f"/files/pub/fail_{pid}.png"
-                    _log(pid, f"失败现场截图:{shot_url}")
                 except Exception:
                     pass
+                else:
+                    await db.arun(_log, pid, f"失败现场截图:{shot_url}")
                 raise
             finally:
                 await browser.close()
@@ -424,7 +423,6 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
         fail = {"kind": kind, "why": why, "fix": fix,
                 "err": "自动发布没有成功，内容未发出；可重试，或用「一键复制」手动发布",
                 "shot": shot_url, "home": p["home"]}
-        _log(pid, f"❌ {why} → {fix}")
         await db.aupdate(
             "pub_task",
             pid,
@@ -433,6 +431,7 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
                 "fail_json": json.dumps(fail, ensure_ascii=False),
             },
         )
+        await db.arun(_log, pid, f"❌ {why} → {fix}")
         await asyncio.to_thread(
             notify.push,
             tid,
@@ -456,12 +455,15 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
                 job_id=payload.get("job_id"),
                 source="matrix",
             )
-            _log(pid, "已自动登记发布台账,T+1/3/7 审查官自动复盘")
         except Exception as exc:
             log.debug(
                 "发布台账登记跳过 pub_task=%s error_type=%s",
                 pid,
                 type(exc).__name__,
+            )
+        else:
+            await db.arun(
+                _log, pid, "已自动登记发布台账,T+1/3/7 审查官自动复盘"
             )
         await asyncio.to_thread(
             notify.push,
@@ -474,7 +476,5 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
             },
         )
     finally:
-        # 发布日志是异步落库的;结束前冲刷,保证任务终态可见时日志已完整。
-        await db.adrain()
         if broadcast:
             broadcast({"type": "pub_update", "task_id": pid})

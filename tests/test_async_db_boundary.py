@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 from app import db
 
@@ -192,6 +193,112 @@ class AsyncFacadeSemanticsTests(_DbCase):
             asyncio.run(scenario())
         finally:
             release.set()
+
+    def test_database_generation_switch_reclaims_worker_connections(self):
+        """反复切库后连接数必须稳定，不能每代遗留一组已关闭连接。"""
+        db._shutdown_async_pool(wait=True)
+        db._close_all_connections()
+        db._conn = None
+        db._conn_path = None
+        db._close_thread_connection()
+        counts = []
+
+        async def open_all_workers():
+            barrier = threading.Barrier(4)
+
+            def use_read_connection():
+                db.conn()
+                barrier.wait(timeout=5)
+
+            await asyncio.gather(*(db.arun(use_read_connection) for _ in range(4)))
+            db.submit_write(db.get_setting, "generation-probe")
+            await db.adrain()
+
+        for generation in range(3):
+            db.DB_PATH = os.path.join(
+                self.tmp.name, f"generation-{generation}.db"
+            )
+            db.conn()
+            asyncio.run(open_all_workers())
+            counts.append(len(db._all_connections))
+
+        self.assertEqual(
+            [6, 6, 6],
+            counts,
+            f"数据库代际切换后连接持续增长: {counts}",
+        )
+
+    def test_meeting_transcript_append_is_awaited_and_reliable(self):
+        """逐字稿是业务记录；返回前必须落库，写失败必须冒泡。"""
+        from app import meeting
+
+        async def scenario():
+            meeting_id = await db.ainsert(
+                "meeting",
+                {
+                    "tenant_id": 1,
+                    "question": "可靠写测试",
+                    "emp_idxs_json": "[0,1]",
+                },
+            )
+            events = []
+            await meeting._push(
+                meeting_id,
+                events.append,
+                "系统",
+                "已可靠落库",
+            )
+            row = await db.aone(
+                "SELECT messages_json FROM meeting WHERE id=?",
+                (meeting_id,),
+            )
+            self.assertEqual(
+                ["已可靠落库"],
+                [item["text"] for item in json.loads(row["messages_json"])],
+            )
+            self.assertEqual(1, len(events))
+
+            with mock.patch.object(
+                meeting.db,
+                "arun",
+                new=mock.AsyncMock(side_effect=sqlite3.OperationalError("disk")),
+            ):
+                with self.assertRaises(sqlite3.OperationalError):
+                    await meeting._push(
+                        meeting_id,
+                        events.append,
+                        "系统",
+                        "不能假装写成功",
+                    )
+            self.assertEqual(1, len(events), "落库失败后不应广播幽灵消息")
+
+        asyncio.run(scenario())
+
+    def test_matrix_log_append_is_not_fire_and_forget(self):
+        """发布日志是追溯证据，不得交给会吞异常的 submit_write。"""
+        import inspect
+        from app import matrixpub
+
+        source = inspect.getsource(matrixpub._log)
+        self.assertNotIn("submit_write", source)
+
+        async def scenario():
+            pid = await db.ainsert(
+                "pub_task",
+                {
+                    "tenant_id": 1,
+                    "platform": "xhs",
+                    "account": "test",
+                    "payload_json": "{}",
+                },
+            )
+            await db.arun(matrixpub._log, pid, "可靠日志")
+            row = await db.aone(
+                "SELECT log FROM pub_task WHERE id=?", (pid,)
+            )
+            self.assertIn("可靠日志", row["log"])
+
+        asyncio.run(scenario())
 
 
 class EventLoopFreezeTests(_DbCase):
@@ -379,6 +486,150 @@ class AppCoroutineSourceTests(unittest.TestCase):
             "进度回调仍在调用线程上直接写库",
         )
         self.assertIn("db.submit_write", recorder)
+
+    def test_submit_write_is_reserved_for_overwriting_progress_snapshots(self):
+        """fire-and-forget 只准用于可丢且后续会整体覆盖的进度快照。"""
+        expected = {
+            "avatar.py": 1,
+            "engine.py": 1,
+            "main.py": 1,
+            "taskrunner.py": 1,
+        }
+        found = {}
+        for filename in sorted(os.listdir(self.app_dir)):
+            if not filename.endswith(".py") or filename == "db.py":
+                continue
+            path = os.path.join(self.app_dir, filename)
+            with open(path, encoding="utf-8") as handle:
+                tree = ast.parse(handle.read(), filename=path)
+            count = sum(
+                1
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "db"
+                and node.func.attr == "submit_write"
+            )
+            if count:
+                found[filename] = count
+        self.assertEqual(expected, found)
+
+
+class ReviewedAsyncCallGraphTests(unittest.TestCase):
+    """钉住审查确认的 async→同步 DB helper 调用边。
+
+    只扫本次放行范围，不把一次可靠性修复膨胀成全仓改写。helper 作为
+    ``db.arun(helper, ...)`` 参数不会形成调用边；直接 ``helper(...)`` 会。
+    """
+
+    TARGETS = {
+        ("engine.py", "_advance_once"): {
+            "self._latest_run", "self._job_tenant", "self._job_title",
+            "notify.push",
+        },
+        ("engine.py", "_run_gate"): {
+            "self.collect_outputs", "self._job_tenant", "self._job_title",
+            "notify.push",
+        },
+        ("engine.py", "_execute"): {"providers.text_model_for"},
+        ("main.py", "_auth_mw"): {
+            "auth.parse_session", "auth.get_user",
+            "_upload_permission_allowed", "_file_owner_tid",
+        },
+        ("main.py", "task_create"): {
+            "_need_module", "employees.is_enabled",
+            "_create_charged_expert_task", "funnel.record_first_work",
+        },
+        ("main.py", "task_redo"): {
+            "_task_row_or_404", "_create_charged_expert_task",
+        },
+        ("main.py", "_tool_watchdog_loop"): {"_recover_stale_tool_jobs"},
+        ("main.py", "_tool_enqueue_async"): {
+            "_tool_require_idle", "_tool_enqueue_record",
+        },
+        ("main.py", "pcal_gen"): {"_tool_require_idle", "_tool_enqueue"},
+        ("main.py", "hotpick_gen"): {"_tool_require_idle", "_tool_enqueue"},
+        ("main.py", "warmup_gen"): {"_tool_require_idle", "_tool_enqueue"},
+        ("main.py", "leads_gen"): {"_tool_require_idle", "_tool_enqueue"},
+        ("main.py", "bench_run"): {
+            "growth.watch_conf", "_tool_require_idle", "_tool_enqueue",
+        },
+        ("matrixpub.py", "check_account"): {"accounts", "_save"},
+        ("matrixpub.py", "_publish_xhs"): {
+            "_log", "_mark_submission_uncertain",
+        },
+        ("matrixpub.py", "_publish_douyin"): {
+            "_log", "_mark_submission_uncertain",
+        },
+        ("matrixpub.py", "_run_task_inner"): {"_log"},
+        ("textvideo.py", "run_job"): {"_steps_append"},
+        ("textvideo.py", "_run_job_inner"): {"_steps_append"},
+        ("avatar.py", "clone_voice"): {
+            "providers.yunwu_conf", "cloned_voices", "save_cloned_voices",
+        },
+        ("expertmatch.py", "match_experts"): {"_visible_specialists"},
+        ("expertmatch.py", "preflight_fit"): {"_dept_peers"},
+    }
+
+    @staticmethod
+    def _call_name(call):
+        parts = []
+        node = call.func
+        while isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        if isinstance(node, ast.Name):
+            parts.append(node.id)
+            return ".".join(reversed(parts))
+        return ""
+
+    def test_reviewed_async_call_graph_has_no_blocking_sync_edges(self):
+        app_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app"
+        )
+        offenders = []
+        for (filename, function_name), forbidden in self.TARGETS.items():
+            path = os.path.join(app_dir, filename)
+            with open(path, encoding="utf-8") as handle:
+                tree = ast.parse(handle.read(), filename=path)
+            matches = [
+                node for node in ast.walk(tree)
+                if isinstance(node, ast.AsyncFunctionDef)
+                and node.name == function_name
+            ]
+            self.assertEqual(
+                1, len(matches), f"{filename}:{function_name} 不再是唯一 async 入口"
+            )
+            target = matches[0]
+
+            class EdgeVisitor(ast.NodeVisitor):
+                def visit_AsyncFunctionDef(self, node):
+                    if node is target:
+                        self.generic_visit(node)
+
+                def visit_FunctionDef(self, node):
+                    return
+
+                def visit_Lambda(self, node):
+                    return
+
+                def visit_Call(self, node):
+                    name = ReviewedAsyncCallGraphTests._call_name(node)
+                    if name in forbidden:
+                        offenders.append(
+                            f"{filename}:{node.lineno} "
+                            f"{function_name}->{name}"
+                        )
+                    self.generic_visit(node)
+
+            EdgeVisitor().visit(target)
+        self.assertEqual(
+            [],
+            offenders,
+            "审查范围仍存在 async→同步 DB helper 调用边:\n"
+            + "\n".join(offenders),
+        )
 
 
 if __name__ == "__main__":

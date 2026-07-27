@@ -477,6 +477,29 @@ class ScheduledBillingOperationCase(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(os.path.exists(work_samples[0]))
         self.assertTrue(os.path.isfile(sample))
 
+    async def test_concurrent_voice_list_updates_do_not_lose_entries(self):
+        """声音列表的读改写必须在一个原子事务中完成。"""
+        from app import avatar
+
+        voices = [
+            {
+                "id": f"voice-{index}",
+                "label": f"声音{index}",
+                "cloned": True,
+                "created_at": float(index),
+            }
+            for index in range(8)
+        ]
+        await asyncio.gather(*(
+            db.arun(avatar._prepend_cloned_voice, 2, voice)
+            for voice in voices
+        ))
+        saved = json.loads(db.get_setting("cloned_voices:2"))
+        self.assertEqual(
+            {voice["id"] for voice in voices},
+            {voice["id"] for voice in saved},
+        )
+
     async def test_voice_clone_failure_and_cancellation_refund_without_visibility(self):
         from app import main
 

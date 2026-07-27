@@ -425,8 +425,10 @@ async def _auth_mw(request: Request, call_next):
             headers={"Retry-After": "30"},
         )
     auth.set_current(None)
-    uid = auth.parse_session(request.cookies.get("cc_sess") or "")
-    user = auth.get_user(uid) if uid else None
+    uid = await db.arun(
+        auth.parse_session, request.cookies.get("cc_sess") or ""
+    )
+    user = await db.arun(auth.get_user, uid) if uid else None
     auth.set_current(user)
     tour = False
     if not user:
@@ -491,7 +493,7 @@ async def _auth_mw(request: Request, call_next):
         upload_kind = "transient"
     if upload_policy:
         action, module, request_limit = upload_policy
-        if not _upload_permission_allowed(module):
+        if not await db.arun(_upload_permission_allowed, module):
             return JSONResponse(
                 {"detail": "您的账号没有该板块权限,请联系企业主账号开通"},
                 status_code=403,
@@ -584,7 +586,7 @@ async def _auth_mw(request: Request, call_next):
             path = _canonical_file_path(raw.decode("latin-1"))
         except (HTTPException, UnicodeDecodeError):
             return JSONResponse({"detail": "路径非法"}, status_code=400)
-        owner_tid = _file_owner_tid(path)
+        owner_tid = await db.arun(_file_owner_tid, path)
         cur = auth.current()
         cur_tid = cur["tenant_id"] if cur else None
         if not cur or (not auth.is_root() and cur_tid != owner_tid):
@@ -2632,10 +2634,10 @@ async def task_create(body: dict):
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if departments.get(idx):
-        _need_module(departments.get(idx)["dept_key"])
+        await db.arun(_need_module, departments.get(idx)["dept_key"])
     else:
-        _need_module("content")
-    if not employees.is_enabled(idx):
+        await db.arun(_need_module, "content")
+    if not await db.arun(employees.is_enabled, idx):
         raise HTTPException(400, "该员工已被停用(后台可重新启用)")
     # 派单预检:仅产业部专家(idx>=100)且未强制派单时,先判断任务书是否对口。
     # 不对口→直接返回引导,不扣点不建任务;LLM 异常/超时一律放行(降级可用,绝不拦死派单)。
@@ -2658,12 +2660,15 @@ async def task_create(body: dict):
     task_data = {"emp_idx": idx, "tenant_id": TEN(),
                  "brief_json": json.dumps(brief, ensure_ascii=False)}
     try:
-        tid = _create_charged_expert_task(
-            task_data, note=(brief.get("direction") or "")[:20])
+        tid = await db.arun(
+            _create_charged_expert_task,
+            task_data,
+            note=(brief.get("direction") or "")[:20],
+        )
     except billing.InsufficientPoints as e:
         raise HTTPException(402, str(e))
+    await db.arun(funnel.record_first_work, TEN(), "expert")
     asyncio.create_task(taskrunner.run_task(tid, engine.broadcast))
-    funnel.record_first_work(TEN(), "expert")
     return {"task_id": tid}
 
 
@@ -3156,7 +3161,7 @@ def task_get(tid: int):
 
 @app.post("/api/tasks/{tid}/redo")
 async def task_redo(tid: int, body: dict):
-    t = _task_row_or_404(tid)
+    t = await db.arun(_task_row_or_404, tid)
     feedback = body.get("feedback", "")
     if not isinstance(feedback, str):
         raise HTTPException(400, "feedback 格式无效")
@@ -3170,7 +3175,8 @@ async def task_redo(tid: int, body: dict):
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     try:
-        nid = _create_charged_expert_task(
+        nid = await db.arun(
+            _create_charged_expert_task,
             {"emp_idx": t["emp_idx"], "tenant_id": TEN(),
              "source_task_id": tid,
              "brief_json": json.dumps(brief, ensure_ascii=False)},
@@ -8319,10 +8325,13 @@ def _ensure_tool_running_index():
     )
 
 
-def _recover_stale_tool_jobs(now: float = None) -> int:
+def _recover_stale_tool_jobs(
+    now: float = None, defer_broadcast: bool = False
+) -> int | tuple[int, list[tuple[int, str]]]:
     """按创建时间执行绝对总时限；心跳只供展示，不能把截止时间越续越长。"""
     now = now or time.time()
     recovered = 0
+    events = []
     for row in db.q("SELECT * FROM tool_job WHERE status='running'"):
         timeout = TOOL_TIMEOUTS.get(row["kind"], 360)
         # 免费重试沿用原记录，必须从本次 retry_started_at 重新计时；否则历史
@@ -8341,7 +8350,10 @@ def _recover_stale_tool_jobs(now: float = None) -> int:
                     row, f"运行超过{minutes}分钟仍未完成，已自动结束并退回点数，请重试",
                     "超时自动退回"):
                 recovered += 1
-                _broadcast_tool(row["tenant_id"], row["kind"])
+                if defer_broadcast:
+                    events.append((row["tenant_id"], row["kind"]))
+                else:
+                    _broadcast_tool(row["tenant_id"], row["kind"])
         except Exception as exc:
             try:
                 log.error(
@@ -8351,14 +8363,18 @@ def _recover_stale_tool_jobs(now: float = None) -> int:
                 )
             except Exception:
                 pass
-    return recovered
+    return (recovered, events) if defer_broadcast else recovered
 
 
 async def _tool_watchdog_loop():
     while True:
         try:
             await asyncio.sleep(60)
-            _recover_stale_tool_jobs()
+            _recovered, events = await db.arun(
+                _recover_stale_tool_jobs, None, True
+            )
+            for tenant_id, kind in events:
+                _broadcast_tool(tenant_id, kind)
         except asyncio.CancelledError:
             return
         except Exception as exc:
@@ -8609,7 +8625,7 @@ def _tool_require_idle(kind: str):
         raise HTTPException(429, "这个工具已有一个任务在后台跑,等它完事再派新的")
 
 
-def _tool_enqueue(kind: str, params: dict, note: str = "") -> dict:
+def _tool_enqueue_record(kind: str, params: dict, note: str = "") -> dict:
     """先落任务再原子扣点；任何插入/并发失败都不会碰用户余额。"""
     tid = TEN()
     action = TOOL_REFUND.get(kind, "expert_task")
@@ -8658,8 +8674,24 @@ def _tool_enqueue(kind: str, params: dict, note: str = "") -> dict:
         raise
     if not charged:
         raise RuntimeError("工具任务计费状态冲突")
-    _spawn_tool_worker(jid)
     return {"job_id": jid, "note": "已挂到后台跑:您随便去忙别的,回工具箱就能看到;跑完还会推微信"}
+
+
+def _tool_enqueue(kind: str, params: dict, note: str = "") -> dict:
+    """同步兼容入口；HTTP 协程使用 ``_tool_enqueue_async``。"""
+    result = _tool_enqueue_record(kind, params, note)
+    _spawn_tool_worker(result["job_id"])
+    return result
+
+
+async def _tool_enqueue_async(
+    kind: str, params: dict, note: str = ""
+) -> dict:
+    """完整扣费事务进 DB 池，回到事件循环后再创建 asyncio worker。"""
+    await db.arun(_tool_require_idle, kind)
+    result = await db.arun(_tool_enqueue_record, kind, params, note)
+    _spawn_tool_worker(result["job_id"])
+    return result
 
 
 @app.get("/api/tools/jobs")
@@ -8734,11 +8766,17 @@ def pcal_get(ym: str):
 
 @app.post("/api/tools/pcal")
 async def pcal_gen(body: dict):
-    _need_module("content")
+    await db.arun(_need_module, "content")
     ym = body.get("ym") or time.strftime("%Y-%m")
-    _tool_require_idle("pcal")
-    return _tool_enqueue("pcal", {"ym": ym, "industry": (body.get("industry") or "通用")[:20],
-                                  "focus": (body.get("focus") or "")[:200]}, note=ym)
+    return await _tool_enqueue_async(
+        "pcal",
+        {
+            "ym": ym,
+            "industry": (body.get("industry") or "通用")[:20],
+            "focus": (body.get("focus") or "")[:200],
+        },
+        note=ym,
+    )
 
 
 @app.put("/api/tools/pcal")
@@ -8776,18 +8814,21 @@ def hotpick_get(industry: str = "通用"):
 
 @app.post("/api/tools/hotpick")
 async def hotpick_gen(body: dict):
-    _need_module("content")
+    await db.arun(_need_module, "content")
     industry = (body.get("industry") or "通用")[:20]
-    _tool_require_idle("hot")
-    return _tool_enqueue("hot", {"industry": industry,
-                                 "channels": (body.get("channels") or [])[:10]},
-                         note=industry)
+    return await _tool_enqueue_async(
+        "hot",
+        {
+            "industry": industry,
+            "channels": (body.get("channels") or [])[:10],
+        },
+        note=industry,
+    )
 
 
 @app.post("/api/tools/warmup")
 async def warmup_gen(body: dict):
-    _need_module("content")
-    _tool_require_idle("warm")
+    await db.arun(_need_module, "content")
     persona_text = ""
     if body.get("profile_id"):
         pr = await db.aone(
@@ -8797,23 +8838,30 @@ async def warmup_gen(body: dict):
         )
         if pr:
             persona_text = registry._persona_text({"persona": db.jloads(pr["persona_json"], {})})
-    return _tool_enqueue("warm", {"platform": body.get("platform") or "小红书",
-                                  "industry": (body.get("industry") or "通用")[:20],
-                                  "positioning": (body.get("positioning") or "")[:200],
-                                  "persona_text": persona_text[:1500]},
-                         note=(body.get("platform") or "")
-                              + (body.get("industry") or ""))
+    return await _tool_enqueue_async(
+        "warm",
+        {
+            "platform": body.get("platform") or "小红书",
+            "industry": (body.get("industry") or "通用")[:20],
+            "positioning": (body.get("positioning") or "")[:200],
+            "persona_text": persona_text[:1500],
+        },
+        note=(body.get("platform") or "") + (body.get("industry") or ""),
+    )
 
 
 @app.post("/api/tools/leads")
 async def leads_gen(body: dict):
-    _need_module("content")
-    _tool_require_idle("leads")
-    return _tool_enqueue("leads", {"industry": (body.get("industry") or "通用")[:20],
-                                   "city": (body.get("city") or "")[:20],
-                                   "product": (body.get("product") or "")[:60]},
-                         note=(body.get("city") or "")
-                              + (body.get("industry") or ""))
+    await db.arun(_need_module, "content")
+    return await _tool_enqueue_async(
+        "leads",
+        {
+            "industry": (body.get("industry") or "通用")[:20],
+            "city": (body.get("city") or "")[:20],
+            "product": (body.get("product") or "")[:60],
+        },
+        note=(body.get("city") or "") + (body.get("industry") or ""),
+    )
 
 
 @app.get("/api/tools/bench")
@@ -8832,11 +8880,10 @@ def bench_put(body: dict):
 
 @app.post("/api/tools/bench/run-now")
 async def bench_run(body: dict = None):
-    _need_module("content")
-    if not growth.watch_conf(TEN()).get("targets"):
+    await db.arun(_need_module, "content")
+    if not (await db.arun(growth.watch_conf, TEN())).get("targets"):
         raise HTTPException(400, "先在上面添加要盯的对标账号并保存")
-    _tool_require_idle("bench")
-    return _tool_enqueue("bench", {}, note="手动")
+    return await _tool_enqueue_async("bench", {}, note="手动")
 
 
 @app.post("/api/tools/menu-copy")

@@ -860,6 +860,7 @@ def conn():
                     _conn.close()
                 except sqlite3.Error:
                     pass
+                _all_connections.discard(_conn)
                 _conn = None
             try:
                 anchor = _initialize_anchor()
@@ -1184,11 +1185,50 @@ def _shutdown_async_pool(wait: bool = True):
     with _async_pool_lock:
         pool = _async_pool
         _async_pool = None
-    # submit_write 可能正使用自己的线程本地连接，必须先等它排空。
+    def reclaim_worker_connections(executor):
+        """让每个 executor 线程亲自关闭它拥有的 SQLite 连接。
+
+        SQLite 连接不能在另一个仍可能执行语句的线程里强关。把与现存线程数
+        相同的 barrier 任务排到队尾，可以保证所有旧工作完成后每个 worker
+        各领取一个清理任务，再由连接所属线程执行 close。
+        """
+        workers = len(getattr(executor, "_threads", ()))
+        # Python 的 ThreadPoolExecutor 退出钩子早于普通 atexit 回调；解释器
+        # 收尾时池可能已被标准库关闭，此时线程已经停止，后续 _close_all_connections
+        # 可安全回收注册表，无需再向已 shutdown 的池提交任务。
+        if (
+            not wait
+            or workers <= 0
+            or getattr(executor, "_shutdown", False)
+        ):
+            return
+        barrier = threading.Barrier(workers)
+
+        def close_owned_connection():
+            try:
+                barrier.wait(timeout=30)
+            finally:
+                _close_thread_connection()
+
+        futures = [
+            executor.submit(close_owned_connection) for _ in range(workers)
+        ]
+        for future in futures:
+            future.result()
+
+    # submit_write 可能正使用自己的线程本地连接，必须先等它排空；随后让池线程
+    # 自己回收连接，避免每次测试/维护切换 DB_PATH 都泄漏整代连接。
     if write_pool is not None:
+        reclaim_worker_connections(write_pool)
         write_pool.shutdown(wait=wait)
     if pool is not None:
+        reclaim_worker_connections(pool)
         pool.shutdown(wait=wait)
+    if wait:
+        with _pending_lock:
+            _pending_writes[:] = [
+                future for future in _pending_writes if not future.done()
+            ]
 
 
 def _shutdown_all():

@@ -610,7 +610,7 @@ class Engine:
                 await db.arun(self.settle_failure, job_id, f"工位{idx + 1}重试后仍失败")
                 return True
 
-            run = self._latest_run(job_id, idx)
+            run = await db.arun(self._latest_run, job_id, idx)
             if not run:  # 删除请求可能在 provider 返回后已清掉全部工位。
                 return True
             if self._needs_review(cfg, job["mode"]):
@@ -646,9 +646,19 @@ class Engine:
                     return True
                 self.touch(job_id)
                 from . import notify
-                notify.push(self._job_tenant(job_id), "awaiting",
-                            {"job_id": job_id, "title": self._job_title(job_id),
-                             "station": f"工位{idx + 1}·{cfg['name']}"})
+                notice_tenant, notice_title = await db.arun(
+                    self._job_notification_meta, job_id
+                )
+                await asyncio.to_thread(
+                    notify.push,
+                    notice_tenant,
+                    "awaiting",
+                    {
+                        "job_id": job_id,
+                        "title": notice_title,
+                        "station": f"工位{idx + 1}·{cfg['name']}",
+                    },
+                )
                 return True
             # 自动放行:挑选类工位自动取推荐首选
             out = db.jloads(run["output_json"], {})
@@ -696,7 +706,7 @@ class Engine:
             return False  # 本工位完成,重扫描推进下一步
 
         # 全部工位完成
-        title = self._job_title(job_id)
+        title = await db.arun(self._job_title, job_id)
 
         def _complete_tx():
             with db.atomic() as c:
@@ -731,12 +741,18 @@ class Engine:
                         now,
                     ),
                 )
-                return True
+                return int(current["tenant_id"] or 1)
 
-        if not await db.arun(_complete_tx):
+        completed_tenant = await db.arun(_complete_tx)
+        if not completed_tenant:
             return True
         from . import notify
-        notify.push(self._job_tenant(job_id), "done", {"job_id": job_id, "title": title})
+        await asyncio.to_thread(
+            notify.push,
+            completed_tenant,
+            "done",
+            {"job_id": job_id, "title": title},
+        )
         await db.arun(self._distill_knowledge, job_id, title)
         self.touch(job_id)
         return True
@@ -813,10 +829,14 @@ class Engine:
                     return tc[o.get("selected_title", 0) if o.get("selected_title", 0) < len(tc) else 0]
         return "(未产出标题)"
 
+    def _job_notification_meta(self, job_id) -> tuple[int, str]:
+        """通知所需 DB 数据一次在线程池读取，调用方再回事件循环发旁路通知。"""
+        return self._job_tenant(job_id), self._job_title(job_id)
+
     async def _run_gate(self, job_id, brief) -> bool:
         """质检;不通过则 gate_blocked 并返回 False."""
         self.broadcast({"type": "gate_running", "job_id": job_id})
-        outputs = self.collect_outputs(job_id)
+        outputs = await db.arun(self.collect_outputs, job_id)
         title, body = "", ""
         o4, o3 = outputs.get(4) or {}, outputs.get(3) or {}
         body = o4.get("body") or o3.get("body") or ""
@@ -866,8 +886,15 @@ class Engine:
         self.touch(job_id)
         if not g["passed"]:
             from . import notify
-            notify.push(self._job_tenant(job_id), "gate",
-                        {"job_id": job_id, "title": self._job_title(job_id)})
+            notice_tenant, notice_title = await db.arun(
+                self._job_notification_meta, job_id
+            )
+            await asyncio.to_thread(
+                notify.push,
+                notice_tenant,
+                "gate",
+                {"job_id": job_id, "title": notice_title},
+            )
         return g["passed"]
 
     async def _execute(self, job_id, idx, cfg, brief, profile, version,
@@ -906,7 +933,7 @@ class Engine:
             "job_id": job_id, "tenant_id": tenant_id,
             "brief": brief, "profile": profile,
             "outputs": await db.arun(self.collect_outputs, job_id),
-            "model": providers.text_model_for(idx),
+            "model": await db.arun(providers.text_model_for, idx),
             "version": version, "today": time.strftime("%Y-%m-%d"),
             "revision_note": revision_note, "prev_output": prev_output,
             "progress": progress, "token": f"job{job_id}:{idx}",

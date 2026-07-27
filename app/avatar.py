@@ -1966,6 +1966,27 @@ def save_cloned_voices(voices: list):
                    json.dumps(voices[:10], ensure_ascii=False))
 
 
+def _prepend_cloned_voice(tenant_id: int, voice: dict):
+    """原子追加克隆声音，避免两个并发成功结果互相覆盖。"""
+    key = f"cloned_voices:{int(tenant_id)}"
+    now = time.time()
+    with db.atomic() as connection:
+        row = connection.execute(
+            "SELECT value FROM app_setting WHERE key=?", (key,)
+        ).fetchone()
+        voices = db.jloads(row["value"] if row else None, []) or []
+        voice_id = voice.get("id")
+        voices = [voice] + [
+            item for item in voices if item.get("id") != voice_id
+        ]
+        connection.execute(
+            "INSERT INTO app_setting(key,value,updated_at) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
+            "updated_at=excluded.updated_at",
+            (key, json.dumps(voices[:10], ensure_ascii=False), now),
+        )
+
+
 # ---------- 照片卡槽(按租户存,用户可随意增删) ----------
 
 def saved_photos() -> list:
@@ -2048,7 +2069,9 @@ async def clone_voice(sample_path: str, label: str, save: bool = True) -> dict:
     """
     import re
     import uuid as _uuid
-    base, key = providers.yunwu_conf()
+    from . import auth
+    tenant_id = auth.tenant_id()
+    base, key = await db.arun(providers.yunwu_conf)
     sample = await asyncio.to_thread(_read_bytes, sample_path)
     async with httpx.AsyncClient(timeout=180) as cli:
         r = await cli.post(
@@ -2085,12 +2108,7 @@ async def clone_voice(sample_path: str, label: str, save: bool = True) -> dict:
         "created_at": time.time(),
     }
     if save:
-        def _save_voice():
-            voices = cloned_voices()
-            voices.insert(0, voice)
-            save_cloned_voices(voices)
-
-        await db.arun(_save_voice)
+        await db.arun(_prepend_cloned_voice, tenant_id, voice)
     return voice
 
 

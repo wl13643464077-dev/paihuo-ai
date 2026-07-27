@@ -304,8 +304,9 @@ def _digest(decision: str, selected: dict | None, summary: str, next_action: str
             f"- 👉 **下一步：** {_text(next_action, 180)}")
 
 
-def _push(meeting_id: int, broadcast, who: str, text: str, color="#8b7355", emoji="🧑‍💼",
-          *, kind="speech", phase=None, round_no=None) -> dict:
+async def _push(meeting_id: int, broadcast, who: str, text: str,
+                color="#8b7355", emoji="🧑‍💼", *, kind="speech",
+                phase=None, round_no=None) -> dict:
     msg = {"who": who, "text": str(text or "").strip(), "color": color, "emoji": emoji,
            "ts": time.time(), "kind": kind}
     if phase:
@@ -315,8 +316,7 @@ def _push(meeting_id: int, broadcast, who: str, text: str, color="#8b7355", emoj
 
     def _append_tx():
         # 读-改-写放同一事务并整体进 db 线程池:并行发言(提案/验证阶段是并发的)
-        # 不互相覆盖,事件循环也不再被写锁竞争冻住。run()/ask() 收尾会 adrain()
-        # 冲刷,保证协程返回时逐字稿已持久。
+        # 不互相覆盖。逐字稿是业务记录而不是可丢进度快照，写失败必须冒泡。
         with db.atomic() as c:
             row = c.execute("SELECT messages_json FROM meeting WHERE id=?",
                             (meeting_id,)).fetchone()
@@ -328,7 +328,7 @@ def _push(meeting_id: int, broadcast, who: str, text: str, color="#8b7355", emoj
                       (json.dumps(messages, ensure_ascii=False),
                        time.time(), meeting_id))
 
-    db.submit_write(_append_tx)
+    await db.arun(_append_tx)
     _emit(
         broadcast,
         {"type": "meeting_msg", "meeting_id": meeting_id, "msg": msg},
@@ -416,10 +416,10 @@ async def run(meeting_id: int, broadcast):
     try:
         if len(members) < 2:
             raise RuntimeError("有效参会成员不足 2 人")
-        _push(meeting_id, broadcast, "系统",
+        await _push(meeting_id, broadcast, "系统",
               f"📣 结果型会议开始 · 议题：{m['question'][:80]} · 到场：{names}",
               "#33291f", "📣", kind="phase", phase="brainstorm", round_no=1)
-        _push(meeting_id, broadcast, "系统",
+        await _push(meeting_id, broadcast, "系统",
               "第 1 轮｜每人只交一个可执行方案；本轮结束按有效方案排出 Top N（最多 3 个）。",
               "#33291f", "1️⃣", kind="phase", phase="brainstorm", round_no=1)
 
@@ -458,17 +458,17 @@ async def run(meeting_id: int, broadcast):
         results = await asyncio.gather(*(propose(member) for member in members), return_exceptions=True)
         for member, result in zip(members, results):
             if isinstance(result, Exception):
-                _push(meeting_id, broadcast, member["name"], "本轮未形成可评审提案。",
+                await _push(meeting_id, broadcast, member["name"], "本轮未形成可评审提案。",
                       member["color"], member["emoji"], phase="brainstorm", round_no=1)
                 continue
             _, data = result
             if not _proposal_is_substantive(data):
-                _push(meeting_id, broadcast, member["name"], "本轮未形成可评审提案。",
+                await _push(meeting_id, broadcast, member["name"], "本轮未形成可评审提案。",
                       member["color"], member["emoji"], phase="brainstorm", round_no=1)
                 continue
             proposal = _normalize_proposal(data, member, len(proposals) + 1)
             proposals.append(proposal)
-            _push(meeting_id, broadcast, member["name"], _proposal_markdown(proposal),
+            await _push(meeting_id, broadcast, member["name"], _proposal_markdown(proposal),
                   member["color"], member["emoji"], kind="proposal", phase="brainstorm", round_no=1)
         await db.aupdate(
             "meeting",
@@ -511,7 +511,7 @@ async def run(meeting_id: int, broadcast):
             f"{i}. **P{r['proposal_id']}｜{next(p['title'] for p in proposals if p['id'] == r['proposal_id'])}** — {r['reason']}"
             for i, r in enumerate(ranking, 1)) or "没有形成足够的可比较方案"
         top_count = min(MAX_PROPOSALS, len(ranking))
-        _push(meeting_id, broadcast, "会议主持人",
+        await _push(meeting_id, broadcast, "会议主持人",
               f"**Top {top_count} 已锁定**\n\n{ranked_text}\n\n接下来只验证第一名，不再扩散话题。",
               "#2b2317", "🎙️", kind="ranking", phase="brainstorm", round_no=1)
         checkpoint = _build_consensus(
@@ -543,7 +543,7 @@ async def run(meeting_id: int, broadcast):
                 "meeting", meeting_id, {"phase": "validate", "round_no": 2}
             )
             _emit(broadcast, {"type": "meeting_update", "meeting_id": meeting_id})
-            _push(meeting_id, broadcast, "系统",
+            await _push(meeting_id, broadcast, "系统",
                   f"第 2 轮｜集中验证 P{selected['id']}：失败预演 + 市场证据 + 单位经济。",
                   "#33291f", "2️⃣", kind="phase", phase="validate", round_no=2)
             selected_json = json.dumps(selected, ensure_ascii=False)
@@ -592,7 +592,7 @@ async def run(meeting_id: int, broadcast):
                             "condition": "缩小验证范围后重试"}
                 validation = _normalize_validation(data, lens, member)
                 validations.append(validation)
-                _push(meeting_id, broadcast, member["name"], _validation_markdown(validation),
+                await _push(meeting_id, broadcast, member["name"], _validation_markdown(validation),
                       member["color"], member["emoji"], kind="validation",
                       phase="validate", round_no=2)
             if not successful_validations:
@@ -685,7 +685,7 @@ GO 要派 1-3 个能产出实物的执行任务；NEED_INFO 要派 1-2 个最小
         )
         _emit(broadcast, {"type": "meeting_update", "meeting_id": meeting_id})
         action_lines = "\n".join(f"- **{a['who']}**：{a['task']}" for a in actions)
-        _push(meeting_id, broadcast, "会议主持人",
+        await _push(meeting_id, broadcast, "会议主持人",
               f"**最终决策：{decision}**\n\n{summary}\n\n"
               f"**Next Action：** {next_action}"
               + (f"\n\n**已锁定行动：**\n{action_lines}" if action_lines else
@@ -750,7 +750,7 @@ GO 要派 1-3 个能产出实物的执行任务；NEED_INFO 要派 1-2 个最小
             "会议执行失败，会议点数已自动退回；可免费重试或重新召开",
         )
         try:
-            _push(meeting_id, broadcast, "系统", public_error,
+            await _push(meeting_id, broadcast, "系统", public_error,
                   "#e5484d", "⚠️", kind="error", phase="failed")
         except Exception as persist_exc:
             log.error(
@@ -760,8 +760,6 @@ GO 要派 1-3 个能产出实物的执行任务；NEED_INFO 要派 1-2 个最小
             )
         await db.arun(settle_failure, meeting_id, public_error)
     finally:
-        # 逐句发言是异步落库的;协程结束前冲刷,保证「run() 返回即逐字稿已持久」。
-        await db.adrain()
         _emit(broadcast, {"type": "meeting_update", "meeting_id": meeting_id})
 
 
@@ -934,7 +932,7 @@ async def execute_actions(meeting_id: int, broadcast) -> list[int]:
     )
     if task_ids:
         try:
-            _push(meeting_id, broadcast, "系统",
+            await _push(meeting_id, broadcast, "系统",
                   "🚀 会议决定已执行：" + "、".join(f"任务 #{tid}" for tid in task_ids)
                   + " 已进入员工工作台。自动执行包含在本次会议中，不重复扣点。",
                   "#277a52", "🚀", kind="execution", phase="completed", round_no=3)
@@ -1241,7 +1239,7 @@ async def ask(meeting_id: int, question: str, broadcast, billing_op: str = None)
     if not persisted:
         state_update["intervention_count"] = count
     await db.aupdate("meeting", meeting_id, state_update)
-    _push(meeting_id, broadcast, "老板", question, "#c99a1e", "👔", kind="intervention",
+    await _push(meeting_id, broadcast, "老板", question, "#c99a1e", "👔", kind="intervention",
           phase="validate", round_no=2)
     execute_after = False
     try:
@@ -1271,7 +1269,7 @@ async def ask(meeting_id: int, question: str, broadcast, billing_op: str = None)
             if isinstance(result, Exception) or not result:
                 continue
             additions.append({"idx": member["idx"], "who": member["name"], "text": result})
-            _push(meeting_id, broadcast, member["name"], result, member["color"], member["emoji"],
+            await _push(meeting_id, broadcast, member["name"], result, member["color"], member["emoji"],
                   kind="validation", phase="validate", round_no=2)
 
         roster = "\n".join(f"{member['idx']}={member['name']}" for member in members)
@@ -1340,7 +1338,7 @@ async def ask(meeting_id: int, question: str, broadcast, billing_op: str = None)
             if billing_op:
                 from . import billing
                 await db.arun(billing.complete_operation, billing_op)
-        _push(meeting_id, broadcast, "会议主持人",
+        await _push(meeting_id, broadcast, "会议主持人",
               f"**介入后决策：{decision}**\n\n{summary}\n\n**Next Action：** {next_action}",
               "#2b2317", "🎙️", kind="decision", phase=phase, round_no=3)
     except Exception as exc:
@@ -1389,7 +1387,7 @@ async def ask(meeting_id: int, question: str, broadcast, billing_op: str = None)
                     meeting_id,
                     type(refund_exc).__name__,
                 )
-        _push(meeting_id, broadcast, "系统", "本次挑战未能形成新证据，保留上一次会议决定。",
+        await _push(meeting_id, broadcast, "系统", "本次挑战未能形成新证据，保留上一次会议决定。",
               "#e5484d", "⚠️", kind="error", phase=previous_phase)
         execute_after = False
 
@@ -1409,7 +1407,7 @@ async def ask(meeting_id: int, question: str, broadcast, billing_op: str = None)
                 "WHERE id=? AND status='running' AND phase IN ('execute','executing')",
                 (time.time(), meeting_id),
             )
-            _push(
+            await _push(
                 meeting_id,
                 broadcast,
                 "系统",
@@ -1419,7 +1417,6 @@ async def ask(meeting_id: int, question: str, broadcast, billing_op: str = None)
                 kind="error",
                 phase="awaiting_execution",
             )
-    await db.adrain()      # 追问的发言也要在返回前落地
     _emit(broadcast, {"type": "meeting_update", "meeting_id": meeting_id})
 
 
