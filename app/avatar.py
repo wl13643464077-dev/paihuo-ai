@@ -246,6 +246,34 @@ def _hg_active_job_ids() -> set:
     return {r["id"] for r in rows}
 
 
+def _hg_remove_registered_photos(photo_ids) -> None:
+    """Remove only confirmed supplier deletions from the latest registry."""
+    removed = {str(photo_id) for photo_id in photo_ids if photo_id}
+    if not removed:
+        return
+    with db.atomic() as connection:
+        row = connection.execute(
+            "SELECT value FROM app_setting WHERE key=?",
+            (HG_PHOTO_REGISTRY,),
+        ).fetchone()
+        entries = db.jloads(row["value"] if row else None, []) or []
+        remaining = [
+            entry for entry in entries
+            if not isinstance(entry, dict)
+            or str(entry.get("id") or "") not in removed
+        ]
+        connection.execute(
+            "INSERT INTO app_setting(key,value,updated_at) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
+            "updated_at=excluded.updated_at",
+            (
+                HG_PHOTO_REGISTRY,
+                json.dumps(remaining[-HG_REGISTRY_MAX:], ensure_ascii=False),
+                time.time(),
+            ),
+        )
+
+
 async def hg_cleanup_photos() -> int:
     """释放照片槽位:只删我们登记过、且其任务已结束的旧组。
 
@@ -285,12 +313,7 @@ async def hg_cleanup_photos() -> int:
     except Exception as exc:
         log.warning("heygen cleanup failed error_type=%s", type(exc).__name__)
     if removed:
-        current_registry = await db.arun(_hg_registry)
-        await db.aset_setting(
-            HG_PHOTO_REGISTRY,
-            json.dumps([e for e in current_registry if e.get("id") not in removed],
-                       ensure_ascii=False),
-        )
+        await db.arun(_hg_remove_registered_photos, removed)
     log.info("heygen released %d owned photo avatar slot(s)", len(removed))
     return len(removed)
 

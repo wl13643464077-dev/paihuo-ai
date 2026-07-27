@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import os
 import tempfile
@@ -142,6 +143,33 @@ class AvatarSettlementCase(unittest.TestCase):
             {entry["id"] for entry in entries},
         )
         self.assertEqual(2, len(entries))
+
+    def test_cleanup_registry_transaction_preserves_concurrent_upload(self):
+        """清理旧照片与登记新照片并发时，新归属不能被旧快照覆盖。"""
+        avatar.hg_register_photo("photo-old", 2, 101)
+        start = threading.Barrier(2)
+
+        def remove_old():
+            start.wait(timeout=2)
+            avatar._hg_remove_registered_photos({"photo-old"})
+
+        def register_new():
+            start.wait(timeout=2)
+            avatar.hg_register_photo("photo-new", 3, 202)
+
+        async def scenario():
+            await asyncio.gather(
+                db.arun(remove_old),
+                db.arun(register_new),
+            )
+
+        asyncio.run(scenario())
+        entries = avatar._hg_registry()
+        self.assertEqual(["photo-new"], [entry["id"] for entry in entries])
+
+        cleanup_source = inspect.getsource(avatar.hg_cleanup_photos)
+        self.assertIn("_hg_remove_registered_photos", cleanup_source)
+        self.assertNotIn("aset_setting", cleanup_source)
 
     def test_insufficient_balance_does_not_leave_job_or_partial_debit(self):
         from app import main

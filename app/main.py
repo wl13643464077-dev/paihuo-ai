@@ -5401,7 +5401,7 @@ async def meeting_create(body: dict):
     # 先做类型净化、去重、权限校验，再计费；重复 idx 不再重复发言/重复收费。
     raw_idxs = tuple(body.get("emp_idxs") or ())
 
-    def select_members() -> list[int]:
+    def select_members() -> tuple[list[int], list[dict]]:
         idxs, seen = [], set()
         for raw in raw_idxs:
             try:
@@ -5414,9 +5414,12 @@ async def meeting_create(body: dict):
             idxs.append(idx)
             if len(idxs) >= meeting.MAX_MEMBERS:
                 break
-        return idxs
+        for idx in idxs:
+            expert = departments.get(idx)
+            _need_module(expert["dept_key"] if expert else "content")
+        return idxs, [_meeting_member_view(idx) for idx in idxs]
 
-    idxs = await db.arun(select_members)
+    idxs, member_views = await db.arun(select_members)
     q = (body.get("question") or "").strip()
     if not q or len(idxs) < 2:
         raise HTTPException(400, "议题必填,且至少拉 2 位员工进群")
@@ -5424,9 +5427,6 @@ async def meeting_create(body: dict):
         raise HTTPException(400, "议题太长了,请压缩到 2000 字以内")
     constraints = (body.get("constraints") or "").strip()[:1200]
     acceptance = (body.get("acceptance_criteria") or "").strip()[:1200]
-    for idx in idxs:
-        expert = departments.get(idx)
-        _need_module(expert["dept_key"] if expert else "content")
     # 按公示价「会议每人1点」整单原子扣费；建会失败不会出现扣点无记录。
     try:
         mid = await db.arun(
@@ -5446,7 +5446,7 @@ async def meeting_create(body: dict):
     except billing.InsufficientPoints as e:
         raise HTTPException(402, str(e))
     asyncio.create_task(meeting.run(mid, engine.broadcast))
-    return {"meeting_id": mid, "members": [_meeting_member_view(i) for i in idxs]}
+    return {"meeting_id": mid, "members": member_views}
 
 
 def _meeting_suggest_prompt(question: str, roster: list):

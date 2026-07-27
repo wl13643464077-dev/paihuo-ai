@@ -600,7 +600,8 @@ class ReviewedAsyncCallGraphTests(unittest.TestCase):
             "_create_charged_avatar_job",
         },
         ("main.py", "meeting_create"): {
-            "meeting.emp_brief", "_create_charged_meeting",
+            "meeting.emp_brief", "_need_module", "_meeting_member_view",
+            "_create_charged_meeting",
         },
         ("main.py", "job_text_video"): {
             "_job_or_404", "build_delivery", "_create_charged_tv_job",
