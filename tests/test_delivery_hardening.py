@@ -450,11 +450,49 @@ class SubscriptionIdempotencyTests(unittest.TestCase):
         after_first = self._balance()
         self.assertGreater(after_first, 0)
 
-        with self.assertRaises(ValueError):
-            billing.subscribe(2, plan, period, op_key="order-1")
+        replay = billing.subscribe(2, plan, period, op_key="order-1")
 
         self.assertEqual(after_first, self._balance(), "重复提交二次发点")
-        self.assertEqual("order-1", first["op_key"])
+        self.assertEqual(first, replay, "网络重放应返回第一次成交的原始回执")
+        operation = self.db.one(
+            "SELECT status FROM billing_operation WHERE op_key='order-1'"
+        )
+        self.assertEqual("succeeded", operation["status"])
+
+        # 重放取第一次持久化回执，不受后来调价影响。
+        with patch.dict(billing.PLANS[0], {"points": 999}):
+            after_price_change = billing.subscribe(
+                2, plan, period, op_key="order-1"
+            )
+        self.assertEqual(first, after_price_change)
+        self.assertEqual(after_first, self._balance())
+
+    def test_subscription_requires_caller_owned_idempotency_key(self):
+        from app import billing
+
+        plan, period = self._plan()
+        with self.assertRaisesRegex(ValueError, "开通单号"):
+            billing.subscribe(2, plan, period)
+        self.assertEqual(0, self._balance())
+        self.assertEqual(
+            0,
+            self.db.one("SELECT COUNT(*) n FROM billing_operation")["n"],
+        )
+
+    def test_subscription_order_id_cannot_be_reused_for_another_plan(self):
+        from app import billing
+
+        plan, period = self._plan()
+        billing.subscribe(2, plan, period, op_key="order-1")
+        balance = self._balance()
+        with self.assertRaisesRegex(ValueError, "其他订单"):
+            billing.subscribe(
+                2,
+                billing.PLANS[1]["key"],
+                period,
+                op_key="order-1",
+            )
+        self.assertEqual(balance, self._balance())
 
     def test_distinct_orders_still_stack(self):
         from app import billing

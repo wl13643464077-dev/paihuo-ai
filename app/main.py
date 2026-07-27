@@ -281,7 +281,24 @@ def ops_metrics():
 @app.on_event("startup")
 async def _startup():
     db.conn()
-    secureconfig.migrate_legacy_secrets()
+    secret_migration = secureconfig.migrate_legacy_secrets()
+    if isinstance(secret_migration, dict):
+        # 只记录聚合计数，绝不把 key、租户、密文或原始凭据写进 journal。
+        log.info(
+            "secure configuration migration settings_encrypted=%d "
+            "settings_verified=%d field_rows_scanned=%d field_rows_updated=%d "
+            "fields_encrypted=%d fields_verified=%d field_rows_failed=%d "
+            "field_migration_complete=%s field_migration_skipped=%s",
+            int(secret_migration.get("encrypted") or 0),
+            int(secret_migration.get("verified") or 0),
+            int(secret_migration.get("field_rows_scanned") or 0),
+            int(secret_migration.get("field_rows_updated") or 0),
+            int(secret_migration.get("fields_encrypted") or 0),
+            int(secret_migration.get("fields_verified") or 0),
+            int(secret_migration.get("field_rows_failed") or 0),
+            bool(secret_migration.get("field_migration_complete")),
+            bool(secret_migration.get("field_migration_skipped")),
+        )
     auth.bootstrap()
     # 组件量规:读取时惰性求值,记录侧零开销。
     obs.register_gauge("engine_queue_depth", lambda: engine.queue.qsize())
@@ -1152,9 +1169,15 @@ def set_support_contact(body: dict):
 def tenant_subscribe(tid: int, body: dict):
     _need_root()
     try:
-        # 前端可传 order_id 做防重:同一单号重复提交只成交一次,不会二次发点。
-        return billing.subscribe(tid, body.get("plan"), body.get("period"),
-                                 op_key=(body.get("order_id") or "").strip() or None)
+        # order_id 是当前协议；op_key 仅为已接入早期预览版的客户端保留。
+        # 两者都缺失时 billing.subscribe 会明确拒绝，绝不临时造随机键伪装幂等。
+        order_id = body.get("order_id") or body.get("op_key")
+        return billing.subscribe(
+            tid,
+            body.get("plan"),
+            body.get("period"),
+            op_key=str(order_id or "").strip(),
+        )
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -3706,7 +3729,8 @@ def _purge_local_files(kind: str, rid: int) -> tuple[int, int]:
 
     绝不接受任何客户端路径:job 的产物固定在 data/assets/job{id}/,
     数字人成片固定在 data/assets/avatar/avatar_{id}.mp4。
-    返回 (成功删除的文件数, 删除失败的文件数),失败不阻塞数据库硬删。
+    返回 (成功删除的文件数, 删除失败的文件数)。调用方必须在失败数为 0
+    之后才能硬删数据库锚点。
     """
     removed = failed = 0
     if kind == "job":
@@ -3725,12 +3749,53 @@ def _purge_local_files(kind: str, rid: int) -> tuple[int, int]:
     elif kind == "avatar":
         clip = os.path.join(
             assetfiles.ASSET_ROOT, "avatar", f"avatar_{rid}.mp4")
-        if os.path.isfile(clip):
+        if os.path.islink(clip):
+            # 软链接目标并未被销毁，不能谎报彻底删除。
+            failed += 1
+        elif os.path.isfile(clip):
             try:
                 os.remove(clip)
                 removed += 1
             except OSError:
                 failed += 1
+    return removed, failed
+
+
+def _purge_tv_files(file_urls: list[str], tid: int, job_id: int) -> tuple[int, int]:
+    """销毁工单关联成片；只接受数据库可证明属于该租户与工单的本地路径。"""
+    removed = failed = 0
+    root = os.path.realpath(assetfiles.ASSET_ROOT)
+    for file_url in file_urls:
+        try:
+            canonical = assetfiles.canonical_file_url(file_url)
+            if (
+                assetfiles.file_owner_tid(canonical) != int(tid)
+                or assetfiles.file_job_id(canonical) != int(job_id)
+            ):
+                raise assetfiles.AssetAccessError("asset ownership mismatch")
+            lexical = os.path.abspath(
+                os.path.join(root, canonical.removeprefix("/files/"))
+            )
+            resolved = os.path.realpath(lexical)
+            if (
+                os.path.commonpath((root, resolved)) != root
+                or lexical != resolved
+            ):
+                # 不跟随软链接删除其目标，也不把软链接本身当成已销毁交付物。
+                raise assetfiles.AssetAccessError("asset path is unsafe")
+        except (assetfiles.AssetAccessError, TypeError, ValueError):
+            failed += 1
+            continue
+        if not os.path.lexists(lexical):
+            continue
+        if not os.path.isfile(lexical):
+            failed += 1
+            continue
+        try:
+            os.remove(lexical)
+            removed += 1
+        except OSError:
+            failed += 1
     return removed, failed
 
 
@@ -3763,14 +3828,40 @@ def trash_purge(kind: str, rid: int):
             " AND status NOT IN (%s)" % ",".join("?" * len(active))
         )
         args.extend(active)
-    # 工单的成片(tv_job)也是交付物:先记下文件位置,行与文件一并销毁,
-    # 否则「连同交付文件一并销毁」的承诺打折(对抗性审查发现)。
-    tv_files = []
-    if kind == "job":
-        tv_files = [r.get("video_file") for r in db.q(
-            "SELECT video_file FROM tv_job WHERE job_id=? AND tenant_id=? "
-            "AND video_file IS NOT NULL", (rid, TEN()))]
+    files_removed = files_failed = 0
     with db.atomic() as connection:
+        # BEGIN IMMEDIATE 锁住软删记录与 tv_job 关系，避免文件列表读取后又并发插入
+        # 新成片，最终出现“文件未删、数据库锚点已丢”的竞态。
+        current = connection.execute(
+            f"SELECT * FROM {table} WHERE id=? AND tenant_id=? "
+            "AND deleted_at IS NOT NULL",
+            (rid, TEN()),
+        ).fetchone()
+        if not current:
+            raise HTTPException(409, "记录状态刚刚发生变化，请刷新后再删除")
+        if active and (current["status"] or "") in active:
+            raise HTTPException(409, "该记录仍在进行中，请先等它收口再彻底删除")
+        tv_files = []
+        if kind == "job":
+            tv_files = [
+                item["video_file"]
+                for item in connection.execute(
+                    "SELECT video_file FROM tv_job "
+                    "WHERE job_id=? AND tenant_id=? AND video_file IS NOT NULL",
+                    (rid, TEN()),
+                ).fetchall()
+            ]
+        # 文件系统无法参与 SQLite 回滚，所以必须先销毁文件、成功后再删数据库。
+        # 失败会退出事务并保留原软删行；部分已删文件在重试时按“已销毁”处理。
+        files_removed, files_failed = _purge_local_files(kind, rid)
+        tv_removed, tv_failed = _purge_tv_files(tv_files, TEN(), rid)
+        files_removed += tv_removed
+        files_failed += tv_failed
+        if files_failed:
+            raise HTTPException(
+                409,
+                f"仍有 {files_failed} 个交付文件未能销毁，记录已保留，请修复存储权限后重试",
+            )
         changed = connection.execute(
             f"DELETE FROM {table} WHERE id=? AND tenant_id=? "
             f"AND deleted_at IS NOT NULL{guard}",
@@ -3785,14 +3876,6 @@ def trash_purge(kind: str, rid: int):
             connection.execute(
                 "DELETE FROM tv_job WHERE job_id=? AND tenant_id=?",
                 (rid, TEN()))
-    files_removed, files_failed = _purge_local_files(kind, rid)
-    for clip_url in tv_files:
-        try:
-            clip = assetfiles.resolve_tenant_asset(clip_url, TEN())
-            os.remove(clip)
-            files_removed += 1
-        except (assetfiles.AssetAccessError, OSError):
-            files_failed += 1
     return {
         "ok": True,
         "purged": True,

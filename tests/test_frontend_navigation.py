@@ -263,8 +263,8 @@ class FrontendNavigationContractTests(unittest.TestCase):
         self.assertIn('listPath("/matrix/tasks","publish",MATRIX_FILTER)', self.app_js)
 
     def test_frontend_change_has_a_new_script_version(self):
-        self.assertIn("/static/app.js?v=42", self.index_html)
-        self.assertIn('release:"web-v38"', self.app_js)
+        self.assertIn("/static/app.js?v=43", self.index_html)
+        self.assertIn('release:"web-v39"', self.app_js)
 
     def test_dynamic_urls_and_inline_arguments_are_closed_at_the_sink(self):
         for helper in ("safeExternalUrl", "safeAssetUrl", "safeRouteUrl"):

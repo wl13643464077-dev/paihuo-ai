@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
+import time
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -40,6 +42,10 @@ SECRET_FIELD_DOMAINS = (
     "matrix_cookie",
 )
 _SECRET_FIELD_SET = frozenset(SECRET_FIELD_DOMAINS)
+_FIELD_MIGRATION_VERSION = 1
+_FIELD_MIGRATION_MARKER = (
+    f"secure_field_encryption_migration:v{_FIELD_MIGRATION_VERSION}"
+)
 
 
 class SecureConfigError(RuntimeError):
@@ -192,15 +198,178 @@ def get_secret(name: str, default: str = "") -> str:
     return stored
 
 
-def migrate_legacy_secrets() -> dict[str, int]:
+def _field_migration_marker(value) -> dict:
+    try:
+        marker = json.loads(str(value or ""))
+    except (TypeError, ValueError):
+        return {}
+    return marker if isinstance(marker, dict) else {}
+
+
+def _migrate_json_secret_fields(connection, cipher: Fernet) -> dict:
+    """Encrypt historical credentials embedded in tenant JSON settings.
+
+    The completion marker contains aggregate counters only.  It is invalidated
+    automatically when a matching setting has a newer ``updated_at`` (for
+    example after a rollback briefly ran older code), so plaintext cannot hide
+    permanently behind a stale one-time marker.
+    """
+    rows = connection.execute(
+        "SELECT key,value,COALESCE(updated_at,0) AS updated_at "
+        "FROM app_setting "
+        "WHERE key GLOB 'wechat_mp:*' OR key GLOB 'matrix_accounts:*' "
+        "ORDER BY key"
+    ).fetchall()
+    latest_source_update = max(
+        (float(row["updated_at"] or 0) for row in rows),
+        default=0.0,
+    )
+    marker_row = connection.execute(
+        "SELECT value FROM app_setting WHERE key=?",
+        (_FIELD_MIGRATION_MARKER,),
+    ).fetchone()
+    marker = _field_migration_marker(marker_row["value"] if marker_row else None)
+    if (
+        marker.get("version") == _FIELD_MIGRATION_VERSION
+        and marker.get("complete") is True
+        and float(marker.get("covered_updated_at") or 0) >= latest_source_update
+    ):
+        return {
+            "field_rows_scanned": 0,
+            "field_rows_updated": 0,
+            "fields_encrypted": 0,
+            "fields_verified": 0,
+            "field_rows_failed": 0,
+            "field_migration_complete": True,
+            "field_migration_skipped": True,
+        }
+
+    rows_updated = fields_encrypted = fields_verified = rows_failed = 0
+    migrated_at = time.time()
+    for row in rows:
+        key = str(row["key"])
+        stored = str(row["value"] or "")
+        try:
+            payload = json.loads(stored)
+            row_encrypted = row_verified = 0
+            changed = False
+            if key.startswith("wechat_mp:"):
+                if not isinstance(payload, dict):
+                    raise ValueError("invalid wechat configuration shape")
+                value = payload.get("secret")
+                if value:
+                    text = str(value)
+                    if len(text) > MAX_SECRET_CHARS:
+                        raise ValueError("legacy secret field is too long")
+                    if is_encrypted(text):
+                        _decrypt("wechat_mp_secret", text, cipher)
+                        row_verified += 1
+                    else:
+                        payload["secret"] = _encrypt(
+                            "wechat_mp_secret", text, cipher
+                        )
+                        row_encrypted += 1
+                        changed = True
+            elif key.startswith("matrix_accounts:"):
+                if not isinstance(payload, list) or any(
+                    not isinstance(account, dict) for account in payload
+                ):
+                    raise ValueError("invalid matrix account configuration shape")
+                migrated_accounts = []
+                for account in payload:
+                    migrated = dict(account)
+                    value = migrated.get("cookie")
+                    if value:
+                        text = str(value)
+                        if len(text) > MAX_SECRET_CHARS:
+                            raise ValueError("legacy cookie field is too long")
+                        if is_encrypted(text):
+                            _decrypt("matrix_cookie", text, cipher)
+                            row_verified += 1
+                        else:
+                            migrated["cookie"] = _encrypt(
+                                "matrix_cookie", text, cipher
+                            )
+                            row_encrypted += 1
+                            changed = True
+                    migrated_accounts.append(migrated)
+                payload = migrated_accounts
+            else:  # pragma: no cover - SQL prefix filter is the boundary.
+                continue
+        except (SecureConfigError, TypeError, ValueError):
+            # Preserve the complete original row.  In particular, never turn
+            # an undecryptable credential into an empty value or fresh token.
+            rows_failed += 1
+            continue
+
+        fields_encrypted += row_encrypted
+        fields_verified += row_verified
+        if changed:
+            connection.execute(
+                "UPDATE app_setting SET value=?,updated_at=? WHERE key=?",
+                (
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                    migrated_at,
+                    key,
+                ),
+            )
+            rows_updated += 1
+
+    complete = rows_failed == 0
+    covered_updated_at = migrated_at if rows_updated else latest_source_update
+    marker_value = json.dumps(
+        {
+            "version": _FIELD_MIGRATION_VERSION,
+            "complete": complete,
+            "rows_scanned": len(rows),
+            "rows_updated": rows_updated,
+            "fields_encrypted": fields_encrypted,
+            "fields_verified": fields_verified,
+            "rows_failed": rows_failed,
+            "covered_updated_at": covered_updated_at,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    connection.execute(
+        "INSERT INTO app_setting(key,value,updated_at) VALUES(?,?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
+        "updated_at=excluded.updated_at",
+        (_FIELD_MIGRATION_MARKER, marker_value, migrated_at),
+    )
+    return {
+        "field_rows_scanned": len(rows),
+        "field_rows_updated": rows_updated,
+        "fields_encrypted": fields_encrypted,
+        "fields_verified": fields_verified,
+        "field_rows_failed": rows_failed,
+        "field_migration_complete": complete,
+        "field_migration_skipped": False,
+    }
+
+
+def migrate_legacy_secrets() -> dict[str, int | bool]:
     """Atomically encrypt all legacy plaintext supplier credentials.
 
-    Existing encrypted values are authenticated as part of startup.  One corrupt
-    value aborts the transaction and therefore aborts the candidate service.
+    Existing standalone encrypted settings are authenticated and corruption
+    aborts the transaction.  Embedded JSON fields retain an undecryptable row
+    unchanged, report only aggregate failures, and leave the completion marker
+    incomplete so the next startup retries safely.
     """
     cipher = _configured_fernet()
     if cipher is None:
-        return {"encrypted": 0, "verified": 0}
+        return {
+            "encrypted": 0,
+            "verified": 0,
+            "field_rows_scanned": 0,
+            "field_rows_updated": 0,
+            "fields_encrypted": 0,
+            "fields_verified": 0,
+            "field_rows_failed": 0,
+            "field_migration_complete": False,
+            "field_migration_skipped": False,
+        }
     encrypted = 0
     verified = 0
     marks = ",".join("?" for _ in SECRET_SETTING_KEYS)
@@ -223,4 +392,5 @@ def migrate_legacy_secrets() -> dict[str, int]:
                 raise SecureConfigError("legacy configuration value is too long")
             db.set_setting(name, _encrypt(name, stored, cipher))
             encrypted += 1
-    return {"encrypted": encrypted, "verified": verified}
+        field_report = _migrate_json_secret_fields(connection, cipher)
+    return {"encrypted": encrypted, "verified": verified, **field_report}

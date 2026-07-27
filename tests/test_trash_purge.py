@@ -147,6 +147,26 @@ class TrashPurgeCase(unittest.TestCase):
         self.assertIsNone(
             db.one("SELECT id FROM avatar_job WHERE id=?", (avatar_id,)))
 
+    def test_avatar_symlink_is_not_reported_as_destroyed(self):
+        avatar_id = self._deleted_avatar()
+        clip_dir = os.path.join(self.asset_root, "avatar")
+        os.makedirs(clip_dir, exist_ok=True)
+        target = os.path.join(self.tmp.name, "sensitive.mp4")
+        with open(target, "wb") as fh:
+            fh.write(b"mp4")
+        clip = os.path.join(clip_dir, f"avatar_{avatar_id}.mp4")
+        os.symlink(target, clip)
+
+        with self.assertRaises(HTTPException) as ctx:
+            main.trash_purge("avatar", avatar_id)
+
+        self.assertEqual(409, ctx.exception.status_code)
+        self.assertTrue(os.path.isfile(target))
+        self.assertTrue(os.path.islink(clip))
+        self.assertIsNotNone(
+            db.one("SELECT id FROM avatar_job WHERE id=?", (avatar_id,))
+        )
+
     def test_purge_without_files_reports_zero_and_still_deletes(self):
         knowledge_id = db.insert(
             "knowledge",
@@ -215,7 +235,7 @@ class TrashPurgeCase(unittest.TestCase):
         self.assertEqual(409, ctx.exception.status_code)
         self.assertIsNotNone(db.one("SELECT id FROM job WHERE id=?", (stuck,)))
 
-    def test_file_removal_failure_does_not_block_db_purge(self):
+    def test_file_removal_failure_retains_db_anchor_and_is_retryable(self):
         job_id = self._deleted_job()
         job_dir = os.path.join(self.asset_root, f"job{job_id}")
         os.makedirs(job_dir, exist_ok=True)
@@ -224,11 +244,65 @@ class TrashPurgeCase(unittest.TestCase):
         with patch.object(
             main.shutil, "rmtree", side_effect=OSError("permission denied")
         ):
-            result = main.trash_purge("job", job_id)
+            with self.assertRaises(HTTPException) as ctx:
+                main.trash_purge("job", job_id)
+        self.assertEqual(409, ctx.exception.status_code)
+        self.assertIn("记录已保留", str(ctx.exception.detail))
+        self.assertIsNotNone(db.one("SELECT id FROM job WHERE id=?", (job_id,)))
+        self.assertTrue(os.path.isfile(os.path.join(job_dir, "final.md")))
+
+        result = main.trash_purge("job", job_id)
         self.assertTrue(result["purged"])
-        self.assertEqual(0, result["files_removed"])
-        self.assertEqual(1, result["files_failed"])
+        self.assertEqual(0, result["files_failed"])
         self.assertIsNone(db.one("SELECT id FROM job WHERE id=?", (job_id,)))
+
+    def test_linked_video_is_removed_before_job_database_anchor(self):
+        job_id = self._deleted_job()
+        tv_id = db.insert(
+            "tv_job",
+            {
+                "tenant_id": 2,
+                "job_id": job_id,
+                "params_json": "{}",
+                "status": "done",
+                "billing_status": "succeeded",
+            },
+        )
+        clip_dir = os.path.join(self.asset_root, "tv")
+        os.makedirs(clip_dir, exist_ok=True)
+        clip = os.path.join(clip_dir, f"tv_{tv_id}.mp4")
+        with open(clip, "wb") as fh:
+            fh.write(b"video")
+        db.update("tv_job", tv_id, {"video_file": f"/files/tv/tv_{tv_id}.mp4"})
+
+        result = main.trash_purge("job", job_id)
+
+        self.assertTrue(result["purged"])
+        self.assertEqual(1, result["files_removed"])
+        self.assertFalse(os.path.exists(clip))
+        self.assertIsNone(db.one("SELECT id FROM job WHERE id=?", (job_id,)))
+        self.assertIsNone(db.one("SELECT id FROM tv_job WHERE id=?", (tv_id,)))
+
+    def test_unsafe_linked_video_path_retains_job_and_video_rows(self):
+        job_id = self._deleted_job()
+        tv_id = db.insert(
+            "tv_job",
+            {
+                "tenant_id": 2,
+                "job_id": job_id,
+                "params_json": "{}",
+                "status": "done",
+                "billing_status": "succeeded",
+                "video_file": "/files/tv/../foreign.mp4",
+            },
+        )
+
+        with self.assertRaises(HTTPException) as ctx:
+            main.trash_purge("job", job_id)
+
+        self.assertEqual(409, ctx.exception.status_code)
+        self.assertIsNotNone(db.one("SELECT id FROM job WHERE id=?", (job_id,)))
+        self.assertIsNotNone(db.one("SELECT id FROM tv_job WHERE id=?", (tv_id,)))
 
 
 if __name__ == "__main__":

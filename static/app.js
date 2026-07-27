@@ -184,7 +184,7 @@ function reportClientError(kind, err, extra={}){
     fingerprint,
     path:location.pathname,
     hash:String(location.hash||"").slice(0,160),
-    release:"web-v38",
+    release:"web-v39",
     line:Number(extra.line)||0,
   });
   try{
@@ -1320,8 +1320,8 @@ async function trashPurge(kind,id,btn){
     title:"最后确认",confirmText:"永久删除",danger:true})) return;
   btn.disabled=true; btn.innerHTML='<span class="spin"></span> 删除中…';
   try{
-    const r=await api(`/trash/${encodeURIComponent(kind)}/${id}/purge`,{method:"POST"});
-    toast(r.files_failed?`已彻底删除，但有 ${r.files_failed} 个交付文件清理失败`:"已彻底删除");
+    await api(`/trash/${encodeURIComponent(kind)}/${id}/purge`,{method:"POST"});
+    toast("已彻底删除");
     SHELL_DIRTY=true;
     await trashView();
   }catch(e){
@@ -4051,6 +4051,52 @@ async function tmGrant(tid){
   try{ const r = await api(`/team/tenants/${tid}/grant`,{method:"POST",body:{points:+pts,reason:"平台充值"}});
     toast(`已充值,余额 ${r.balance} 点`); render(); }catch(e){ toast(e.message); }
 }
+const SUBSCRIPTION_ORDER_IDS=new Map();
+function subscriptionOrderStorageKey(tid,plan,period){
+  return `paihuo:subscribe:${Number(tid)}:${String(plan)}:${String(period)}`;
+}
+function newSubscriptionOrderId(tid){
+  const cryptoApi=globalThis.crypto;
+  if(!cryptoApi?.getRandomValues) throw new Error("当前浏览器无法生成安全订单号，请升级浏览器后重试");
+  const token=typeof cryptoApi.randomUUID==="function"
+    ?cryptoApi.randomUUID()
+    :Array.from(cryptoApi.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,"0")).join("");
+  return `subscribe:${Number(tid)}:${token}`;
+}
+function subscriptionOrderId(tid,plan,period){
+  const key=subscriptionOrderStorageKey(tid,plan,period);
+  if(SUBSCRIPTION_ORDER_IDS.has(key)) return SUBSCRIPTION_ORDER_IDS.get(key);
+  try{
+    const cached=JSON.parse(localStorage.getItem(key)||"null");
+    if(cached?.id&&Number(cached.created_at)>Date.now()-7*86400000){
+      SUBSCRIPTION_ORDER_IDS.set(key,String(cached.id));
+      return String(cached.id);
+    }
+  }catch(_){}
+  const id=newSubscriptionOrderId(tid);
+  SUBSCRIPTION_ORDER_IDS.set(key,id);
+  try{ localStorage.setItem(key,JSON.stringify({id,created_at:Date.now()})); }catch(_){}
+  return id;
+}
+function clearSubscriptionOrderId(tid,plan,period,orderId){
+  const key=subscriptionOrderStorageKey(tid,plan,period);
+  if(SUBSCRIPTION_ORDER_IDS.get(key)===orderId) SUBSCRIPTION_ORDER_IDS.delete(key);
+  try{
+    const cached=JSON.parse(localStorage.getItem(key)||"null");
+    if(cached?.id===orderId) localStorage.removeItem(key);
+  }catch(_){}
+}
+async function submitSubscription(tid,plan,period,orderId){
+  const options={method:"POST",body:{plan,period,order_id:orderId}};
+  for(let attempt=0;attempt<2;attempt++){
+    try{ return await api(`/team/tenants/${tid}/subscribe`,options); }
+    catch(e){
+      // 超时、断网或网关 5xx 时，原请求可能已成交；用同一订单号重放一次即可
+      // 安全取得原回执，绝不能生成第二个订单号。
+      if(attempt>0||(e?.status&&e.status<500)) throw e;
+    }
+  }
+}
 async function tmSub(tid){
   const plan = await uiPrompt({
     title:"选择套餐",label:"套餐",type:"select",value:"startup",
@@ -4071,8 +4117,12 @@ async function tmSub(tid){
     ],confirmText:"确认开通"
   });
   if(period===null) return;
-  try{ const r = await api(`/team/tenants/${tid}/subscribe`,{method:"POST",body:{plan,period}});
-    toast(`套餐已开通:${r.points}点,应收¥${r.price}`); render(); }catch(e){ toast(e.message); }
+  try{
+    const orderId=subscriptionOrderId(tid,plan,period);
+    const r=await submitSubscription(tid,plan,period,orderId);
+    clearSubscriptionOrderId(tid,plan,period,orderId);
+    toast(`套餐已开通:${r.points}点,应收¥${r.price}`); render();
+  }catch(e){ toast(e.message); }
 }
 async function tmTenantToggle(tid,en){
   try{ await api(`/team/tenants/${tid}`,{method:"PUT",body:{enabled:!!en}}); render(); }catch(e){ toast(e.message); }

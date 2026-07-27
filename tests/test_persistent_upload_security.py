@@ -1011,7 +1011,7 @@ class PersistentUploadSecurityCase(unittest.TestCase):
             ), mock.patch.object(
                 self.main.secureconfig,
                 "migrate_legacy_secrets",
-            ), mock.patch.object(
+            ) as migrate_secrets, mock.patch.object(
                 self.main.auth,
                 "bootstrap",
             ), mock.patch.object(
@@ -1021,6 +1021,7 @@ class PersistentUploadSecurityCase(unittest.TestCase):
             ) as recover:
                 asyncio.run(self.main._startup())
             recover.assert_called_once_with(raise_on_blocked=True)
+            migrate_secrets.assert_called_once_with()
 
             with mock.patch.object(
                 self.main.db,

@@ -438,8 +438,9 @@ def grant(tid: int, points: float, reason: str):
 def subscribe(tid: int, plan_key: str, period_key: str, op_key: str = None):
     """开通/续费套餐:改套餐与发点必须同生共死,且同一笔订单只能发一次点。
 
-    ``op_key`` 由调用方传入(如订单号)时才有防重放能力:重复提交、前端重试或网络
-    重放都只会成交一次。省略时退化为一次性键——仍然保证原子性,但挡不住重复点击。
+    ``op_key`` 是调用方生成并在网络重试时复用的订单号。缺少订单号必须拒绝，
+    不能在服务端偷偷补随机值后宣称幂等。相同订单与相同套餐重复请求会重放原始
+    回执；相同订单号若被拿去购买不同套餐则拒绝。
     """
     plan = next((p for p in PLANS if p["key"] == plan_key), None)
     period = next((p for p in PERIODS if p["key"] == period_key), None)
@@ -448,22 +449,83 @@ def subscribe(tid: int, plan_key: str, period_key: str, op_key: str = None):
     pts = plan["points"] * period["months"]
     price = round(plan["sale"] * period["months"] * period["discount"])
     expires = time.time() + period["months"] * 31 * 86400
-    key = (op_key or uuid.uuid4().hex).strip()
+    key = str(op_key or "").strip()
     if not key or len(key) > 160:
-        raise ValueError("无效的开通单号")
+        raise ValueError("缺少有效的开通单号，请刷新页面后重试")
     now = time.time()
     label = f"开通{plan['name']}({period['label']},实收¥{price}),含 {pts} 点"
+    receipt = {
+        "v": 1,
+        "plan": plan_key,
+        "period": period_key,
+        "points": pts,
+        "price": price,
+        "expires": expires,
+    }
+    receipt_note = json.dumps(receipt, ensure_ascii=True, separators=(",", ":"))
     # 套餐变更与点数入账放进同一个事务:中途崩溃不会留下"有套餐没点数"或反之。
     with db.atomic() as c:
         cur = c.execute(
             "INSERT OR IGNORE INTO billing_operation"
             "(op_key,tenant_id,action,units,points,note,status,created_at,updated_at) "
             "VALUES(?,?,?,?,?,?,'charged',?,?)",
-            (key, tid, "subscribe", period["months"], pts, label[:200], now, now),
+            (
+                key,
+                tid,
+                "subscribe",
+                period["months"],
+                pts,
+                receipt_note,
+                now,
+                now,
+            ),
         )
         if cur.rowcount != 1:
-            raise ValueError("该开通单号已处理过,请勿重复提交")
-        db.update("tenants", tid, {"plan": f"{plan['name']}·{period['label']}",
-                                   "plan_expires": expires})
+            existing = c.execute(
+                "SELECT tenant_id,action,units,points,note,status "
+                "FROM billing_operation WHERE op_key=?",
+                (key,),
+            ).fetchone()
+            try:
+                old_receipt = json.loads(str(existing["note"] or ""))
+            except (AttributeError, TypeError, ValueError):
+                old_receipt = {}
+            try:
+                same_order = bool(
+                    existing
+                    and int(existing["tenant_id"]) == int(tid)
+                    and existing["action"] == "subscribe"
+                    and existing["status"] == "succeeded"
+                    and isinstance(old_receipt, dict)
+                    and old_receipt.get("v") == 1
+                    and old_receipt.get("plan") == plan_key
+                    and old_receipt.get("period") == period_key
+                    and float(old_receipt["points"]) == float(existing["points"])
+                    and float(old_receipt["price"]) >= 0
+                    and float(old_receipt["expires"]) > 0
+                )
+            except (KeyError, TypeError, ValueError):
+                same_order = False
+            if not same_order:
+                raise ValueError("开通单号已被其他订单使用，请刷新页面后重试")
+            return {
+                "points": old_receipt["points"],
+                "price": old_receipt["price"],
+                "expires": old_receipt["expires"],
+                "op_key": key,
+            }
+        changed = c.execute(
+            "UPDATE tenants SET plan=?,plan_expires=?,updated_at=? WHERE id=?",
+            (f"{plan['name']}·{period['label']}", expires, now, tid),
+        ).rowcount
+        if changed != 1:
+            raise ValueError("企业账号不存在或已被删除")
         grant(tid, pts, label)
+        completed = c.execute(
+            "UPDATE billing_operation SET status='succeeded',updated_at=? "
+            "WHERE op_key=? AND status='charged'",
+            (time.time(), key),
+        ).rowcount
+        if completed != 1:
+            raise RuntimeError("开通订单状态冲突")
     return {"points": pts, "price": price, "expires": expires, "op_key": key}
