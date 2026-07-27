@@ -751,6 +751,52 @@ def _start_billed_operation(action: str, note: str = "") -> str:
         raise HTTPException(402, str(exc)) from exc
 
 
+async def _run_db_safely(fn, *args, **kwargs):
+    """Linearize an already-submitted DB mutation through request cancellation.
+
+    Once a billing/status commit reaches the executor, its caller must observe
+    the real result.  Otherwise the worker can commit after cancellation while
+    the handler concurrently refunds or deletes the committed artifact.
+    """
+    operation = asyncio.create_task(db.arun(fn, *args, **kwargs))
+    try:
+        return await asyncio.shield(operation)
+    except asyncio.CancelledError:
+        return await operation
+
+
+async def _start_billing_operation_safely(
+    fn,
+    *args,
+    cancel_reason: str,
+    **kwargs,
+) -> str:
+    """Start durable billing off-loop without leaving a cancelled charge."""
+    start_task = asyncio.create_task(db.arun(fn, *args, **kwargs))
+    try:
+        return await asyncio.shield(start_task)
+    except asyncio.CancelledError:
+        op_key = None
+        try:
+            op_key = await start_task
+        except BaseException:
+            pass
+        if op_key:
+            try:
+                await _run_db_safely(
+                    billing.fail_operation,
+                    op_key,
+                    cancel_reason,
+                )
+            except Exception as exc:
+                log.error(
+                    "cancelled billing start refund failed op=%s error_type=%s",
+                    op_key,
+                    type(exc).__name__,
+                )
+        raise
+
+
 @app.get("/api/billing")
 def billing_get():
     t = db.one("SELECT * FROM tenants WHERE id=?", (TEN(),))
@@ -4780,6 +4826,77 @@ def _avatar_asset_name(raw, field: str, kinds: set[str], required: bool = True):
     return name
 
 
+def _prepare_avatar_clone_sample(raw_name, tid: int) -> str:
+    """Validate and privately copy a voice sample under the asset registry lock."""
+    sample_descriptor = -1
+    sample_path = ""
+    with avatar.asset_library_lock(tid):
+        name = _avatar_asset_name(raw_name, "audio_name", {"voice"})
+        source_path = avatar.asset_path(name, {"voice"}, tid)
+        suffix = os.path.splitext(name)[1].lower()
+        sample_descriptor, sample_path = tempfile.mkstemp(
+            prefix=".avatar-clone-",
+            suffix=suffix,
+        )
+        try:
+            os.fchmod(sample_descriptor, 0o600)
+            with os.fdopen(sample_descriptor, "wb") as target:
+                sample_descriptor = -1
+                with open(source_path, "rb") as source:
+                    shutil.copyfileobj(source, target, length=1 << 20)
+                target.flush()
+                os.fsync(target.fileno())
+        except BaseException:
+            if sample_descriptor >= 0:
+                os.close(sample_descriptor)
+            try:
+                os.remove(sample_path)
+            except OSError:
+                pass
+            raise
+    return sample_path
+
+
+def _cleanup_avatar_clone_sample(sample_path: str, tid: int) -> None:
+    try:
+        os.remove(sample_path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        log.warning("voice clone work sample cleanup failed tenant=%s", tid)
+
+
+async def _prepare_avatar_clone_sample_safely(
+    raw_name,
+    tid: int,
+) -> str:
+    """Copy the clone sample without leaking it when the request is cancelled."""
+    copy_task = asyncio.create_task(
+        asyncio.to_thread(_prepare_avatar_clone_sample, raw_name, tid)
+    )
+    try:
+        return await asyncio.shield(copy_task)
+    except asyncio.CancelledError:
+        sample_path = ""
+        try:
+            sample_path = await copy_task
+        except BaseException:
+            pass
+        if sample_path:
+            cleanup_task = asyncio.create_task(
+                asyncio.to_thread(
+                    _cleanup_avatar_clone_sample,
+                    sample_path,
+                    tid,
+                )
+            )
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                await cleanup_task
+        raise
+
+
 @app.get("/api/avatar/meta")
 def avatar_meta():
     _need_module("avatar")
@@ -4874,7 +4991,7 @@ async def _avatar_script_from_link_work(body: dict, url: str, dur: int) -> dict:
 @app.post("/api/avatar/script-from-link")
 async def avatar_script_from_link(body: dict):
     """爆款链接 → 提取文案 → 改写成口播稿（联网，走云雾能力网关）。"""
-    _need_module("avatar")
+    await db.arun(_need_module, "avatar")
     raw_value = body.get("url", "")
     style_value = body.get("style", "")
     if not isinstance(raw_value, str) or len(raw_value) > 4000:
@@ -4894,7 +5011,10 @@ async def avatar_script_from_link(body: dict):
         raise HTTPException(400, "口播时长无效")
     if dur < 5 or dur > 120:
         raise HTTPException(400, "口播时长需在 5—120 秒之间")
-    profile_id = _profile_id_for_tenant(body.get("profile_id"))
+    profile_id = await db.arun(
+        _profile_id_for_tenant,
+        body.get("profile_id"),
+    )
     safe_body = {"style": style, "profile_id": profile_id}
     from . import linkgrab
     try:  # 防 SSRF:先卡掉内网/本机地址,再扣费(别为一次被拦的请求收钱)
@@ -4902,15 +5022,24 @@ async def avatar_script_from_link(body: dict):
     except ValueError as e:
         raise HTTPException(400, str(e))
     try:
-        billing_op = billing.start_operation(
-            "link_extract", tid=TEN(), note="爆款链接提取")
+        billing_op = await _start_billing_operation_safely(
+            billing.start_operation,
+            "link_extract",
+            tid=TEN(),
+            note="爆款链接提取",
+            cancel_reason="爆款链接提取请求中断自动退回",
+        )
     except billing.InsufficientPoints as e:
         raise HTTPException(402, str(e))
     try:
         result = await _avatar_script_from_link_work(safe_body, url, dur)
     except BaseException as exc:
         try:
-            billing.fail_operation(billing_op, "爆款链接提取失败自动退回")
+            await _run_db_safely(
+                billing.fail_operation,
+                billing_op,
+                "爆款链接提取失败自动退回",
+            )
         except Exception as refund_exc:
             logging.getLogger("billing").error(
                 "link extraction refund failed op=%s error_type=%s",
@@ -4918,7 +5047,7 @@ async def avatar_script_from_link(body: dict):
                 type(refund_exc).__name__,
             )
         raise
-    billing.complete_operation(billing_op)
+    await _run_db_safely(billing.complete_operation, billing_op)
     return result
 
 
@@ -4995,58 +5124,25 @@ def avatar_photo_delete(name: str):
 @app.post("/api/avatar/clone")
 async def avatar_clone(body: dict):
     """克隆声音:audio_name 为已上传(kind=voice)的样本文件名."""
-    _need_module("avatar")
+    await db.arun(_need_module, "avatar")
     tid = TEN()
-    # The external clone call must not depend on a public file that can be
-    # deleted after validation.  Copy a private work sample while holding the
-    # same registry lock used by upload/delete, then release the lock before
-    # making the slow supplier request.
-    sample_descriptor = -1
-    sample_path = ""
-    with avatar.asset_library_lock(tid):
-        name = _avatar_asset_name(
-            body.get("audio_name"), "audio_name", {"voice"}
-        )
-        source_path = avatar.asset_path(name, {"voice"}, tid)
-        suffix = os.path.splitext(name)[1].lower()
-        sample_descriptor, sample_path = tempfile.mkstemp(
-            prefix=".avatar-clone-",
-            suffix=suffix,
-        )
-        try:
-            os.fchmod(sample_descriptor, 0o600)
-            with os.fdopen(sample_descriptor, "wb") as target:
-                sample_descriptor = -1
-                with open(source_path, "rb") as source:
-                    while chunk := source.read(1 << 20):
-                        target.write(chunk)
-                target.flush()
-                os.fsync(target.fileno())
-        except BaseException:
-            if sample_descriptor >= 0:
-                os.close(sample_descriptor)
-                sample_descriptor = -1
-            try:
-                os.remove(sample_path)
-            except OSError:
-                pass
-            raise
-
-    def cleanup_sample():
-        try:
-            os.remove(sample_path)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            log.warning(
-                "voice clone work sample cleanup failed tenant=%s",
-                tid,
-            )
+    # Validation and the private copy share the asset lock, but the potentially
+    # large copy/fsync runs on the default I/O executor rather than the loop or
+    # the scarce DB executor.
+    sample_path = await _prepare_avatar_clone_sample_safely(
+        body.get("audio_name"),
+        tid,
+    )
 
     try:
-        op_key = _start_billed_operation("voice_clone", note="声音克隆")
+        op_key = await _start_billing_operation_safely(
+            _start_billed_operation,
+            "voice_clone",
+            note="声音克隆",
+            cancel_reason="声音克隆请求中断",
+        )
     except BaseException:
-        cleanup_sample()
+        await asyncio.to_thread(_cleanup_avatar_clone_sample, sample_path, tid)
         raise
     try:
         try:
@@ -5054,7 +5150,11 @@ async def avatar_clone(body: dict):
                 sample_path, body.get("label") or "我的声音", save=False
             )
         finally:
-            cleanup_sample()
+            await asyncio.to_thread(
+                _cleanup_avatar_clone_sample,
+                sample_path,
+                tid,
+            )
 
         def claim(connection):
             row = connection.execute(
@@ -5079,11 +5179,19 @@ async def avatar_clone(body: dict):
             )
             return True
 
-        if not billing.complete_operation_if_claimed(op_key, claim):
+        if not await _run_db_safely(
+            billing.complete_operation_if_claimed,
+            op_key,
+            claim,
+        ):
             raise RuntimeError("声音克隆本地结算状态冲突")
     except asyncio.CancelledError:
         try:
-            billing.fail_operation(op_key, "声音克隆请求中断")
+            await _run_db_safely(
+                billing.fail_operation,
+                op_key,
+                "声音克隆请求中断",
+            )
         except Exception as refund_exc:
             log.error(
                 "voice clone cancellation refund failed op=%s error_type=%s",
@@ -5093,7 +5201,11 @@ async def avatar_clone(body: dict):
         raise
     except Exception as exc:
         try:
-            settled = billing.fail_operation(op_key, "声音克隆失败自动退回")
+            settled = await _run_db_safely(
+                billing.fail_operation,
+                op_key,
+                "声音克隆失败自动退回",
+            )
         except Exception as settle_error:
             log.error(
                 "voice clone refund failed op=%s error_type=%s",
@@ -5527,14 +5639,33 @@ async def meeting_suggest(body: dict):
         raise HTTPException(400, "先输入议题")
     if len(q) > 2000:
         raise HTTPException(400, "议题太长了,请压缩到 2000 字以内")
-    roster = ([{"idx": s["idx"], "name": s["name"], "duty": s["duty"]}
-               for s in registry.STATIONS if employees.is_enabled(s["idx"])]
-              if auth.allowed("content") else [])
-    for d in departments.list_depts():
-        if not auth.allowed(d["key"]):
-            continue
-        roster += [{"idx": e["idx"], "name": f"{e.get('person','')}{e['name']}",
-                    "duty": e["duty"]} for e in d["employees"] if employees.is_enabled(e["idx"])]
+
+    def build_roster() -> list[dict]:
+        candidates = []
+        if auth.allowed("content"):
+            candidates.extend(
+                {"idx": s["idx"], "name": s["name"], "duty": s["duty"]}
+                for s in registry.STATIONS
+            )
+        for department in departments.list_depts():
+            if not auth.allowed(department["key"]):
+                continue
+            candidates.extend(
+                {
+                    "idx": employee["idx"],
+                    "name": f"{employee.get('person', '')}{employee['name']}",
+                    "duty": employee["duty"],
+                }
+                for employee in department["employees"]
+            )
+        configs = employees.get_configs(item["idx"] for item in candidates)
+        return [
+            item
+            for item in candidates
+            if configs.get(item["idx"], {"enabled": True})["enabled"]
+        ]
+
+    roster = await db.arun(build_roster)
     if len(roster) < 2:
         raise HTTPException(403, "当前账号可用的数字员工不足 2 位")
     from . import providers
@@ -5553,7 +5684,10 @@ async def meeting_suggest(body: dict):
     idxs = [i for i in (r["data"].get("idxs") or []) if i in valid][:meeting.MAX_MEMBERS]
     if len(idxs) < 2:
         raise HTTPException(500, "自动选人失败,请手动勾选")
-    return {"idxs": idxs, "members": [_meeting_member_view(i) for i in idxs]}
+    members = await db.arun(
+        lambda: [_meeting_member_view(i) for i in idxs]
+    )
+    return {"idxs": idxs, "members": members}
 
 
 @app.get("/api/meetings/{mid}/export.{fmt}")
@@ -6949,18 +7083,18 @@ def _wechat_delivery_or_404(delivery_id: int) -> dict:
 @app.post("/api/wechat-deliveries/{delivery_id}/reconcile")
 async def reconcile_wechat_delivery(delivery_id: int):
     """只读核对微信草稿箱；找到标记才收口，绝不盲目重发。"""
-    _need_module("content")
-    delivery = _wechat_delivery_or_404(delivery_id)
+    await db.arun(_need_module, "content")
+    delivery = await db.arun(_wechat_delivery_or_404, delivery_id)
     if delivery["status"] in ("done", "blocked"):
         return _wechat_delivery_result(delivery)
     if delivery["status"] == "submitted":
         try:
-            if not _finalize_wechat_delivery(delivery):
+            if not await _run_db_safely(_finalize_wechat_delivery, delivery):
                 raise RuntimeError("草稿台账结算状态冲突")
         except Exception as exc:
             raise HTTPException(503, "好消息:文章已经进入公众号草稿箱✅ 系统记录稍后自动补齐,请勿重复发送") from exc
         return _wechat_delivery_result(
-            _wechat_delivery_or_404(delivery_id)
+            await db.arun(_wechat_delivery_or_404, delivery_id)
         )
     if delivery["status"] != "submitting":
         raise HTTPException(409, "这篇已确认送达公众号草稿箱,不需要再处理")
@@ -6976,23 +7110,30 @@ async def reconcile_wechat_delivery(delivery_id: int):
             "尚未在最近草稿中找到这篇内容；请打开公众号草稿箱人工确认，"
             "确认确实没有后可使用“确认未送达”解锁",
         )
-    if not _mark_wechat_submitted(delivery_id, delivery["op_key"], media_id):
+    if not await _run_db_safely(
+        _mark_wechat_submitted,
+        delivery_id,
+        delivery["op_key"],
+        media_id,
+    ):
         raise HTTPException(409, "这篇的发送状态刚刚更新了(可能已送达或已退点),刷新页面看最新结果,别重复点发送")
-    delivery = _wechat_delivery_or_404(delivery_id)
+    delivery = await db.arun(_wechat_delivery_or_404, delivery_id)
     try:
-        if not _finalize_wechat_delivery(delivery):
+        if not await _run_db_safely(_finalize_wechat_delivery, delivery):
             raise RuntimeError("草稿台账结算状态冲突")
     except Exception as exc:
         raise HTTPException(503, "文章已确认在公众号草稿箱✅ 系统记录稍后自动补齐,请勿重复发送") from exc
-    return _wechat_delivery_result(_wechat_delivery_or_404(delivery_id))
+    return _wechat_delivery_result(
+        await db.arun(_wechat_delivery_or_404, delivery_id)
+    )
 
 
 @app.post("/api/wechat-deliveries/{delivery_id}/confirm-not-delivered")
 async def confirm_wechat_delivery_not_delivered(delivery_id: int, body: dict):
     """管理员人工确认微信无草稿后退款解锁；提交前再做一次只读核对。"""
-    _need_module("content")
+    await db.arun(_need_module, "content")
     _need_admin()
-    delivery = _wechat_delivery_or_404(delivery_id)
+    delivery = await db.arun(_wechat_delivery_or_404, delivery_id)
     if delivery["status"] in ("done", "blocked"):
         return _wechat_delivery_result(delivery)
     if (
@@ -7022,20 +7163,27 @@ async def confirm_wechat_delivery_not_delivered(delivery_id: int, body: dict):
             503, "系统无法完成最后一次草稿箱核对，未退款也未解锁"
         ) from exc
     if media_id:
-        if not _mark_wechat_submitted(
-            delivery_id, delivery["op_key"], media_id
+        if not await _run_db_safely(
+            _mark_wechat_submitted,
+            delivery_id,
+            delivery["op_key"],
+            media_id,
         ):
             raise HTTPException(409, "这篇的发送状态刚刚更新了(可能已送达或已退点),刷新页面看最新结果,别重复点发送")
-        delivery = _wechat_delivery_or_404(delivery_id)
+        delivery = await db.arun(_wechat_delivery_or_404, delivery_id)
         try:
-            if not _finalize_wechat_delivery(delivery):
+            if not await _run_db_safely(_finalize_wechat_delivery, delivery):
                 raise RuntimeError("草稿台账结算状态冲突")
         except Exception as exc:
             raise HTTPException(503, "已在公众号草稿箱里找到这篇文章✅ 系统记录稍后自动补齐,请勿重复发送") from exc
-        return _wechat_delivery_result(_wechat_delivery_or_404(delivery_id))
+        return _wechat_delivery_result(
+            await db.arun(_wechat_delivery_or_404, delivery_id)
+        )
     try:
-        settled = _fail_wechat_delivery(
-            delivery, "管理员人工核对公众号草稿箱后确认未送达"
+        settled = await _run_db_safely(
+            _fail_wechat_delivery,
+            delivery,
+            "管理员人工核对公众号草稿箱后确认未送达",
         )
     except Exception as exc:
         log.error(
@@ -7457,15 +7605,18 @@ def censor_scan_api(body: dict):
 @app.post("/api/censor/check")
 async def censor_check_api(body: dict):
     """深度审查(规则词库 + AI 对照平台规范)."""
-    _need_module("content")
+    await db.arun(_need_module, "content")
     tid = TEN()
     title = (body.get("title") or "").strip()[:120]
     text = (body.get("body") or "").strip()
     if not text:
         raise HTTPException(400, "先贴上要审查的正文")
     platform = body.get("platform") or "公众号"
-    op_key = _start_billed_operation(
-        "censor_check", note=f"{platform}·{title[:14]}"
+    op_key = await _start_billing_operation_safely(
+        _start_billed_operation,
+        "censor_check",
+        note=f"{platform}·{title[:14]}",
+        cancel_reason="审查请求中断",
     )
     try:
         report = await censor.check(
@@ -7484,11 +7635,19 @@ async def censor_check_api(body: dict):
             )
             return True
 
-        if not billing.complete_operation_if_claimed(op_key, claim):
+        if not await _run_db_safely(
+            billing.complete_operation_if_claimed,
+            op_key,
+            claim,
+        ):
             raise RuntimeError("审查结算状态冲突")
     except asyncio.CancelledError:
         try:
-            billing.fail_operation(op_key, "审查请求中断")
+            await _run_db_safely(
+                billing.fail_operation,
+                op_key,
+                "审查请求中断",
+            )
         except Exception as refund_exc:
             log.error(
                 "censor cancellation refund failed op=%s error_type=%s",
@@ -7500,7 +7659,11 @@ async def censor_check_api(body: dict):
         # AI 深审失败照旧退点,但免费的规则词库结果不能陪葬:
         # 老板至少带走这部分,并明确知道深审没跑完、钱退了。
         try:
-            settled = billing.fail_operation(op_key, "审查失败自动退回")
+            settled = await _run_db_safely(
+                billing.fail_operation,
+                op_key,
+                "审查失败自动退回",
+            )
         except Exception as settle_error:
             log.error(
                 "censor refund failed op=%s error_type=%s",
@@ -7522,7 +7685,11 @@ async def censor_check_api(body: dict):
         return fallback
     except Exception as exc:
         try:
-            settled = billing.fail_operation(op_key, "审查失败自动退回")
+            settled = await _run_db_safely(
+                billing.fail_operation,
+                op_key,
+                "审查失败自动退回",
+            )
         except Exception as settle_error:
             log.error(
                 "censor refund failed op=%s error_type=%s",
@@ -7541,14 +7708,19 @@ async def censor_check_api(body: dict):
 @app.post("/api/censor/retro")
 async def censor_retro_api(body: dict):
     """发后数据复盘:把平台数据丢给审查官."""
-    _need_module("content")
+    await db.arun(_need_module, "content")
     tid = TEN()
     data_text = (body.get("data_text") or "").strip()
     if not data_text:
         raise HTTPException(400, "先把发布后的数据贴进来(阅读/点赞/评论/涨粉…截图可先传文件识别)")
     platform = body.get("platform") or "公众号"
     title = (body.get("title") or "")[:120]
-    op_key = _start_billed_operation("censor_retro", note=platform)
+    op_key = await _start_billing_operation_safely(
+        _start_billed_operation,
+        "censor_retro",
+        note=platform,
+        cancel_reason="复盘请求中断",
+    )
     try:
         result = await censor.retro(
             tid,
@@ -7566,11 +7738,19 @@ async def censor_retro_api(body: dict):
             )
             return True
 
-        if not billing.complete_operation_if_claimed(op_key, claim):
+        if not await _run_db_safely(
+            billing.complete_operation_if_claimed,
+            op_key,
+            claim,
+        ):
             raise RuntimeError("复盘结算状态冲突")
     except asyncio.CancelledError:
         try:
-            billing.fail_operation(op_key, "复盘请求中断")
+            await _run_db_safely(
+                billing.fail_operation,
+                op_key,
+                "复盘请求中断",
+            )
         except Exception as refund_exc:
             log.error(
                 "censor retro cancellation refund failed op=%s error_type=%s",
@@ -7580,7 +7760,11 @@ async def censor_retro_api(body: dict):
         raise
     except Exception as exc:
         try:
-            settled = billing.fail_operation(op_key, "复盘失败自动退回")
+            settled = await _run_db_safely(
+                billing.fail_operation,
+                op_key,
+                "复盘失败自动退回",
+            )
         except Exception as settle_error:
             log.error(
                 "censor retro refund failed op=%s error_type=%s",
@@ -8983,63 +9167,132 @@ async def bench_run(body: dict = None):
     return await _tool_enqueue_async("bench", {}, note="手动")
 
 
+def _tool_image_base64(raw: bytes) -> str:
+    import base64
+    return base64.b64encode(raw).decode()
+
+
+def _store_tool_image(data: bytes, tid: int) -> tuple[str, str]:
+    """Durably store one generated image and remove partial writes on failure."""
+    import uuid
+    directory = os.path.join(ROOT, "data", "assets", "tools", str(tid))
+    os.makedirs(directory, exist_ok=True)
+    name = f"shot_{uuid.uuid4().hex[:10]}.png"
+    path = os.path.join(directory, name)
+    try:
+        with open(path, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise
+    return path, name
+
+
+def _remove_tool_image(path: str) -> None:
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+async def _store_tool_image_safely(data: bytes, tid: int) -> tuple[str, str]:
+    """Keep blocking writes off-loop and avoid an orphan on cancellation."""
+    write_task = asyncio.create_task(
+        asyncio.to_thread(_store_tool_image, data, tid)
+    )
+    try:
+        return await asyncio.shield(write_task)
+    except asyncio.CancelledError:
+        stored = None
+        try:
+            stored = await write_task
+        except BaseException:
+            pass
+        if stored:
+            cleanup_task = asyncio.create_task(
+                asyncio.to_thread(_remove_tool_image, stored[0])
+            )
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                await cleanup_task
+        raise
+
+
 @app.post("/api/tools/menu-copy")
 async def menu_copy_api(file: _UploadFile = _File(...), want: str = Form("")):
-    _need_module("content")
+    await db.arun(_need_module, "content")
     raw = await _read_limited(file, 8 * 1024 * 1024, "图片太大(≤8MB)")
-    op_key = _start_billed_operation("menu_copy")
-    import base64 as _b64
+    op_key = await _start_billing_operation_safely(
+        _start_billed_operation,
+        "menu_copy",
+        cancel_reason="识图请求中断自动退回",
+    )
     mime = file.content_type if (file.content_type or "").startswith("image/") else "image/jpeg"
     try:
         result = await growth.menu_copy(
-            TEN(), _b64.b64encode(raw).decode(), mime, want
+            TEN(),
+            await asyncio.to_thread(_tool_image_base64, raw),
+            mime,
+            want,
         )
-        if not billing.complete_operation(op_key):
+        if not await _run_db_safely(billing.complete_operation, op_key):
             raise RuntimeError("计费操作状态冲突")
         return result
     except asyncio.CancelledError:
-        billing.fail_operation(op_key, "请求中断自动退回")
+        await _run_db_safely(
+            billing.fail_operation,
+            op_key,
+            "请求中断自动退回",
+        )
         raise
     except Exception:
-        billing.fail_operation(op_key, "识图失败自动退回")
+        await _run_db_safely(
+            billing.fail_operation,
+            op_key,
+            "识图失败自动退回",
+        )
         raise HTTPException(500, "识图失败,点数已退回,换张清晰的图试试")
 
 
 @app.post("/api/tools/product-shot")
 async def product_shot_api(file: _UploadFile = _File(...), scene: str = Form("")):
-    _need_module("content")
+    await db.arun(_need_module, "content")
     raw = await _read_limited(file, 8 * 1024 * 1024, "图片太大(≤8MB)")
-    op_key = _start_billed_operation("product_shot")
+    op_key = await _start_billing_operation_safely(
+        _start_billed_operation,
+        "product_shot",
+        cancel_reason="商品图请求中断自动退回",
+    )
     path = ""
     try:
         data = await growth.product_shot(TEN(), raw, scene)
-        import uuid as _uuid
-        d = os.path.join(ROOT, "data", "assets", "tools", str(TEN()))
-        os.makedirs(d, exist_ok=True)
-        name = f"shot_{_uuid.uuid4().hex[:10]}.png"
-        path = os.path.join(d, name)
-        with open(path, "wb") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        if not billing.complete_operation(op_key):
+        path, name = await _store_tool_image_safely(data, TEN())
+        if not await _run_db_safely(billing.complete_operation, op_key):
             raise RuntimeError("计费操作状态冲突")
         return {"file": f"/files/tools/{TEN()}/{name}"}
     except asyncio.CancelledError:
-        billing.fail_operation(op_key, "请求中断自动退回")
-        if path:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+        await _run_db_safely(
+            billing.fail_operation,
+            op_key,
+            "请求中断自动退回",
+        )
+        await asyncio.to_thread(_remove_tool_image, path)
         raise
     except Exception:
-        billing.fail_operation(op_key, "商品图生成或保存失败自动退回")
-        if path:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+        await _run_db_safely(
+            billing.fail_operation,
+            op_key,
+            "商品图生成或保存失败自动退回",
+        )
+        await asyncio.to_thread(_remove_tool_image, path)
         raise HTTPException(500, "美化失败，点数已退回，请稍后重试")
 
 
@@ -9053,20 +9306,31 @@ async def photo_factory_api(file: _UploadFile = _File(...), scene: str = Form(""
     两条腿各自独立计费与退款,哪条失败退哪条的点,响应里把每条腿的结果
     与失败原因分开说清,老板不用猜"钱花在哪了"。
     """
-    _need_module("content")
+    await db.arun(_need_module, "content")
     raw = await _read_limited(file, 8 * 1024 * 1024, "图片太大(≤8MB)")
-    import base64 as _b64
     mime = file.content_type if (file.content_type or "").startswith("image/") else "image/jpeg"
-    b64 = _b64.b64encode(raw).decode()
+    b64 = await asyncio.to_thread(_tool_image_base64, raw)
 
     # 两条腿的计费操作先后开好:第二条点数不足时退掉第一条,给合并后的
     # 提示,而不是让老板看到"本次需 1 点"这种只说半截的话。
-    shot_op = _start_billed_operation("product_shot")
+    shot_op = await _start_billing_operation_safely(
+        _start_billed_operation,
+        "product_shot",
+        cancel_reason="拍照工厂商品图请求中断自动退回",
+    )
     try:
-        copy_op = _start_billed_operation("menu_copy")
-    except HTTPException as exc:
-        billing.fail_operation(shot_op, "拍照工厂另一半点数不足,整体退回")
-        if exc.status_code == 402:
+        copy_op = await _start_billing_operation_safely(
+            _start_billed_operation,
+            "menu_copy",
+            cancel_reason="拍照工厂文案请求中断自动退回",
+        )
+    except BaseException as exc:
+        await _run_db_safely(
+            billing.fail_operation,
+            shot_op,
+            "拍照工厂另一半未启动,整体退回",
+        )
+        if isinstance(exc, HTTPException) and exc.status_code == 402:
             raise HTTPException(
                 402, "拍照工厂一次需 3 点(出图2+文案1),当前余额不足。请充值后再试"
             ) from exc
@@ -9076,46 +9340,52 @@ async def photo_factory_api(file: _UploadFile = _File(...), scene: str = Form(""
         path = ""
         try:
             data = await growth.product_shot(TEN(), raw, scene)
-            import uuid as _uuid
-            d = os.path.join(ROOT, "data", "assets", "tools", str(TEN()))
-            os.makedirs(d, exist_ok=True)
-            name = f"shot_{_uuid.uuid4().hex[:10]}.png"
-            path = os.path.join(d, name)
-            with open(path, "wb") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            if not billing.complete_operation(op_key):
+            path, name = await _store_tool_image_safely(data, TEN())
+            if not await _run_db_safely(
+                billing.complete_operation,
+                op_key,
+            ):
                 raise RuntimeError("计费操作状态冲突")
             return {"file": f"/files/tools/{TEN()}/{name}"}
         except asyncio.CancelledError:
-            billing.fail_operation(op_key, "请求中断自动退回")
-            if path:
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
+            await _run_db_safely(
+                billing.fail_operation,
+                op_key,
+                "请求中断自动退回",
+            )
+            await asyncio.to_thread(_remove_tool_image, path)
             raise
         except Exception:
-            billing.fail_operation(op_key, "商品图生成或保存失败自动退回")
-            if path:
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
+            await _run_db_safely(
+                billing.fail_operation,
+                op_key,
+                "商品图生成或保存失败自动退回",
+            )
+            await asyncio.to_thread(_remove_tool_image, path)
             return {"error": "美化没成功,这条腿的 2 点已退回;可换张更清晰的图重试"}
 
     async def _copy_leg(op_key):
         try:
             result = await growth.menu_copy(TEN(), b64, mime, want)
-            if not billing.complete_operation(op_key):
+            if not await _run_db_safely(
+                billing.complete_operation,
+                op_key,
+            ):
                 raise RuntimeError("计费操作状态冲突")
             return {"menu": result}
         except asyncio.CancelledError:
-            billing.fail_operation(op_key, "请求中断自动退回")
+            await _run_db_safely(
+                billing.fail_operation,
+                op_key,
+                "请求中断自动退回",
+            )
             raise
         except Exception:
-            billing.fail_operation(op_key, "识图失败自动退回")
+            await _run_db_safely(
+                billing.fail_operation,
+                op_key,
+                "识图失败自动退回",
+            )
             return {"error": "文案没写成,这条腿的 1 点已退回;可换张更清晰的图重试"}
 
     shot_result, copy_result = await asyncio.gather(
@@ -9132,23 +9402,35 @@ async def photo_factory_api(file: _UploadFile = _File(...), scene: str = Form(""
 
 @app.post("/api/tools/variants")
 async def variants_api(body: dict):
-    _need_module("content")
+    await db.arun(_need_module, "content")
     script = (body.get("script") or "").strip()
     if len(script) < 30:
         raise HTTPException(400, "先贴一篇口播稿(至少30字)")
-    op_key = _start_billed_operation("matrix_variants")
+    op_key = await _start_billing_operation_safely(
+        _start_billed_operation,
+        "matrix_variants",
+        cancel_reason="裂变请求中断自动退回",
+    )
     try:
         result = await growth.script_variants(
             TEN(), script, body.get("n") or 3, body.get("styles") or ""
         )
-        if not billing.complete_operation(op_key):
+        if not await _run_db_safely(billing.complete_operation, op_key):
             raise RuntimeError("计费操作状态冲突")
         return result
     except asyncio.CancelledError:
-        billing.fail_operation(op_key, "请求中断自动退回")
+        await _run_db_safely(
+            billing.fail_operation,
+            op_key,
+            "请求中断自动退回",
+        )
         raise
     except Exception:
-        billing.fail_operation(op_key, "裂变失败自动退回")
+        await _run_db_safely(
+            billing.fail_operation,
+            op_key,
+            "裂变失败自动退回",
+        )
         raise HTTPException(500, "裂变失败,点数已退回,请重试")
 
 
@@ -9231,7 +9513,7 @@ def matrix_account_del(acc_id: str):
 
 @app.post("/api/matrix/publish")
 async def matrix_publish(body: dict):
-    _need_module("content")
+    await db.arun(_need_module, "content")
     platform = body.get("platform")
     if platform not in matrixpub.PLATFORMS:
         raise HTTPException(400, "平台不支持")
@@ -9242,29 +9524,56 @@ async def matrix_publish(body: dict):
             job_id = int(body["job_id"])
         except (TypeError, ValueError):
             raise HTTPException(400, "工单参数无效")
-        _job_or_404(job_id)
-        payload["job_id"] = job_id
-    imgs = []
-    for f in (body.get("images") or [])[:9]:
-        try:
-            lp = assetfiles.resolve_tenant_asset(
-                f, TEN(), expected_job_id=job_id,
+    tenant_id = TEN()
+
+    def validate_payload() -> None:
+        if job_id is not None:
+            _job_or_404(job_id)
+            payload["job_id"] = job_id
+        payload["images"] = [
+            assetfiles.resolve_tenant_asset(
+                value,
+                tenant_id,
+                expected_job_id=job_id,
                 allowed_extensions=(".png", ".jpg", ".jpeg"),
             )
-        except assetfiles.AssetAccessError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        imgs.append(lp)
-    payload["images"] = imgs
-    if body.get("video"):
-        try:
+            for value in (body.get("images") or [])[:9]
+        ]
+        if body.get("video"):
             payload["video"] = assetfiles.resolve_tenant_asset(
-                body["video"], TEN(), expected_job_id=job_id,
+                body["video"],
+                tenant_id,
+                expected_job_id=job_id,
                 allowed_extensions=(".mp4",),
             )
-        except assetfiles.AssetAccessError as exc:
-            raise HTTPException(400, str(exc)) from exc
+
     try:
-        pid = matrixpub.enqueue(TEN(), platform, body.get("account"), payload)
+        await db.arun(validate_payload)
+    except assetfiles.AssetAccessError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    enqueue_task = asyncio.create_task(
+        db.arun(
+            matrixpub.enqueue,
+            tenant_id,
+            platform,
+            body.get("account"),
+            payload,
+        )
+    )
+    try:
+        pid = await asyncio.shield(enqueue_task)
+    except asyncio.CancelledError:
+        pid = None
+        try:
+            pid = await enqueue_task
+        except BaseException:
+            pass
+        if pid is not None:
+            asyncio.create_task(matrixpub.run_task(pid, engine.broadcast))
+        raise
     except ValueError as e:
         raise HTTPException(400, str(e))
     asyncio.create_task(matrixpub.run_task(pid, engine.broadcast))
