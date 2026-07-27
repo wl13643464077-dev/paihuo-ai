@@ -345,7 +345,7 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("任务中心", await page.locator("#nav").inner_text())
             main_text = await page.locator("#main").inner_text()
             self.assertIn("请先设置您自己的密码", main_text)
-            self.assertIn("之后才能继续查看任务和使用数字员工", main_text)
+            self.assertIn("之后就能正常查看任务和使用数字员工", main_text)
             self.assertEqual(1, await page.locator("#main .card").count())
             self.assertNotIn("/api/meta", requested_api_paths)
             self.assertNotIn("/api/state", requested_api_paths)
