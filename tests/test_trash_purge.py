@@ -247,9 +247,24 @@ class TrashPurgeCase(unittest.TestCase):
             with self.assertRaises(HTTPException) as ctx:
                 main.trash_purge("job", job_id)
         self.assertEqual(409, ctx.exception.status_code)
-        self.assertIn("记录已保留", str(ctx.exception.detail))
-        self.assertIsNotNone(db.one("SELECT id FROM job WHERE id=?", (job_id,)))
+        self.assertIn("记录已锁定并保留", str(ctx.exception.detail))
+        retained = db.one(
+            "SELECT id,delete_reason FROM job WHERE id=?", (job_id,)
+        )
+        self.assertIsNotNone(retained)
+        self.assertTrue(
+            retained["delete_reason"].startswith(main._PURGE_MARKER_PREFIX)
+        )
         self.assertTrue(os.path.isfile(os.path.join(job_dir, "final.md")))
+        with self.assertRaises(HTTPException) as restore_ctx:
+            main.trash_restore("job", job_id)
+        self.assertEqual(409, restore_ctx.exception.status_code)
+        self.assertIn("不能恢复", str(restore_ctx.exception.detail))
+        listed = next(
+            item for item in main.trash_list()["items"]
+            if item["kind"] == "job" and item["id"] == job_id
+        )
+        self.assertNotIn(main._PURGE_MARKER_PREFIX, listed["reason"])
 
         result = main.trash_purge("job", job_id)
         self.assertTrue(result["purged"])
@@ -303,6 +318,93 @@ class TrashPurgeCase(unittest.TestCase):
         self.assertEqual(409, ctx.exception.status_code)
         self.assertIsNotNone(db.one("SELECT id FROM job WHERE id=?", (job_id,)))
         self.assertIsNotNone(db.one("SELECT id FROM tv_job WHERE id=?", (tv_id,)))
+
+    def test_job_directory_regular_file_or_symlink_blocks_purge(self):
+        for shape in ("file", "symlink"):
+            with self.subTest(shape=shape):
+                job_id = self._deleted_job()
+                job_path = os.path.join(self.asset_root, f"job{job_id}")
+                if shape == "file":
+                    with open(job_path, "wb") as fh:
+                        fh.write(b"not-a-directory")
+                else:
+                    os.symlink(
+                        os.path.join(self.tmp.name, "missing-target"),
+                        job_path,
+                    )
+
+                with self.assertRaises(HTTPException) as ctx:
+                    main.trash_purge("job", job_id)
+
+                self.assertEqual(409, ctx.exception.status_code)
+                self.assertTrue(os.path.lexists(job_path))
+                row = db.one(
+                    "SELECT delete_reason FROM job WHERE id=?", (job_id,)
+                )
+                self.assertTrue(
+                    row["delete_reason"].startswith(main._PURGE_MARKER_PREFIX)
+                )
+                os.remove(job_path)
+
+    def test_file_cleanup_runs_outside_sqlite_write_transaction(self):
+        job_id = self._deleted_job()
+        depths = []
+        original_local = main._purge_local_files
+        original_tv = main._purge_tv_files
+
+        def local(kind, rid):
+            depths.append(getattr(db._thread, "atomic_depth", 0))
+            return original_local(kind, rid)
+
+        def videos(paths, tid, rid):
+            depths.append(getattr(db._thread, "atomic_depth", 0))
+            return original_tv(paths, tid, rid)
+
+        with patch.object(main, "_purge_local_files", side_effect=local), \
+                patch.object(main, "_purge_tv_files", side_effect=videos):
+            result = main.trash_purge("job", job_id)
+
+        self.assertTrue(result["purged"])
+        self.assertEqual([0, 0], depths)
+
+    def test_new_linked_video_during_file_cleanup_keeps_retry_anchor(self):
+        job_id = self._deleted_job()
+        inserted = {}
+
+        def add_concurrent_relation(_kind, _rid):
+            inserted["id"] = db.insert(
+                "tv_job",
+                {
+                    "tenant_id": 2,
+                    "job_id": job_id,
+                    "params_json": "{}",
+                    "status": "done",
+                    "billing_status": "succeeded",
+                },
+            )
+            return 0, 0
+
+        with patch.object(
+            main, "_purge_local_files", side_effect=add_concurrent_relation
+        ), self.assertRaises(HTTPException) as ctx:
+            main.trash_purge("job", job_id)
+
+        self.assertEqual(409, ctx.exception.status_code)
+        self.assertIn("关联交付文件", str(ctx.exception.detail))
+        row = db.one("SELECT delete_reason FROM job WHERE id=?", (job_id,))
+        self.assertTrue(
+            row["delete_reason"].startswith(main._PURGE_MARKER_PREFIX)
+        )
+        self.assertIsNotNone(
+            db.one("SELECT id FROM tv_job WHERE id=?", (inserted["id"],))
+        )
+
+        result = main.trash_purge("job", job_id)
+        self.assertTrue(result["purged"])
+        self.assertIsNone(db.one("SELECT id FROM job WHERE id=?", (job_id,)))
+        self.assertIsNone(
+            db.one("SELECT id FROM tv_job WHERE id=?", (inserted["id"],))
+        )
 
 
 if __name__ == "__main__":

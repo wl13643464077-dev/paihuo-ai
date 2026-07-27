@@ -124,7 +124,15 @@ def encrypt_field(domain: str, value: str | None) -> str:
     if len(normalized) > MAX_SECRET_CHARS:
         raise ValueError("secret field is too long")
     if normalized.startswith(ENCRYPTED_PREFIX):
-        return normalized          # 已是密文,避免重复保存时二次加密
+        cipher = _configured_fernet()
+        if cipher is None:
+            raise SecureConfigError(
+                "configuration key is required to authenticate encrypted settings"
+            )
+        # “长得像密文”不等于可信密文：必须验证签名和 domain 绑定，避免伪造
+        # enc:v1: 值绕过保存入口后把不可恢复数据写进库。
+        _decrypt(domain, normalized, cipher)
+        return normalized
     cipher = _configured_fernet()
     if cipher is None:
         return normalized
@@ -354,8 +362,10 @@ def migrate_legacy_secrets() -> dict[str, int | bool]:
 
     Existing standalone encrypted settings are authenticated and corruption
     aborts the transaction.  Embedded JSON fields retain an undecryptable row
-    unchanged, report only aggregate failures, and leave the completion marker
-    incomplete so the next startup retries safely.
+    unchanged, persist only aggregate failure evidence, and leave the completion
+    marker incomplete so the next startup retries safely.  Production raises a
+    content-free error after committing safe conversions, which blocks startup
+    until every failed row is repaired.
     """
     cipher = _configured_fernet()
     if cipher is None:
@@ -393,4 +403,15 @@ def migrate_legacy_secrets() -> dict[str, int | bool]:
             db.set_setting(name, _encrypt(name, stored, cipher))
             encrypted += 1
         field_report = _migrate_json_secret_fields(connection, cipher)
-    return {"encrypted": encrypted, "verified": verified, **field_report}
+    report = {"encrypted": encrypted, "verified": verified, **field_report}
+    if _required() and (
+        not field_report["field_migration_complete"]
+        or int(field_report["field_rows_failed"] or 0) > 0
+    ):
+        # 成功转换的行已原子提交，失败行保持原样且完成标记仍为 false。异常只含
+        # 聚合数量，不带 setting key、租户、正文、密文或供应商响应。
+        raise SecureConfigError(
+            "embedded credential migration incomplete "
+            f"(failed_rows={int(field_report['field_rows_failed'] or 0)})"
+        )
+    return report

@@ -340,9 +340,28 @@ def fail_operation(op_key: str, reason: str = "执行失败自动退回") -> boo
     )
 
 
+def settle_legacy_subscriptions() -> int:
+    """收口旧版成功后遗留为 ``charged`` 的套餐订单。
+
+    旧实现把订单行、套餐、发点和流水放在同一个 SQLite 事务里；因此能在库里
+    看到这条 subscribe 行，就证明整笔交易已提交。这里只改状态，不再发点或写
+    流水，避免通用中断恢复把一笔成功入账的套餐误当失败任务退款。
+    """
+    now = time.time()
+    with db.atomic() as c:
+        changed = c.execute(
+            "UPDATE billing_operation SET status='succeeded',error=NULL,updated_at=? "
+            "WHERE action='subscribe' AND status='charged'",
+            (now,),
+        ).rowcount
+    return int(changed or 0)
+
+
 def recover_interrupted_operations(reason: str = "服务重启，中断任务自动退回",
                                    exclude_op_keys=None) -> int:
     """启动时退回上个进程仍为 charged 的操作，并清理无扣款的 pending 记录。"""
+    # 防御其他启动入口直接调用通用恢复：成功套餐绝不能进入退款集合。
+    settle_legacy_subscriptions()
     excluded = {str(key) for key in (exclude_op_keys or []) if key}
     rows = db.q("SELECT op_key FROM billing_operation WHERE status='charged'")
     rows = [row for row in rows if row["op_key"] not in excluded]

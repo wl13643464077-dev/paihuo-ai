@@ -152,22 +152,64 @@ class SecureConfigTests(unittest.TestCase):
             json.dumps([{"id": "plain", "cookie": plaintext}]),
         )
 
-        with self._env():
-            report = secureconfig.migrate_legacy_secrets()
+        with self._env(), self.assertRaises(
+            secureconfig.SecureConfigError
+        ) as ctx:
+            secureconfig.migrate_legacy_secrets()
 
-        self.assertEqual(1, report["field_rows_failed"])
-        self.assertFalse(report["field_migration_complete"])
+        public_error = str(ctx.exception)
+        self.assertIn("failed_rows=1", public_error)
+        for forbidden in (
+            corrupt,
+            plaintext,
+            "wechat_mp:2",
+            "matrix_accounts:2",
+        ):
+            self.assertNotIn(forbidden, public_error)
         self.assertEqual(
             corrupt,
             json.loads(str(db.get_setting("wechat_mp:2")))["secret"],
         )
         self.assertNotIn(plaintext, str(db.get_setting("matrix_accounts:2")))
-        serialized_report = json.dumps(report, ensure_ascii=False)
-        self.assertNotIn(corrupt, serialized_report)
-        self.assertNotIn(plaintext, serialized_report)
         marker = str(db.get_setting(secureconfig._FIELD_MIGRATION_MARKER))
+        marker_payload = json.loads(marker)
+        self.assertFalse(marker_payload["complete"])
+        self.assertEqual(1, marker_payload["rows_failed"])
         self.assertNotIn(corrupt, marker)
         self.assertNotIn(plaintext, marker)
+
+    def test_encrypt_field_authenticates_ciphertext_and_domain(self):
+        with self._env():
+            ciphertext = secureconfig.encrypt_field(
+                "matrix_cookie", "sessionid=" + "s" * 64
+            )
+            self.assertEqual(
+                ciphertext,
+                secureconfig.encrypt_field("matrix_cookie", ciphertext),
+            )
+            with self.assertRaisesRegex(
+                secureconfig.SecureConfigError, "binding"
+            ):
+                secureconfig.encrypt_field("wechat_mp_secret", ciphertext)
+            with self.assertRaisesRegex(
+                secureconfig.SecureConfigError, "invalid"
+            ):
+                secureconfig.encrypt_field(
+                    "matrix_cookie",
+                    secureconfig.ENCRYPTED_PREFIX + "forged-token",
+                )
+
+        with patch.dict(
+            os.environ,
+            {
+                secureconfig.CONFIG_KEY_ENV: "",
+                secureconfig.REQUIRE_CONFIG_KEY_ENV: "",
+            },
+            clear=False,
+        ), self.assertRaisesRegex(
+            secureconfig.SecureConfigError, "required"
+        ):
+            secureconfig.encrypt_field("matrix_cookie", ciphertext)
 
     def test_json_field_migration_rolls_back_all_rows_on_write_failure(self):
         matrix_raw = json.dumps(

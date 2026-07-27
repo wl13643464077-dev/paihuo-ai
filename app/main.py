@@ -343,6 +343,12 @@ async def _startup():
     recovered_drafts, protected_draft_ops = _recover_wechat_deliveries()
     if recovered_drafts:
         log.warning("recovered %d interrupted wechat deliveries", recovered_drafts)
+    settled_subscriptions = billing.settle_legacy_subscriptions()
+    if settled_subscriptions:
+        log.info(
+            "settled %d legacy successful subscription operations",
+            settled_subscriptions,
+        )
     recovered_billing = billing.recover_interrupted_operations(
         exclude_op_keys=protected_draft_ops
     )
@@ -3561,6 +3567,29 @@ _TRASH_TABLES = {
     "profile": ("account_profile", "content"),
     "asset": ("asset", "library"),
 }
+_PURGE_MARKER_PREFIX = "__purge_pending_v1__:"
+
+
+def _is_purge_marker(value) -> bool:
+    return str(value or "").startswith(_PURGE_MARKER_PREFIX)
+
+
+def _new_purge_marker() -> str:
+    return _PURGE_MARKER_PREFIX + os.urandom(16).hex()
+
+
+def _purge_tv_snapshot(connection, tid: int, job_id: int) -> tuple:
+    return tuple(
+        (
+            int(item["id"]),
+            str(item["video_file"]) if item["video_file"] is not None else None,
+        )
+        for item in connection.execute(
+            "SELECT id,video_file FROM tv_job "
+            "WHERE job_id=? AND tenant_id=? ORDER BY id",
+            (job_id, tid),
+        ).fetchall()
+    )
 
 
 def _trash_module(kind: str, row: dict) -> str:
@@ -3656,7 +3685,11 @@ def trash_list(limit: int = 200, offset: int = 0):
                 "assignee": employee.get("name") or "",
                 "deleted_at": row.get("deleted_at") or 0,
                 "created_at": row.get("created_at") or 0,
-                "reason": (row.get("delete_reason") or "")[:160],
+                "reason": (
+                    "彻底删除尚未完成，请再次点击彻底删除继续处理"
+                    if _is_purge_marker(row.get("delete_reason"))
+                    else (row.get("delete_reason") or "")[:160]
+                ),
             }
         )
     return {
@@ -3684,6 +3717,21 @@ def trash_restore(kind: str, rid: int):
         raise HTTPException(404)
     try:
         with db.atomic() as connection:
+            current = connection.execute(
+                f"SELECT * FROM {table} WHERE id=? AND tenant_id=? "
+                "AND deleted_at IS NOT NULL",
+                (rid, TEN()),
+            ).fetchone()
+            if not current:
+                raise HTTPException(
+                    409, "记录状态刚刚发生变化，请刷新后再恢复"
+                )
+            if _is_purge_marker(current["delete_reason"]):
+                raise HTTPException(
+                    409,
+                    "该记录正在等待彻底删除，部分文件可能已经销毁，不能恢复；"
+                    "请再次点击彻底删除完成清理",
+                )
             changed = connection.execute(
                 f"UPDATE {table} SET deleted_at=NULL,deleted_by=NULL,"
                 "delete_reason=NULL,updated_at=? "
@@ -3733,9 +3781,16 @@ def _purge_local_files(kind: str, rid: int) -> tuple[int, int]:
     之后才能硬删数据库锚点。
     """
     removed = failed = 0
+    root = os.path.realpath(assetfiles.ASSET_ROOT)
     if kind == "job":
-        job_dir = os.path.join(assetfiles.ASSET_ROOT, f"job{rid}")
-        if os.path.isdir(job_dir):
+        job_dir = os.path.join(root, f"job{rid}")
+        if os.path.lexists(job_dir):
+            if (
+                os.path.islink(job_dir)
+                or not os.path.isdir(job_dir)
+                or os.path.realpath(job_dir) != job_dir
+            ):
+                return 0, 1
             count = sum(len(names) for _, _, names in os.walk(job_dir))
             try:
                 shutil.rmtree(job_dir)
@@ -3748,11 +3803,14 @@ def _purge_local_files(kind: str, rid: int) -> tuple[int, int]:
                 )
     elif kind == "avatar":
         clip = os.path.join(
-            assetfiles.ASSET_ROOT, "avatar", f"avatar_{rid}.mp4")
-        if os.path.islink(clip):
-            # 软链接目标并未被销毁，不能谎报彻底删除。
-            failed += 1
-        elif os.path.isfile(clip):
+            root, "avatar", f"avatar_{rid}.mp4")
+        if os.path.lexists(clip):
+            if (
+                os.path.islink(clip)
+                or not os.path.isfile(clip)
+                or os.path.realpath(clip) != clip
+            ):
+                return 0, 1
             try:
                 os.remove(clip)
                 removed += 1
@@ -3820,51 +3878,75 @@ def trash_purge(kind: str, rid: int):
     active = _TRASH_ACTIVE_STATUS.get(kind, ())
     if (row.get("status") or "") in active:
         raise HTTPException(409, "该记录仍在进行中，请先等它收口再彻底删除")
-    guard = ""
-    args = [rid, TEN()]
-    if active:
-        # 与读到的快照之间可能有并发状态变化,DELETE 里再校验一次
-        guard = (
-            " AND status NOT IN (%s)" % ",".join("?" * len(active))
-        )
-        args.extend(active)
-    files_removed = files_failed = 0
+
+    tid = TEN()
+    marker = _new_purge_marker()
+    tv_snapshot = ()
+    # 阶段一只持有一个短写事务：重验权限/状态、固定关联快照并用随机 marker
+    # 认领软删行。随后立刻释放 SQLite 写锁。
     with db.atomic() as connection:
-        # BEGIN IMMEDIATE 锁住软删记录与 tv_job 关系，避免文件列表读取后又并发插入
-        # 新成片，最终出现“文件未删、数据库锚点已丢”的竞态。
         current = connection.execute(
             f"SELECT * FROM {table} WHERE id=? AND tenant_id=? "
             "AND deleted_at IS NOT NULL",
-            (rid, TEN()),
+            (rid, tid),
         ).fetchone()
         if not current:
             raise HTTPException(409, "记录状态刚刚发生变化，请刷新后再删除")
+        current_row = dict(current)
+        if not auth.allowed(_trash_module(kind, current_row)):
+            raise HTTPException(404)
         if active and (current["status"] or "") in active:
             raise HTTPException(409, "该记录仍在进行中，请先等它收口再彻底删除")
-        tv_files = []
         if kind == "job":
-            tv_files = [
-                item["video_file"]
-                for item in connection.execute(
-                    "SELECT video_file FROM tv_job "
-                    "WHERE job_id=? AND tenant_id=? AND video_file IS NOT NULL",
-                    (rid, TEN()),
-                ).fetchall()
-            ]
-        # 文件系统无法参与 SQLite 回滚，所以必须先销毁文件、成功后再删数据库。
-        # 失败会退出事务并保留原软删行；部分已删文件在重试时按“已销毁”处理。
-        files_removed, files_failed = _purge_local_files(kind, rid)
-        tv_removed, tv_failed = _purge_tv_files(tv_files, TEN(), rid)
-        files_removed += tv_removed
-        files_failed += tv_failed
-        if files_failed:
+            tv_snapshot = _purge_tv_snapshot(connection, tid, rid)
+        changed = connection.execute(
+            f"UPDATE {table} SET delete_reason=?,updated_at=? "
+            "WHERE id=? AND tenant_id=? AND deleted_at IS NOT NULL",
+            (marker, time.time(), rid, tid),
+        ).rowcount
+        if changed != 1:
+            raise HTTPException(409, "记录状态刚刚发生变化，请刷新后再删除")
+
+    # 阶段二在事务外做可能很慢的磁盘 I/O；删除失败时 marker 和数据库锚点
+    # 保持在位，下一次点击会重新认领并安全重试。
+    files_removed, files_failed = _purge_local_files(kind, rid)
+    tv_files = [path for _, path in tv_snapshot if path]
+    tv_removed, tv_failed = _purge_tv_files(tv_files, tid, rid)
+    files_removed += tv_removed
+    files_failed += tv_failed
+    if files_failed:
+        raise HTTPException(
+            409,
+            f"仍有 {files_failed} 个交付文件未能销毁，记录已锁定并保留；"
+            "修复存储权限后请再次点击彻底删除，当前不能恢复以免找回残缺内容",
+        )
+
+    # 阶段三再次短事务：marker、租户、状态和全部 tv_job 关联都必须与阶段一
+    # 一致。关联若在 I/O 期间变化就保留锚点，下次重试会纳入新关联。
+    with db.atomic() as connection:
+        current = connection.execute(
+            f"SELECT * FROM {table} WHERE id=? AND tenant_id=? "
+            "AND deleted_at IS NOT NULL",
+            (rid, tid),
+        ).fetchone()
+        if not current or current["delete_reason"] != marker:
             raise HTTPException(
-                409,
-                f"仍有 {files_failed} 个交付文件未能销毁，记录已保留，请修复存储权限后重试",
+                409, "另一条彻底删除请求已接管该记录，请刷新回收站确认结果"
             )
+        if active and (current["status"] or "") in active:
+            raise HTTPException(409, "记录状态发生变化，已保留删除锚点")
+        if kind == "job" and _purge_tv_snapshot(connection, tid, rid) != tv_snapshot:
+            raise HTTPException(
+                409, "清理期间新增了关联交付文件，记录已保留；请再次点击彻底删除"
+            )
+        guard = ""
+        args = [rid, tid, marker]
+        if active:
+            guard = " AND status NOT IN (%s)" % ",".join("?" * len(active))
+            args.extend(active)
         changed = connection.execute(
             f"DELETE FROM {table} WHERE id=? AND tenant_id=? "
-            f"AND deleted_at IS NOT NULL{guard}",
+            f"AND deleted_at IS NOT NULL AND delete_reason=?{guard}",
             args,
         ).rowcount
         if changed != 1:
@@ -3875,7 +3957,7 @@ def trash_purge(kind: str, rid: int):
                 "DELETE FROM station_run WHERE job_id=?", (rid,))
             connection.execute(
                 "DELETE FROM tv_job WHERE job_id=? AND tenant_id=?",
-                (rid, TEN()))
+                (rid, tid))
     return {
         "ok": True,
         "purged": True,
