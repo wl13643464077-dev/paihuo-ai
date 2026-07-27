@@ -3378,13 +3378,21 @@ async def employee_learn(idx: int):
     s = registry.BY_IDX.get(idx) or (departments.get(idx) and departments.learn_station(idx))
     if not s:
         raise HTTPException(404)
-    if idx in employees.LEARNING:
+    if not employees.claim_learning(idx):
         raise HTTPException(429, "该员工正在进修中")
     try:
-        billing_op = billing.start_operation(
-            "learn", tid=TEN(), note=f"{s.get('name', '数字员工')}进修")
+        billing_op = await db.arun(
+            billing.start_operation,
+            "learn",
+            tid=TEN(),
+            note=f"{s.get('name', '数字员工')}进修",
+        )
     except billing.InsufficientPoints as e:
+        employees.LEARNING.discard(idx)
         raise HTTPException(402, str(e))
+    except BaseException:
+        employees.LEARNING.discard(idx)
+        raise
 
     tid = TEN()
     emp_name = s.get("name", "数字员工")
@@ -3392,10 +3400,18 @@ async def employee_learn(idx: int):
     async def _bg():
         from . import notify
         try:
-            result = await employees.learn(s, broadcast=engine.broadcast)
+            result = await employees.learn(
+                s,
+                broadcast=engine.broadcast,
+                claimed=True,
+            )
         except BaseException as exc:
             try:
-                billing.fail_operation(billing_op, "员工进修失败自动退回")
+                await db.arun(
+                    billing.fail_operation,
+                    billing_op,
+                    "员工进修失败自动退回",
+                )
             except Exception as refund_exc:
                 logging.getLogger("employees").error(
                     "employee %s learning refund failed error_type=%s",
@@ -3409,34 +3425,69 @@ async def employee_learn(idx: int):
             )
             # 后台失败不能只写服务端日志:老板盯着面板等结果,必须站内告知。
             try:
-                notify.push(tid, "learn_failed", {"title": emp_name})
+                await notify.push_async(
+                    tid,
+                    "learn_failed",
+                    {"title": emp_name},
+                )
             except Exception:
                 logging.getLogger("employees").warning(
                     "employee %s learn-failed notify failed", idx)
         else:
             fresh = int((result or {}).get("new") or 0)
             if fresh:
-                billing.complete_operation(billing_op)
+                await db.arun(billing.complete_operation, billing_op)
             else:
                 # 一条新技能都没学到就不收钱,与全站「没产出就退点」口径一致。
                 try:
-                    billing.fail_operation(billing_op, "进修未学到新技能自动退回")
+                    await db.arun(
+                        billing.fail_operation,
+                        billing_op,
+                        "进修未学到新技能自动退回",
+                    )
                 except Exception:
                     logging.getLogger("employees").error(
                         "employee %s zero-fresh refund failed", idx)
             try:
-                notify.push(tid, "learn_done", {
-                    "title": emp_name, "new": fresh,
-                    "total": (result or {}).get("total"),
-                    "summary": (f"「{emp_name}」新学 {fresh} 条技能,技能库共 "
-                                f"{(result or {}).get('total', '?')} 条"
-                                + ("" if fresh else "(全部与已有重复,3 点已退回)")),
-                })
+                await notify.push_async(
+                    tid,
+                    "learn_done",
+                    {
+                        "title": emp_name,
+                        "new": fresh,
+                        "total": (result or {}).get("total"),
+                        "summary": (
+                            f"「{emp_name}」新学 {fresh} 条技能,技能库共 "
+                            f"{(result or {}).get('total', '?')} 条"
+                            + ("" if fresh else "(全部与已有重复,3 点已退回)")
+                        ),
+                    },
+                )
             except Exception:
                 logging.getLogger("employees").warning(
                     "employee %s learn-done notify failed", idx)
+        finally:
+            # employees.learn owns normal cleanup; this also protects tests,
+            # cancellations before coroutine entry, and future implementation swaps.
+            employees.LEARNING.discard(idx)
 
-    asyncio.create_task(_bg())
+    try:
+        asyncio.create_task(_bg())
+    except BaseException:
+        employees.LEARNING.discard(idx)
+        try:
+            await db.arun(
+                billing.fail_operation,
+                billing_op,
+                "员工进修未启动自动退回",
+            )
+        except Exception as refund_exc:
+            logging.getLogger("employees").error(
+                "employee %s launch refund failed error_type=%s",
+                idx,
+                type(refund_exc).__name__,
+            )
+        raise
     return {"ok": True, "started": True}
 
 

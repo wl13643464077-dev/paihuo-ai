@@ -8,6 +8,7 @@
 import asyncio
 import os
 import tempfile
+import threading
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -102,6 +103,49 @@ class SweepFixCase(unittest.IsolatedAsyncioTestCase):
             await self._run_learn()
         self.assertEqual(50, self._balance())
         self.assertEqual(1, len(self._notes("learn_failed")))
+
+    async def test_concurrent_learn_requests_have_one_charge_and_one_claim(self):
+        """并发点击只能创建一笔进修操作，第二次必须立即收到 429。"""
+        self._as_boss()
+        entered = threading.Event()
+        release = threading.Event()
+        original = billing.start_operation
+
+        def slow_start(*args, **kwargs):
+            entered.set()
+            release.wait(timeout=2)
+            return original(*args, **kwargs)
+
+        with patch.object(
+            billing,
+            "start_operation",
+            side_effect=slow_start,
+        ), patch.object(
+            employees,
+            "learn",
+            AsyncMock(return_value={"new": 1, "total": 1, "cost_usd": 0}),
+        ):
+            first = asyncio.create_task(main.employee_learn(self.idx))
+            self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+            with self.assertRaises(HTTPException) as raised:
+                await main.employee_learn(self.idx)
+            self.assertEqual(429, raised.exception.status_code)
+            release.set()
+            self.assertTrue((await first)["started"])
+            for _ in range(50):
+                if self.idx not in employees.LEARNING:
+                    break
+                await asyncio.sleep(0.01)
+
+        self.assertNotIn(self.idx, employees.LEARNING)
+        self.assertEqual(47, self._balance())
+        self.assertEqual(
+            1,
+            db.one(
+                "SELECT COUNT(*) AS n FROM billing_log "
+                "WHERE tenant_id=2 AND delta=-3"
+            )["n"],
+        )
 
     async def test_censor_deep_failure_returns_free_scan_and_refunds(self):
         self._as_owner()

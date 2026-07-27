@@ -401,6 +401,114 @@ class EventLoopFreezeTests(_DbCase):
         asyncio.run(scenario())
         locker.join(timeout=5)
 
+    def test_employee_learning_write_lock_does_not_freeze_loop(self):
+        """员工进修的读取和最终技能写入必须完整卸载到 DB 线程池。"""
+        from app import employees, providers
+
+        release = threading.Event()
+        holding = threading.Event()
+        station = {
+            "idx": 9876,
+            "name": "进修并发测试员",
+            "dept": "测试部",
+            "duty": "验证异步数据库边界",
+            "skill": "并发回归",
+        }
+
+        def hold_write_lock():
+            raw = sqlite3.connect(db.DB_PATH, timeout=30)
+            try:
+                raw.execute("PRAGMA busy_timeout=30000")
+                raw.execute("BEGIN IMMEDIATE")
+                raw.execute("INSERT INTO tenants(name) VALUES('进修锁持有者')")
+                holding.set()
+                release.wait(timeout=10)
+                raw.commit()
+            finally:
+                raw.close()
+
+        locker = threading.Thread(target=hold_write_lock, daemon=True)
+        locker.start()
+        self.assertTrue(holding.wait(timeout=5), "写锁线程未就绪")
+
+        response = {
+            "data": {
+                "skills": [{
+                    "title": "新技能",
+                    "detail": "执行细节",
+                    "source": "测试来源",
+                }],
+            },
+            "cost_usd": 0.0,
+            "tokens": 0,
+        }
+
+        async def scenario():
+            worker = asyncio.create_task(employees.learn(station))
+            timer = threading.Timer(0.65, release.set)
+            timer.start()
+            try:
+                t0 = time.monotonic()
+                await asyncio.sleep(0.1)
+                elapsed = time.monotonic() - t0
+                self.assertLess(
+                    elapsed,
+                    0.35,
+                    f"员工进修写锁冻结事件循环 {elapsed:.3f}s",
+                )
+                self.assertFalse(
+                    worker.done(),
+                    "技能写入应在锁释放前保持等待，测试必须制造真实竞争",
+                )
+                result = await asyncio.wait_for(worker, timeout=5)
+            finally:
+                release.set()
+                timer.cancel()
+            self.assertEqual(1, result["new"])
+            saved = await db.arun(employees.get_config, station["idx"])
+            self.assertEqual(["新技能"], [item["title"] for item in saved["skills"]])
+
+        try:
+            with mock.patch.object(
+                providers,
+                "call_text_json",
+                new=mock.AsyncMock(return_value=response),
+            ):
+                asyncio.run(scenario())
+        finally:
+            release.set()
+            locker.join(timeout=5)
+            employees.LEARNING.discard(station["idx"])
+
+    def test_employee_learning_releases_claim_when_initial_read_fails(self):
+        """首次异步读取失败/取消也不能让员工永久卡在“进修中”状态。"""
+        from app import employees
+
+        station = {
+            "idx": 9877,
+            "name": "进修清理测试员",
+            "dept": "测试部",
+            "duty": "验证失败清理",
+            "skill": "故障恢复",
+        }
+
+        async def scenario():
+            with mock.patch.object(
+                employees.db,
+                "arun",
+                new=mock.AsyncMock(
+                    side_effect=sqlite3.OperationalError("read failed")
+                ),
+            ):
+                with self.assertRaises(sqlite3.OperationalError):
+                    await employees.learn(station)
+
+        try:
+            asyncio.run(scenario())
+            self.assertNotIn(station["idx"], employees.LEARNING)
+        finally:
+            employees.LEARNING.discard(station["idx"])
+
     def test_pool_is_bounded(self):
         """池子必须有界:SQLite 只有一个写者,无界线程只会排队占资源。"""
         pool = db._pool()
@@ -609,6 +717,10 @@ class ReviewedAsyncCallGraphTests(unittest.TestCase):
         ("main.py", "text_video_create"): {
             "textvideo.resolve_clip_path", "_create_charged_tv_job",
         },
+        ("main.py", "employee_learn"): {"billing.start_operation"},
+        ("main.py", "_bg"): {
+            "billing.fail_operation", "billing.complete_operation", "notify.push",
+        },
         ("main.py", "_tool_watchdog_loop"): {"_recover_stale_tool_jobs"},
         ("main.py", "_tool_enqueue_async"): {
             "_tool_require_idle", "_tool_enqueue_record",
@@ -630,9 +742,26 @@ class ReviewedAsyncCallGraphTests(unittest.TestCase):
         ("matrixpub.py", "_run_task_inner"): {"_log"},
         ("textvideo.py", "run_job"): {"_steps_append"},
         ("textvideo.py", "_run_job_inner"): {"_steps_append"},
+        ("employees.py", "learn"): {
+            "get_config", "set_skills", "_store_learning_result", "_upsert",
+        },
         ("avatar.py", "clone_voice"): {
             "providers.yunwu_conf", "cloned_voices", "save_cloned_voices",
         },
+        ("avatar.py", "hg_cleanup_photos"): {"_hg_headers"},
+        ("avatar.py", "hg_upload_talking_photo"): {"_hg_headers"},
+        ("avatar.py", "hg_upload_audio"): {"_hg_headers"},
+        ("avatar.py", "hg_voice_id"): {"_hg_headers"},
+        ("avatar.py", "hg_generate"): {"_hg_headers"},
+        ("avatar.py", "hg_poll"): {"_hg_headers"},
+        ("avatar.py", "tts"): {"providers.yunwu_conf"},
+        ("avatar.py", "kling_avatar"): {"providers.yunwu_conf"},
+        ("avatar.py", "kling_poll"): {"providers.yunwu_conf"},
+        ("avatar.py", "run_job"): {"secureconfig.get_secret"},
+        ("runninghub.py", "synth"): {"conf"},
+        ("feishu.py", "_token"): {"conf"},
+        ("feishu.py", "sync_rows"): {"tenant_bitable"},
+        ("feishu.py", "sync"): {"tenant_bitable", "_sync_page"},
         ("expertmatch.py", "match_experts"): {"_visible_specialists"},
         ("expertmatch.py", "preflight_fit"): {"_dept_peers"},
         ("providers.py", "chat"): {"yunwu_conf"},

@@ -97,7 +97,7 @@ def parse_app_token(url: str) -> str:
 
 
 async def _token(cli) -> str:
-    app_id, secret = conf()
+    app_id, secret = await db.arun(conf)
     if not app_id or not secret:
         raise ValueError("平台未配置飞书应用(管理后台→飞书集成)")
     data = await _request_json(
@@ -247,7 +247,7 @@ def _asset_record(r):
 
 async def sync_rows(name: str, fields: list, recs: list) -> dict:
     """通用:把一批记录写进租户多维表格的指定数据表(没有就建)."""
-    url = tenant_bitable()
+    url = await db.arun(tenant_bitable)
     app_token = parse_app_token(url)
     if not app_token:
         raise ValueError("先在「👥 权限管理」页粘贴您的飞书多维表格链接并保存")
@@ -293,7 +293,7 @@ def _sync_page(kind: str, tid: int, before_id: int | None) -> tuple:
 
 
 async def sync(kind: str) -> dict:
-    url = tenant_bitable()
+    url = await db.arun(tenant_bitable)
     app_token = parse_app_token(url)
     if not app_token:
         raise ValueError("先在下方粘贴您的飞书多维表格链接并保存")
@@ -302,7 +302,7 @@ async def sync(kind: str) -> dict:
         name, fields = "知识沉淀", KNOW_FIELDS
     else:
         name, fields = "资产库", ASSET_FIELDS
-    records, before_id = _sync_page(kind, tid, None)
+    records, before_id = await db.arun(_sync_page, kind, tid, None)
     if not records:
         raise ValueError("没有可同步的数据")
     async with httpx.AsyncClient(timeout=60) as cli:
@@ -323,5 +323,10 @@ async def sync(kind: str) -> dict:
             )
             if len(records) < SYNC_READ_PAGE_SIZE:
                 break
-            records, before_id = _sync_page(kind, tid, before_id)
+            records, before_id = await db.arun(
+                _sync_page,
+                kind,
+                tid,
+                before_id,
+            )
     return {"synced": n, "table": name}

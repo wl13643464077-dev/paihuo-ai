@@ -20,6 +20,14 @@ MAX_SKILLS_IN_PROMPT = 12      # 注入提示词的技能条数上限
 MAX_SKILLS_CHARS = 2400        # 注入提示词的技能总字数上限
 
 
+def claim_learning(idx: int) -> bool:
+    """Atomically reserve one employee's learning slot on the event loop."""
+    if idx in LEARNING:
+        return False
+    LEARNING.add(idx)
+    return True
+
+
 # ---------------- 配置读写 ----------------
 def _row_to_config(idx: int, r) -> dict:
     if not r:
@@ -68,6 +76,18 @@ def set_prompt(idx: int, template: str):
 
 def set_skills(idx: int, skills: list):
     _upsert(idx, {"skills_json": json.dumps(skills, ensure_ascii=False)})
+
+
+def _store_learning_result(idx: int, skills: list, learned_at: float) -> None:
+    """Persist the learned skill set and timestamp as one transaction."""
+    with db.atomic():
+        _upsert(
+            idx,
+            {
+                "skills_json": json.dumps(skills, ensure_ascii=False),
+                "learned_at": learned_at,
+            },
+        )
 
 
 def set_settings(idx: int, settings: dict):
@@ -165,25 +185,28 @@ def learning_prompt_bundle(station: dict, existing: list):
     )
 
 
-async def learn(station: dict, broadcast=None) -> dict:
+async def learn(station: dict, broadcast=None, *, claimed: bool = False) -> dict:
     """联网收集该岗位的最新技能,合并进技能库.
 
     broadcast(ev) 可选:实时把进修步骤推给前端(SSE)。
+    claimed=True 仅供已在路由入口预占进修槽的后台任务使用。
     """
     idx = station["idx"]
-    if idx in LEARNING:
+    if claimed:
+        if idx not in LEARNING:
+            raise ValueError("该员工进修占位已失效")
+    elif not claim_learning(idx):
         raise ValueError("该员工正在进修中")
-    LEARNING.add(idx)
     broadcast = broadcast or (lambda ev: None)
 
     def progress(kind, label=""):
         broadcast({"type": "employee_step", "idx": idx,
                    "step": {"k": kind, "l": str(label)[:300], "ts": time.time()}})
 
-    existing = get_config(idx)["skills"]
-    prompt = learning_prompt_bundle(station, existing)
-    progress("start", "去全网进修:检索岗位最新方法论与平台规则…")
     try:
+        existing = (await db.arun(get_config, idx))["skills"]
+        prompt = learning_prompt_bundle(station, existing)
+        progress("start", "去全网进修:检索岗位最新方法论与平台规则…")
         from . import providers
         r = await providers.call_text_json(
             idx,
@@ -204,8 +227,7 @@ async def learn(station: dict, broadcast=None) -> dict:
                 fresh.append(s)
                 seen.add(s["title"])
         merged = existing + fresh
-        set_skills(idx, merged)
-        _upsert(idx, {"learned_at": time.time()})
+        await db.arun(_store_learning_result, idx, merged, time.time())
         progress("done", f"进修完成:新学 {len(fresh)} 条技能,技能库共 {len(merged)} 条 "
                          f"· ${r['cost_usd']:.3f}")
         broadcast({"type": "employee_update", "idx": idx})

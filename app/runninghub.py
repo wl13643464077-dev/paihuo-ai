@@ -55,7 +55,7 @@ async def _create(cli, key, wf, img, aud):
 
 async def synth(photo_path: str, audio_path: str, progress) -> str:
     """照片+音频 → RunningHub 数字人视频 URL(高画质)."""
-    key, wf = conf()
+    key, wf = await db.arun(conf)
     if not key:
         raise RHError("未配置 RunningHub key(管理后台→数字人引擎)")
     async with httpx.AsyncClient(timeout=180) as cli:

@@ -229,6 +229,39 @@ class AvatarSettlementCase(unittest.TestCase):
         )
         self.assertEqual(30, billing.balance(2))
 
+    def test_basic_engine_does_not_read_unrelated_heygen_secret(self):
+        """Basic/Kling paths must not depend on decrypting HeyGen credentials."""
+        from app import main, runninghub
+
+        photo = self._asset(2, "photo", ".jpg")
+        voice = self._asset(2, "voice", ".mp3")
+        self._as_tenant(2)
+        job_id = main._create_charged_avatar_job(
+            self._params(
+                engine="basic",
+                photo_name=photo,
+                own_audio_name=voice,
+            ),
+            2,
+        )
+
+        with mock.patch.object(
+            avatar.secureconfig,
+            "get_secret",
+            side_effect=AssertionError("Basic 不应读取 HeyGen 密钥"),
+        ) as read_secret, mock.patch.object(
+            runninghub,
+            "synth",
+            new=mock.AsyncMock(side_effect=avatar.Cancelled()),
+        ), mock.patch.object(
+            avatar,
+            "_cap_audio",
+            side_effect=lambda path, _seconds: path,
+        ):
+            asyncio.run(avatar.run_job(job_id, lambda _event: None))
+
+        read_secret.assert_not_called()
+
     def test_cancel_while_worker_runs_cannot_finish_or_refund_twice(self):
         from app import main
 

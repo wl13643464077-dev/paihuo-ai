@@ -293,6 +293,7 @@ async def hg_cleanup_photos() -> int:
         return 0
     candidates.sort(key=lambda e: e.get("ts") or 0)     # 最旧的先释放
     removed: set = set()
+    headers = await db.arun(_hg_headers)
     try:
         async with httpx.AsyncClient(timeout=60) as cli:
             for entry in candidates:
@@ -302,7 +303,7 @@ async def hg_cleanup_photos() -> int:
                 for path in (f"{HEYGEN_API}/v2/photo_avatar/{gid}",
                              f"{HEYGEN_API}/v2/avatar_group/{gid}"):
                     try:
-                        rr = await cli.delete(path, headers=_hg_headers())
+                        rr = await cli.delete(path, headers=headers)
                         if rr.status_code == 200 and (rr.json().get("code") == 100):
                             removed.add(gid)
                             break
@@ -323,9 +324,10 @@ async def hg_upload_talking_photo(photo_path: str, tenant_id=None, job_id=None,
     ext = os.path.splitext(photo_path)[1].lower()
     ctype = "image/png" if ext == ".png" else "image/jpeg"
     data = await asyncio.to_thread(_read_bytes, photo_path)
+    headers = await db.arun(_hg_headers)
     async with httpx.AsyncClient(timeout=120) as cli:
         r = await cli.post(f"{HEYGEN_UPLOAD}/v1/talking_photo",
-                           headers={**_hg_headers(), "Content-Type": ctype}, content=data)
+                           headers={**headers, "Content-Type": ctype}, content=data)
         d = r.json()
         tid = ((d.get("data") or {}).get("talking_photo_id")) or ((d.get("data") or {}).get("id"))
         if tid:
@@ -354,9 +356,10 @@ async def hg_upload_audio(audio_path: str) -> str:
     ext = os.path.splitext(audio_path)[1].lower()
     ctype = {"mp3": "audio/mpeg", "m4a": "audio/mp4", "wav": "audio/wav"}.get(ext.lstrip("."), "audio/mpeg")
     data = await asyncio.to_thread(_read_bytes, audio_path)
+    headers = await db.arun(_hg_headers)
     async with httpx.AsyncClient(timeout=180) as cli:
         r = await cli.post(f"{HEYGEN_UPLOAD}/v1/asset",
-                           headers={**_hg_headers(), "Content-Type": ctype}, content=data)
+                           headers={**headers, "Content-Type": ctype}, content=data)
         d = r.json()
         aid = ((d.get("data") or {}).get("id")) or ((d.get("data") or {}).get("asset_id"))
         if not aid:
@@ -369,8 +372,9 @@ async def hg_voice_id() -> str:
     vid = await db.aget_setting("heygen_voice_id")
     if vid:
         return vid
+    headers = await db.arun(_hg_headers)
     async with httpx.AsyncClient(timeout=60) as cli:
-        r = await cli.get(f"{HEYGEN_API}/v2/voices", headers=_hg_headers())
+        r = await cli.get(f"{HEYGEN_API}/v2/voices", headers=headers)
         for v in ((r.json().get("data") or {}).get("voices")) or []:
             lang = (v.get("language") or "").lower()
             if "chinese" in lang or "zh" in lang or "mandarin" in lang:
@@ -389,9 +393,10 @@ async def hg_generate(talking_photo_id: str, script: str, audio_asset_id: str = 
             "dimension": {"width": 720, "height": 1280} if portrait
             else {"width": 1280, "height": 720},
             "use_avatar_iv_model": True, "title": "BossAI 数字人"}
+    headers = await db.arun(_hg_headers)
     async with httpx.AsyncClient(timeout=120) as cli:
         r = await cli.post(f"{HEYGEN_API}/v2/video/generate",
-                           headers={**_hg_headers(), "Content-Type": "application/json"},
+                           headers={**headers, "Content-Type": "application/json"},
                            json=body)
         d = r.json()
         vid = (d.get("data") or {}).get("video_id")
@@ -402,13 +407,14 @@ async def hg_generate(talking_photo_id: str, script: str, audio_asset_id: str = 
 
 async def hg_poll(video_id: str, progress, timeout: int = 1800, job_id: int = None) -> str:
     t0 = time.time()
+    headers = await db.arun(_hg_headers)
     async with httpx.AsyncClient(timeout=60) as cli:
         while time.time() - t0 < timeout:
             await asyncio.sleep(15)
             if job_id and await db.arun(cancelled, job_id):
                 raise Cancelled()
             r = await cli.get(f"{HEYGEN_API}/v1/video_status.get",
-                              headers=_hg_headers(), params={"video_id": video_id})
+                              headers=headers, params={"video_id": video_id})
             d = (r.json().get("data") or {})
             st = d.get("status", "")
             if st == "completed":
@@ -2152,7 +2158,7 @@ async def clone_voice(sample_path: str, label: str, save: bool = True) -> dict:
 
 async def tts(text: str, voice_id: str) -> str:
     """海螺配音,返回 https 音频 URL(可灵只认 https 音频)."""
-    base, key = providers.yunwu_conf()
+    base, key = await db.arun(providers.yunwu_conf)
     async with httpx.AsyncClient(timeout=300) as cli:
         r = await cli.post(f"{base}/minimax/v1/t2a_v2",
                            headers={"Authorization": f"Bearer {key}"},
@@ -2168,7 +2174,7 @@ async def tts(text: str, voice_id: str) -> str:
 
 async def kling_avatar(image_url: str, audio_url: str, prompt: str = "") -> str:
     """提交可灵数字人任务,返回 task_id。pro 模式口型/画面同步更准."""
-    base, key = providers.yunwu_conf()
+    base, key = await db.arun(providers.yunwu_conf)
     body = {"image": image_url, "sound_file": audio_url,
             "mode": await db.aget_setting("kling_mode") or "pro"}
     if prompt:
@@ -2185,7 +2191,7 @@ async def kling_avatar(image_url: str, audio_url: str, prompt: str = "") -> str:
 
 async def kling_poll(task_id: str, progress, timeout: int = 1500, job_id: int = None) -> str:
     """轮询直到成片,返回视频 URL."""
-    base, key = providers.yunwu_conf()
+    base, key = await db.arun(providers.yunwu_conf)
     t0 = time.time()
     async with httpx.AsyncClient(timeout=60) as cli:
         while time.time() - t0 < timeout:
@@ -2336,15 +2342,17 @@ async def run_job(job_id: int, broadcast):
             raise Cancelled()
         picked = p.get("engine") if p.get("engine") in ("heygen", "kling", "basic") else ""
         eng = picked or await db.arun(engine_name)
-        if eng == "heygen" and not secureconfig.get_secret("heygen_key"):
-            eng = "kling"
-        elif eng == "heygen" and await db.aget_setting("heygen_exhausted"):
-            if picked == "heygen":
-                # 明确点了就再试一次(可能已充值)
-                await db.aset_setting("heygen_exhausted", None)
-                progress("start", "尝试 HeyGen(若仍提示额度用完,请充值或改基础版/可灵)…")
-            else:
+        if eng == "heygen":
+            heygen_ready = await db.arun(secureconfig.get_secret, "heygen_key")
+            if not heygen_ready:
                 eng = "kling"
+            elif await db.aget_setting("heygen_exhausted"):
+                if picked == "heygen":
+                    # 明确点了就再试一次(可能已充值)
+                    await db.aset_setting("heygen_exhausted", None)
+                    progress("start", "尝试 HeyGen(若仍提示额度用完,请充值或改基础版/可灵)…")
+                else:
+                    eng = "kling"
         photo_path = await db.arun(
             asset_path, p["photo_name"], {"photo"}, j.get("tenant_id") or 1
         )

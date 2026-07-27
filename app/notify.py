@@ -222,6 +222,20 @@ def push(tid: int, kind: str, payload: dict):
         send_sync(tid, kind, payload)
 
 
+async def push_async(tid: int, kind: str, payload: dict):
+    """Async entrypoint: persist off-loop and keep webhook I/O out of DB workers."""
+    await db.arun(record, tid, kind, payload)
+    if not await db.arun(get_webhook, tid):
+        return
+    asyncio.get_running_loop().run_in_executor(
+        None,
+        send_sync,
+        tid,
+        kind,
+        payload,
+    )
+
+
 async def test_send(tid: int) -> dict:
     ok = await asyncio.to_thread(send_sync, tid, "report",
                                  {"report_name": "通知测试", "summary": "看到这条说明打通了!以后等拍板/交付/复盘提醒都会推到这里。",
