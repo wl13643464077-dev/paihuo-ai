@@ -591,6 +591,56 @@ class UpgradeSecurityCase(unittest.TestCase):
             ledger["name"],
         )
 
+    def test_schema48_migrates_and_validates_new_production_columns(self):
+        connection = db.conn()
+        connection.execute(
+            "DROP INDEX IF EXISTS idx_account_profile_tenant_deleted"
+        )
+        connection.execute("DROP INDEX IF EXISTS idx_asset_tenant_deleted")
+        for table, columns in {
+            "schedule": ("fail_streak",),
+            "account_profile": ("deleted_at", "deleted_by", "delete_reason"),
+            "asset": ("deleted_at", "deleted_by", "delete_reason"),
+            "job": ("created_by",),
+            "task": ("created_by",),
+            "station_run": ("reviewed_by",),
+        }.items():
+            for column in columns:
+                connection.execute(
+                    f"ALTER TABLE {table} DROP COLUMN {column}"
+                )
+        connection.execute(
+            "DELETE FROM schema_version WHERE version >= 48"
+        )
+        connection.execute("PRAGMA user_version=47")
+        connection.commit()
+        db._close_all_connections()
+        db._conn = None
+        db._conn_path = None
+
+        db.conn()
+
+        for table, columns in {
+            "schedule": {"fail_streak"},
+            "account_profile": {"deleted_at", "deleted_by", "delete_reason"},
+            "asset": {"deleted_at", "deleted_by", "delete_reason"},
+            "job": {"created_by"},
+            "task": {"created_by"},
+            "station_run": {"reviewed_by"},
+        }.items():
+            actual = {
+                row["name"] for row in db.q(f"PRAGMA table_info({table})")
+            }
+            self.assertTrue(columns <= actual, (table, columns - actual))
+        ledger = db.one(
+            "SELECT name FROM schema_version WHERE version=48"
+        )
+        self.assertEqual(
+            "collaboration-soft-delete-schedule-fail-streak",
+            ledger["name"],
+        )
+        self.assertEqual(48, db.one("PRAGMA user_version")["user_version"])
+
     def test_future_database_is_rejected_before_wal_or_schema_mutation(self):
         if db._conn is not None:
             db._conn.close()

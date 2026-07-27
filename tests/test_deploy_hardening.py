@@ -22,6 +22,7 @@ class DeploymentHardeningContractCase(unittest.TestCase):
         (root / "app").mkdir(parents=True)
         (root / "static").mkdir()
         (root / "config" / "departments").mkdir(parents=True)
+        (root / "config" / "industry_knowledge").mkdir(parents=True)
         (state / "departments").mkdir(parents=True)
         (state / "public").mkdir()
         (state / "assets" / "avatar").mkdir(parents=True)
@@ -34,6 +35,14 @@ class DeploymentHardeningContractCase(unittest.TestCase):
         )
         (root / "config" / "departments" / "content.json").write_text(
             '{"key":"content","employees":[]}'
+        )
+        (
+            root / "config" / "industry_knowledge" / "content.json"
+        ).write_text(
+            '{"key":"content","name":"内容行业",'
+            '"metrics":[{"name":"完成率","formula":"完成数/任务数"}],'
+            '"benchmarks":[],"glossary":[],"practices":[],'
+            '"compliance":[],"pitfalls":[]}'
         )
         (root / "config" / "gate_rules.default.json").write_text(
             '{"sensitive_words":[],"notes":"fixture"}'
@@ -612,6 +621,7 @@ class DeploymentHardeningContractCase(unittest.TestCase):
             self.assertTrue(report["ok"])
             self.assertEqual("ok", report["integrity"])
             self.assertEqual(1, report["department_files"])
+            self.assertEqual(1, report["industry_knowledge_files"])
 
     def test_preflight_requires_immutable_seeds_but_allows_gate_state_init(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -624,6 +634,30 @@ class DeploymentHardeningContractCase(unittest.TestCase):
             with self.assertRaisesRegex(
                 preflight.PreflightError,
                 "immutable gate seed",
+            ):
+                self._check_fixture(root, state, venv)
+
+    def test_preflight_rejects_missing_or_mismatched_industry_knowledge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, state, venv = self._preflight_fixture(Path(tmp))
+            knowledge = (
+                root / "config" / "industry_knowledge" / "content.json"
+            )
+            knowledge.unlink()
+            with self.assertRaisesRegex(
+                preflight.PreflightError,
+                "industry knowledge is empty",
+            ):
+                self._check_fixture(root, state, venv)
+
+            knowledge.write_text(
+                '{"key":"other","name":"错误行业",'
+                '"metrics":[],"benchmarks":[],"glossary":[],'
+                '"practices":[],"compliance":[],"pitfalls":[]}'
+            )
+            with self.assertRaisesRegex(
+                preflight.PreflightError,
+                "keys do not match",
             ):
                 self._check_fixture(root, state, venv)
 

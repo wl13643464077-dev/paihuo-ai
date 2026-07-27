@@ -24,7 +24,7 @@ _conn = None
 _conn_path = None
 _connection_generation = 0
 _all_connections: set[sqlite3.Connection] = set()
-LATEST_SCHEMA_VERSION = 47
+LATEST_SCHEMA_VERSION = 48
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version(
@@ -167,11 +167,27 @@ def _validate_migrated_database(c) -> None:
         "job": {
             "id", "brief_json", "mode", "status", "current_idx", "tenant_id",
             "billing_status", "billing_points", "retry_count", "deleted_at",
+            "deleted_by", "delete_reason", "created_by",
             "created_at", "updated_at",
         },
         "task": {
             "id", "emp_idx", "brief_json", "status", "tenant_id",
             "billing_status", "billing_points", "retry_count", "deleted_at",
+            "deleted_by", "delete_reason", "created_by",
+        },
+        "station_run": {
+            "id", "job_id", "station_idx", "status", "reviewed_by",
+        },
+        "account_profile": {
+            "id", "tenant_id", "name", "deleted_at", "deleted_by",
+            "delete_reason",
+        },
+        "asset": {
+            "id", "tenant_id", "type", "deleted_at", "deleted_by",
+            "delete_reason",
+        },
+        "schedule": {
+            "id", "tenant_id", "name", "enabled", "fail_streak",
         },
         "knowledge": {"id", "tenant_id", "title", "content", "deleted_at"},
         "avatar_job": {
@@ -747,6 +763,11 @@ def _initialize_anchor():
         _conn.execute(
             "DELETE FROM app_setting WHERE key='session_secret'"
         )
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(47,'environment-only-session-secret-migration',?)",
+            (time.time(),),
+        )
         # 旧会议没有 V28 决策字段；只做展示态回填，绝不把历史会议重新跑一遍。
         _conn.execute("UPDATE meeting SET phase='completed' "
                       "WHERE status='done' AND phase='queued' AND decision IS NULL")
@@ -757,7 +778,7 @@ def _initialize_anchor():
             "INSERT OR IGNORE INTO schema_version(version,name,applied_at) VALUES(?,?,?)",
             (
                 LATEST_SCHEMA_VERSION,
-                "environment-only-session-secret-migration",
+                "collaboration-soft-delete-schedule-fail-streak",
                 time.time(),
             ),
         )
