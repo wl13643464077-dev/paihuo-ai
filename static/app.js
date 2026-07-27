@@ -3022,7 +3022,8 @@ async function companyView(){
       <label class="btn" style="cursor:pointer">📎 上传文档(可多选)
         <input type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.docx,.xlsx,.pptx,.jpg,.jpeg,.png,.webp" style="display:none" onchange="companyUpload(this)"></label>
       <button class="btn" onclick="companySaveMat(this)">💾 只存资料</button>
-      <button class="btn pri" onclick="companyDistill(this)">✨ 提炼并同步给全部员工</button></div>
+      <button class="btn pri" onclick="companyDistill(this)">✨ 提炼并同步给全部员工</button>
+      ${c.has_prev?`<button class="btn" onclick="companyUndo(this)" title="换回上次提炼前的那一版档案">↩️ 撤销上次提炼</button>`:""}</div>
     <div class="sub" style="margin-top:-4px">支持 Word / PDF / Excel / PPT / 图片 / txt——上传后会自动提取文字并追加到上面,再点提炼。</div>
     <h3 style="margin:20px 0 4px">📇 提炼出的企业档案(注入员工的"固定参数",可手动微调)</h3>
     <div class="sub">这 7 项就是每个员工每次开工都会先读到的企业信息。可直接改,改完点保存。</div>
@@ -3064,6 +3065,13 @@ async function companyDistill(btn){
     await api("/company/distill",{method:"POST",timeout:330000,longRunning:true});
     toast("已提炼并同步给全部员工"); render();
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent=t; }
+}
+async function companyUndo(btn){
+  if(!await uiConfirm("换回上次提炼前的那一版档案?当前这版会成为可再次撤销的备份(两版互换)。",{
+    okText:"↩️ 撤销",okClass:"pri"})) return;
+  btn.disabled=true;
+  try{ await api("/company/restore-prev",{method:"POST"}); toast("已换回上一版档案"); render(); }
+  catch(e){ toast(e.message); btn.disabled=false; }
 }
 async function companySaveProfile(btn, opts){
   if(btn) btn.disabled=true;

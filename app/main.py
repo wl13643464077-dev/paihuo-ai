@@ -4149,7 +4149,8 @@ def company_get():
             "profile": prof,
             "injected": filled > 0,
             "filled": filled,
-            "total_fields": len(_COMPANY_FIELDS)}
+            "total_fields": len(_COMPANY_FIELDS),
+            "has_prev": bool(db.get_setting(f"company_profile_prev:{tid}"))}
 
 
 @app.put("/api/company")
@@ -4211,10 +4212,31 @@ async def company_distill():
         )
     prof = {k: str(r["data"].get(k) or "").strip()[:600] for k in _COMPANY_FIELDS}
     prof["updated_at"] = time.time()
+    # 覆盖前留一份上一版:提炼会重写老板手工调校的字段,必须有后悔药
+    previous = await db.aget_setting(f"company_profile:{tid}")
+    if previous:
+        await db.aset_setting(f"company_profile_prev:{tid}", previous)
     await db.aset_setting(
         f"company_profile:{tid}", json.dumps(prof, ensure_ascii=False)
     )
-    return {"profile": prof, "cost_usd": r.get("cost_usd", 0)}
+    return {"profile": prof, "cost_usd": r.get("cost_usd", 0),
+            "can_undo": bool(previous)}
+
+
+@app.post("/api/company/restore-prev")
+def company_restore_prev():
+    """一键撤销上次提炼:换回覆盖前的那一版档案(仅保留一步)。"""
+    _need_admin()
+    tid = TEN()
+    previous = db.get_setting(f"company_profile_prev:{tid}")
+    if not previous:
+        raise HTTPException(404, "没有可撤销的版本(只保留最近一次提炼前的档案)")
+    current = db.get_setting(f"company_profile:{tid}")
+    db.set_setting(f"company_profile:{tid}", previous)
+    # 两版互换:撤销之后还能"撤销撤销"
+    db.set_setting(f"company_profile_prev:{tid}", current)
+    return {"ok": True,
+            "profile": db.jloads(previous, {}) or {}}
 
 
 # ---------------- V22:老板视角——员工产出总览(产出/token/费用) ----------------

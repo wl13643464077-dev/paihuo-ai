@@ -86,6 +86,23 @@ class ReturningBossContracts(unittest.TestCase):
         db.DB_PATH = self.old_path
         self.tmp.cleanup()
 
+    def test_company_distill_undo_swaps_versions(self):
+        db.set_setting("company_profile:2", '{"brand":"旧版","tone":"手工调校"}')
+        with self.assertRaises(HTTPException) as none_yet:
+            main.company_restore_prev()
+        self.assertEqual(404, none_yet.exception.status_code)
+        # 模拟提炼覆盖后的状态:prev=旧版,current=新版
+        db.set_setting("company_profile_prev:2",
+                       '{"brand":"旧版","tone":"手工调校"}')
+        db.set_setting("company_profile:2", '{"brand":"新版"}')
+        self.assertTrue(main.company_get()["has_prev"])
+        restored = main.company_restore_prev()
+        self.assertEqual("手工调校", restored["profile"]["tone"],
+                         "撤销必须换回手工调校的那一版")
+        # 两版互换:还能撤销撤销
+        again = main.company_restore_prev()
+        self.assertEqual("新版", again["profile"]["brand"])
+
     def test_publog_paginated_contract_and_legacy_list(self):
         for i in range(3):
             pubtrack.add_entry(2, "公众号", f"文章{i}")
