@@ -54,61 +54,9 @@ sudo test "$(stat -c '%U:%G %a' "$key_backup")" = "root:root 600"
 - 发布回执/发布记录必须把数据库快照身份、release id 与密钥副本路径关联。
   恢复时按该关联选取一对材料，不能按“最新文件”猜测。
 
-本机 root-only 副本只处理误删和版本回退，不能替代异地灾备。
-
-## 异地备份（deploy/offsite_backup.py）
-
-异地推送已实现为固定运维工具，但**默认不启用**：远端位置与加密密钥必须由
-老板亲自配置，配置行为本身就是授权。工具在未配置时启动即失败并告警，
-不会静默跳过——"以为有异地备份"比"知道没有"危险得多。
-
-启用步骤（root）：
-
-```bash
-set -euo pipefail
-umask 077
-install -d -m 700 /etc/paihuo
-cat > /etc/paihuo/offsite.env <<EOF
-PAIHUO_OFFSITE_DEST=ssh://backup@offsite-host:/srv/paihuo
-PAIHUO_OFFSITE_KEY=$(python3 - <<'PY'
-import secrets; print(secrets.token_urlsafe(48))
-PY
-)
-EOF
-chmod 600 /etc/paihuo/offsite.env
-systemctl enable --now paihuo-offsite-backup.timer
-systemctl start paihuo-offsite-backup.service   # 首次立即推送并验回
-```
-
-`PAIHUO_OFFSITE_DEST` 也可以是已挂载异地存储的绝对路径（NAS/对象存储挂载点，
-目录权限必须 0700）。两种形态推送后都会做哈希验回：本地路径重读比对，
-ssh 目的地经远端 `sha256sum` 比对；验不上按失败告警。
-
-安全属性：
-
-- 远端只保存 **Fernet 密文 + 清单**（明文/密文双 SHA-256、schema 摘要），
-  不含任何明文业务数据；`PAIHUO_OFFSITE_KEY` 与会话/配置密钥互相独立，
-  绝不进入推送内容或子进程参数。
-- **该密钥必须抄写进离线恢复信封**：丢了密钥，异地密文即废。
-- 远端按对保留最近 N 份（默认 14），密文与清单成对清理。
-- 每次成功写 HMAC 回执 `/var/lib/paihuo-upgrade/latest-offsite-backup.json`；
-  监控用 `python3 -m deploy.offsite_backup --check-freshness --backup-dir
-  /var/backups/paihuo` 判新鲜度（默认 26h），回执缺失/伪造/过期一律失败。
-
-恢复（在任何机器上）：
-
-```bash
-python3 - <<'PY'
-from pathlib import Path
-from deploy.offsite_backup import decrypt_backup
-plain = decrypt_backup(Path("db-….db.enc"), "<信封里的 PAIHUO_OFFSITE_KEY>")
-Path("restored.db").write_bytes(plain)
-PY
-python3 -m deploy.verify_backup --database restored.db   # 照常做完整校验
-```
-
-注意：数据库里的供应商凭据是密文，异地恢复必须同时持有环境密钥备份单元
-（见上一节）；只拿到数据库密文+异地密钥并不能恢复供应商能力。
+本机 root-only 副本只处理误删和版本回退，不能替代异地灾备。Git/远端以及
+数据库与密钥的异地主机或对象存储位置仍需用户指定并明确授权；授权前不得擅自
+上传任何密钥。
 
 ## 安装与首次验收
 
