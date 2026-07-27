@@ -378,6 +378,10 @@ def _initialize_anchor():
         # 连续非计费失败要累计,静默 10 分钟重试一天 144 次老板却毫不知情
         _add_column(_conn, "schedule", "fail_streak",
                     "INTEGER NOT NULL DEFAULT 0")
+        # 通知定向:user_id 为空=租户广播;read_by 存广播的按人已读集合
+        # (逗号包裹串,如 ",5,20,",instr 即可判含),财务类通知只发企业主。
+        _add_column(_conn, "notification", "user_id", "INTEGER")
+        _add_column(_conn, "notification", "read_by", "TEXT")
         _add_column(_conn, "schedule", "claim_token", "TEXT")
         for col in ("model_text", "model_image"):  # v6 迁移:员工级模型路由
             _add_column(_conn, "employee_config", col, "TEXT")

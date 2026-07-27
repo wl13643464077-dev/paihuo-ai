@@ -1981,11 +1981,16 @@ def state(limit: int | None = None, offset: int = 0):
         p["persona"] = persona
         p["has_corpus"] = bool(corpus)
     inbox = [j for j in jobs if j["status"] in ("awaiting_review", "gate_blocked", "failed")]
+    # 通知可见性:广播(user_id 空)对全租户,且本人没在 read_by 里点过已读;
+    # 定向通知只给收件人本人。read_at 非空 = 对所有人已读(主账号一键全读)。
     notifications = db.q(
         "SELECT id,kind,title,body,link,created_at "
         "FROM notification WHERE tenant_id=? AND read_at IS NULL "
+        "AND (user_id=? OR (user_id IS NULL "
+        "AND instr(COALESCE(read_by,','), ','||?||',')=0)) "
         "ORDER BY id DESC LIMIT 30",
-        (TEN(),),
+        (TEN(), int((auth.current() or {}).get("id") or 0),
+         str(int((auth.current() or {}).get("id") or 0))),
     )
     # V26:余额+新手引导进度(首页头卡与开工清单用)
     ten_row = db.one("SELECT balance, plan FROM tenants WHERE id=?", (TEN(),)) or {}
@@ -2038,13 +2043,27 @@ def notifications_read(body: dict):
             ids.append(item_id)
     if not ids:
         return {"ok": True, "updated": 0}
-    marks = ",".join("?" for _ in ids)
     now = time.time()
-    changed = db.execute(
-        f"UPDATE notification SET read_at=?,updated_at=? "
-        f"WHERE tenant_id=? AND read_at IS NULL AND id IN ({marks})",
-        (now, now, TEN(), *ids),
-    )
+    uid = int((auth.current() or {}).get("id") or 0)
+    changed = 0
+    with db.atomic() as connection:
+        marks = ",".join("?" for _ in ids)
+        # 定向给我的:直接置已读
+        changed += connection.execute(
+            f"UPDATE notification SET read_at=?,updated_at=? "
+            f"WHERE tenant_id=? AND read_at IS NULL AND user_id=? "
+            f"AND id IN ({marks})",
+            (now, now, TEN(), uid, *ids),
+        ).rowcount
+        # 广播的:只把"我"追加进 read_by,别人(尤其老板)的未读不受影响
+        changed += connection.execute(
+            f"UPDATE notification SET "
+            f"read_by=COALESCE(read_by,',')||?||',',updated_at=? "
+            f"WHERE tenant_id=? AND read_at IS NULL AND user_id IS NULL "
+            f"AND instr(COALESCE(read_by,','), ','||?||',')=0 "
+            f"AND id IN ({marks})",
+            (str(uid), now, TEN(), str(uid), *ids),
+        ).rowcount
     return {"ok": True, "updated": changed}
 
 

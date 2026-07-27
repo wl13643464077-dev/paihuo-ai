@@ -86,7 +86,12 @@ class NotificationsReadPermissionCase(unittest.TestCase):
         self._as_member()
         result = main.notifications_read({"ids": [first_id]})
         self.assertEqual(1, result["updated"])
-        self.assertEqual(1, self._unread_count())
+        # 定向轮之后:member 的单条已读只影响自己(记入 read_by),
+        # 不再写 read_at——老板的未读绝不能被员工吞掉。
+        self.assertEqual(2, self._unread_count(),
+                         "广播行的 read_at 必须保持未读(按人已读)")
+        member_visible = {n["id"] for n in main.state()["notifications"]}
+        self.assertNotIn(first_id, member_visible, "自己读过的不再显示")
 
     def test_owner_read_all_clears_tenant_unread(self):
         self._push_two_unread()

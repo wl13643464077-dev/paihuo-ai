@@ -160,10 +160,26 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
     return title, body, link
 
 
+# 钱袋子与经营风险类通知只发企业主:member 看到只是噪音,
+# 还会把"该充值了/断更风险"这类老板必须亲自处理的事淹掉。
+OWNER_ONLY_KINDS = {
+    "daily_digest", "schedule_paused", "schedule_failed",
+    "learn_done", "learn_failed",
+}
+
+
+def _owner_uid(tid: int):
+    row = db.one(
+        "SELECT id FROM users WHERE tenant_id=? AND role='owner' "
+        "AND COALESCE(enabled,1)=1 ORDER BY id LIMIT 1", (tid,))
+    return row["id"] if row else None
+
+
 def record(tid: int, kind: str, payload: dict) -> int | None:
     """Persist the notification even when no external webhook is configured."""
     try:
         title, body, link = _inbox_item(kind, payload)
+        target = _owner_uid(tid) if kind in OWNER_ONLY_KINDS else None
         return db.insert(
             "notification",
             {
@@ -172,6 +188,7 @@ def record(tid: int, kind: str, payload: dict) -> int | None:
                 "title": title,
                 "body": body,
                 "link": link,
+                "user_id": target,
             },
         )
     except Exception as exc:
