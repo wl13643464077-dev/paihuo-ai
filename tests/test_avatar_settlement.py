@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -111,6 +112,36 @@ class AvatarSettlementCase(unittest.TestCase):
                 "WHERE tenant_id=2 AND delta=-12"
             )["n"],
         )
+
+    def test_concurrent_heygen_photo_registration_keeps_both_owners(self):
+        """平台级照片登记必须是单事务 RMW，并发租户不能互相覆盖。"""
+        original_registry = avatar._hg_registry
+        old_code_read_barrier = threading.Barrier(2)
+
+        def synchronized_registry_read():
+            # 若实现退回“先读后写”，强制两条 worker 都读到同一旧快照，
+            # 让丢更新稳定复现；事务实现不会调用这个旧 helper。
+            old_code_read_barrier.wait(timeout=2)
+            return original_registry()
+
+        async def scenario():
+            with mock.patch.object(
+                avatar,
+                "_hg_registry",
+                side_effect=synchronized_registry_read,
+            ):
+                await asyncio.gather(
+                    db.arun(avatar.hg_register_photo, "photo-A", 2, 101),
+                    db.arun(avatar.hg_register_photo, "photo-B", 3, 202),
+                )
+
+        asyncio.run(scenario())
+        entries = avatar._hg_registry()
+        self.assertEqual(
+            {"photo-A", "photo-B"},
+            {entry["id"] for entry in entries},
+        )
+        self.assertEqual(2, len(entries))
 
     def test_insufficient_balance_does_not_leave_job_or_partial_debit(self):
         from app import main

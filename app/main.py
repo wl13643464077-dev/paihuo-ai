@@ -5139,28 +5139,41 @@ async def avatar_job_create(body: dict):
             400,
             f"{dur} 秒口播稿最多 {max_script_chars} 个字符，请精简或选择更长时长",
         )
-    all_voices = avatar.cloned_voices() + avatar.VOICES
-    voice = next((v for v in all_voices if v["id"] == body.get("voice_id")), avatar.VOICES[0])
     tid = TEN()
-    # Validation and the charged job row form one asset-library critical
-    # section.  A concurrent delete can run only after the durable job
-    # reference exists, at which point physical reclamation is prohibited.
-    with avatar.asset_library_lock(tid):
-        photo_name = _avatar_asset_name(
-            body.get("photo_name"), "photo_name", {"photo"}
+
+    def create_job() -> int:
+        all_voices = avatar.cloned_voices() + avatar.VOICES
+        voice = next(
+            (item for item in all_voices
+             if item["id"] == body.get("voice_id")),
+            avatar.VOICES[0],
         )
-        own_audio_name = _avatar_asset_name(
-            body.get("own_audio_name"),
-            "own_audio_name",
-            {"voice"},
-            required=False,
-        )
-        params = {"photo_name": photo_name, "script": script,
-                  "voice_id": voice["id"], "voice_label": voice["label"],
-                  "own_audio_name": own_audio_name,
-                  "engine": body.get("engine") or "", "duration": dur,
-                  "prompt": (body.get("prompt") or "").strip()}
-        jid = _create_charged_avatar_job(params, tid)
+        # Validation and the charged job row form one asset-library critical
+        # section. A concurrent delete can run only after the durable job
+        # reference exists, at which point physical reclamation is prohibited.
+        with avatar.asset_library_lock(tid):
+            photo_name = _avatar_asset_name(
+                body.get("photo_name"), "photo_name", {"photo"}
+            )
+            own_audio_name = _avatar_asset_name(
+                body.get("own_audio_name"),
+                "own_audio_name",
+                {"voice"},
+                required=False,
+            )
+            params = {
+                "photo_name": photo_name,
+                "script": script,
+                "voice_id": voice["id"],
+                "voice_label": voice["label"],
+                "own_audio_name": own_audio_name,
+                "engine": body.get("engine") or "",
+                "duration": dur,
+                "prompt": (body.get("prompt") or "").strip(),
+            }
+            return _create_charged_avatar_job(params, tid)
+
+    jid = await db.arun(create_job)
     asyncio.create_task(avatar.run_job(jid, engine.broadcast))
     return {"job_id": jid}
 
@@ -5386,18 +5399,24 @@ def _create_charged_meeting(data: dict, member_count: int) -> int:
 @app.post("/api/meetings")
 async def meeting_create(body: dict):
     # 先做类型净化、去重、权限校验，再计费；重复 idx 不再重复发言/重复收费。
-    idxs, seen = [], set()
-    for raw in (body.get("emp_idxs") or []):
-        try:
-            idx = int(raw)
-        except (TypeError, ValueError):
-            continue
-        if idx in seen or not meeting.emp_brief(idx):
-            continue
-        seen.add(idx)
-        idxs.append(idx)
-        if len(idxs) >= meeting.MAX_MEMBERS:
-            break
+    raw_idxs = tuple(body.get("emp_idxs") or ())
+
+    def select_members() -> list[int]:
+        idxs, seen = [], set()
+        for raw in raw_idxs:
+            try:
+                idx = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if idx in seen or not meeting.emp_brief(idx):
+                continue
+            seen.add(idx)
+            idxs.append(idx)
+            if len(idxs) >= meeting.MAX_MEMBERS:
+                break
+        return idxs
+
+    idxs = await db.arun(select_members)
     q = (body.get("question") or "").strip()
     if not q or len(idxs) < 2:
         raise HTTPException(400, "议题必填,且至少拉 2 位员工进群")
@@ -5410,16 +5429,20 @@ async def meeting_create(body: dict):
         _need_module(expert["dept_key"] if expert else "content")
     # 按公示价「会议每人1点」整单原子扣费；建会失败不会出现扣点无记录。
     try:
-        mid = _create_charged_meeting({
-            "tenant_id": TEN(),
-            "question": q,
-            "constraints": constraints,
-            "acceptance_criteria": acceptance,
-            "emp_idxs_json": json.dumps(idxs),
-            "auto_execute": 0 if body.get("auto_execute") is False else 1,
-            "phase": "queued",
-            "round_no": 0,
-        }, len(idxs))
+        mid = await db.arun(
+            _create_charged_meeting,
+            {
+                "tenant_id": TEN(),
+                "question": q,
+                "constraints": constraints,
+                "acceptance_criteria": acceptance,
+                "emp_idxs_json": json.dumps(idxs),
+                "auto_execute": 0 if body.get("auto_execute") is False else 1,
+                "phase": "queued",
+                "round_no": 0,
+            },
+            len(idxs),
+        )
     except billing.InsufficientPoints as e:
         raise HTTPException(402, str(e))
     asyncio.create_task(meeting.run(mid, engine.broadcast))
@@ -7734,39 +7757,52 @@ def _create_charged_tv_job(params: dict, tenant_id: int = None,
 async def job_text_video(job_id: int, body: dict):
     _need_module("content")
     bgm = _validated_tv_bgm(body)
-    _job_or_404(job_id)
-    d = build_delivery(job_id)
-    v = next((x for x in (d.get("versions") or []) if x.get("platform") in ("抖音", "视频号")), None)
-    text = (v or {}).get("body") or d["body"]
-    if not (text or "").strip():
-        raise HTTPException(400, "工单还没有定稿正文")
-    images = []
-    for image in d.get("images") or []:
-        file_url = image.get("file") or ""
-        if not file_url.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
-            continue
-        try:
-            assetfiles.resolve_tenant_asset(
-                file_url, TEN(), expected_job_id=job_id,
-                allowed_extensions=(".png", ".jpg", ".jpeg", ".webp"),
-            )
-        except assetfiles.AssetAccessError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        images.append(assetfiles.canonical_file_url(file_url))
-    params = {
-        "title": d["title"],
-        "body": text,
-        "images": images,
-        "voice_id": body.get("voice_id") or "",
-        "image_query": d["title"][:16],
-        "bgm": bgm,
-    }
-    tvid = _create_charged_tv_job(
-        params,
-        tenant_id=TEN(),
-        job_id=job_id,
-        note=d["title"][:16],
-    )
+    tid = TEN()
+
+    def create_job_video() -> int:
+        _job_or_404(job_id)
+        delivery = build_delivery(job_id)
+        version = next(
+            (
+                item for item in (delivery.get("versions") or [])
+                if item.get("platform") in ("抖音", "视频号")
+            ),
+            None,
+        )
+        text = (version or {}).get("body") or delivery["body"]
+        if not (text or "").strip():
+            raise HTTPException(400, "工单还没有定稿正文")
+        images = []
+        for image in delivery.get("images") or []:
+            file_url = image.get("file") or ""
+            if not file_url.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                continue
+            try:
+                assetfiles.resolve_tenant_asset(
+                    file_url,
+                    tid,
+                    expected_job_id=job_id,
+                    allowed_extensions=(".png", ".jpg", ".jpeg", ".webp"),
+                )
+            except assetfiles.AssetAccessError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            images.append(assetfiles.canonical_file_url(file_url))
+        params = {
+            "title": delivery["title"],
+            "body": text,
+            "images": images,
+            "voice_id": body.get("voice_id") or "",
+            "image_query": delivery["title"][:16],
+            "bgm": bgm,
+        }
+        return _create_charged_tv_job(
+            params,
+            tenant_id=tid,
+            job_id=job_id,
+            note=delivery["title"][:16],
+        )
+
+    tvid = await db.arun(create_job_video)
     asyncio.create_task(textvideo.run_job(tvid, engine.broadcast))
     return {"tv_id": tvid}
 
@@ -7784,31 +7820,40 @@ async def text_video_create(body: dict):
             raise HTTPException(400, "主题和文案至少填一个")
         raw_clips = body.get("clips")
         raw_clips = raw_clips if isinstance(raw_clips, list) else []
-        with textvideo.clip_library_lock(TEN()):
-            clips = []
-            seen = set()
-            for name in raw_clips[:50]:
-                path = textvideo.resolve_clip_path(TEN(), name)
-                if path and path not in seen:
-                    seen.add(path)
-                    clips.append(path)
-                if len(clips) >= 12:
-                    break
-            if not clips:
-                raise HTTPException(400, "先勾选至少 1 段素材视频")
-            params = {"mode": "clips", "clips": clips,
-                      "title": (body.get("title") or topic or "")[:40],
-                      "script": script[:2000], "topic": topic[:60],
-                      "voice_id": body.get("voice_id") or "",
-                      "bgm": bgm,
-                      "end_text": (body.get("end_text") or "")[:40]}
+        tid = TEN()
+
+        def create_clip_video() -> int:
             # Selection and persistence share the same tenant lock with DELETE,
             # so a paid job can never be born pointing at a just-removed clip.
-            tvid = _create_charged_tv_job(
-                params,
-                tenant_id=TEN(),
-                note=(params.get("title") or script or topic)[:16],
-            )
+            with textvideo.clip_library_lock(tid):
+                clips = []
+                seen = set()
+                for name in raw_clips[:50]:
+                    path = textvideo.resolve_clip_path(tid, name)
+                    if path and path not in seen:
+                        seen.add(path)
+                        clips.append(path)
+                    if len(clips) >= 12:
+                        break
+                if not clips:
+                    raise HTTPException(400, "先勾选至少 1 段素材视频")
+                params = {
+                    "mode": "clips",
+                    "clips": clips,
+                    "title": (body.get("title") or topic or "")[:40],
+                    "script": script[:2000],
+                    "topic": topic[:60],
+                    "voice_id": body.get("voice_id") or "",
+                    "bgm": bgm,
+                    "end_text": (body.get("end_text") or "")[:40],
+                }
+                return _create_charged_tv_job(
+                    params,
+                    tenant_id=tid,
+                    note=(params.get("title") or script or topic)[:16],
+                )
+
+        tvid = await db.arun(create_clip_video)
     else:
         if len(script) < 20:
             raise HTTPException(400, "口播稿太短(至少20字)")
@@ -7817,7 +7862,8 @@ async def text_video_create(body: dict):
                   "image_query": (body.get("image_query") or body.get("title") or "")[:30],
                   "bgm": bgm,
                   "end_text": (body.get("end_text") or "")[:40]}
-        tvid = _create_charged_tv_job(
+        tvid = await db.arun(
+            _create_charged_tv_job,
             params,
             tenant_id=TEN(),
             note=(params.get("title") or script or topic)[:16],

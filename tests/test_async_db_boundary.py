@@ -544,6 +544,19 @@ class ReviewedAsyncCallGraphTests(unittest.TestCase):
         ("main.py", "task_redo"): {
             "_task_row_or_404", "_create_charged_expert_task",
         },
+        ("main.py", "avatar_job_create"): {
+            "avatar.cloned_voices", "_avatar_asset_name",
+            "_create_charged_avatar_job",
+        },
+        ("main.py", "meeting_create"): {
+            "meeting.emp_brief", "_create_charged_meeting",
+        },
+        ("main.py", "job_text_video"): {
+            "_job_or_404", "build_delivery", "_create_charged_tv_job",
+        },
+        ("main.py", "text_video_create"): {
+            "textvideo.resolve_clip_path", "_create_charged_tv_job",
+        },
         ("main.py", "_tool_watchdog_loop"): {"_recover_stale_tool_jobs"},
         ("main.py", "_tool_enqueue_async"): {
             "_tool_require_idle", "_tool_enqueue_record",

@@ -1159,6 +1159,8 @@ async def build(tvid: int, tid: int, title: str, script: str, images: list,
                 if not done:
                     log.warning("xfade assembly failed returncode=%s", r.returncode)
                     progress("叠化拼装失败,回退简单拼接")
+            except _Cancelled:
+                raise
             except Exception as exc:
                 log.warning(
                     "xfade assembly error_type=%s", type(exc).__name__

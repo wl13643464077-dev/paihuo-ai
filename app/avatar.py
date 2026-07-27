@@ -211,17 +211,32 @@ def hg_register_photo(photo_id: str, tenant_id, job_id) -> None:
     """
     if not photo_id:
         return
-    entries = [e for e in _hg_registry() if e.get("id") != photo_id]
-    entries.append({
-        "id": str(photo_id),
-        "tenant_id": tenant_id,
-        "job_id": job_id,
-        "ts": time.time(),
-    })
-    db.set_setting(
-        HG_PHOTO_REGISTRY,
-        json.dumps(entries[-HG_REGISTRY_MAX:], ensure_ascii=False),
-    )
+    with db.atomic() as connection:
+        row = connection.execute(
+            "SELECT value FROM app_setting WHERE key=?",
+            (HG_PHOTO_REGISTRY,),
+        ).fetchone()
+        entries = db.jloads(row["value"] if row else None, []) or []
+        entries = [
+            entry for entry in entries
+            if isinstance(entry, dict) and entry.get("id") != photo_id
+        ]
+        entries.append({
+            "id": str(photo_id),
+            "tenant_id": tenant_id,
+            "job_id": job_id,
+            "ts": time.time(),
+        })
+        connection.execute(
+            "INSERT INTO app_setting(key,value,updated_at) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
+            "updated_at=excluded.updated_at",
+            (
+                HG_PHOTO_REGISTRY,
+                json.dumps(entries[-HG_REGISTRY_MAX:], ensure_ascii=False),
+                time.time(),
+            ),
+        )
 
 
 def _hg_active_job_ids() -> set:

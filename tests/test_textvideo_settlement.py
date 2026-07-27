@@ -244,6 +244,64 @@ class TextVideoSettlementCase(unittest.TestCase):
             "SELECT id FROM tv_job WHERE id=?", (tvid,)
         ))
 
+    def test_build_cancellation_does_not_enter_concat_fallback(self):
+        """叠化失败提示发现取消后，不能吞掉取消再跑 900 秒回退。"""
+        calls = []
+
+        def fake_run(command, **_kwargs):
+            calls.append(command)
+            # 两个分段成功，叠化失败；若取消被吞还会出现第 4 次 concat。
+            return mock.Mock(returncode=0 if len(calls) <= 2 else 1)
+
+        def progress(message):
+            if "回退简单拼接" in message:
+                raise textvideo._Cancelled()
+
+        async def exercise():
+            with mock.patch.object(
+                    textvideo, "split_sentences", return_value=["甲", "乙"]), \
+                    mock.patch.object(
+                        textvideo.avatar,
+                        "tts",
+                        new=mock.AsyncMock(return_value="https://media.test/a.mp3"),
+                    ), \
+                    mock.patch.object(
+                        textvideo.netfetch,
+                        "download_public_media",
+                        new=mock.AsyncMock(),
+                    ), \
+                    mock.patch.object(textvideo, "_probe_dur", return_value=1.0), \
+                    mock.patch.object(textvideo, "_seg_cmd", return_value=["segment"]), \
+                    mock.patch.object(
+                        textvideo, "_append_ending", new=mock.AsyncMock()
+                    ), \
+                    mock.patch.object(
+                        textvideo,
+                        "_xfade_cmd",
+                        return_value=(
+                            ["xfade"], "graph", "video", "unused", 2.0
+                        ),
+                    ), \
+                    mock.patch.object(textvideo, "_render_output_ok", return_value=True), \
+                    mock.patch.object(
+                        textvideo.subprocess, "run", side_effect=fake_run
+                    ):
+                with self.assertRaises(textvideo._Cancelled):
+                    await textvideo.build(
+                        1,
+                        2,
+                        "标题",
+                        "两句口播",
+                        [],
+                        "",
+                        "tv",
+                        progress,
+                        bgm="none",
+                    )
+
+        asyncio.run(exercise())
+        self.assertEqual(3, len(calls), "取消后仍启动了 concat 回退")
+
     def test_notification_and_broadcast_failure_cannot_refund_delivery(self):
         tvid = self._create()
 
