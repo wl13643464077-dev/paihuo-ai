@@ -75,6 +75,9 @@ class ReturningBossContracts(unittest.TestCase):
         db.DB_PATH = os.path.join(self.tmp.name, "returning.db")
         db.conn()
         db.insert("tenants", {"id": 2, "name": "企业", "balance": 30})
+        # 财务类通知只发企业主:租户必须有真实 owner 行才会落站内
+        db.insert("users", {"id": 20, "tenant_id": 2, "username": "owner",
+                            "password_hash": "x", "role": "owner"})
         auth.set_current({"id": 20, "tenant_id": 2, "username": "owner",
                           "role": "owner", "modules": ["content"]})
 
@@ -85,6 +88,28 @@ class ReturningBossContracts(unittest.TestCase):
         db._conn = None
         db.DB_PATH = self.old_path
         self.tmp.cleanup()
+
+    def test_billing_refunds_not_counted_as_recharge(self):
+        now = time.time()
+        for delta, reason in ((100, "开通标准版"), (-18, "内容流水线整单 · x"),
+                              (18, "退回:内容流水线整单 · x")):
+            db.insert("billing_log", {"tenant_id": 2, "delta": delta,
+                                      "balance": 100, "reason": reason,
+                                      "created_at": now, "updated_at": now})
+        data = main.billing_get()
+        self.assertEqual(100, data["recharged"], "退点不得计入累计充值")
+        self.assertEqual(18, data["refunded_total"])
+        month = data["monthly"][0]
+        self.assertEqual(100, month["recharged"])
+        self.assertEqual(18, month["refunded"])
+
+    def test_tool_search_matches_chinese_display_name(self):
+        from app import taskcenter
+        db.insert("tool_job", {"tenant_id": 2, "kind": "hot",
+                               "status": "done", "params_json": "{}"})
+        hit = taskcenter.list_items(2, {"content"}, q="今日必发")
+        self.assertEqual(1, hit["counts"]["all"],
+                         "列表标题显示的中文名必须可搜")
 
     def test_company_distill_undo_swaps_versions(self):
         db.set_setting("company_profile:2", '{"brand":"旧版","tone":"手工调校"}')

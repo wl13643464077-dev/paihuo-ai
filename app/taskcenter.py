@@ -330,8 +330,13 @@ def _visible_header_query(tenant_id: int, allowed_modules: set[str],
         add("video", "tv_job", "status", "tenant_id=?", (tenant_id,),
             search_expr="COALESCE(json_extract(params_json,'$.title'),"
                         "params_json,'')")
+        # 工具单列表标题显示的是 TOOL_NAMES 中文名,搜索必须能按它命中,
+        # 否则老板照着屏幕上的「今日必发」搜出 0 条
+        tool_name_case = ("CASE kind " + " ".join(
+            f"WHEN '{key}' THEN '{name}'" for key, name in TOOL_NAMES.items()
+        ) + " ELSE kind END")
         add("tool", "tool_job", "status", "tenant_id=?", (tenant_id,),
-            search_expr="COALESCE(params_json,'')")
+            search_expr=f"({tool_name_case})||COALESCE(params_json,'')")
         add("publish", "pub_task", "status", "tenant_id=?", (tenant_id,),
             search_expr="COALESCE(json_extract(payload_json,'$.title'),'')")
         add("wechat", "wechat_draft_delivery", "status",
@@ -465,12 +470,12 @@ def list_items(tenant_id: int, allowed_modules: set[str], limit: int = 300,
     )
     details["video"] = _rows_for_ids(
         "id,job_id,params_json,status,billing_status,retry_count,"
-        "created_at,updated_at",
+        "created_by,created_at,updated_at",
         "tv_job", tenant_id, ids_by_kind.get("video", []),
     )
     details["tool"] = _rows_for_ids(
         "id,kind,params_json,status,billing_status,retry_count,"
-        "created_at,updated_at",
+        "created_by,created_at,updated_at",
         "tool_job", tenant_id, ids_by_kind.get("tool", []),
     )
     details["publish"] = _rows_for_ids(

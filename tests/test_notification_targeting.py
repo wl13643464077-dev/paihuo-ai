@@ -95,6 +95,24 @@ class NotificationTargetingCase(unittest.TestCase):
             2, {"content", "avatar"})["items"] if i["kind"] == "avatar"]
         self.assertEqual("yuangong", avatar_items[0].get("creator"))
 
+    def test_owner_missing_skips_inapp_instead_of_broadcast(self):
+        db.execute("UPDATE users SET enabled=0 WHERE id=?", (self.owner_id,))
+        nid = notify.record(2, "daily_digest", {"date": "07-27",
+                                                "summary": "x"})
+        self.assertIsNone(nid, "无企业主时宁可不落站内,绝不降级广播")
+        self.assertEqual(0, db.one(
+            "SELECT COUNT(*) n FROM notification WHERE tenant_id=2")["n"])
+
+    def test_multiple_owners_each_get_financial_notice(self):
+        second = db.insert("users", {
+            "tenant_id": 2, "username": "laoban2",
+            "password_hash": "x", "role": "owner"})
+        notify.record(2, "schedule_paused", {"title": "日更"})
+        rows = db.q("SELECT user_id FROM notification WHERE tenant_id=2 "
+                    "AND kind='schedule_paused'")
+        self.assertEqual({self.owner_id, second},
+                         {r["user_id"] for r in rows}, "每位企业主各收一份")
+
     def test_member_cannot_read_owner_targeted_notification(self):
         nid = notify.record(2, "schedule_paused", {"title": "日更"})
         self._as(self.member_id, "member")

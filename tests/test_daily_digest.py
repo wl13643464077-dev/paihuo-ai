@@ -28,6 +28,10 @@ class DailyDigestCase(unittest.TestCase):
         db.insert("tenants", {"id": 1, "name": "平台", "balance": 0})
         db.insert("tenants", {"id": 2, "name": "活跃企业", "balance": 100})
         db.insert("tenants", {"id": 3, "name": "闲置企业", "balance": 50})
+        # 财务类通知定向企业主:各租户都要有真实 owner 行才会落站内
+        for tid in (2, 3):
+            db.insert("users", {"tenant_id": tid, "username": f"owner{tid}",
+                                "password_hash": "x", "role": "owner"})
         db.insert("tenants", {"id": 4, "name": "停用企业", "enabled": 0,
                               "balance": 30})
         self.now = _fixed_now()

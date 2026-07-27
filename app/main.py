@@ -808,9 +808,15 @@ def billing_get():
         }
     log_rows = db.q("SELECT delta, balance, reason, created_at FROM billing_log "
                     "WHERE tenant_id=? ORDER BY id DESC LIMIT 300", (TEN(),))
-    agg = db.one("SELECT COALESCE(SUM(CASE WHEN delta>0 THEN delta END),0) recharged, "
-                 "COALESCE(-SUM(CASE WHEN delta<0 THEN delta END),0) spent, COUNT(*) n "
-                 "FROM billing_log WHERE tenant_id=?", (TEN(),)) or {}
+    # 退点也是正向流水,但把它计成「充值」会让累计充值虚高、月度两列同抬:
+    # 失败一单先计消耗再计充值。按 reason「退回」前缀单列。
+    agg = db.one(
+        "SELECT COALESCE(SUM(CASE WHEN delta>0 AND reason NOT LIKE '退回%' "
+        "THEN delta END),0) recharged, "
+        "COALESCE(SUM(CASE WHEN delta>0 AND reason LIKE '退回%' "
+        "THEN delta END),0) refunded, "
+        "COALESCE(-SUM(CASE WHEN delta<0 THEN delta END),0) spent, COUNT(*) n "
+        "FROM billing_log WHERE tenant_id=?", (TEN(),)) or {}
     # 近30天按动作聚合消耗:必须从 billing_log 流水算——核心扣点路径
     # (内容工单/专家任务/会议/成片/工具/定时)走 charge_if_claimed,
     # 只写流水不写 billing_operation;此前从后者聚合会把大头全部漏掉。
@@ -846,7 +852,10 @@ def billing_get():
     # 按月对账(北京时区自然月,近6个月):老板问"这个月花了多少"要有答案
     monthly = db.q(
         "SELECT strftime('%Y-%m', created_at, 'unixepoch', '+8 hours') AS ym, "
-        "COALESCE(SUM(CASE WHEN delta>0 THEN delta END),0) AS recharged, "
+        "COALESCE(SUM(CASE WHEN delta>0 AND reason NOT LIKE '退回%' "
+        "THEN delta END),0) AS recharged, "
+        "COALESCE(SUM(CASE WHEN delta>0 AND reason LIKE '退回%' "
+        "THEN delta END),0) AS refunded, "
         "COALESCE(-SUM(CASE WHEN delta<0 THEN delta END),0) AS spent "
         "FROM billing_log WHERE tenant_id=? AND created_at>? "
         "GROUP BY ym ORDER BY ym DESC LIMIT 6",
@@ -856,6 +865,7 @@ def billing_get():
             "plan_expires": (t or {}).get("plan_expires"),
             "is_platform": TEN() == 1,
             "recharged": agg.get("recharged") or 0, "spent": agg.get("spent") or 0,
+            "refunded_total": agg.get("refunded") or 0,
             "txn_n": agg.get("n") or 0,
             "prices": price_rows, "plans": billing.PLANS,
             "periods": billing.PERIODS, "log": log_rows,
@@ -879,7 +889,10 @@ def records_export(kind: str = "billing"):
         rows = db.q("SELECT delta,balance,reason,created_at FROM billing_log "
                     "WHERE tenant_id=? ORDER BY id DESC", (TEN(),))
         out = [{"时间": ts(r["created_at"]),
-                "类型": "充值" if r["delta"] > 0 else "消耗",
+                "类型": ("退回" if (r["delta"] > 0
+                                    and str(r.get("reason") or "")
+                                    .startswith("退回"))
+                         else "充值" if r["delta"] > 0 else "消耗"),
                 "项目": r.get("reason") or "",
                 "积分变动": r["delta"],
                 "余额": r["balance"]} for r in rows]
@@ -1918,6 +1931,7 @@ def meta():
               # 老板派活前必须能看到这单要花多少点(明码标价);价格可被 root 调整,
               # 所以从价目表读,不许前端写死。
               "job_points": (billing.prices().get("content_job") or {}).get("points", 18),
+              "voice_clone_points": (billing.prices().get("voice_clone") or {}).get("points", 9),
               # 对客联系方式(root 配置):没有它,「点数不足→看套餐→联系顾问」是死胡同。
               "support_contact": (db.get_setting("support_contact") or "")[:80],
               "brief_templates": ["蹭热点", "日更选题", "产品软文", "观点输出", "教程干货", "二创改写"],
@@ -2466,11 +2480,23 @@ def station_action(job_id: int, idx: int, body: dict):
 
 @app.post("/api/jobs/{job_id}/gate")
 def gate_action(job_id: int, body: dict):
-    _job_or_404(job_id)
+    job = _job_or_404(job_id)
+    action = body.get("action")
     try:
-        engine.gate_action(job_id, body.get("action"))
+        engine.gate_action(job_id, action)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    # 审查拦截被 member 放行/重检是合规场景,比普通拍板更需要老板知情
+    u = auth.current() or {}
+    if u.get("role") == "member":
+        from . import notify
+        notify.push(int(job.get("tenant_id") or TEN()), "member_reviewed", {
+            "job_id": int(job_id),
+            "user": u.get("username") or "",
+            "station": "审查关卡",
+            "approved": action == "override",
+            "title": engine._job_title(job_id),
+        })
     return {"ok": True}
 
 

@@ -170,29 +170,38 @@ OWNER_ONLY_KINDS = {
 }
 
 
-def _owner_uid(tid: int):
-    row = db.one(
+def _owner_uids(tid: int) -> list:
+    return [int(r["id"]) for r in db.q(
         "SELECT id FROM users WHERE tenant_id=? AND role='owner' "
-        "AND COALESCE(enabled,1)=1 ORDER BY id LIMIT 1", (tid,))
-    return row["id"] if row else None
+        "AND COALESCE(enabled,1)=1 ORDER BY id", (tid,))]
 
 
 def record(tid: int, kind: str, payload: dict) -> int | None:
     """Persist the notification even when no external webhook is configured."""
     try:
         title, body, link = _inbox_item(kind, payload)
-        target = _owner_uid(tid) if kind in OWNER_ONLY_KINDS else None
-        return db.insert(
-            "notification",
-            {
-                "tenant_id": int(tid),
-                "kind": str(kind or "event")[:40],
-                "title": title,
-                "body": body,
-                "link": link,
-                "user_id": target,
-            },
-        )
+        targets = [None]
+        if kind in OWNER_ONLY_KINDS:
+            # 每位企业主各收一份;一个 enabled owner 都没有时宁可不落站内,
+            # 也绝不把钱务通知降级成全员广播泄给员工。
+            targets = _owner_uids(tid)
+            if not targets:
+                return None
+        first = None
+        for target in targets:
+            row_id = db.insert(
+                "notification",
+                {
+                    "tenant_id": int(tid),
+                    "kind": str(kind or "event")[:40],
+                    "title": title,
+                    "body": body,
+                    "link": link,
+                    "user_id": target,
+                },
+            )
+            first = first if first is not None else row_id
+        return first
     except Exception as exc:
         log.error(
             "站内通知落库失败 tid=%s kind=%s error_type=%s",

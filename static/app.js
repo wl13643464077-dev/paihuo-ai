@@ -1216,6 +1216,8 @@ function trioGo(step){
 function guideReset(){
   localStorage.removeItem("ob_hide_"+((ME&&ME.tenant)||""));
   localStorage.removeItem("trio_hide_"+((ME&&ME.tenant)||""));
+  // 四步都完成时引导卡默认不渲染;点了"重看"就强制展示一次完成态
+  localStorage.setItem("ob_force_"+((ME&&ME.tenant)||""),"1");
   toast("新手引导已恢复,回到办公室即可重看");
   location.hash = "#/";
 }
@@ -1227,11 +1229,17 @@ function obCard(){
     {done:su.profile, t:"① 建人设档案", d:"产出像您本人写的", h:"#/profiles"},
     {done:su.first_job, t:"② 发出第一单", d:"看流水线全程直播", h:"#/new", pts:`${META?.job_points??18} 点`},
     {done:su.wechat, t:"③ 打通微信", d:"通知/公众号草稿箱", h:"#/channels"},
-    // 声音克隆 9 点:META 未下发该价,写死当前值,与摄影棚「开始克隆(9点)」及后端 app/billing.py DEFAULT_PRICES.voice_clone 保持一致
-    {done:su.clone, t:"④ 克隆您的声音", d:"视频都用您的原声", h:"#/avatar", pts:"9 点"},
+    {done:su.clone, t:"④ 克隆您的声音", d:"视频都用您的原声", h:"#/avatar", pts:`${META?.voice_clone_points??9} 点`},
   ];
   const undone = steps.filter(x=>!x.done).length;
-  if(!undone) return "";
+  const forced = localStorage.getItem("ob_force_"+(ME.tenant||""));
+  if(!undone && !forced) return "";
+  if(!undone && forced){
+    localStorage.removeItem("ob_force_"+(ME.tenant||""));
+    return `<div class="card" style="background:linear-gradient(120deg,#e7f6ec,#fffaf0 70%)">
+      <h2 style="margin:0">🎉 开工四步已全部完成</h2>
+      <div class="sub" style="margin-top:6px">配置齐了:人设、首单、微信通知、原声克隆都已就绪。日常从「➕ 下达新任务」或「⏰ 定时任务」开工即可。</div></div>`;
+  }
   return `<div class="card" style="background:linear-gradient(120deg,#e8f7ee,#fffaf0 70%)">
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       <h2 style="margin:0;flex:1;min-width:200px">🚀 开工四步(还差 ${undone} 步)</h2>
@@ -3398,7 +3406,7 @@ async function avatarView(){
             <input type="file" accept=".mp3,.m4a,.wav" onchange="avUploadCloneSample(this)">
             <div class="row" style="margin-top:6px;align-items:flex-end">
               <div style="flex:1"><label>给这个声音起个名</label><input id="av-clone-label" placeholder="如:老板本尊" value="老板的声音"></div>
-              <div><button class="btn pri sm" id="av-clone-btn" disabled onclick="avClone(this)">🧬 开始克隆(9点)</button></div>
+              <div><button class="btn pri sm" id="av-clone-btn" disabled onclick="avClone(this)">🧬 开始克隆(${META?.voice_clone_points??9}点)</button></div>
             </div>
             <div class="sub" id="av-clone-status"></div>
           </details></div>
@@ -3499,7 +3507,7 @@ async function avClone(btn){
     const v = await api("/avatar/clone",{method:"POST",body:{audio_name:AV_CLONE_SAMPLE.name,
       label:$("#av-clone-label").value.trim()}});
     toast(`克隆成功!音色「${v.label}」已加入列表`); AV_CLONE_SAMPLE=null; render();
-  }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🧬 开始克隆(9点)"; }
+  }catch(e){ toast(e.message); btn.disabled=false; btn.textContent=`🧬 开始克隆(${META?.voice_clone_points??9}点)`; }
 }
 async function avFromLink(btn){
   const url = $("#av-link").value.trim();
@@ -4145,14 +4153,16 @@ function billReasonHtml(reason){
     .replace(/(?:数字人工单|成片任务)\s?#(\d+)/g,m=>m.replace(/#(\d+)/,'<a href="#/tasks" style="text-decoration:underline;font-weight:800">#$1</a>'))
     .replace(/(^|[^人])工单\s?#(\d+)/g,'$1工单 <a href="#/job/$2" style="text-decoration:underline;font-weight:800">#$2</a>')
     .replace(/任务#(\d+)/g,'任务<a href="#/tasks/$1" style="text-decoration:underline;font-weight:800">#$1</a>')
-    .replace(/会议#(\d+)/g,'会议<a href="#/meetings" style="text-decoration:underline;font-weight:800">#$1</a>');
+    .replace(/会议#(\d+)/g,'会议<a href="#/meetings" style="text-decoration:underline;font-weight:800">#$1</a>')
+    .replace(/工具单#(\d+)/g,'工具单<a href="#/tasks" style="text-decoration:underline;font-weight:800">#$1</a>');
 }
 async function billingView(){
   trackFunnelSessionOnce("pricing_view","billing");
   const b = await api("/billing");
   const digestConf = await api("/notify/daily-digest").catch(()=>({enabled:true}));
   const tourBanner = ME&&ME.role==="tour" ? `<div class="notice" style="background:#ece3ff;margin-top:0">👀 <b>参观模式</b>:点击员工卡片,了解每位数字员工可以为您的业务提供什么帮助。<a href="/promo#plans" style="text-decoration:underline;font-weight:900">查看套餐</a> 或联系开通企业账号后直接派活。</div>` : "";
-  const shown = (BILL_TAB==="in"?b.log.filter(l=>l.delta>0):BILL_TAB==="out"?b.log.filter(l=>l.delta<0):b.log);
+  const isRefund = l=>l.delta>0&&String(l.reason||"").startsWith("退回");
+  const shown = (BILL_TAB==="in"?b.log.filter(l=>l.delta>0&&!isRefund(l)):BILL_TAB==="out"?b.log.filter(l=>l.delta<0):b.log);
   const spendActs = (!b.is_platform&&b.spend_by_action)?b.spend_by_action.filter(s=>(s.points||0)>0):[];
   const spendTotal = spendActs.reduce((sum,s)=>sum+(s.points||0),0);
   const expDays = b.plan_expires? Math.ceil((b.plan_expires*1000-Date.now())/86400000) : null;
@@ -4173,6 +4183,7 @@ async function billingView(){
     ${b.is_platform?`<div class="notice" style="margin-bottom:0">👑 您是平台方,自己用不扣积分(显示∞)。下面看到的是给客户开通/客户消耗的真实记录。客户登录自己账号时,这里就是他的余额和账单。</div>`
       :`<div class="kv" style="margin-top:12px"><span>累计充值 <b style="color:#2f9e6e">+${(b.recharged||0).toFixed(0)}</b></span>
         <span>累计消耗 <b style="color:#e5484d">-${(b.spent||0).toFixed(0)}</b></span>
+        ${(b.refunded_total||0)>0?`<span>失败退回 <b style="color:#b45309">+${(b.refunded_total||0).toFixed(0)}</b></span>`:""}
         <span>共 ${b.txn_n||0} 笔</span></div>`}</div>
   ${spendActs.length?`<div class="card"><h2>💸 近30天花在哪</h2>
     <div class="sub">按功能统计最近 30 天实际消耗的积分,帮您看清钱被哪类动作花掉了。</div>
@@ -4184,10 +4195,11 @@ async function billingView(){
         <div style="height:100%;width:${spendTotal?Math.max(2,Math.round((s.points||0)/spendTotal*100)):0}%;background:#ffd166"></div></div></div>`).join("")}</div>`:""}
   ${(!b.is_platform&&(b.monthly||[]).length)?`<div class="card"><h2>📅 按月对账(近半年)</h2>
     <div class="dimwrap"><table class="dimtable" style="min-width:min(420px,100%)"><thead><tr>
-      <th>月份</th><th>充值</th><th>消耗</th></tr></thead><tbody>
+      <th>月份</th><th>充值</th><th>消耗</th><th>失败退回</th></tr></thead><tbody>
       ${b.monthly.map(m=>`<tr><td><b>${esc(m.ym)}</b></td>
         <td style="color:#2f9e6e">+${(m.recharged||0).toFixed(0)}</td>
-        <td style="color:#e5484d">-${(m.spent||0).toFixed(0)}</td></tr>`).join("")}</tbody></table></div></div>`:""}
+        <td style="color:#e5484d">-${(m.spent||0).toFixed(0)}</td>
+        <td style="color:#b45309">${(m.refunded||0)>0?`+${(m.refunded||0).toFixed(0)}`:"—"}</td></tr>`).join("")}</tbody></table></div></div>`:""}
   <div class="card"><h2 style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">🧾 积分明细(充值 & 消耗记录)
     ${isAdmin()&&!b.is_platform?`<a class="btn sm" style="margin-left:auto" href="/api/records/export.xlsx?kind=billing">⬇️ 导出全部流水</a>`:""}</h2>
     <label style="display:flex;gap:8px;align-items:flex-start;margin:6px 0 4px;cursor:${isAdmin()?"pointer":"default"}">
@@ -4195,13 +4207,13 @@ async function billingView(){
       <span class="sub">📮 每日经营简报(昨日完成/花销/风险,推到站内+企微)${isAdmin()?"":"(仅企业主可改)"}</span></label>
     <div class="tabs">
       <span class="tb ${BILL_TAB==="all"?"on":""}" onclick="BILL_TAB='all';render()">全部(${b.log.length})</span>
-      <span class="tb ${BILL_TAB==="in"?"on":""}" onclick="BILL_TAB='in';render()">💰 充值记录(${b.log.filter(l=>l.delta>0).length})</span>
+      <span class="tb ${BILL_TAB==="in"?"on":""}" onclick="BILL_TAB='in';render()">💰 充值记录(${b.log.filter(l=>l.delta>0&&!isRefund(l)).length})</span>
       <span class="tb ${BILL_TAB==="out"?"on":""}" onclick="BILL_TAB='out';render()">🔻 消耗记录(${b.log.filter(l=>l.delta<0).length})</span></div>
     ${shown.length?`<div class="dimwrap" style="margin-top:10px"><table class="dimtable" style="min-width:min(520px,100%)"><thead><tr>
       <th>时间</th><th>类型</th><th>项目</th><th>积分变动</th><th>余额</th></tr></thead><tbody>
       ${shown.map(l=>`<tr>
         <td class="sub" style="white-space:nowrap">${tcFmt(l.created_at)}</td>
-        <td>${l.delta>0?'<span class="tag" style="background:#a7ecc9">充值</span>':'<span class="tag" style="background:#ffd7d9">消耗</span>'}</td>
+        <td>${isRefund(l)?'<span class="tag" style="background:#ffe3b3">退回</span>':l.delta>0?'<span class="tag" style="background:#a7ecc9">充值</span>':'<span class="tag" style="background:#ffd7d9">消耗</span>'}</td>
         <td>${billReasonHtml(l.reason||"")}</td>
         <td><b style="color:${l.delta<0?"#e5484d":"#2f9e6e"}">${l.delta>0?"+":""}${l.delta}</b></td>
         <td class="sub">${l.balance.toFixed(0)}</td></tr>`).join("")}</tbody></table></div>`
@@ -5342,7 +5354,7 @@ async function toolsView(tab,preserveDraft=false){
   if(TS.tab==="vars"||TS.tab==="remix") varsTvs();
   scheduleToolPoll();
 }
-function goClone(){ window.AV_OPEN_CLONE=true; location.hash="#/avatar"; toast("🧬 带您去摄影棚:录一段10秒以上的话,声音就是您的了(9点,一次永久用)"); }
+function goClone(){ window.AV_OPEN_CLONE=true; location.hash="#/avatar"; toast(`🧬 带您去摄影棚:录一段10秒以上的话,声音就是您的了(${META?.voice_clone_points??9}点,一次永久用)`); }
 function clipToggle(name){
   TS.clipSel = TS.clipSel||[];
   TS.clipSel = TS.clipSel.includes(name)? TS.clipSel.filter(x=>x!==name) : [...TS.clipSel, name];

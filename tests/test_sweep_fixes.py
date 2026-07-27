@@ -28,6 +28,9 @@ class SweepFixCase(unittest.IsolatedAsyncioTestCase):
         db.DB_PATH = os.path.join(self.tmp.name, "sweep.db")
         db.conn()
         db.insert("tenants", {"id": 2, "name": "测试企业", "balance": 50})
+        # 进修结果通知定向企业主:租户须有真实 owner 行才会落站内
+        db.insert("users", {"tenant_id": 2, "username": "owner",
+                            "password_hash": "x", "role": "owner"})
         self.idx = next(iter(registry.BY_IDX))
 
     def tearDown(self):

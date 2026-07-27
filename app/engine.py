@@ -154,6 +154,7 @@ class Engine:
         "tv_done": "content", "tv_step": "content",
         "job_update": "content", "station_step": "content",
         "tool_update": "content", "pub_update": "content",
+        "gate_running": "content",
     }
 
     def broadcast(self, ev: dict):
