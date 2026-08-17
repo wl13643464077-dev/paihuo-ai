@@ -591,15 +591,26 @@ def _decision_status(markdown: str) -> tuple[str | None, list[str]]:
     return value, []
 
 
-def _decision_usable_text(sections: list[str], *, evidence: bool = False) -> bool:
+def _decision_usable_text(
+    sections: list[str], *, evidence: bool = False, strict: bool = True,
+) -> bool:
     if not sections:
         return False
     text = "\n".join(sections).strip()
     if not text:
         return False
     lowered = text.lower()
-    if any(marker in lowered for marker in _DECISION_EMPTY_MARKERS):
-        return False
+    if strict:
+        if any(marker in lowered for marker in _DECISION_EMPTY_MARKERS):
+            return False
+    else:
+        # 非 GO 的分析型交付：诚实标注「待核验/未提供」不毒化整段——
+        # 剔除这些标注后仍需有实质内容；整段只剩占位话术仍不可用。
+        stripped = lowered
+        for marker in _DECISION_EMPTY_MARKERS:
+            stripped = stripped.replace(marker, "")
+        if len(re.sub(r"[\s\W]+", "", stripped)) < 20:
+            return False
     if re.search(r"(?<![a-z])(?:n/?a|none)(?![a-z])", lowered):
         return False
     if evidence and not re.search(
@@ -611,18 +622,20 @@ def _decision_usable_text(sections: list[str], *, evidence: bool = False) -> boo
     return True
 
 
-def _decision_evidence_usable(sections: list[str]) -> bool:
+def _decision_evidence_usable(sections: list[str], *, strict: bool = True) -> bool:
     """证据必须可复核：具体记录/事实 + 时间范围 + 来源或证据索引。
 
     ``数据源：系统``、``系统显示数据`` 等泛词不能单独构成证据。解析是
-    确定性的，不尝试从模型语气推断可信度；不满足任一项就 fail-closed。
+    确定性的，不尝试从模型语气推断可信度。GO 要求记录/时间窗/来源三要素
+    齐全；非 GO 的分析型交付（ADVISE/HOLD/ESCALATE 不授权任何执行）允许
+    法规、标准类常识证据没有业务时间窗——记录锚点 + 具名来源即可。
     """
-    if not _decision_usable_text(sections):
+    if not _decision_usable_text(sections, strict=strict):
         return False
     text = "\n".join(str(section or "") for section in sections).strip()
     if not _DECISION_RECORD_ANCHORS.search(text):
         return False
-    if not _DECISION_DATE_OR_WINDOW.search(text):
+    if strict and not _DECISION_DATE_OR_WINDOW.search(text):
         return False
 
     source_values = [match.group(1).strip() for match in _DECISION_SOURCE_LABEL.finditer(text)]
@@ -1023,7 +1036,9 @@ def enforce_decision_output(
     if not isinstance(employee.get("decision_contract"), dict):
         reasons.append("决策合同未加载")
     evidence_sections = _decision_field_sections(original, "facts_evidence_sources")
-    if not _decision_evidence_usable(evidence_sections):
+    if not _decision_evidence_usable(
+        evidence_sections, strict=(raw_status == "GO")
+    ):
         reasons.append("缺少事实证据/数据源或证据不可核验")
     manifest, provenance_reasons = _decision_provenance_state(employee, provenance)
     if (

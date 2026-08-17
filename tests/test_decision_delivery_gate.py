@@ -226,6 +226,33 @@ class DecisionDeliveryGateTests(unittest.TestCase):
         )
         self.assertEqual("HOLD", go["status"])
 
+    def test_advise_with_honestly_hedged_regulatory_evidence_passes(self):
+        """非 GO 分析单：法规常识类证据带具名来源即可，诚实标注「待核验」
+        不再毒化整段；同样内容声称 GO 仍按三要素严格失败。"""
+        employee = _v2_employee()
+        required = [
+            row["input_id"]
+            for row in departments.decision_evidence_requirements(employee)
+        ]
+        original = (
+            "# 边界分析\n## 决策状态\nADVISE\n"
+            "## 事实证据/数据源\n"
+            "- 光电类项目属医疗美容，须医疗机构资质；来源：《医疗美容服务管理办法》"
+            "监管规定（科普转述，待核验，非监管定性文件）\n"
+            "- 生活美容仅限非侵入养护记录；来源：行业标准汇编\n"
+            "## 数据缺口\n待补齐：" + "、".join(required) + "\n"
+            f"## 审批边界\n{departments.DECISION_APPROVAL_BODY}\n"
+            f"## 禁止动作\n{departments.DECISION_FORBIDDEN_BODY}\n"
+        )
+        result = departments.enforce_decision_output(employee, original)
+        self.assertEqual("ADVISE", result["status"])
+        self.assertTrue(result["passed"])
+
+        go = departments.enforce_decision_output(
+            employee, original.replace("ADVISE", "GO", 1)
+        )
+        self.assertEqual("HOLD", go["status"])
+
     def test_research_urls_outside_contract_sections_are_allowed(self):
         """联网证据的参考链接放在分析部分合法；写进合同章节仍违规。"""
         base = _complete_output("GO")
