@@ -3349,8 +3349,9 @@ def build_task_prompt(e: dict, brief: dict, skills_text: str, knowledge_text: st
             "不得写进固定章节，也不得充当用户提交证据。"
             "「## 事实证据/数据源」章节里每条证据必须在同一行带"
             "「来源：<可查的名称/文号/记录名>」与日期或时间窗；只写名称，不写网址。",
-            "必需输入：\n" + "\n".join(
-                f"- {item}" for item in contract.get("required_inputs") or []
+            "必需输入（引用时必须使用这些确切编号，不存在其他编号）：\n" + "\n".join(
+                f"- {row['input_id']}：{row['label']}"
+                for row in decision_evidence_requirements(e)
             ),
             "证据要求：\n" + "\n".join(
                 f"- {item}" for item in contract.get("evidence_required") or []
