@@ -630,12 +630,17 @@ def _decision_evidence_usable(sections: list[str], *, strict: bool = True) -> bo
     齐全；非 GO 的分析型交付（ADVISE/HOLD/ESCALATE 不授权任何执行）允许
     法规、标准类常识证据没有业务时间窗——记录锚点 + 具名来源即可。
     """
-    if not _decision_usable_text(sections, strict=strict):
+    if not _decision_usable_text(sections, evidence=True, strict=strict):
         return False
+    if not strict:
+        # 非 GO 不授权任何执行：证据段只需存在且有实质内容（含诚实的
+        # "证据不足/待核验"声明）。记录锚点/时间窗/具名来源的机器词表
+        # 只作为 GO 的硬门槛——按词表拦非 GO 只会惩罚措辞而非内容。
+        return True
     text = "\n".join(str(section or "") for section in sections).strip()
     if not _DECISION_RECORD_ANCHORS.search(text):
         return False
-    if strict and not _DECISION_DATE_OR_WINDOW.search(text):
+    if not _DECISION_DATE_OR_WINDOW.search(text):
         return False
 
     source_values = [match.group(1).strip() for match in _DECISION_SOURCE_LABEL.finditer(text)]
