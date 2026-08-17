@@ -293,11 +293,28 @@ class DecisionProvenanceUnitTests(unittest.TestCase):
                 self.assertEqual("HOLD", rejected["status"])
                 self.assertFalse(rejected["passed"])
 
-        duplicate = original.replace(
-            "## 数据缺口", "- 重复索引 [RI-01]\n## 数据缺口"
+        # 正常分析里复述同一 RI 编号（引用行一次 + 说明再提一次）不再视为
+        # 伪造：防伪由未知/畸形 token 全拒与"每个证据对只允许一条可复核
+        # 事实行"共同保证（老板拍板 D-052：机器摩擦不算违规）。
+        duplicate_mention = original.replace(
+            "## 数据缺口", "- 补充说明：RI-01 的记录口径见上一行\n## 数据缺口"
+        )
+        allowed_mention = departments.enforce_decision_output(
+            employee, duplicate_mention, provenance=manifest
+        )
+        self.assertEqual("GO", allowed_mention["status"])
+        self.assertTrue(allowed_mention["passed"])
+
+        # 但复制整条精确证据对行仍然失败：GO 严格文法要求每对唯一。
+        pair_line = next(
+            line for line in original.splitlines()
+            if line.startswith(f"- [{manifest['items'][0]['input_id']}]")
+        )
+        duplicated_pair = original.replace(
+            pair_line, pair_line + "\n" + pair_line, 1
         )
         rejected_duplicate = departments.enforce_decision_output(
-            employee, duplicate, provenance=manifest
+            employee, duplicated_pair, provenance=manifest
         )
         self.assertEqual("HOLD", rejected_duplicate["status"])
         self.assertFalse(rejected_duplicate["passed"])

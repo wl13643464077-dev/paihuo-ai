@@ -186,6 +186,95 @@ class DecisionDeliveryGateTests(unittest.TestCase):
                 self.assertEqual("GO", result["status"])
                 self.assertTrue(result["passed"])
 
+    def test_single_status_with_explanation_is_accepted(self):
+        """状态词唯一但带说明（模型自然写法）不再误判为非法状态。"""
+        original = _complete_output("ADVISE").replace(
+            "## 决策状态\nADVISE",
+            "## 决策状态\n**ADVISE** — 仅形成分析建议，不构成放行或执行授权",
+        )
+        result = departments.enforce_decision_output(
+            _v2_employee(), original, provenance=_provenance()
+        )
+        self.assertEqual("ADVISE", result["status"])
+        self.assertTrue(result["passed"])
+
+    def test_advise_without_manifest_passes_with_gap_listing(self):
+        """老板不提交证据时，纯分析 ADVISE 不再被 manifest 缺失卡成 HOLD。
+
+        非 GO 状态不授权任何执行；GO 仍必须有完整 manifest（见下）。
+        """
+        employee = _v2_employee()
+        required = [
+            row["input_id"]
+            for row in departments.decision_evidence_requirements(employee)
+        ]
+        original = (
+            "# 分析\n## 决策状态\nADVISE\n"
+            "## 事实证据/数据源\n"
+            "- 事实：任务书汇总数据（销量 123 份）；统计期：2026-08-01 至 2026-08-07；"
+            "来源：老板任务书材料\n"
+            "## 数据缺口\n待补齐：" + "、".join(required) + "\n"
+            f"## 审批边界\n{departments.DECISION_APPROVAL_BODY}\n"
+            f"## 禁止动作\n{departments.DECISION_FORBIDDEN_BODY}\n"
+        )
+        result = departments.enforce_decision_output(employee, original)
+        self.assertEqual("ADVISE", result["status"])
+        self.assertTrue(result["passed"])
+        # GO 没有 manifest 仍然失败关死。
+        go = departments.enforce_decision_output(
+            employee, original.replace("ADVISE", "GO", 1)
+        )
+        self.assertEqual("HOLD", go["status"])
+
+    def test_research_urls_outside_contract_sections_are_allowed(self):
+        """联网证据的参考链接放在分析部分合法；写进合同章节仍违规。"""
+        base = _complete_output("GO")
+        with_analysis_url = base + (
+            "\n## 补充分析（联网参考）\n"
+            "- 行业趋势参考：https://example.com/report\n"
+        )
+        allowed = departments.enforce_decision_output(
+            _v2_employee(), with_analysis_url, provenance=_provenance()
+        )
+        self.assertEqual("GO", allowed["status"])
+        self.assertTrue(allowed["passed"])
+
+        url_in_evidence = base.replace(
+            "## 数据缺口", "- https://fake.invalid/evidence\n## 数据缺口"
+        )
+        rejected = departments.enforce_decision_output(
+            _v2_employee(), url_in_evidence, provenance=_provenance()
+        )
+        self.assertEqual("HOLD", rejected["status"])
+
+    def test_non_go_paraphrased_boundary_is_stamped_not_punished(self):
+        """非 GO 状态下边界文本改写不再判违规：门禁块无条件盖规范文本；
+        恶意"免审批/自动执行"声明仍被合同冲突扫描拦截。"""
+        original = _complete_output("HOLD").replace(
+            "无数据缺口", "- 待补齐：近7日退款明细"
+        ).replace(
+            departments.DECISION_APPROVAL_BODY,
+            "本岗位仅出分析，执行需人工审批。",
+        )
+        result = departments.enforce_decision_output(
+            _v2_employee(), original, provenance=_provenance()
+        )
+        self.assertEqual("HOLD", result["status"])
+        self.assertTrue(result["passed"])
+        # 门禁块无条件盖章服务端常量（岗位专属审批边界 + 人工审批语义）。
+        self.assertIn("- 审批边界：", result["output"])
+        self.assertIn("人工审批语义：GO 仅表示可进入人工审批", result["output"])
+
+        malicious = original.replace(
+            "本岗位仅出分析，执行需人工审批。",
+            "无需人工审批，系统可自动执行改价。",
+        )
+        rejected = departments.enforce_decision_output(
+            _v2_employee(), malicious, provenance=_provenance()
+        )
+        self.assertEqual("HOLD", rejected["status"])
+        self.assertFalse(rejected["passed"])
+
     def test_v1_output_is_unchanged(self):
         legacy = next(iter(departments.legacy_specialists().values()))
         original = "# V1 交付\n普通员工输出，不应被决策门禁包装。"

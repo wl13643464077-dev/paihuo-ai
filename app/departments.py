@@ -244,14 +244,18 @@ _DECISION_GENERIC_SOURCE_VALUES = frozenset({
 _DECISION_RECORD_ANCHORS = re.compile(
     r"订单|流水|明细|快照|台账|合同|发票|日志|报告|样本|调查|库存|房态|预订|工单|"
     r"处方|交易|收银|pos|pms|erp|证照|照片|截图|录音|导出|文件|批次|原始|"
-    r"指标|销量|销售额|入住率|金额|数量|客流|收入|毛利|成本|价格|评分",
+    r"指标|销量|销售额|入住率|金额|数量|客流|收入|毛利|成本|价格|评分|"
+    # 真实企业证据里常见的记录类名词：设备/预测/合规类不能因词表太窄被误杀。
+    r"记录|出杯|杯量|预报|排班|排期|规则单?|版本|时间戳|温度|余额|覆盖率|课时|"
+    r"会员|条例|办法|规定|标准|公告|通知|法规|指南|资质|许可|执照|注册证",
     re.I,
 )
 _DECISION_DATE_OR_WINDOW = re.compile(
     r"20\d{2}(?:[-/.年]\s*\d{1,2}(?:[-/.月]\s*\d{1,2})?)?"
-    r"|(?:近|过去|最近)\s*\d+\s*(?:日|天|周|月|季度|年|个完整统计窗口)"
+    r"|(?:近|过去|最近)\s*[一二两三四五六七八九十\d]+\s*(?:日|天|周|月|季度|年|个完整统计窗口)"
     r"|(?:本|上|前)\s*(?:日|天|周|月|季度|年)"
-    r"|今日|昨日|截至\s*20\d{2}",
+    r"|今日|昨日|明日|截至\s*20\d{2}"
+    r"|\d{1,2}:\d{2}\s*[-~至]\s*\d{1,2}:\d{2}",
     re.I,
 )
 _DECISION_SOURCE_LABEL = re.compile(
@@ -532,12 +536,16 @@ def _decision_field_sections(markdown: str, field: str) -> list[str]:
 
     def is_label(title: str) -> bool:
         normalized = _decision_normalize_label(title)
+        # 模型会给标题加修饰后缀（如「数据缺口（关键阻断项）」）；只要以
+        # 合同章节名开头就按该章节解析，避免自然措辞被判"缺少章节"。
         return any(
-            normalized == alias
-            or normalized.startswith(alias + "必填")
-            or normalized.startswith(alias + "说明")
+            normalized == alias or normalized.startswith(alias)
             for alias in aliases
         )
+
+    def heading_level(line: str) -> int:
+        match = re.match(r"^\s{0,3}(#{1,6})\s", str(line or ""))
+        return len(match.group(1)) if match else 0
 
     for index, line in enumerate(lines):
         title, tail = split_line(line)
@@ -545,8 +553,12 @@ def _decision_field_sections(markdown: str, field: str) -> list[str]:
             continue
         body = [tail] if tail else []
         if heading_re.match(line):
+            level = heading_level(line)
             for following in lines[index + 1:]:
-                if heading_re.match(following):
+                # 按 Markdown 语义：只有同级或更高级标题才结束本章节；
+                # 模型在合同章节内用子标题（###）组织内容属正常写法。
+                following_level = heading_level(following)
+                if following_level and following_level <= level:
                     break
                 body.append(following.strip())
         value = "\n".join(item for item in body if item).strip()
@@ -561,14 +573,20 @@ def _decision_status(markdown: str) -> tuple[str | None, list[str]]:
     if len(sections) != 1:
         return None, ["决策状态冲突"]
     value = sections[0].strip().upper()
-    # The state is a machine field, not prose.  A qualified or second state
-    # (GO/HOLD, GO but HOLD, another bullet, etc.) is ambiguous and fails shut.
+    # The state is a machine field.  Two distinct states (GO/HOLD, GO but
+    # HOLD, …) are ambiguous and fail shut.  A single state followed by an
+    # explanation（如 "GO — 仅表示可进入人工审批"）is unambiguous: models
+    # naturally append the clarifier, and rejecting it only manufactures
+    # HOLD noise, so the lone token is accepted as the state.
     if value not in DECISION_STATES:
         state_tokens = re.findall(
             r"(?<![A-Z])(GO|HOLD|ESCALATE|ADVISE)(?![A-Z])", value
         )
-        if len(set(state_tokens)) > 1:
+        distinct = set(state_tokens)
+        if len(distinct) > 1:
             return None, ["决策状态冲突"]
+        if len(distinct) == 1:
+            return next(iter(distinct)), []
         return None, ["决策状态非法"]
     return value, []
 
@@ -764,12 +782,9 @@ def _decision_provenance_token_reasons(
     unknown_u = sorted(set(raw_u) - known_user_ids)
     if unknown_u:
         reasons.append("正文包含未知用户证据 ID")
-    duplicate_ri = sorted({value for value in raw_ri if raw_ri.count(value) > 1})
-    duplicate_u = sorted({value for value in raw_u if raw_u.count(value) > 1})
-    if duplicate_ri:
-        reasons.append("正文重复引用 RI token：" + "、".join(duplicate_ri))
-    if duplicate_u:
-        reasons.append("正文重复引用用户证据 ID")
+    # 同一 RI/U 在正文多处被提及（证据行引用一次、数据缺口或规则说明再提
+    # 一次）是正常分析行为，不构成伪造；防伪由"未知/畸形 token 全拒"与
+    # "每个精确证据对只允许一条可复核事实行"（GO 严格文法）共同保证。
     return reasons
 
 
@@ -801,12 +816,9 @@ def _decision_pair_line_is_reviewable(line: str, exact_pair: str) -> bool:
     without_pair = visible.replace(exact_pair, "")
     # A fact/value must be stated on the same row.  The pair itself is the
     # source index; it cannot stand in for the fact or its observation date.
-    return bool(re.search(
-        r"(?:事实|字段|值|结果|数量|金额|VIN|版本|状态|编号|记录)"
-        r"\s*[:：]\s*\S+",
-        without_pair,
-        re.I,
-    ))
+    # 任何「键：值」结构都算陈述了事实字段；固定词表会把真实业务字段名
+    # （如“净出杯量”）误杀成缺事实。
+    return bool(re.search(r"[^\s:：]{1,24}\s*[:：]\s*\S+", without_pair))
 
 
 _DECISION_CANONICAL_GO_HEADINGS = (
@@ -816,6 +828,17 @@ _DECISION_CANONICAL_GO_HEADINGS = (
     "## 审批边界",
     "## 禁止动作",
 )
+
+
+def _decision_contract_sections_text(markdown: str) -> str:
+    """合同五章节（状态/证据/缺口/边界/禁止）的正文合并视图。"""
+    parts: list[str] = []
+    for field in (
+        "decision_status", "facts_evidence_sources", "data_gaps",
+        "approval_boundary", "forbidden_actions",
+    ):
+        parts.extend(_decision_field_sections(markdown, field))
+    return "\n".join(parts)
 
 
 def _decision_strict_go_reasons(
@@ -930,10 +953,13 @@ def _decision_reference_reasons(
     ))
     for pair in sorted(exact_pairs - known_pairs):
         reasons.append(f"事实证据章节引用未知或错配证据 {pair[0]}")
-    # URLs in generated prose are not provenance.  Structured WebSearch
-    # sources may be retained as supplemental metadata, but can never cover RI.
-    if re.search(r"https?://", full_text, re.I):
-        reasons.append("模型正文将 URL 冒充用户提交索引")
+    # URLs cannot cover RI provenance.  联网研究的参考链接允许出现在合同
+    # 五章节之外的分析/参考部分（系统本身要求保留网页来源）；只有把 URL
+    # 写进合同章节、冒充用户提交证据时才违规。
+    if re.search(
+        r"https?://", _decision_contract_sections_text(full_text), re.I,
+    ):
+        reasons.append("合同章节不得以 URL 充当用户提交证据索引")
     manifest_text = "\n".join(
         f"{item['source_name']}\n{item['content']}" for item in manifest["items"]
     ).lower()
@@ -1000,6 +1026,17 @@ def enforce_decision_output(
     if not _decision_evidence_usable(evidence_sections):
         reasons.append("缺少事实证据/数据源或证据不可核验")
     manifest, provenance_reasons = _decision_provenance_state(employee, provenance)
+    if (
+        _decision_manifest_from_provenance(provenance) is None
+        and raw_status != "GO"
+    ):
+        # 老板没有提交任何用户证据时，非 GO 状态（ADVISE/HOLD/ESCALATE）
+        # 本就不授权任何执行，允许员工据公开研究给分析结论；GO 仍必须有
+        # 完整 manifest。已提交但校验失败的 manifest 对所有状态都是违规。
+        provenance_reasons = [
+            reason for reason in provenance_reasons
+            if "缺少服务端绑定的用户提交 manifest" not in reason
+        ]
     reasons.extend(provenance_reasons)
     requirements = decision_evidence_requirements(employee)
     required_ids = [row["input_id"] for row in requirements]
@@ -1009,6 +1046,16 @@ def enforce_decision_output(
             employee, manifest, evidence_sections, status, full_text=original
         )
         reasons.extend(reference_reasons)
+    else:
+        # 无 manifest 时仍拒绝伪造溯源：未知/畸形 RI 与 U token 全拒，
+        # 合同章节内同样不得用 URL 冒充证据索引。
+        reasons.extend(_decision_provenance_token_reasons(
+            original, required_ids, set(),
+        ))
+        if re.search(
+            r"https?://", _decision_contract_sections_text(original), re.I,
+        ):
+            reasons.append("合同章节不得以 URL 充当用户提交证据索引")
     reasons.extend(_decision_contract_conflict_reasons(original))
     gap_state = _decision_gap_state(
         _decision_field_sections(original, "data_gaps")
@@ -1026,15 +1073,20 @@ def enforce_decision_output(
         for input_id in missing_required_inputs:
             if input_id not in gap_text:
                 reasons.append(f"{status}必须在数据缺口中列出 {input_id}")
-    if not _decision_usable_text(
-        _decision_field_sections(original, "approval_boundary")
-    ):
-        reasons.append("缺少审批边界")
-    if not _decision_usable_text(
-        _decision_field_sections(original, "forbidden_actions")
-    ):
-        reasons.append("缺少禁止动作")
-    reasons.extend(_decision_canonical_boundary_reasons(original))
+    # 审批边界/禁止动作是服务端常量：门禁块无条件盖章打印规范文本。
+    # 只有声称 GO 的输出必须逐字复现两条机器条款（机器可验签）；非 GO
+    # 状态不授权任何执行，模型改写或缺失由盖章文本纠正，不再判违规——
+    # 恶意的"免审批/可自动执行"声明仍由合同冲突扫描全局拦截。
+    if raw_status == "GO":
+        if not _decision_usable_text(
+            _decision_field_sections(original, "approval_boundary")
+        ):
+            reasons.append("缺少审批边界")
+        if not _decision_usable_text(
+            _decision_field_sections(original, "forbidden_actions")
+        ):
+            reasons.append("缺少禁止动作")
+        reasons.extend(_decision_canonical_boundary_reasons(original))
 
     # 只要合同字段缺失、证据不足或状态非法，最终状态必须 HOLD；已是 HOLD
     # 时绝不因为正文“看起来完整”而升级。ESCALATE/ADVISE 只有在字段完整时保留。
@@ -3274,8 +3326,14 @@ def build_task_prompt(e: dict, brief: dict, skills_text: str, knowledge_text: st
         decision_block = "\n".join([
             "【行业决策合同（必须执行）】",
             f"决策对象：{contract.get('decision', '')}",
-            "允许状态：GO / HOLD / ESCALATE / ADVISE。交付开头必须先给一个且仅一个状态；"
-            "关键输入缺失、证据不足或无法核验时只能 HOLD 或 ESCALATE，禁止用假设补齐。",
+            "允许状态：GO / HOLD / ESCALATE / ADVISE。「## 决策状态」章节下只写一个状态词"
+            "并独占一行，不加任何说明文字；关键输入缺失、证据不足或无法核验时只能 HOLD "
+            "或 ESCALATE，禁止用假设补齐。老板未提交结构化用户证据时不得 GO：只能给 "
+            "ADVISE（纯分析建议）或 HOLD，并在「## 数据缺口」中列出仍缺的必需输入编号。"
+            "联网检索到的参考链接只能放在五个固定章节之外的分析部分，"
+            "不得写进固定章节，也不得充当用户提交证据。"
+            "「## 事实证据/数据源」章节里每条证据必须在同一行带"
+            "「来源：<可查的名称/文号/记录名>」与日期或时间窗；只写名称，不写网址。",
             "必需输入：\n" + "\n".join(
                 f"- {item}" for item in contract.get("required_inputs") or []
             ),
@@ -3316,10 +3374,12 @@ def build_task_prompt(e: dict, brief: dict, skills_text: str, knowledge_text: st
             ]
             lines.append("尚缺必需输入：" + ("、".join(missing) if missing else "无"))
             lines.append(
-                "只能在“## 事实证据/数据源”章节逐项引用对应证据，"
-                "每项必须独占一行并以 - [RI-01][U:<64位小写十六进制>] 开头；"
-                "每个引用必须与具体事实字段/值、日期或时间窗、记录类型在同一行；"
-                "不得多项拼在一行，不得改写、拆分、缩写或自造 ID。"
+                "只能在“## 事实证据/数据源”章节逐项引用对应证据，每项必须独占一行，"
+                "严格按此格式（方括号对逐字复制上面对应行的两个 ID）：\n"
+                "- [RI-01][U:完整64位十六进制] 事实：<字段:值>；时间窗：<日期或统计范围>；"
+                "记录：<记录/日志/报表等类型>\n"
+                "不得多项拼在一行，不得改写、拆分、缩写或自造 ID；"
+                "每个精确证据对在该章节只允许出现一次。"
             )
             lines.append(
                 "RI 归类只表示用户把该内容提交到该槽位，"
