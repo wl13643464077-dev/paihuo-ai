@@ -630,7 +630,7 @@ def _decision_evidence_usable(sections: list[str], *, strict: bool = True) -> bo
     齐全；非 GO 的分析型交付（ADVISE/HOLD/ESCALATE 不授权任何执行）允许
     法规、标准类常识证据没有业务时间窗——记录锚点 + 具名来源即可。
     """
-    if not _decision_usable_text(sections, evidence=True, strict=strict):
+    if not _decision_usable_text(sections, strict=strict):
         return False
     if not strict:
         # 非 GO 不授权任何执行：证据段只需存在且有实质内容（含诚实的
@@ -1041,9 +1041,15 @@ def enforce_decision_output(
     if not isinstance(employee.get("decision_contract"), dict):
         reasons.append("决策合同未加载")
     evidence_sections = _decision_field_sections(original, "facts_evidence_sources")
-    if not _decision_evidence_usable(
-        evidence_sections, strict=(raw_status == "GO")
+    if raw_status == "GO":
+        if not _decision_evidence_usable(evidence_sections, strict=True):
+            reasons.append("缺少事实证据/数据源或证据不可核验")
+    elif evidence_sections and not _decision_evidence_usable(
+        evidence_sections, strict=False
     ):
+        # 非 GO 写了证据章节就必须有实质内容；完全没写不算违规——证据
+        # 提交状态由门禁块的「用户提交覆盖」行权威陈述，缺口由数据缺口
+        # 规则单独强制，模型的行文选择不构成安全问题。
         reasons.append("缺少事实证据/数据源或证据不可核验")
     manifest, provenance_reasons = _decision_provenance_state(employee, provenance)
     if (

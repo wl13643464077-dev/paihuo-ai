@@ -253,6 +253,31 @@ class DecisionDeliveryGateTests(unittest.TestCase):
         )
         self.assertEqual("HOLD", go["status"])
 
+    def test_non_go_without_evidence_section_is_not_a_violation(self):
+        """非 GO 缺失证据章节不算违规：证据状态由门禁块覆盖行权威陈述；
+        GO 仍必须有完整可核验证据章节。"""
+        employee = _v2_employee()
+        required = [
+            row["input_id"]
+            for row in departments.decision_evidence_requirements(employee)
+        ]
+        original = (
+            "# 分析\n## 决策状态\nHOLD\n"
+            "## 数据缺口\n待补齐：" + "、".join(required) + "\n"
+            f"## 审批边界\n{departments.DECISION_APPROVAL_BODY}\n"
+            f"## 禁止动作\n{departments.DECISION_FORBIDDEN_BODY}\n"
+        )
+        result = departments.enforce_decision_output(employee, original)
+        self.assertEqual("HOLD", result["status"])
+        self.assertTrue(result["passed"])
+        go = departments.enforce_decision_output(
+            employee, original.replace("HOLD", "GO", 1).replace(
+                "待补齐：" + "、".join(required), "无数据缺口"
+            )
+        )
+        self.assertEqual("HOLD", go["status"])
+        self.assertIn("缺少事实证据/数据源或证据不可核验", go["reasons"])
+
     def test_research_urls_outside_contract_sections_are_allowed(self):
         """联网证据的参考链接放在分析部分合法；写进合同章节仍违规。"""
         base = _complete_output("GO")
