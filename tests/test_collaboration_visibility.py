@@ -5,7 +5,7 @@ import os
 import tempfile
 import unittest
 
-from app import auth, db, main
+from app import auth, db, employeeidentity, main
 from app.engine import engine
 
 
@@ -123,6 +123,9 @@ class CollaborationVisibilityCase(unittest.TestCase):
         task_id = main._create_charged_expert_task(
             {
                 "emp_idx": 0,
+                **employeeidentity.task_fields(
+                    employeeidentity.active_employee(0)
+                ),
                 "tenant_id": 2,
                 "brief_json": json.dumps({"direction": "专家任务发起人"}),
             },
@@ -221,6 +224,9 @@ class CollaborationVisibilityCase(unittest.TestCase):
                 {
                     "tenant_id": 2,
                     "emp_idx": 0,
+                    **employeeidentity.task_fields(
+                        employeeidentity.active_employee(0)
+                    ),
                     "brief_json": json.dumps({"direction": "详情发起人"}),
                     "status": "done",
                     "billing_status": "charged",

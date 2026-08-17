@@ -1,13 +1,28 @@
 """员工级模型自由切换的聚焦回归测试。"""
+import os
+import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 
-from app import main, providers
+from app import db, main, providers
 
 
 UNAVAILABLE_IMAGE_MODEL = "nano-banana-2-pro"
+TEST_IDENTITY_REF = "a" * 64
+TEST_BINDING = {
+    "employee": {"idx": 0},
+    "identity": {"identity_ref": TEST_IDENTITY_REF},
+    "config": {"config_revision": 7},
+}
+TEST_PUBLIC_IDENTITY = {
+    "person_status": "active",
+    "identity_status": "current",
+    "can_assign_new": True,
+    "can_continue": True,
+    "can_learn": True,
+}
 
 
 class TextModelRoutingTests(unittest.TestCase):
@@ -39,15 +54,17 @@ class TextModelRoutingTests(unittest.TestCase):
         with patch.object(main, "_need_boss"), \
                 patch.object(main.registry, "STATIONS", [station]), \
                 patch.object(main.departments, "list_depts", return_value=[]), \
+                patch.object(main.employeeidentity, "active_employee", return_value=station), \
+                patch.object(main, "_employee_public_contract",
+                             return_value=TEST_PUBLIC_IDENTITY), \
                 patch.object(main.employees, "get_config",
-                             return_value={"prompt_template": None, "skills": []}), \
+                             return_value={"prompt_template": None, "skills": [],
+                                           "model_text": "removed-employee-model",
+                                           "model_image": None}), \
                 patch.object(main.employees, "is_enabled", return_value=True), \
                 patch.object(main.avatar, "engine_name", return_value="kling"), \
                 patch.object(main.db, "get_setting",
-                             side_effect=lambda key: saved.get(key)), \
-                patch.object(main.db, "one",
-                             return_value={"model_text": "removed-employee-model",
-                                           "model_image": None}):
+                             side_effect=lambda key: saved.get(key)):
             payload = main.admin_overview()
 
         self.assertEqual(
@@ -58,8 +75,9 @@ class TextModelRoutingTests(unittest.TestCase):
 
     def test_employee_model_save_rejects_unknown_or_invalid_text_models(self):
         with patch.object(main, "_need_boss"), \
-                patch.object(main, "_is_emp", return_value=True), \
-                patch.object(main.employees, "set_models") as save_mock:
+                patch.object(main, "_employee_current_write_binding",
+                             return_value=TEST_BINDING), \
+                patch.object(main.employees, "set_models_for_identity") as save_mock:
             for model in ("removed-text-model", 123, {"id": "gpt-5.5"}):
                 with self.subTest(model=model):
                     with self.assertRaises(HTTPException) as caught:
@@ -100,8 +118,11 @@ class TextModelRoutingTests(unittest.TestCase):
         )
 
         with patch.object(main, "_need_boss"), \
-                patch.object(main, "_is_emp", return_value=True), \
-                patch.object(main.employees, "set_models") as employee_save:
+                patch.object(main, "_employee_current_write_binding",
+                             return_value=TEST_BINDING), \
+                patch.object(main.employees, "set_models_for_identity") as employee_save, \
+                patch.object(main.employees, "get_config", return_value={}), \
+                patch.object(main, "_employee_public_contract", return_value={}):
             self.assertEqual(
                 {"ok": True},
                 main.admin_emp_models(0, {"model_text": "claude-opus-4-8"}),
@@ -112,8 +133,10 @@ class TextModelRoutingTests(unittest.TestCase):
             )
         self.assertEqual(
             [
-                ((0, "claude-opus-4-8", None), {}),
-                ((0, "", None), {}),
+                ((TEST_IDENTITY_REF, "claude-opus-4-8", None),
+                 {"expected_revision": 7}),
+                ((TEST_IDENTITY_REF, "", None),
+                 {"expected_revision": 7}),
             ],
             employee_save.call_args_list,
         )
@@ -129,15 +152,17 @@ class ImageModelRoutingTests(unittest.TestCase):
         with patch.object(main, "_need_boss"), \
                 patch.object(main.registry, "STATIONS", [station]), \
                 patch.object(main.departments, "list_depts", return_value=[]), \
+                patch.object(main.employeeidentity, "active_employee", return_value=station), \
+                patch.object(main, "_employee_public_contract",
+                             return_value=TEST_PUBLIC_IDENTITY), \
                 patch.object(main.employees, "get_config",
-                             return_value={"prompt_template": None, "skills": []}), \
+                             return_value={"prompt_template": None, "skills": [],
+                                           "model_text": None,
+                                           "model_image": UNAVAILABLE_IMAGE_MODEL}), \
                 patch.object(main.employees, "is_enabled", return_value=True), \
                 patch.object(main.avatar, "engine_name", return_value="kling"), \
                 patch.object(main.db, "get_setting",
-                             side_effect=lambda key: saved.get(key)), \
-                patch.object(main.db, "one",
-                             return_value={"model_text": None,
-                                           "model_image": UNAVAILABLE_IMAGE_MODEL}):
+                             side_effect=lambda key: saved.get(key)):
             payload = main.admin_overview()
 
         selectable_ids = {model["id"] for model in payload["image_models"]}
@@ -148,8 +173,9 @@ class ImageModelRoutingTests(unittest.TestCase):
 
     def test_employee_model_save_rejects_unavailable_and_unknown_image_models(self):
         with patch.object(main, "_need_boss"), \
-                patch.object(main, "_is_emp", return_value=True), \
-                patch.object(main.employees, "set_models") as save_mock:
+                patch.object(main, "_employee_current_write_binding",
+                             return_value=TEST_BINDING), \
+                patch.object(main.employees, "set_models_for_identity") as save_mock:
             for model in (UNAVAILABLE_IMAGE_MODEL, "invented-image-model", 123):
                 with self.subTest(model=model):
                     with self.assertRaises(HTTPException) as caught:
@@ -173,11 +199,16 @@ class ImageModelRoutingTests(unittest.TestCase):
     def test_available_image_model_can_still_be_saved(self):
         model = "doubao-seedream-5-0-260128"
         with patch.object(main, "_need_boss"), \
-                patch.object(main, "_is_emp", return_value=True), \
-                patch.object(main.employees, "set_models") as save_mock:
+                patch.object(main, "_employee_current_write_binding",
+                             return_value=TEST_BINDING), \
+                patch.object(main.employees, "set_models_for_identity") as save_mock, \
+                patch.object(main.employees, "get_config", return_value={}), \
+                patch.object(main, "_employee_public_contract", return_value={}):
             self.assertEqual({"ok": True},
                              main.admin_emp_models(5, {"model_image": model}))
-        save_mock.assert_called_once_with(5, None, model)
+        save_mock.assert_called_once_with(
+            TEST_IDENTITY_REF, None, model, expected_revision=7,
+        )
 
     def test_available_global_image_model_can_still_be_saved(self):
         model = "doubao-seedream-5-0-260128"
@@ -217,6 +248,26 @@ class ImageRuntimeAvailabilityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
+    """网关测试使用独立数据库，避免异步 worker 触碰仓库默认 DB 锁。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old_path = db.DB_PATH
+        db._shutdown_async_pool(wait=True)
+        db._close_all_connections()
+        db._conn = None
+        db._conn_path = None
+        db.DB_PATH = os.path.join(self.tmp.name, "model-routing.db")
+        db.conn()
+
+    def tearDown(self):
+        db._shutdown_async_pool(wait=True)
+        db._close_all_connections()
+        db._conn = None
+        db._conn_path = None
+        db.DB_PATH = self.old_path
+        self.tmp.cleanup()
+
     async def test_text_json_retry_accumulates_every_model_call(self):
         attempts = [
             {"text": "不是 JSON", "cost_usd": 0.2, "tokens": 30},
@@ -280,6 +331,10 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             "text": '{"sources":[{"source_url":"https://example.com/posts/1"}]}',
             "cost_usd": 0.2,
             "tokens": 30,
+            "web_sources": [{
+                "source_title": "Original post",
+                "source_url": "https://example.com/posts/1",
+            }],
         }
         with patch.object(providers, "yunwu_conf",
                           return_value=("https://proxy.example", "key")), \
@@ -289,7 +344,9 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(got["data"]["sources"][0]["source_url"],
                          "https://example.com/posts/1")
         self.assertEqual(got["tokens"], 30)
+        self.assertEqual(agent_result["web_sources"], got["web_sources"])
         self.assertTrue(agent_mock.await_args.kwargs["web"])
+        self.assertTrue(agent_mock.await_args.kwargs["capture_web_sources"])
         self.assertEqual(agent_mock.await_args.kwargs["model"], providers.AGENT_MODEL)
         self.assertEqual(
             agent_mock.await_args.kwargs["provider_env"]["ANTHROPIC_AUTH_TOKEN"], "key")
@@ -302,8 +359,26 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_structured_web_retry_accumulates_every_gateway_call(self):
         attempts = [
-            {"text": "不是 JSON", "cost_usd": 0.2, "tokens": 30},
-            {"text": '{"sources":[]}', "cost_usd": 0.3, "tokens": 40},
+            {
+                "text": "不是 JSON", "cost_usd": 0.2, "tokens": 30,
+                "web_sources": [{
+                    "source_title": "First source",
+                    "source_url": "https://example.com/posts/1",
+                }],
+            },
+            {
+                "text": '{"sources":[]}', "cost_usd": 0.3, "tokens": 40,
+                "web_sources": [
+                    {
+                        "source_title": "Duplicate title ignored",
+                        "source_url": "https://example.com/posts/1",
+                    },
+                    {
+                        "source_title": "Second source",
+                        "source_url": "https://example.com/posts/2",
+                    },
+                ],
+            },
         ]
         with patch.object(providers, "yunwu_conf",
                           return_value=("https://proxy.example", "key")), \
@@ -313,12 +388,42 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent_mock.await_count, 2)
         self.assertAlmostEqual(got["cost_usd"], 0.5)
         self.assertEqual(got["tokens"], 70)
+        self.assertEqual(
+            [
+                {
+                    "source_title": "First source",
+                    "source_url": "https://example.com/posts/1",
+                },
+                {
+                    "source_title": "Second source",
+                    "source_url": "https://example.com/posts/2",
+                },
+            ],
+            got["web_sources"],
+        )
+
+    async def test_structured_web_model_text_cannot_create_captured_sources(self):
+        agent_result = {
+            "text": '{"sources":[{"source_url":"https://invented.invalid/1"}]}',
+            "cost_usd": 0.2,
+            "tokens": 30,
+        }
+        with patch.object(providers, "yunwu_conf",
+                          return_value=("https://proxy.example", "key")), \
+                patch("app.llm.call", AsyncMock(return_value=agent_result)):
+            got = await providers.call_web_json("只找真实原帖")
+
+        self.assertEqual([], got["web_sources"])
 
     async def test_structured_web_result_can_be_repaired_without_searching_twice(self):
         research = {
             "text": "找到原帖：https://example.com/posts/1，用户正在比价。",
             "cost_usd": 0.2,
             "tokens": 30,
+            "web_sources": [{
+                "source_title": "Trusted tool source",
+                "source_url": "https://example.com/posts/1",
+            }],
         }
         repaired = {
             "text": '{"sources":[{"source_url":"https://example.com/posts/1"}]}',
@@ -341,6 +446,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                          "https://example.com/posts/1")
         self.assertAlmostEqual(got["cost_usd"], 0.3)
         self.assertEqual(got["tokens"], 40)
+        self.assertEqual(research["web_sources"], got["web_sources"])
 
     async def test_structured_web_repair_cannot_invent_or_change_source_url(self):
         research = {

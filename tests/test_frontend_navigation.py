@@ -263,7 +263,15 @@ class FrontendNavigationContractTests(unittest.TestCase):
         self.assertIn('listPath("/matrix/tasks","publish",MATRIX_FILTER)', self.app_js)
 
     def test_frontend_change_has_a_new_script_version(self):
-        self.assertIn("/static/app.js?v=45", self.index_html)
+        # 源文件只保留占位 ?v=；真实版本由 `/` 路由按 app.js 内容哈希注入，
+        # 发版换文件即换 URL，浏览器不可能再复用旧脚本缓存（手工 ?v=54 在
+        # schema55 连续发版中从未被更新过，属于事故根因，禁止回退）。
+        self.assertIn("/static/app.js?v=", self.index_html)
+        self.assertIn("def _entry_asset_version", self.main_py)
+        self.assertIn("hashlib.sha256(fh.read()).hexdigest()[:12]", self.main_py)
+        self.assertIn("def _inject_entry_asset_version", self.main_py)
+        self.assertIn(r"(/static/app\.js\?v=)[0-9A-Za-z]+", self.main_py)
+        self.assertIn("_inject_entry_asset_version(f.read())", self.main_py)
         self.assertIn('release:"web-v40"', self.app_js)
 
     def test_employee_task_forms_use_role_and_industry_specific_guidance(self):
@@ -327,7 +335,7 @@ class FrontendNavigationContractTests(unittest.TestCase):
             self.app_js,
         )
         self.assertIn(
-            'ME&&ME.role==="tour" ? "intro"',
+            'ME&&ME.role==="tour"||!canAssign ? "intro"',
             self.app_js,
         )
 

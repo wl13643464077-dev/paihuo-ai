@@ -4,6 +4,7 @@ import contextvars
 import ipaddress
 import json
 import logging
+import math
 import os
 import posixpath
 import re
@@ -19,13 +20,15 @@ from urllib.parse import unquote, urlsplit
 
 import hashlib
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import (analyzer, assetfiles, auth, billing, db, departments, employees, expertmatch,
+from . import (analyzer, assetfiles, auth, billing, bossdashboard, db, departments, employeeidentity, employeelearning, employees, expertmatch,
                export, feishu, funnel, llm, meeting, obs, providers, scheduler,
-               purchases, secureconfig, taskcenter, taskrunner)
+               inspection, inspectionimport, inspectionoverrides, inspectionstandards,
+               learningevidence, purchases, secureconfig,
+               taskcenter, taskrunner, taskthreads)
 from .engine import engine
 from .skills import registry
 
@@ -40,6 +43,31 @@ app = FastAPI(title="派活 PaiHuo — 老板会派活，数字员工去干活")
 def _read_file_bytes(path: str) -> bytes:
     with open(path, "rb") as handle:
         return handle.read()
+
+
+def _sync_platform_industry_scope() -> int:
+    """让平台总部拥有显式行业映射；普通租户仍必须逐项授权。"""
+    now = time.time()
+    rows = [
+        str(item.get("key") or "").strip()
+        for item in departments.list_depts()
+        if str(item.get("key") or "").strip()
+    ]
+    with db.atomic() as connection:
+        tenant = connection.execute(
+            "SELECT id FROM tenants WHERE id=1 AND enabled=1"
+        ).fetchone()
+        if not tenant:
+            return 0
+        changed = 0
+        for position, industry_key in enumerate(dict.fromkeys(rows)):
+            cursor = connection.execute(
+                "INSERT OR IGNORE INTO tenant_industry(tenant_id,industry_key,"
+                "is_primary,created_at) VALUES(1,?,?,?)",
+                (industry_key, 1 if position == 0 else 0, now),
+            )
+            changed += max(0, int(cursor.rowcount or 0))
+        return changed
 
 # 全站 55 处 raise HTTPException(404) 之类的裸状态码,默认 detail 是英文
 # ("Not Found"/"Forbidden"…),前端会原样弹给老板。统一在出口翻译成人话;
@@ -92,6 +120,12 @@ _AVATAR_UPLOAD_MAX_BYTES = 30 * 1024 * 1024
 # Caddy keeps a 40 MB transport ceiling.  Leave room for multipart framing so
 # the application and proxy advertise one honest, reachable clip limit.
 _CLIP_UPLOAD_MAX_BYTES = 38 * 1024 * 1024
+_INSPECTION_UPLOAD_MAX_BYTES = 38 * 1024 * 1024
+_INSPECTION_ANALYSIS_MODEL_TIMEOUT_SECONDS = 300
+_INSPECTION_CONTRACT_MARKER = "【最终权威JSON合同·运行时动态生成】"
+# 前端复查上传等待 120s；后端必须更早收口并降级人工复核，
+# 否则客户端先超时重试会在首个请求仍运行时重复落复查照片。
+_INSPECTION_RECHECK_MODEL_TIMEOUT_SECONDS = 90
 _UPLOAD_MULTIPART_OVERHEAD_BYTES = 1024 * 1024
 _PERSISTENT_UPLOAD_RESERVED = contextvars.ContextVar(
     "persistent_upload_reserved",
@@ -108,12 +142,27 @@ _PERSISTENT_UPLOAD_ROUTES = {
         "content",
         _CLIP_UPLOAD_MAX_BYTES + _UPLOAD_MULTIPART_OVERHEAD_BYTES,
     ),
+    ("POST", "/api/inspections"): (
+        "inspection",
+        "*work",
+        _INSPECTION_UPLOAD_MAX_BYTES + _UPLOAD_MULTIPART_OVERHEAD_BYTES,
+    ),
+    ("POST", "/api/inspections/rechecks"): (
+        "inspection-recheck",
+        "*work",
+        _INSPECTION_UPLOAD_MAX_BYTES + _UPLOAD_MULTIPART_OVERHEAD_BYTES,
+    ),
 }
 _TRANSIENT_UPLOAD_RESERVED = contextvars.ContextVar(
     "transient_upload_reserved",
     default=False,
 )
 _TRANSIENT_UPLOAD_ROUTES = {
+    ("POST", "/api/inspections/branches/imports"): (
+        "inspection-branch-import",
+        "*admin",
+        inspectionimport.MAX_FILE_BYTES + _UPLOAD_MULTIPART_OVERHEAD_BYTES,
+    ),
     ("POST", "/api/parse-file"): (
         "file-parse",
         "*work",
@@ -139,6 +188,8 @@ _TRANSIENT_UPLOAD_ROUTES = {
 
 def _upload_permission_allowed(module: str) -> bool:
     """Resolve upload permissions before multipart parsing starts."""
+    if module == "*admin":
+        return auth.is_admin()
     if module != "*work":
         return auth.allowed(module)
     user = auth.current() or {}
@@ -285,7 +336,29 @@ def ops_metrics():
 
 @app.on_event("startup")
 async def _startup():
+    app.state.learning_batch_shutting_down = False
     await asyncio.to_thread(db.conn)
+    # Close the lifecycle gap for idle tenants before serving traffic.  The
+    # sweep is deliberately bounded and cross-tenant; request paths retain a
+    # tenant-local lazy fallback for quota recovery.
+    try:
+        retention = await db.arun(inspectionimport.cleanup_expired_previews)
+        log.info(
+            "inspection import retention startup sweep scanned=%d expired=%d "
+            "compacted=%d wal_checkpointed=%d wal_busy=%d",
+            int((retention or {}).get("scanned", 0)),
+            int((retention or {}).get("expired", 0)),
+            int((retention or {}).get("compacted", 0)),
+            int((retention or {}).get("wal_checkpointed", 0)),
+            int((retention or {}).get("wal_busy", -1)),
+        )
+    except Exception as exc:
+        # A transient cleanup failure must not make the API unavailable; the
+        # scheduler retries the same bounded sweep on its next periodic tick.
+        log.error(
+            "inspection import retention startup sweep failed error_type=%s",
+            type(exc).__name__,
+        )
     secret_migration = await db.arun(secureconfig.migrate_legacy_secrets)
     if isinstance(secret_migration, dict):
         # 只记录聚合计数，绝不把 key、租户、密文或原始凭据写进 journal。
@@ -305,6 +378,12 @@ async def _startup():
             bool(secret_migration.get("field_migration_skipped")),
         )
     await db.arun(auth.bootstrap)
+    synced_platform_industries = await db.arun(_sync_platform_industry_scope)
+    if synced_platform_industries:
+        log.info(
+            "platform industry scopes synchronized count=%d",
+            synced_platform_industries,
+        )
     # 组件量规:读取时惰性求值,记录侧零开销。
     obs.register_gauge("engine_queue_depth", lambda: engine.queue.qsize())
     obs.register_gauge("engine_job_locks", lambda: len(engine.locks))
@@ -359,16 +438,42 @@ async def _startup():
             "settled %d legacy successful subscription operations",
             settled_subscriptions,
         )
+    recovered_learning = await db.arun(
+        employeelearning.recover_interrupted_runs
+    )
+    if recovered_learning:
+        log.warning(
+            "failed %d interrupted employee learning runs before refund",
+            recovered_learning,
+        )
+    settled_learning, protected_learning_ops = await db.arun(
+        _recover_employee_learning_billing
+    )
+    if settled_learning:
+        log.info(
+            "settled %d delivered employee learning operations",
+            settled_learning,
+        )
     recovered_billing = await db.arun(
         billing.recover_interrupted_operations,
-        exclude_op_keys=protected_draft_ops,
+        exclude_op_keys=(protected_draft_ops | protected_learning_ops),
     )
     if recovered_billing:
         log.warning("recovered %d interrupted billed operations", recovered_billing)
+    orphaned_learning_batches = await db.arun(
+        _detect_orphaned_learning_batches_for_restart
+    )
+    if orphaned_learning_batches:
+        log.warning(
+            "detected %d employee learning batches awaiting an explicit, "
+            "tenant-scoped resume after restart",
+            orphaned_learning_batches,
+        )
     await engine.start()
     asyncio.create_task(scheduler.loop(engine))
     asyncio.create_task(analyzer.loop())
     taskrunner.resume_pending(engine.broadcast)
+    await _resume_inspection_tasks()
     avatar.resume_pending(engine.broadcast)      # 数字人:queued重开/running退点
     meeting.resume_pending(engine.broadcast)     # 圆桌会:queued重开/running标失败
     from . import textvideo as _tv
@@ -377,6 +482,14 @@ async def _startup():
     _recover_interrupted_tool_jobs()
     _ensure_tool_running_index()
     _start_tool_watchdog()
+
+
+@app.on_event("shutdown")
+async def _learning_batch_shutdown_marker():
+    # Coordinator recovery retries remain persistent during normal service,
+    # but a deliberate process shutdown must be allowed to stop.  Interrupted
+    # researching rows are compensated by the existing startup recovery.
+    app.state.learning_batch_shutting_down = True
 
 
 # ---------------- V8:账号会话 + 租户隔离 ----------------
@@ -409,10 +522,21 @@ def _canonical_file_path(path: str) -> str:
 
 def _file_owner_tid(path: str):
     """解析登录态文件预览的租户归属；归属不明返回 0，默认拒绝。"""
+    return int(_file_access_scope(path).get("tenant_id") or 0)
+
+
+def _file_access_scope(path: str) -> dict:
+    """解析文件的租户与最窄板块；巡店证据保留行业边界。"""
     m = _re_files.match(r"/files/avatar-public/([^/]+)$", path)
     if m:
-        return avatar.asset_owner(m.group(1))
-    return assetfiles.file_owner_tid(path)
+        return {
+            "tenant_id": int(avatar.asset_owner(m.group(1)) or 0),
+            "industry_key": None,
+            # /files/avatar-public 是登录态素材预览；供外部供应商
+            # 拉取的现有 /pub 公开传输端点不经过这个分支。
+            "required_module": "avatar",
+        }
+    return assetfiles.file_access_scope(path)
 
 
 @app.middleware("http")
@@ -591,11 +715,37 @@ async def _auth_mw(request: Request, call_next):
             path = _canonical_file_path(raw.decode("latin-1"))
         except (HTTPException, UnicodeDecodeError):
             return JSONResponse({"detail": "路径非法"}, status_code=400)
-        owner_tid = await db.arun(_file_owner_tid, path)
+        file_scope = await db.arun(_file_access_scope, path)
+        owner_tid = int(file_scope.get("tenant_id") or 0)
+        industry_key = str(file_scope.get("industry_key") or "")
+        required_module = str(file_scope.get("required_module") or "")
         cur = auth.current()
         cur_tid = cur["tenant_id"] if cur else None
-        if not cur or (not auth.is_root() and cur_tid != owner_tid):
+        if (
+            not cur
+            or owner_tid < 1
+            # 看板的跨租户结构化统计权不是原文附件读取权；
+            # root/命名 boss 也必须与文件归属租户严格一致。
+            or int(cur_tid or 0) != owner_tid
+        ):
             return JSONResponse({"detail": "无权访问该文件"}, status_code=403)
+        role = str(cur.get("role") or "")
+        if role not in ("root", "owner", "member"):
+            return JSONResponse({"detail": "无权访问该文件"}, status_code=403)
+        # 所有受管文件族都必须声明最窄板块，任何遗漏一律
+        # fail closed。owner/root 对 content/avatar 等基础板块仍由
+        # auth.allowed 正常放行；但行业被租户撤权后，owner 不能继续
+        # 借管理角色直读该行业的历史巡店证据。
+        if (
+            not required_module
+            or not await db.arun(auth.allowed, required_module)
+        ):
+            detail = (
+                "无权访问该行业文件"
+                if industry_key and required_module == industry_key
+                else "无权访问该文件"
+            )
+            return JSONResponse({"detail": detail}, status_code=403)
         # 演绎师/封面师产出的 HTML/SVG 由不可信输入链驱动生成,同源直开会让其中的
         # 脚本以登录会话调用 /api/*。用 sandbox CSP 剥夺其同源与脚本能力(iframe 预览
         # 已带 sandbox,这里堵的是"打开"式顶层导航),并禁止 MIME 嗅探。
@@ -695,6 +845,12 @@ _PUBLIC_STATION_TASK_GUIDES = {
         "input_tips": ["要复盘的内容与发布时间", "曝光、互动、转化等可用数据", "原定目标、异常事件与用户反馈"],
         "output_hint": "得到表现诊断、原因假设、复用项和下一轮改进动作",
     },
+    "inspection": {
+        "task_placeholder": "例如：检查[门店/区域]本次现场照片，找出可见问题并给出整改与复查计划。",
+        "material_placeholder": "请优先从巡店工作台上传现场照片；可补充门店、区域、检查范围、责任人和整改期限要求。",
+        "input_tips": ["门店、区域和巡检日期", "1～8张覆盖不同区域的现场照片", "本次重点、负责人和期限要求"],
+        "output_hint": "得到带照片证据的问题分级、整改责任与期限、复查标准和门店记录",
+    },
 }
 
 
@@ -712,15 +868,168 @@ def _public_station_task_guide(s: dict) -> dict:
     }
 
 
-def _public_station(s: dict, *, include_task_guide: bool = False) -> dict:
+_EMPLOYEE_IDENTITY_PUBLIC_FIELDS = (
+    "person_status", "identity_status", "identity_ref", "config_revision",
+    "config_sha256", "bundle_sha256", "can_assign_new", "can_continue", "can_learn",
+    "slot_row_version", "role_profile_summary",
+)
+_ROLE_WRITE_BINDING_FIELDS = (
+    "identity_ref", "config_revision", "config_sha256", "bundle_sha256",
+)
+
+
+def _employee_public_contract(
+    employee: dict,
+    *,
+    config: dict | None = None,
+    include_profile: bool = False,
+) -> dict:
+    """Expose the two independent schema-54 identity axes.
+
+    A person slot may remain active while an old task or meeting keeps using a
+    historical role identity.  Callers handling frozen work may pass its exact
+    config revision; we never recover that revision from ``idx``.
+    """
+    # registry.STATIONS is intentionally a lightweight execution registry and
+    # predates the frozen schema-54 identity fields.  Public API callers still
+    # pass those core rows in several places, so normalize only an exact core
+    # key/idx match to its canonical current identity before building the
+    # public contract.  Industry/history rows must already be exact and are
+    # never active-first substituted here.
+    if not employee.get("dept_key"):
+        try:
+            active = employeeidentity.active_employee(int(employee.get("idx")))
+        except (TypeError, ValueError):
+            active = None
+        if (
+            active
+            and active.get("dept_key") == "content"
+            and str(active.get("key") or "") == str(employee.get("key") or "")
+        ):
+            employee = active
+    view = employeeidentity.identity_view(
+        employee, include_profile=include_profile,
+    )
+    if config is not None:
+        if str(config.get("identity_ref") or "") != str(view["identity_ref"]):
+            raise RuntimeError("员工岗位与配置身份不一致")
+        view["config_revision"] = int(config.get("config_revision") or 0)
+        view["config_sha256"] = str(config.get("config_sha256") or "")
+        view["bundle_sha256"] = str(config.get("bundle_sha256") or "")
+        if include_profile:
+            view["professional_profile"] = (
+                config.get("effective_profile")
+                or config.get("professional_profile")
+                or {}
+            )
+    result = {
+        field: view.get(field) for field in _EMPLOYEE_IDENTITY_PUBLIC_FIELDS
+    }
+    if include_profile:
+        result["professional_profile"] = view.get("professional_profile") or {}
+        role_key = str(view.get("key") or employee.get("key") or "")
+        cap_details = departments.capability_details_for(role_key)
+        if not result["professional_profile"]:
+            # 餐饮/内容部老岗位没有 V4 档案：附加发布内出厂能力档案，仅
+            # 用于展示层；身份、配置包与任务提示词永远不读这份 sidecar。
+            sidecar = departments.factory_profile_for(role_key)
+            if sidecar:
+                result["professional_profile"] = sidecar["professional_profile"]
+                cap_details = sidecar.get("capability_details") or {}
+        if cap_details:
+            result["capability_details"] = cap_details
+    # One-release aliases keep old clients readable. New UI decisions use only
+    # person_status + identity_status and the explicit capability booleans.
+    result["roster_status"] = (
+        "active" if result["identity_status"] == "current" else "legacy"
+    )
+    result["can_assign"] = bool(result["can_assign_new"])
+    return result
+
+
+def _employee_current_write_binding(idx: int, body: dict | None = None) -> dict:
+    """Bind a mutable request to the exact current role/config it rendered.
+
+    ``idx`` is a person slot, never write authority.  Every mutable/new-work
+    request must echo the full immutable role/config triple it rendered.
+    """
+    if not isinstance(body, dict):
+        raise HTTPException(400, "员工岗位请求格式无效")
+    if any(body.get(field) in (None, "") for field in _ROLE_WRITE_BINDING_FIELDS):
+        raise HTTPException(400, "员工岗位身份、配置与能力包绑定必须完整提交")
+    employee = employeeidentity.active_employee(idx)
+    if not employee:
+        raise HTTPException(404, "当前岗位不存在")
+    config = employees.get_config(int(employee["idx"]))
+    if not config:
+        raise HTTPException(409, "员工岗位配置完整性校验失败")
+    expected_identity = str(body.get("identity_ref") or "").strip()
+    if re.fullmatch(r"[0-9a-f]{64}", expected_identity) is None:
+        raise HTTPException(400, "岗位身份引用无效")
+    if expected_identity != str(config.get("identity_ref") or ""):
+        raise HTTPException(409, "员工岗位已更新，请刷新后重试")
+    raw_revision = body.get("config_revision")
+    if isinstance(raw_revision, bool) or not isinstance(raw_revision, int):
+        raise HTTPException(400, "岗位配置版本无效")
+    expected_revision = raw_revision
+    if expected_revision < 1:
+        raise HTTPException(400, "岗位配置版本无效")
+    if expected_revision != int(config.get("config_revision") or 0):
+        raise HTTPException(409, "员工岗位配置已更新，请刷新后重试")
+    expected_hash = str(body.get("config_sha256") or "").strip()
+    if re.fullmatch(r"[0-9a-f]{64}", expected_hash) is None:
+        raise HTTPException(400, "岗位配置摘要无效")
+    if expected_hash != str(config.get("config_sha256") or ""):
+        raise HTTPException(409, "员工岗位配置已更新，请刷新后重试")
+    expected_bundle = str(body.get("bundle_sha256") or "").strip()
+    if re.fullmatch(r"[0-9a-f]{64}", expected_bundle) is None:
+        raise HTTPException(400, "岗位能力包摘要无效")
+    if expected_bundle != str(config.get("bundle_sha256") or ""):
+        raise HTTPException(409, "员工岗位能力包已更新，请刷新后重试")
+    return {
+        "employee": employee,
+        "config": config,
+        "identity": _employee_public_contract(employee, config=config),
+    }
+
+
+def _employee_effective_view(employee: dict, config: dict) -> dict:
+    """Overlay only an approved effective bundle onto an immutable identity."""
+    return {
+        **employee,
+        "professional_profile": (
+            config.get("effective_profile")
+            or employee.get("professional_profile")
+            or {}
+        ),
+        "workflow": (
+            config.get("effective_workflow") or employee.get("workflow") or []
+        ),
+        "steps": (
+            config.get("effective_workflow") or employee.get("steps") or []
+        ),
+    }
+
+
+def _public_station(
+    s: dict, *, include_task_guide: bool = False,
+    config: dict | None = None,
+) -> dict:
     """内容部员工的对外名片：只含展示信息，不含岗位实现与模型配置。"""
-    public = {k: s[k] for k in ("idx", "key", "name", "dept", "emoji", "color", "intro")}
+    public = {
+        k: s[k]
+        for k in ("idx", "key", "name", "dept", "emoji", "color", "intro")
+    } | _employee_public_contract(s, config=config)
     if include_task_guide:
         public["task_guide"] = _public_station_task_guide(s)
     return public
 
 
-def _public_expert(e: dict, *, include_task_guide: bool = False) -> dict:
+def _public_expert(
+    e: dict, *, include_task_guide: bool = False,
+    config: dict | None = None,
+    include_profile: bool = False,
+) -> dict:
     """产业专家的对外名片：文字介绍优先，绝不透出岗位手册结构。"""
     intro = (e.get("intro") or "").strip()
     if not intro:
@@ -737,7 +1046,10 @@ def _public_expert(e: dict, *, include_task_guide: bool = False) -> dict:
               "您只需说明当前背景、目标和已有材料，TA就能围绕实际业务给出清晰、专业、可落地的建议。")
     public = {k: e.get(k) for k in ("idx", "name", "emoji", "color", "person", "dept_name")} | {
         "intro": intro,
-    }
+        "catalog_version": e.get("catalog_version") or "v1",
+    } | _employee_public_contract(
+        e, config=config, include_profile=include_profile,
+    )
     if include_task_guide:
         public["task_guide"] = departments.public_task_guide(e)
     return public
@@ -1863,11 +2175,8 @@ def team_user_create(body: dict):
 @app.put("/api/team/users/{uid}")
 def team_user_update(uid: int, body: dict):
     _need_admin()
-    u = db.one("SELECT * FROM users WHERE id=?", (uid,))
-    if not u or (not auth.is_root() and u["tenant_id"] != TEN()):
-        raise HTTPException(404)
-    if u["role"] == "root" and not auth.is_root():
-        raise HTTPException(403)
+    actor_is_root = auth.is_root()
+    actor_tenant_id = TEN()
     data = {}
     if "modules" in body:
         data["modules_json"] = json.dumps(body["modules"] or [])
@@ -1879,8 +2188,31 @@ def team_user_update(uid: int, body: dict):
             raise HTTPException(400, policy_error)
         data["password_hash"] = auth.hash_pw(body["password"])
         data["must_change_password"] = 1
-    if data:
-        db.update("users", uid, data)
+    with db.atomic() as connection:
+        current_row = connection.execute(
+            "SELECT * FROM users WHERE id=?", (uid,)
+        ).fetchone()
+        if not current_row:
+            raise HTTPException(404)
+        u = dict(current_row)
+        if not actor_is_root and int(u["tenant_id"]) != int(actor_tenant_id):
+            raise HTTPException(404)
+        if u["role"] == "root" and not actor_is_root:
+            raise HTTPException(403)
+        if data:
+            connection.execute(
+                "UPDATE users SET "
+                + ",".join(f"{key}=?" for key in data)
+                + ",updated_at=? WHERE id=?",
+                (*data.values(), time.time(), uid),
+            )
+            # 停用成员等同强制下线；会话撤销与 enabled 更新必须同事务。
+            # 否则账号重新启用时，停用前 Cookie 会重新变成有效。
+            if (
+                int(u.get("enabled") or 0) == 1
+                and data.get("enabled") == 0
+            ):
+                auth.revoke_sessions(uid)
     return {"ok": True}
 
 
@@ -1923,11 +2255,22 @@ def team_tenant_create(body: dict):
         raise HTTPException(400, "主账号用户名已存在")
     valid_ind = {d["key"] for d in auth.all_industries()}
     inds = [x for x in (body.get("industries") or []) if x in valid_ind]
-    with db.atomic():
+    with db.atomic() as connection:
         tid = db.insert("tenants", {
             "name": name,
             "industries_json": json.dumps(inds, ensure_ascii=False),
         })
+        for position, industry_key in enumerate(dict.fromkeys(inds)):
+            connection.execute(
+                "INSERT INTO tenant_industry(tenant_id,industry_key,"
+                "is_primary,created_at) VALUES(?,?,?,?)",
+                (
+                    tid,
+                    industry_key,
+                    1 if position == 0 else 0,
+                    time.time(),
+                ),
+            )
         db.insert("users", {
             "tenant_id": tid,
             "username": owner,
@@ -1952,19 +2295,51 @@ def team_tenant_industries(tid: int, body: dict):
     _need_root()
     valid = {d["key"] for d in auth.all_industries()}
     inds = [x for x in (body.get("industries") or []) if x in valid]
-    db.update("tenants", tid, {"industries_json": json.dumps(inds, ensure_ascii=False)})
+    if not db.one("SELECT id FROM tenants WHERE id=?", (tid,)):
+        raise HTTPException(404)
+    with db.atomic() as connection:
+        connection.execute(
+            "UPDATE tenants SET industries_json=?,updated_at=? WHERE id=?",
+            (json.dumps(inds, ensure_ascii=False), time.time(), tid),
+        )
+        connection.execute("DELETE FROM tenant_industry WHERE tenant_id=?", (tid,))
+        for position, industry_key in enumerate(dict.fromkeys(inds)):
+            connection.execute(
+                "INSERT INTO tenant_industry(tenant_id,industry_key,is_primary,created_at) "
+                "VALUES(?,?,?,?)",
+                (tid, industry_key, 1 if position == 0 else 0, time.time()),
+            )
     return {"ok": True}
 
 
 @app.put("/api/team/tenants/{tid}")
 def team_tenant_toggle(tid: int, body: dict):
     _need_root()
-    if not db.one("SELECT id FROM tenants WHERE id=?", (tid,)):
-        raise HTTPException(404)
-    if "enabled" in body:
-        db.update("tenants", tid, {"enabled": 1 if body["enabled"] else 0})
-    if body.get("name"):
-        db.update("tenants", tid, {"name": body["name"]})
+    with db.atomic() as connection:
+        tenant_row = connection.execute(
+            "SELECT id,enabled FROM tenants WHERE id=?", (tid,)
+        ).fetchone()
+        if not tenant_row:
+            raise HTTPException(404)
+        tenant = dict(tenant_row)
+        if "enabled" in body:
+            target_enabled = 1 if body["enabled"] else 0
+            connection.execute(
+                "UPDATE tenants SET enabled=?,updated_at=? WHERE id=?",
+                (target_enabled, time.time(), tid),
+            )
+            # 停用企业必须同时永久撤销全部已签发会话。否则企业重新启用后，
+            # 停用前的旧 Cookie 会复活，绕过管理员的下线意图。
+            if int(tenant.get("enabled") or 0) == 1 and target_enabled == 0:
+                for row in connection.execute(
+                    "SELECT id FROM users WHERE tenant_id=?", (tid,)
+                ):
+                    auth.revoke_sessions(int(row["id"]))
+        if body.get("name"):
+            connection.execute(
+                "UPDATE tenants SET name=?,updated_at=? WHERE id=?",
+                (body["name"], time.time(), tid),
+            )
     return {"ok": True}
 
 
@@ -2004,8 +2379,12 @@ def settings_get():
     data_dir = os.path.join(ROOT, "data")
     counts = {t: db.one(f"SELECT COUNT(*) AS n FROM {t}")["n"]
               for t in ("job", "station_run", "knowledge", "schedule", "asset")}
-    skills_n = sum(len(db.jloads(r["skills_json"], []))
-                   for r in db.q("SELECT skills_json FROM employee_config"))
+    skills_n = sum(
+        len(config.get("skills") or [])
+        for config in employees.get_configs(
+            [*registry.BY_IDX, *departments.specialists()]
+        ).values()
+    )
     return {
         "storage": {
             # 测试、staging 和恢复演练会通过 CONTENTCREW_DB_PATH 使用独立
@@ -2054,13 +2433,20 @@ def admin_overview():
         return (v[:5] + "…" + v[-4:]) if v and len(v) > 12 else ("已设置" if v else "")
 
     def emp_row(idx, name, dept, web_required=False):
+        employee = employeeidentity.active_employee(idx)
+        if not employee:
+            return None
         cfg = employees.get_config(idx)
-        r = db.one("SELECT model_text, model_image FROM employee_config WHERE idx=?", (idx,)) or {}
-        saved_text_model = r.get("model_text")
-        saved_image_model = r.get("model_image")
-        return {"idx": idx, "name": name, "dept": dept, "web_required": web_required,
+        identity = _employee_public_contract(employee, config=cfg)
+        saved_text_model = cfg.get("model_text")
+        saved_image_model = cfg.get("model_image")
+        return {"idx": idx,
+                "name": str(employee.get("name") or name),
+                "person": str(employee.get("person") or name),
+                "catalog_version": str(employee.get("catalog_version") or "v1"),
+                "dept": dept, "web_required": web_required,
                 "is_custom": bool(cfg["prompt_template"]),
-                "enabled": employees.is_enabled(idx),
+                "enabled": identity["person_status"] == "active",
                 "core": idx < 100,
                 "skills_n": len(cfg["skills"]),
                 "model_text": (saved_text_model
@@ -2068,7 +2454,8 @@ def admin_overview():
                                else ""),
                 "model_image": (saved_image_model
                                 if providers.image_model_available(saved_image_model)
-                                else "")}
+                                else ""),
+                **identity}
 
     rows = []
     for s in registry.STATIONS:
@@ -2077,6 +2464,7 @@ def admin_overview():
     for d in departments.list_depts():
         for e in d["employees"]:
             rows.append(emp_row(e["idx"], e["name"], d["name"]))
+    rows = [row for row in rows if row]
     return {"provider": {"yunwu_base": db.get_setting("yunwu_base") or "https://yunwu.ai",
                          "yunwu_key": mask(secureconfig.get_secret("yunwu_key"))},
             "avatar": {"engine_active": avatar.engine_name(),
@@ -2103,8 +2491,7 @@ def admin_funnel(days: int = 30):
 def admin_emp_models(idx: int, body: dict):
     _need_boss()
     from . import providers
-    if not _is_emp(idx):
-        raise HTTPException(404)
+    binding = _employee_current_write_binding(idx, body)
     mt, mi = body.get("model_text"), body.get("model_image")
     if ("model_text" in body and mt not in (None, "")
             and not providers.text_model_available(mt)):
@@ -2112,9 +2499,20 @@ def admin_emp_models(idx: int, body: dict):
     if ("model_image" in body and mi not in (None, "")
             and not providers.image_model_available(mi)):
         raise HTTPException(400, "未知或不可用的生图模型")
-    employees.set_models(idx, mt if "model_text" in body else None,
-                         mi if "model_image" in body else None)
-    return {"ok": True}
+    try:
+        employees.set_models_for_identity(
+            binding["identity"]["identity_ref"],
+            mt if "model_text" in body else None,
+            mi if "model_image" in body else None,
+            expected_revision=binding["config"]["config_revision"],
+        )
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    fresh = employees.get_config(idx)
+    return {
+        "ok": True,
+        **_employee_public_contract(binding["employee"], config=fresh),
+    }
 
 
 @app.put("/api/admin/employees/{idx}/enabled")
@@ -2124,8 +2522,20 @@ def admin_emp_enabled(idx: int, body: dict):
         raise HTTPException(404)
     if idx < 100:
         raise HTTPException(400, "内容部工位是流水线必备,不能停用")
-    employees.set_enabled(idx, bool(body.get("enabled")))
-    return {"ok": True}
+    binding = _employee_current_write_binding(idx, body)
+    expected = body.get("slot_row_version")
+    if isinstance(expected, bool) or not isinstance(expected, int) or expected < 1:
+        raise HTTPException(400, "员工在岗状态版本必填且必须有效")
+    try:
+        slot = employees.set_enabled(
+            idx, bool(body.get("enabled")),
+            expected_row_version=expected,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"ok": True, **_employee_public_contract(
+        binding["employee"], config=employees.get_config(idx)
+    ), "slot_row_version": slot["row_version"]}
 
 
 @app.get("/api/admin/employees/{idx}/detail")
@@ -2134,24 +2544,58 @@ def admin_emp_detail(idx: int):
     _need_boss()
     if not _is_emp(idx):
         raise HTTPException(404)
+    employee = employeeidentity.active_employee(idx)
+    if not employee:
+        raise HTTPException(404)
     cfg = employees.get_config(idx)
+    identity = _employee_public_contract(
+        employee, config=cfg, include_profile=True,
+    )
+    learning_history = (
+        _employee_learning_history(cfg.get("identity_ref"), limit=5)
+        if str(employee.get("catalog_version") or "")
+        == departments.DECISION_V4_CATALOG_VERSION
+        else {"runs": [], "researching": False, "activated": 0}
+    )
     if idx in registry.BY_IDX:
         s = registry.BY_IDX[idx]
-        info = {"name": s["name"], "dept": s["dept"], "duty": s["duty"], "core": True}
+        info = {
+            "name": s["name"], "person": str(employee.get("person") or s["name"]),
+            "catalog_version": str(employee.get("catalog_version") or "v1"),
+            "dept": s["dept"], "duty": s["duty"], "core": True,
+        }
         caps = registry.capabilities_for(idx)
         stats = db.one("SELECT COUNT(*) n, SUM(cost_usd) cost FROM station_run "
                        "WHERE station_idx=? AND status IN ('done','awaiting_review')", (idx,)) or {}
     else:
-        e = departments.get(idx)
-        info = {"name": f"{e.get('person','')}·{e['name']}", "dept": e["dept_name"],
-                "duty": e["duty"], "core": False}
-        caps = departments.capabilities_for(idx, cfg.get("caps_off"))
-        stats = db.one("SELECT COUNT(*) n, SUM(cost_usd) cost FROM task "
-                       "WHERE emp_idx=? AND status='done'", (idx,)) or {}
-    return {**info, "idx": idx, "enabled": employees.is_enabled(idx),
+        e = employee
+        info = {
+            "name": e["name"], "person": str(e.get("person") or ""),
+            "catalog_version": str(e.get("catalog_version") or "v1"),
+            "dept": e["dept_name"], "duty": e["duty"], "core": False,
+        }
+        caps = departments.capabilities_for(
+            idx, cfg.get("caps_off"),
+            employee=_employee_effective_view(e, cfg),
+        )
+        identity_where, identity_args = _employee_task_where(employee)
+        stats = db.one(
+            "SELECT COUNT(*) n, SUM(cost_usd) cost FROM task "
+            "WHERE status='done' AND " + identity_where,
+            identity_args,
+        ) or {}
+    return {**info, "idx": idx,
+            "enabled": identity["person_status"] == "active",
             "skills": cfg["skills"], "learned_at": cfg["learned_at"],
-            "learning": idx in employees.LEARNING,
-            "capabilities": caps,
+            "effective_workflow": cfg.get("effective_workflow") or [],
+            "learning_evidence": cfg.get("learning_evidence") or [],
+            "learning": idx in employees.LEARNING or learning_history["researching"],
+            "learning_run": (
+                learning_history["runs"][0] if learning_history["runs"] else None
+            ),
+            "learning_runs": learning_history["runs"],
+            "activated_learning_runs": learning_history["activated"],
+            "capabilities": caps, **identity,
             "stats": {"runs": stats.get("n", 0), "cost_usd": stats.get("cost") or 0}}
 
 
@@ -2160,20 +2604,25 @@ def admin_emp_prompt(idx: int):
     _need_boss()
     if not _is_emp(idx):
         raise HTTPException(404)
+    employee = employeeidentity.active_employee(idx)
+    if not employee:
+        raise HTTPException(404)
     cfg = employees.get_config(idx)
+    identity = _employee_public_contract(
+        employee, config=cfg, include_profile=True,
+    )
     if idx in registry.BY_IDX:
         s = registry.BY_IDX[idx]
         return {"idx": idx, "name": s["name"],
                 "default_template": registry.DEFAULT_PROMPTS[s["key"]],
                 "placeholders": registry.PLACEHOLDERS[s["key"]],
-                "prompt_template": cfg["prompt_template"]}
-    e = departments.get(idx)
-    return {"idx": idx, "name": e["name"],
+                "prompt_template": cfg["prompt_template"], **identity}
+    return {"idx": idx, "name": employee["name"],
             "default_template": "(专家默认提示词由岗位手册+任务书自动拼装;在此填写即完全接管,"
                                 "支持 {direction} {industry} {material} 占位符)",
             "placeholders": {"direction": "任务内容", "industry": "行业/业态",
                              "material": "补充材料"},
-            "prompt_template": cfg["prompt_template"]}
+            "prompt_template": cfg["prompt_template"], **identity}
 
 
 # ---------------- 元数据 ----------------
@@ -2185,6 +2634,8 @@ def meta():
         for station in registry.STATIONS:
             item = {k: v for k, v in station.items() if k != "run"}
             item["model"] = providers.text_model_for(station["idx"])
+            config = employees.get_config(station["idx"])
+            item.update(_employee_public_contract(station, config=config))
             stations.append(item)
     else:
         stations = [_public_station(s) for s in registry.STATIONS]
@@ -2887,12 +3338,41 @@ def resume_job(job_id: int):
 
 
 # ---------------- V5:多部门 + 专家任务 ----------------
+_TASK_IDENTITY_COLUMNS = (
+    "employee_key", "employee_catalog_version", "employee_name_snapshot",
+    "employee_dept_key", "employee_spec_sha256", "employee_identity_ref",
+    "employee_config_revision", "employee_config_sha256", "person_snapshot",
+    "identity_scheme", "bundle_sha256",
+)
+
+
+def _employee_task_signature(employee: dict) -> tuple:
+    return (int(employee["idx"]), employeeidentity.identity_ref(employee))
+
+
+def _employee_task_where(employee: dict, alias: str = "task") -> tuple[str, tuple]:
+    signature = _employee_task_signature(employee)
+    # Config revisions are mutable generations within one immutable role
+    # identity.  Card statistics include every revision of that role, while an
+    # older V1/V2 role sharing the numeric person slot remains excluded by ref.
+    columns = ("emp_idx", "employee_identity_ref")
+    return (
+        " AND ".join(f"{alias}.{column}=?" for column in columns),
+        signature,
+    )
+
+
 @app.get("/api/depts")
 def depts_list():
     stats = {}
-    for r in db.q("SELECT emp_idx, COUNT(*) n, SUM(status='running' OR status='queued') run "
-                  "FROM task WHERE tenant_id=? AND deleted_at IS NULL GROUP BY emp_idx", (TEN(),)):
-        stats[r["emp_idx"]] = r
+    for r in db.q(
+        "SELECT emp_idx,employee_identity_ref,"
+        "COUNT(*) n,SUM(status IN ('running','queued')) run "
+        "FROM task WHERE tenant_id=? AND deleted_at IS NULL "
+        "GROUP BY emp_idx,employee_identity_ref",
+        (TEN(),),
+    ):
+        stats[(r["emp_idx"], r["employee_identity_ref"])] = r
     visible = [d for d in departments.list_depts() if auth.dept_visible(d["key"])]
     # 一次性批量取所有可见员工的配置,避免逐人 get_config+is_enabled 的 N+1(几百员工×2查库)
     cfgs = employees.get_configs([e["idx"] for d in visible for e in d["employees"]])
@@ -2902,11 +3382,15 @@ def depts_list():
         emps = []
         for e in d["employees"]:
             cfg = cfgs.get(e["idx"]) or employees.get_config(e["idx"])
-            st = stats.get(e["idx"]) or {}
+            scoped_employee = {
+                **e, "dept_key": d["key"], "dept_name": d["name"],
+            }
+            st = stats.get(_employee_task_signature(scoped_employee)) or {}
+            enabled = bool(cfg.get("enabled", True))
             public = _public_expert(
-                {**e, "dept_key": d["key"], "dept_name": d["name"]},
+                scoped_employee, config=cfg,
             ) | {
-                "group": e["group"], "enabled": cfg.get("enabled", True),
+                "group": e["group"], "enabled": enabled,
                 "tasks_n": st.get("n", 0), "running_n": st.get("run", 0) or 0,
             }
             if internal:
@@ -2926,30 +3410,63 @@ def depts_list():
 
 @app.get("/api/depts/emp/{idx}")
 def dept_emp(idx: int):
-    e = departments.get(idx)
+    e = employeeidentity.active_employee(idx)
     if not e:
         raise HTTPException(404)
-    if (auth.current() or {}).get("role") != "tour":
+    show_profile = (auth.current() or {}).get("role") != "tour"
+    if show_profile:
         _need_module(e["dept_key"])
     cfg = employees.get_config(idx)
-    tasks = db.q("SELECT id, status, brief_json, cost_usd, created_at FROM task "
-                 "WHERE emp_idx=? AND tenant_id=? AND deleted_at IS NULL "
-                 "ORDER BY id DESC LIMIT 20", (idx, TEN()))
+    identity_where, identity_args = _employee_task_where(e)
+    tasks = db.q(
+        "SELECT id,status,brief_json,cost_usd,created_at FROM task "
+        "WHERE tenant_id=? AND deleted_at IS NULL AND " + identity_where + " "
+        "ORDER BY id DESC LIMIT 20",
+        (TEN(), *identity_args),
+    )
     for t in tasks:
         t["brief"] = db.jloads(t.pop("brief_json"))
-    stats = db.one("SELECT COUNT(*) n, SUM(cost_usd) cost FROM task WHERE emp_idx=? "
-                   "AND status='done' AND tenant_id=? AND deleted_at IS NULL",
-                   (idx, TEN())) or {}
+    stats = db.one(
+        "SELECT COUNT(*) n,SUM(cost_usd) cost FROM task WHERE tenant_id=? "
+        "AND status='done' AND deleted_at IS NULL AND " + identity_where,
+        (TEN(), *identity_args),
+    ) or {}
+    identity = _employee_public_contract(
+        e, config=cfg, include_profile=show_profile,
+    )
+    enabled = bool(cfg.get("enabled", True))
     public = _public_expert(
-        e, include_task_guide=not _is_tour()
-    ) | {"tasks": tasks}
+        e,
+        include_task_guide=not _is_tour(),
+        config=cfg,
+        include_profile=show_profile,
+    ) | {
+        "tasks": tasks,
+        "enabled": enabled,
+    }
     if not _is_boss():
         return public
+    effective_employee = _employee_effective_view(e, cfg)
+    learning_history = _employee_learning_history(cfg.get("identity_ref"), limit=5)
     return {**public,
             **{k: e[k] for k in ("duty", "desc", "group", "inputs", "steps", "deliverables")},
-            "capabilities": departments.capabilities_for(idx, cfg.get("caps_off")),
-            "skills": cfg["skills"], "learned_at": cfg["learned_at"],
-            "learning": idx in employees.LEARNING,
+            "capabilities": (
+                departments.capabilities_for(
+                    idx, cfg.get("caps_off"), employee=effective_employee,
+                )
+            ),
+            "skills": cfg["skills"] if identity["can_learn"] else [],
+            "effective_workflow": cfg.get("effective_workflow") or [],
+            "learning_evidence": cfg.get("learning_evidence") or [],
+            "learned_at": cfg["learned_at"] if identity["can_learn"] else None,
+            "learning": identity["can_learn"] and (
+                idx in employees.LEARNING or learning_history["researching"]
+            ),
+            "learning_run": (
+                learning_history["runs"][0] if learning_history["runs"] else None
+            ),
+            "learning_runs": learning_history["runs"],
+            "activated_learning_runs": learning_history["activated"],
             "prompt_template": cfg["prompt_template"],
             "is_custom": bool(cfg["prompt_template"]),
             "stats": {"runs": stats.get("n", 0), "cost_usd": stats.get("cost") or 0}}
@@ -2957,7 +3474,58 @@ def dept_emp(idx: int):
 
 def _create_charged_expert_task(task_data: dict, note: str = "") -> int:
     """先落 pending 任务，再用同一事务抢占并扣点，避免扣费后没有任务记录。"""
-    tid = TEN()
+    snapshot_names = {
+        "employee_key", "employee_catalog_version", "employee_name_snapshot",
+        "employee_dept_key", "employee_spec_sha256", "person_snapshot",
+        "identity_scheme",
+    }
+    required_snapshot_names = snapshot_names - {"person_snapshot"}
+    config_names = {
+        "employee_identity_ref", "employee_config_revision",
+        "employee_config_sha256", "bundle_sha256",
+    }
+    identity_scheme = str(task_data.get("identity_scheme") or "").strip()
+    has_frozen_snapshot = bool(
+        all(
+            str(task_data.get(field) or "").strip()
+            for field in required_snapshot_names
+        )
+        and (
+            identity_scheme != "v2-person"
+            or bool(str(task_data.get("person_snapshot") or "").strip())
+        )
+    )
+    supplied_config = {
+        field for field in config_names
+        if task_data.get(field) not in (None, "")
+    }
+    if supplied_config and (
+        not has_frozen_snapshot or supplied_config != config_names
+    ):
+        raise RuntimeError("任务员工配置身份字段不完整")
+    binding = (
+        employeeidentity.resolve_task_binding(task_data)
+        if has_frozen_snapshot and supplied_config == config_names else None
+    )
+    if has_frozen_snapshot and supplied_config == config_names and not binding:
+        raise RuntimeError("任务员工配置版本无法验证")
+    employee = (
+        binding["employee"] if binding
+        else employeeidentity.resolve_task(task_data) if has_frozen_snapshot
+        else employeeidentity.active_employee(task_data.get("emp_idx"))
+    )
+    if not employee:
+        raise RuntimeError("不允许向未知员工创建任务")
+    config = binding["config"] if binding else employees.ensure_role_config(employee)
+    identity_fields = employeeidentity.task_fields(employee, config=config)
+    compared_fields = snapshot_names | supplied_config
+    if has_frozen_snapshot and any(
+        str(task_data.get(field) or "") != str(value)
+        for field, value in identity_fields.items() if field in compared_fields
+    ):
+        raise RuntimeError("任务员工身份与冻结目录不一致")
+    task_data = {**task_data, **identity_fields, "emp_idx": int(employee["idx"])}
+    tid = int(task_data.get("tenant_id") or TEN())
     points = 0.0 if tid == 1 else float(
         (billing.prices().get("expert_task") or {"points": 1})["points"])
     task_id = db.insert("task", {
@@ -2966,10 +3534,17 @@ def _create_charged_expert_task(task_data: dict, note: str = "") -> int:
         "billing_status": "pending",
         "billing_points": points,
         # 发起人:记录是哪个账号派的活;无会话的内部路径留空
-        "created_by": (auth.current() or {}).get("id"),
+        "created_by": task_data.get("created_by", (auth.current() or {}).get("id")),
     })
 
     def claim(connection):
+        derived_frozen_work = bool(
+            task_data.get("source_task_id") or task_data.get("source_meeting_id")
+        )
+        if not _role_binding_matches(
+            connection, task_data, require_current=not derived_frozen_work,
+        ):
+            raise RuntimeError("员工岗位配置已更新，请刷新后重试")
         changed = connection.execute(
             "UPDATE task SET status='queued',billing_status='charged',updated_at=? "
             "WHERE id=? AND status='pending_charge' AND billing_status='pending'",
@@ -2991,6 +3566,166 @@ def _create_charged_expert_task(task_data: dict, note: str = "") -> int:
     if not charged:
         raise RuntimeError("专家任务计费状态冲突")
     return task_id
+
+
+def _role_binding_matches(
+    connection, frozen: dict, *, require_current: bool,
+) -> bool:
+    """Check an exact role triple inside the same transaction as charging."""
+    identity_ref = str(
+        frozen.get("employee_identity_ref", frozen.get("identity_ref")) or ""
+    ).strip()
+    config_sha256 = str(
+        frozen.get("employee_config_sha256", frozen.get("config_sha256")) or ""
+    ).strip()
+    bundle_sha256 = str(frozen.get("bundle_sha256") or "").strip()
+    raw_revision = frozen.get(
+        "employee_config_revision", frozen.get("config_revision")
+    )
+    raw_idx = frozen.get("emp_idx", frozen.get("idx"))
+    try:
+        revision = int(raw_revision)
+        idx = int(raw_idx)
+    except (TypeError, ValueError):
+        return False
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", identity_ref) is None
+        or re.fullmatch(r"[0-9a-f]{64}", config_sha256) is None
+        or re.fullmatch(r"[0-9a-f]{64}", bundle_sha256) is None
+        or revision < 1
+    ):
+        return False
+    row = connection.execute(
+        "SELECT * FROM employee_role_config WHERE identity_ref=? "
+        "AND config_revision=?",
+        (identity_ref, revision),
+    ).fetchone()
+    if row is None and not require_current:
+        row = connection.execute(
+            "SELECT * FROM employee_role_config_history WHERE identity_ref=? "
+            "AND config_revision=?",
+            (identity_ref, revision),
+        ).fetchone()
+    exact = bool(
+        row
+        and db.employee_role_config_row_valid(row)
+        and int(row["idx"]) == idx
+        and int(row["config_revision"]) == revision
+        and str(row["config_sha256"]) == config_sha256
+    )
+    bundle = connection.execute(
+        "SELECT * FROM employee_role_bundle_revision WHERE identity_ref=? "
+        "AND config_revision=? AND config_sha256=? AND bundle_sha256=?",
+        (identity_ref, revision, config_sha256, bundle_sha256),
+    ).fetchone()
+    exact = bool(exact and bundle and db.employee_role_bundle_row_valid(bundle))
+    if not exact or not require_current:
+        return exact
+    slot = connection.execute(
+        "SELECT active_identity_ref,enabled FROM employee_slot WHERE idx=?",
+        (idx,),
+    ).fetchone()
+    return bool(
+        slot
+        and str(slot["active_identity_ref"] or "") == identity_ref
+        and int(slot["enabled"] or 0) == 1
+    )
+
+
+def _initial_task_replay(
+    task_data: dict,
+    request_key: str,
+    actor_id: int | None,
+) -> dict | None:
+    """只读复核首轮幂等身份；不同输入复用同号一律拒绝。"""
+    row = db.one(
+        "SELECT id,tenant_id,emp_idx,brief_json,created_by,source_task_id,"
+        "phase,deleted_at,employee_key,employee_catalog_version,"
+        "employee_name_snapshot,employee_dept_key,employee_spec_sha256,"
+        "employee_identity_ref,employee_config_revision,"
+        "employee_config_sha256,person_snapshot,identity_scheme,bundle_sha256 "
+        "FROM task WHERE tenant_id=? AND request_key=?",
+        (int(task_data["tenant_id"]), request_key),
+    )
+    if not row:
+        return None
+    expected_brief = db.jloads(task_data.get("brief_json"), None)
+    actual_brief = db.jloads(row.get("brief_json"), None)
+    same_actor = (
+        (actor_id is None and row.get("created_by") is None)
+        or (
+            actor_id is not None
+            and row.get("created_by") is not None
+            and int(row["created_by"]) == int(actor_id)
+        )
+    )
+    if (
+        row.get("deleted_at") is not None
+        or row.get("emp_idx") is None
+        or int(row["emp_idx"]) != int(task_data["emp_idx"])
+        or any(
+            row.get(field) != task_data.get(field)
+            for field in _TASK_IDENTITY_COLUMNS
+        )
+        or actual_brief != expected_brief
+        or not same_actor
+        or row.get("source_task_id") is not None
+        or str(row.get("phase") or "delivery") != "delivery"
+    ):
+        raise taskthreads.IdempotencyConflict(
+            "request_key_reused",
+            "这个请求编号已用于其他任务，请刷新页面后重试",
+        )
+    return {"created": False, "task_id": int(row["id"])}
+
+
+def _create_idempotent_expert_task(
+    task_data: dict,
+    request_key: str,
+    actor_id: int | None,
+    note: str = "",
+) -> dict:
+    """在同一 BEGIN IMMEDIATE 中核对幂等号、建任务并扣点。"""
+    complete_binding = all(
+        task_data.get(field) not in (None, "")
+        for field in _TASK_IDENTITY_COLUMNS
+    )
+    if complete_binding:
+        binding = employeeidentity.resolve_task_binding(task_data)
+        employee = binding["employee"] if binding else None
+        config = binding["config"] if binding else None
+    elif all(
+        str(task_data.get(field) or "").strip()
+        for field in _TASK_IDENTITY_COLUMNS[:5]
+    ):
+        employee = employeeidentity.resolve_task(task_data)
+        config = employees.ensure_role_config(employee) if employee else None
+    else:
+        employee = employeeidentity.active_employee(task_data.get("emp_idx"))
+        config = employees.ensure_role_config(employee) if employee else None
+    if not employee:
+        raise RuntimeError("不允许向未知员工创建任务")
+    task_data = {
+        **task_data,
+        **employeeidentity.task_fields(employee, config=config),
+        "emp_idx": int(employee["idx"]),
+    }
+    with db.atomic() as connection:
+        replay = _initial_task_replay(task_data, request_key, actor_id)
+        if replay is not None:
+            return replay
+        if not _role_binding_matches(
+            connection, task_data, require_current=True,
+        ):
+            raise taskthreads.IdempotencyConflict(
+                "employee_binding_stale",
+                "员工岗位配置已更新，请刷新后重试",
+            )
+        task_id = _create_charged_expert_task(
+            {**task_data, "request_key": request_key, "created_by": actor_id},
+            note=note,
+        )
+        return {"created": True, "task_id": int(task_id)}
 
 
 def _start_expert_task_worker(task_id: int):
@@ -3022,21 +3757,55 @@ async def _record_first_work_best_effort(tid: int, kind: str) -> None:
 @app.post("/api/tasks")
 async def task_create(body: dict):
     idx = body.get("emp_idx")
-    if not departments.get(idx) and idx not in registry.BY_IDX:
+    if isinstance(idx, bool):
+        raise HTTPException(400, "员工编号无效")
+    employee = employeeidentity.active_employee(idx)
+    if not employee:
         raise HTTPException(404, "员工不存在")
+    idx = int(employee["idx"])
+    binding = _employee_current_write_binding(idx, body)
+    if not binding["identity"]["can_assign_new"]:
+        raise HTTPException(409, "当前岗位不可新派活")
+    if idx == inspection.EMPLOYEE_IDX:
+        raise HTTPException(
+            400,
+            "巡店经理必须从“巡店”工作台上传现场照片后派活，不能创建无照片任务",
+        )
     try:
-        brief = taskrunner.normalize_brief(body.get("brief"))
+        brief = taskrunner.normalize_task_brief(body.get("brief"), employee, TEN())
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    if departments.get(idx):
-        await db.arun(_need_module, departments.get(idx)["dept_key"])
+    try:
+        request_key = taskthreads.normalize_request_key(body.get("request_key"))
+    except taskthreads.TaskThreadError as exc:
+        _raise_task_thread_error(exc)
+    expert = departments.get_active(idx)
+    if expert:
+        await db.arun(_need_module, expert["dept_key"])
     else:
         await db.arun(_need_module, "content")
     if not await db.arun(employees.is_enabled, idx):
         raise HTTPException(400, "该员工已被停用(后台可重新启用)")
+    actor_id = int((auth.current() or {}).get("id") or 0) or None
+    task_data = {
+        "emp_idx": idx,
+        **employeeidentity.task_fields(employee, config=binding["config"]),
+        "tenant_id": TEN(),
+        "brief_json": json.dumps(brief, ensure_ascii=False),
+        "created_by": actor_id,
+    }
+    try:
+        replay = await db.arun(
+            _initial_task_replay, task_data, request_key, actor_id,
+        )
+    except taskthreads.TaskThreadError as exc:
+        _raise_task_thread_error(exc)
+    if replay is not None:
+        return {**replay, "replayed": True}
+
     # 派单预检:仅产业部专家(idx>=100)且未强制派单时,先判断任务书是否对口。
     # 不对口→直接返回引导,不扣点不建任务;LLM 异常/超时一律放行(降级可用,绝不拦死派单)。
-    if isinstance(idx, int) and idx >= 100 and departments.get(idx) and not body.get("force"):
+    if isinstance(idx, int) and idx >= 100 and expert and not body.get("force"):
         try:
             async with _free_ai_slot("task-preflight"):
                 pf = await expertmatch.preflight_fit(
@@ -3052,22 +3821,35 @@ async def task_create(body: dict):
             return {"mismatch": True, "why": pf.get("why", ""),
                     "suggestions": pf.get("suggestions", [])}
     # 来源只能由服务器内部流程写入，不能相信客户端自报的会议 ID。
-    task_data = {"emp_idx": idx, "tenant_id": TEN(),
-                 "brief_json": json.dumps(brief, ensure_ascii=False)}
     try:
-        tid = await _run_db_then_start_worker_safely(
-            _create_charged_expert_task,
+        created = await _run_db_then_start_worker_safely(
+            _create_idempotent_expert_task,
             task_data,
+            request_key,
+            actor_id,
             note=(brief.get("direction") or "")[:20],
-            start_worker=_start_expert_task_worker,
-            settle_unstarted=_settle_unstarted_expert_task,
+            start_worker=lambda result: _start_expert_task_worker(result["task_id"]),
+            should_start=lambda result: bool(result.get("created")),
+            settle_unstarted=lambda result: _settle_unstarted_expert_task(
+                result["task_id"]
+            ),
         )
     except billing.InsufficientPoints as e:
         raise HTTPException(402, str(e))
+    except taskthreads.TaskThreadError as exc:
+        _raise_task_thread_error(exc)
     asyncio.create_task(
         _record_first_work_best_effort(TEN(), "expert")
     )
-    return {"task_id": tid}
+    return {
+        "task_id": int(created["task_id"]),
+        "created": bool(created.get("created")),
+        "replayed": not bool(created.get("created")),
+        "identity_ref": binding["identity"]["identity_ref"],
+        "config_revision": binding["config"]["config_revision"],
+        "config_sha256": binding["config"]["config_sha256"],
+        "bundle_sha256": binding["config"]["bundle_sha256"],
+    }
 
 
 # AI 选人是免费的平台 LLM 调用,按租户日限,防脚本刷平台钱(内存态,同 _apply_ips 风格)
@@ -3118,7 +3900,7 @@ def task_center(
     """老板任务总账：聚合真实业务表，不复制状态，也不跨租户/越板块展示。"""
     modules = {m["key"] for m in auth.all_modules() if auth.allowed(m["key"])}
     try:
-        return taskcenter.list_items(
+        result = taskcenter.list_items(
             TEN(),
             modules,
             limit=limit,
@@ -3127,6 +3909,17 @@ def task_center(
             status=status,
             kind=kind,
         )
+        items = []
+        for raw in result.get("items") or []:
+            item = dict(raw)
+            if item.get("kind") == "expert":
+                identity = _task_identity_public(item["record_id"], TEN())
+                if identity:
+                    item.update(identity)
+                if (identity or {}).get("identity_status") == "unknown":
+                    item["assignee"] = "岗位身份待核"
+            items.append(item)
+        return {**result, "items": items}
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
 
@@ -3600,8 +4393,24 @@ def _task_row_or_404(tid: int) -> dict:
     t = db.one("SELECT * FROM task WHERE id=? AND deleted_at IS NULL", (tid,))
     if not t or t.get("tenant_id", 1) != TEN():
         raise HTTPException(404)
-    expert = departments.get(t["emp_idx"])
-    module = expert.get("dept_key") if expert else "content"
+    if int(t.get("emp_idx") or 0) == inspection.EMPLOYEE_IDX:
+        try:
+            t["_inspection_scope"] = inspection.task_scope(
+                TEN(), int((auth.current() or {}).get("id") or 0), tid
+            )
+        except inspection.InspectionError as exc:
+            # 任务详情不泄露其他租户/行业是否存在巡店记录。
+            raise HTTPException(404, "巡店任务不存在或无权访问") from exc
+        module = str(t["_inspection_scope"]["industry_key"])
+    else:
+        binding = employeeidentity.resolve_task_binding(t)
+        if not binding:
+            raise HTTPException(404)
+        employee = binding["employee"]
+        module = str(t.get("employee_dept_key") or "")
+        t["_roster_meta"] = employeeidentity.roster_metadata_from_task(t)
+        t["_frozen_employee"] = employee
+        t["_frozen_employee_config"] = binding["config"]
     if not auth.allowed(module):
         raise HTTPException(404)
     return t
@@ -3610,13 +4419,90 @@ def _task_row_or_404(tid: int) -> dict:
 @app.get("/api/tasks/{tid}")
 def task_get(tid: int):
     t = _task_row_or_404(tid)
+    inspection_scope = t.pop("_inspection_scope", None)
+    roster_meta = t.pop("_roster_meta", None)
+    frozen_employee = t.pop("_frozen_employee", None)
+    frozen_config = t.pop("_frozen_employee_config", None)
     t["brief"] = db.jloads(t.pop("brief_json"))
     t["steps"] = _steps_for_view(
         t.pop("steps_json"), _is_boss(), status=t.get("status")
     )
-    e = departments.get(t["emp_idx"]) or registry.BY_IDX.get(t["emp_idx"]) or {}
-    t["emp_name"] = e.get("name", "")
-    t["dept_name"] = e.get("dept_name") or e.get("dept") or "内容生产部"
+    t["emp_name"] = (
+        f"{str(t.get('person_snapshot') or '').strip()}·"
+        f"{str(t.get('employee_name_snapshot') or '').strip()}"
+    ).strip("·") or "岗位身份待核"
+    if roster_meta is None:
+        roster_meta = employeeidentity.roster_metadata_from_task(t) or {
+            "roster_status": "legacy", "can_assign": False,
+            "person_status": "inactive", "identity_status": "unknown",
+            "can_assign_new": False, "can_continue": False,
+            "can_learn": False,
+        }
+    if inspection_scope:
+        inspection_employee = employeeidentity.active_employee(
+            int(t.get("emp_idx") or inspection.EMPLOYEE_IDX)
+        )
+        inspection_config = (
+            employees.get_config(int(inspection_employee["idx"]))
+            if inspection_employee else None
+        )
+        identity = (
+            _employee_public_contract(
+                inspection_employee,
+                config=inspection_config,
+                include_profile=True,
+            )
+            if inspection_employee and inspection_config else {
+                "person_status": "active", "identity_status": "current",
+                "identity_ref": "inspection", "config_revision": 0,
+                "config_sha256": "", "can_assign_new": True,
+                "can_continue": False, "can_learn": True,
+                "role_profile_summary": {}, "professional_profile": {},
+                "roster_status": "active", "can_assign": True,
+            }
+        )
+    elif frozen_employee and frozen_config:
+        identity = _employee_public_contract(
+            frozen_employee, config=frozen_config, include_profile=True,
+        )
+    else:
+        identity = {
+            "person_status": roster_meta["person_status"],
+            "identity_status": roster_meta["identity_status"],
+            "identity_ref": str(t.get("employee_identity_ref") or ""),
+            "config_revision": int(t.get("employee_config_revision") or 0),
+            "config_sha256": str(t.get("employee_config_sha256") or ""),
+            "can_assign_new": False,
+            "can_continue": bool(roster_meta["can_continue"]),
+            "can_learn": False,
+            "role_profile_summary": {},
+            "professional_profile": {},
+            "roster_status": roster_meta["roster_status"],
+            "can_assign": False,
+        }
+    t.update(identity)
+    if departments.is_decision_employee(frozen_employee):
+        # The guide is regenerated only from the employee which matched all
+        # frozen task identity fields in _task_row_or_404.  Never resolve by a
+        # possibly reused current emp_idx and never echo client requirements.
+        t["task_guide"] = departments.public_task_guide(frozen_employee)
+    dept_key = str(t.get("employee_dept_key") or "")
+    if dept_key == "content":
+        t["dept_name"] = "内容生产部"
+    else:
+        # 历史任务只能按创建时冻结的部门 key 解释。不能再用 emp_idx
+        # 回查当前目录，否则同一编号被新员工复用后会把旧任务改挂到新部门。
+        frozen_dept = next(
+            (
+                item for item in departments.list_depts()
+                if str(item.get("key") or "") == dept_key
+            ),
+            None,
+        )
+        t["dept_name"] = (
+            str(frozen_dept.get("name") or dept_key)
+            if frozen_dept else f"岗位部门 {dept_key}"
+        )
     # 发起人:是哪个账号派的活;查不到(历史任务/跨租户)为 None
     t["created_by_name"] = _tenant_username(t.get("created_by"))
     retries = int(t.get("retry_count") or 0)
@@ -3633,8 +4519,20 @@ def task_get(tid: int):
         t.get("output_md"),
         _is_boss(),
     )
-    if t.get("source_meeting_id"):
-        m = db.one("SELECT question, emp_idxs_json FROM meeting WHERE id=? AND tenant_id=?",
+    if inspection_scope:
+        t["source"] = {
+            "type": "inspection",
+            "label": f"巡店记录 #{inspection_scope['visit_id']}",
+            "route": (
+                f"#/inspections/{inspection_scope['visit_id']}/"
+                f"{inspection_scope['industry_key']}"
+            ),
+            "detail": "现场照片、问题证据、整改与人工复核在巡店工作台闭环",
+        }
+    elif t.get("source_meeting_id"):
+        m = db.one(
+            "SELECT question,emp_idxs_json,member_snapshot_json FROM meeting "
+            "WHERE id=? AND tenant_id=?",
                    (t["source_meeting_id"], TEN()))
         visible = bool(m and _meeting_visible(m))
         t["source"] = {
@@ -3644,9 +4542,10 @@ def task_get(tid: int):
             "detail": m.get("question") if visible else "",
         }
     elif t.get("source_task_id"):
-        parent = db.one("SELECT id FROM task WHERE id=? AND tenant_id=? "
-                        "AND deleted_at IS NULL",
-                        (t["source_task_id"], TEN()))
+        try:
+            parent = _task_row_or_404(int(t["source_task_id"]))
+        except (HTTPException, TypeError, ValueError):
+            parent = None
         t["source"] = {
             "type": "redo",
             "label": (f"任务 #{t['source_task_id']} 的重做" if parent
@@ -3657,37 +4556,179 @@ def task_get(tid: int):
     else:
         t["source"] = {"type": "direct", "label": "员工面板·直接派活",
                        "route": "", "detail": ""}
+    try:
+        if inspection_scope:
+            t["thread"] = {
+                "status": "unsupported",
+                "can_continue": False,
+                "can_accept": False,
+                "revisions": [],
+                "reason_code": "inspection_workflow_only",
+            }
+        else:
+            t["thread"] = taskthreads.thread_summary_for_task(tid, TEN())
+    except taskthreads.TaskThreadError as exc:
+        # 数据不完整时不能把损坏的会话伪装成可继续；正文仍可只读查看。
+        t["thread"] = {
+            "status": "unavailable",
+            "can_continue": False,
+            "can_accept": False,
+            "revisions": [],
+            "reason_code": exc.code,
+        }
+    t["can_continue"] = bool(
+        t.get("can_continue") and t["thread"].get("can_continue")
+    )
     return t
+
+
+def _raise_task_thread_error(exc: taskthreads.TaskThreadError):
+    if isinstance(exc, taskthreads.TaskThreadNotFound):
+        raise HTTPException(404, str(exc)) from exc
+    if isinstance(exc, taskthreads.InvalidFollowup):
+        raise HTTPException(400, str(exc)) from exc
+    raise HTTPException(409, str(exc)) from exc
+
+
+def _require_frozen_task_write_binding(body: dict, task: dict) -> None:
+    if any(body.get(field) in (None, "") for field in _ROLE_WRITE_BINDING_FIELDS):
+        raise HTTPException(400, "任务岗位四元绑定必须完整提交")
+    expected_identity = str(body.get("identity_ref") or "").strip()
+    expected_hash = str(body.get("config_sha256") or "").strip()
+    expected_bundle = str(body.get("bundle_sha256") or "").strip()
+    raw_revision = body.get("config_revision")
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", expected_identity) is None
+        or re.fullmatch(r"[0-9a-f]{64}", expected_hash) is None
+        or re.fullmatch(r"[0-9a-f]{64}", expected_bundle) is None
+        or isinstance(raw_revision, bool)
+        or not isinstance(raw_revision, int)
+        or raw_revision < 1
+    ):
+        raise HTTPException(400, "任务岗位四元绑定无效")
+    if (
+        expected_identity != str(task.get("employee_identity_ref") or "")
+        or raw_revision != int(task.get("employee_config_revision") or 0)
+        or expected_hash != str(task.get("employee_config_sha256") or "")
+        or expected_bundle != str(task.get("bundle_sha256") or "")
+    ):
+        raise HTTPException(409, "任务岗位配置已变更，请刷新后重试")
+
+
+async def _create_task_followup(tid: int, body: dict):
+    if not isinstance(body, dict):
+        raise HTTPException(400, "继续沟通请求格式无效")
+    if {"decision_evidence", "provenance", "web_sources"} & set(body):
+        raise HTTPException(400, "请求包含不可由客户端写入的证据字段")
+    task = await db.arun(_task_row_or_404, tid)
+    if int(task.get("emp_idx") or 0) == inspection.EMPLOYEE_IDX:
+        raise HTTPException(
+            409,
+            "巡店任务需要用整改进度和复查照片继续，不支持文本重做",
+        )
+    _require_frozen_task_write_binding(body, task)
+    frozen_employee = task.get("_frozen_employee")
+    if not frozen_employee or not employeeidentity.identity_view(
+        frozen_employee,
+    )["can_continue"]:
+        raise HTTPException(409, "员工当前不可继续这条任务线程")
+    feedback = body.get("feedback")
+    material = body.get("material")
+    evidence_items = (
+        body.get("evidence_items")
+        if "evidence_items" in body
+        else taskthreads.EVIDENCE_ITEMS_ABSENT
+    )
+    request_key = body.get("request_key")
+    try:
+        result = await _run_db_then_start_worker_safely(
+            taskthreads.create_followup,
+            tid,
+            TEN(),
+            request_key,
+            feedback,
+            _create_charged_expert_task,
+            material=material,
+            evidence_items=evidence_items,
+            actor_id=int((auth.current() or {}).get("id") or 0) or None,
+            expected_emp_idx=int(task["emp_idx"]),
+            start_worker=lambda row: _start_expert_task_worker(row["task_id"]),
+            should_start=lambda row: bool(row.get("created")),
+            settle_unstarted=lambda row: _settle_unstarted_expert_task(
+                row["task_id"]
+            ),
+        )
+    except billing.InsufficientPoints as e:
+        raise HTTPException(402, str(e))
+    except taskthreads.TaskThreadError as exc:
+        _raise_task_thread_error(exc)
+    return result
+
+
+@app.post("/api/tasks/{tid}/followups")
+async def task_followup(tid: int, body: dict):
+    return await _create_task_followup(tid, body)
 
 
 @app.post("/api/tasks/{tid}/redo")
 async def task_redo(tid: int, body: dict):
-    t = await db.arun(_task_row_or_404, tid)
-    feedback = body.get("feedback", "")
-    if not isinstance(feedback, str):
-        raise HTTPException(400, "feedback 格式无效")
-    original = db.jloads(t["brief_json"], {})
-    if not isinstance(original, dict):
-        raise HTTPException(400, "原任务书格式无效")
-    original["feedback"] = feedback
-    original["prev_excerpt"] = (t.get("output_md") or "")[:1500]
-    try:
-        brief = taskrunner.normalize_brief(original)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    try:
-        nid = await _run_db_then_start_worker_safely(
-            _create_charged_expert_task,
-            {"emp_idx": t["emp_idx"], "tenant_id": TEN(),
-             "source_task_id": tid,
-             "brief_json": json.dumps(brief, ensure_ascii=False)},
-            note="重做",
-            start_worker=_start_expert_task_worker,
-            settle_unstarted=_settle_unstarted_expert_task,
+    """旧客户端兼容入口；所有重做统一进入线性协作会话。"""
+    feedback = body.get("feedback")
+    request_key = body.get("request_key")
+    if not isinstance(request_key, str) or not request_key.strip():
+        raise HTTPException(
+            400,
+            "请求编号必填；请生成唯一 request_key 后重试，"
+            "同一次重试必须复用原编号",
         )
-    except billing.InsufficientPoints as e:
-        raise HTTPException(402, str(e))
-    return {"task_id": nid}
+    return await _create_task_followup(
+        tid,
+        {
+            "feedback": feedback,
+            "material": body.get("material"),
+            "request_key": request_key,
+            "identity_ref": body.get("identity_ref"),
+            "config_revision": body.get("config_revision"),
+            "config_sha256": body.get("config_sha256"),
+            "bundle_sha256": body.get("bundle_sha256"),
+            **(
+                {"evidence_items": body.get("evidence_items")}
+                if "evidence_items" in body else {}
+            ),
+        },
+    )
+
+
+@app.post("/api/task-threads/{thread_id}/accept")
+async def task_thread_accept(thread_id: int, body: dict | None = None):
+    body = body if isinstance(body, dict) else {}
+    task_id = body.get("task_id")
+    if isinstance(task_id, bool) or not isinstance(task_id, int) or task_id < 1:
+        raise HTTPException(400, "当前任务编号无效")
+    task = await db.arun(_task_row_or_404, task_id)
+    if int(task.get("emp_idx") or 0) == inspection.EMPLOYEE_IDX:
+        raise HTTPException(
+            409,
+            "巡店问题只能在上传复查照片后由企业主人工关单",
+        )
+    was_standalone = task.get("thread_id") is None
+    if was_standalone and int(thread_id) != int(task_id):
+        raise HTTPException(409, "任务协作会话尚未建立，请刷新后重试")
+    if not was_standalone and int(task.get("thread_id") or 0) != int(thread_id):
+        raise HTTPException(409, "任务不属于这个协作会话")
+    try:
+        summary = await db.arun(
+            taskthreads.mark_satisfied,
+            task_id,
+            TEN(),
+            int((auth.current() or {}).get("id") or 0) or None,
+            expected_emp_idx=int(task["emp_idx"]),
+        )
+    except taskthreads.TaskThreadError as exc:
+        _raise_task_thread_error(exc)
+    if not was_standalone and int(summary.get("thread_id") or 0) != int(thread_id):
+        raise HTTPException(409, "协作会话刚刚发生变化，请刷新后重试")
+    return {"ok": True, "thread": summary}
 
 
 @app.post("/api/tasks/{tid}/retry")
@@ -3696,13 +4737,24 @@ async def task_retry(tid: int):
     task = await db.arun(_task_row_or_404, tid)
     if task.get("status") != "failed":
         raise HTTPException(409, "只有失败任务可以免费重试")
+    is_inspection = int(task.get("emp_idx") or 0) == inspection.EMPLOYEE_IDX
     prepared = await _run_db_then_start_worker_safely(
-        taskrunner.prepare_retry,
+        _prepare_inspection_retry if is_inspection else taskrunner.prepare_retry,
         tid,
         TEN(),
-        start_worker=lambda _prepared: _start_expert_task_worker(tid),
+        start_worker=(
+            (lambda _prepared: asyncio.create_task(_run_inspection_task(tid)))
+            if is_inspection
+            else (lambda _prepared: _start_expert_task_worker(tid))
+        ),
         should_start=bool,
-        settle_unstarted=lambda _prepared: _settle_unstarted_expert_task(tid),
+        settle_unstarted=(
+            (lambda _prepared: _settle_inspection_task_by_id(
+                tid, "巡店重试未能启动，已安全终止"
+            ))
+            if is_inspection
+            else (lambda _prepared: _settle_unstarted_expert_task(tid))
+        ),
     )
     if not prepared:
         current = await db.aone(
@@ -3711,15 +4763,26 @@ async def task_retry(tid: int):
         ) or {}
         if (current.get("retry_count") or 0) >= taskrunner.MAX_FREE_RETRIES:
             raise HTTPException(429, "该任务免费重试次数已用完，请新建任务")
+        if is_inspection:
+            raise HTTPException(
+                409,
+                "这条巡店的原照片或巡店记录不完整，无法安全免费重试；"
+                "请回到巡店工作台重新发起",
+            )
         raise HTTPException(409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
-    expert = departments.get(task["emp_idx"])
+    inspection_scope = task.get("_inspection_scope") or {}
+    required_module = str(
+        inspection_scope.get("industry_key")
+        or task.get("employee_dept_key")
+        or ""
+    ).strip()
+    if required_module in {"", "unknown", "__denied__"}:
+        raise HTTPException(404)
     engine.broadcast(
         {
             "type": "task_update",
             "tenant_id": TEN(),
-            "_required_modules": (
-                str((expert or {}).get("dept_key") or "content"),
-            ),
+            "_required_modules": (required_module,),
             "task_id": tid,
             "idx": task["emp_idx"],
         }
@@ -3739,14 +4802,24 @@ async def task_retry(tid: int):
 def task_delete(tid: int):
     _need_admin()
     task = _task_row_or_404(tid)
+    if int(task.get("emp_idx") or 0) == inspection.EMPLOYEE_IDX:
+        raise HTTPException(
+            409,
+            "巡店任务是问题、整改和人工复核的审计记录，不能单独删除",
+        )
+    guard = taskthreads.task_deletion_guard(tid, TEN())
+    if not guard.get("allowed"):
+        raise HTTPException(409, guard.get("message") or "该任务属于协作版本链，不能单独删除")
     llm.kill(f"task{tid}:")
     if (task.get("status") == "pending_charge"
             and task.get("billing_status") == "pending"):
+        terminal_at = time.time()
         db.execute(
             "UPDATE task SET status='failed',billing_status='void',"
-            "output_md=?,updated_at=? WHERE id=? AND status='pending_charge' "
+            "output_md=?,terminal_at=?,updated_at=? "
+            "WHERE id=? AND status='pending_charge' "
             "AND billing_status='pending' AND deleted_at IS NULL",
-            ("任务在扣费前被移入回收站", time.time(), tid),
+            ("任务在扣费前被移入回收站", terminal_at, terminal_at, tid),
         )
     elif task.get("status") in ("queued", "running", "failed"):
         taskrunner.settle_failure(tid, "老板删除未交付任务")
@@ -3760,24 +4833,16 @@ def task_delete(tid: int):
         raise HTTPException(503, "这个任务的退点还在处理中(约几秒),稍等片刻再删除")
     if row["status"] == "failed" and row["billing_status"] == "charged":
         raise HTTPException(503, "任务退款尚未完成，请稍后重试删除")
-    deleted_at = time.time()
-    changed = db.execute(
-        "UPDATE task SET deleted_at=?,deleted_by=?,delete_reason=?,updated_at=? "
-        "WHERE id=? AND tenant_id=? AND deleted_at IS NULL "
-        "AND status IN ('done','failed')",
-        (
-            deleted_at,
-            int((auth.current() or {}).get("id") or 0),
-            "用户移入回收站",
-            deleted_at,
+    try:
+        deleted = taskthreads.soft_delete_task(
             tid,
             TEN(),
-        ),
-    )
-    if changed != 1:
-        raise HTTPException(409, "任务状态刚刚发生变化，请刷新后再删除")
+            actor_id=int((auth.current() or {}).get("id") or 0) or None,
+        )
+    except taskthreads.TaskThreadError as exc:
+        _raise_task_thread_error(exc)
     taskrunner.sync_meeting_delivery_for_task(tid)
-    return {"ok": True, "soft_deleted": True, "deleted_at": deleted_at}
+    return deleted
 
 
 # ---------------- 数字员工(V2) ----------------
@@ -3801,12 +4866,17 @@ def employees_list():
         st = stats.get(s["idx"]) or {}
         if not internal:
             out.append(
-                _public_station(s, include_task_guide=not _is_tour())
+                _public_station(
+                    s, include_task_guide=not _is_tour(), config=cfg,
+                )
             )
             continue
         model_id = providers.text_model_for(s["idx"])
         out.append({
             **{k: v for k, v in s.items() if k != "run"},
+            **_employee_public_contract(
+                s, config=cfg, include_profile=True,
+            ),
             "model": model_id,
             "model_id": model_id,
             "prompt_template": cfg["prompt_template"],
@@ -3826,37 +4896,57 @@ def employees_list():
 
 
 def _is_emp(idx: int) -> bool:
-    return idx in registry.BY_IDX or departments.get(idx) is not None
+    return idx in registry.BY_IDX or departments.get_active(idx) is not None
 
 
 @app.put("/api/employees/{idx}/prompt")
 def employee_prompt(idx: int, body: dict):
     _need_boss()
-    if not _is_emp(idx):
-        raise HTTPException(404)
-    employees.set_prompt(idx, body.get("template"))
-    return {"ok": True, "is_custom": bool((body.get("template") or "").strip())}
+    binding = _employee_current_write_binding(idx, body)
+    try:
+        employees.set_prompt_for_identity(
+            binding["identity"]["identity_ref"],
+            body.get("template"),
+            expected_revision=binding["config"]["config_revision"],
+        )
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    fresh = employees.get_config(idx)
+    return {
+        "ok": True,
+        "is_custom": bool((body.get("template") or "").strip()),
+        **_employee_public_contract(binding["employee"], config=fresh),
+    }
 
 
 @app.put("/api/employees/{idx}/skills")
 def employee_skills(idx: int, body: dict):
     _need_boss()   # employee_config 是全平台共享表，仅命名超级账号可改。
-    if not _is_emp(idx):
-        raise HTTPException(404)
+    binding = _employee_current_write_binding(idx, body)
     skills = body.get("skills")
     if not isinstance(skills, list):
         raise HTTPException(400, "skills 必须是数组")
     if not auth.is_root():
         # 非 root 客户端拿到的技能卡没有 source(脱敏),整表回存时把库里原有来源补回来
         old_src = {(s.get("title"), s.get("detail")): s.get("source")
-                   for s in employees.get_config(idx)["skills"]}
+                   for s in binding["config"]["skills"]}
         for s in skills:
             if "source" not in s:
                 src = old_src.get((s.get("title"), s.get("detail")))
                 if src is not None:
                     s["source"] = src
-    employees.set_skills(idx, skills)
-    return {"ok": True}
+    try:
+        employees.set_skills_for_identity(
+            binding["identity"]["identity_ref"],
+            skills,
+            expected_revision=binding["config"]["config_revision"],
+        )
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    fresh = employees.get_config(idx)
+    return {"ok": True, **_employee_public_contract(
+        binding["employee"], config=fresh,
+    )}
 
 
 @app.put("/api/employees/{idx}/settings")
@@ -3865,19 +4955,30 @@ def employee_settings(idx: int, body: dict):
     """员工工作配置(V3):趋势官/情报员检索渠道、拆解师对标与维度。传 {} 恢复默认."""
     if idx not in registry.BY_IDX:
         raise HTTPException(404)
+    binding = _employee_current_write_binding(idx, body)
     settings = body.get("settings")
     if not isinstance(settings, dict):
         raise HTTPException(400, "settings 必须是对象")
-    employees.set_settings(idx, settings)
-    return {"ok": True, "settings": registry.station_settings(registry.BY_IDX[idx]["key"])}
+    try:
+        employees.set_settings_for_identity(
+            binding["identity"]["identity_ref"], settings,
+            expected_revision=binding["config"]["config_revision"],
+        )
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    fresh = employees.get_config(idx)
+    return {
+        "ok": True,
+        "settings": registry.station_settings(registry.BY_IDX[idx]["key"]),
+        **_employee_public_contract(binding["employee"], config=fresh),
+    }
 
 
 @app.put("/api/employees/{idx}/capabilities")
 def employee_capabilities(idx: int, body: dict):
     _need_boss()   # 全局共享配置,仅命名超级账号
     """员工能力开关(V4):body.caps_off = 停用的能力名列表."""
-    if not _is_emp(idx):
-        raise HTTPException(404)
+    binding = _employee_current_write_binding(idx, body)
     caps_off = body.get("caps_off")
     if not isinstance(caps_off, list):
         raise HTTPException(400, "caps_off 必须是数组")
@@ -3885,18 +4986,3595 @@ def employee_capabilities(idx: int, body: dict):
         valid = {c["name"] for c in registry.CAPABILITIES.get(registry.BY_IDX[idx]["key"], [])}
         caps = None
     else:
-        valid = {c["name"] for c in departments.capabilities_for(idx, [])}
+        valid = {
+            c["name"] for c in departments.capabilities_for(
+                idx, [],
+                employee=_employee_effective_view(
+                    binding["employee"], binding["config"],
+                ),
+            )
+        }
         caps = None
-    employees.set_caps_off(idx, [c for c in caps_off if c in valid])
-    caps = (registry.capabilities_for(idx) if idx in registry.BY_IDX
-            else departments.capabilities_for(idx, employees.get_config(idx)["caps_off"]))
-    return {"ok": True, "capabilities": caps}
+    try:
+        employees.set_caps_off_for_identity(
+            binding["identity"]["identity_ref"],
+            [c for c in caps_off if c in valid],
+            expected_revision=binding["config"]["config_revision"],
+        )
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    fresh = employees.get_config(idx)
+    caps = (
+        registry.capabilities_for(idx) if idx in registry.BY_IDX
+        else departments.capabilities_for(
+            idx, fresh["caps_off"],
+            employee=_employee_effective_view(binding["employee"], fresh),
+        )
+    )
+    return {
+        "ok": True, "capabilities": caps,
+        **_employee_public_contract(binding["employee"], config=fresh),
+    }
+
+
+_LEARNING_REQUIRED_ARTIFACT_KINDS = (
+    "knowledge", "skill", "capability", "workflow",
+)
+
+
+def _learning_run_checkpoint(run: dict) -> dict:
+    value = run.get("checkpoint_json")
+    if isinstance(value, dict):
+        return dict(value)
+    parsed = db.jloads(value, {})
+    return dict(parsed) if isinstance(parsed, dict) else {}
+
+
+def _expire_learning_run_if_due(run_id: int) -> dict:
+    """Lazily expire an unfired/pending run without expiring future rows.
+
+    ``employeelearning.expire_run(..., now=...)`` historically treats any
+    explicit ``now`` as authority to expire unconditionally.  Keep the due
+    comparison and mutation in one write transaction and deliberately call
+    it without that unsafe override.  Queued rows have delivered no research,
+    so any defensive internal reservation is released before terminalizing;
+    awaiting-review rows retain their already-consumed research accounting.
+    """
+    with db.atomic():
+        run = employeelearning.get_run(int(run_id))
+        if str(run.get("status") or "") not in {
+            employeelearning.RUN_QUEUED,
+            employeelearning.RUN_AWAITING_APPROVAL,
+        }:
+            return run
+        try:
+            expires_at = float(run.get("expires_at"))
+        except (TypeError, ValueError):
+            return run
+        if expires_at > time.time():
+            return run
+        if run.get("status") == employeelearning.RUN_QUEUED:
+            employeelearning.release_budget(int(run_id))
+        employeelearning.expire_run(int(run_id))
+        return employeelearning.get_run(int(run_id))
+
+
+def _expire_due_learning_identity_runs(identity_ref: str) -> int:
+    """Release expired live owners before a new idempotent run is created."""
+    role_ref = str(identity_ref or "").strip()
+    if re.fullmatch(r"[0-9a-f]{64}", role_ref) is None:
+        return 0
+    rows = db.q(
+        "SELECT id FROM employee_learning_run WHERE identity_ref=? "
+        "AND status IN (?,?) AND expires_at IS NOT NULL AND expires_at<=? "
+        "ORDER BY id LIMIT 20",
+        (
+            role_ref,
+            employeelearning.RUN_QUEUED,
+            employeelearning.RUN_AWAITING_APPROVAL,
+            time.time(),
+        ),
+    )
+    for row in rows:
+        _expire_learning_run_if_due(int(row["id"]))
+    return len(rows)
+
+
+def _expire_due_learning_batch_runs(batch_id: int) -> int:
+    """Bounded read-path sweep for one at-most-360-target manifest."""
+    rows = db.q(
+        "SELECT id FROM employee_learning_run WHERE batch_id=? "
+        "AND status IN (?,?) AND expires_at IS NOT NULL AND expires_at<=? "
+        "ORDER BY id LIMIT ?",
+        (
+            int(batch_id),
+            employeelearning.RUN_QUEUED,
+            employeelearning.RUN_AWAITING_APPROVAL,
+            time.time(),
+            _LEARNING_BATCH_MAX_TARGETS,
+        ),
+    )
+    for row in rows:
+        _expire_learning_run_if_due(int(row["id"]))
+    return len(rows)
+
+
+def _learning_owned_run(run_id: int) -> tuple[dict, dict]:
+    """Resolve one run through its tenant-owned batch, fail closed."""
+    try:
+        run = employeelearning.get_run(int(run_id))
+        batch = employeelearning.get_batch(int(run["batch_id"]))
+    except (TypeError, ValueError, employeelearning.LearningError) as exc:
+        raise HTTPException(404, "进修记录不存在") from exc
+    try:
+        tenant_id = int(batch.get("tenant_id"))
+    except (TypeError, ValueError):
+        tenant_id = -1
+    if tenant_id != TEN():
+        raise HTTPException(404, "进修记录不存在")
+    run = _expire_learning_run_if_due(int(run["id"]))
+    return run, employeelearning.get_batch(int(run["batch_id"]))
+
+
+def _learning_run_idx(run: dict) -> int:
+    try:
+        idx = int(run.get("employee_idx") or 0)
+    except (TypeError, ValueError):
+        idx = 0
+    if idx <= 0:
+        raise HTTPException(409, "进修记录缺少员工身份快照")
+    return idx
+
+
+def _learning_run_bundle_sha256(run: dict) -> str:
+    value = str(
+        _learning_run_checkpoint(run).get("expected_bundle_sha256") or ""
+    ).strip()
+    if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise HTTPException(409, "进修记录缺少能力包快照")
+    return value
+
+
+def _learning_billing_op_key(tenant_id: int, run_id: int) -> str:
+    return f"employee-learning:{int(tenant_id)}:{int(run_id)}"
+
+
+def _start_learning_billing_at_frozen_price(
+    run_id: int, tenant_id: int, note: str,
+) -> str:
+    """Validate the frozen three-point contract and charge in one DB lock."""
+    with db.atomic():
+        run = employeelearning.get_run(int(run_id))
+        batch = employeelearning.get_batch(int(run["batch_id"]))
+        if int(batch.get("tenant_id") or -1) != int(tenant_id):
+            raise employeelearning.InvalidTransitionError(
+                "进修计费租户绑定已变化"
+            )
+        metadata = _learning_batch_metadata(batch)
+        schema = str(metadata.get("schema") or "")
+        expected_points = float(run.get("budget_points") or 0)
+        if schema == "schema55-learning-batch-v1":
+            try:
+                frozen_points = float(metadata["points_per_employee"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise employeelearning.InvalidTransitionError(
+                    "批次进修计费证明缺失"
+                ) from exc
+        elif schema == "schema55-learning-single-v1":
+            frozen_points = _LEARNING_BATCH_POINTS_PER_EMPLOYEE
+        else:
+            raise employeelearning.InvalidTransitionError(
+                "进修计费模式不可验证"
+            )
+        try:
+            live_points = float((billing.prices().get("learn") or {})["points"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise employeelearning.InvalidTransitionError(
+                "进修计费单价不可用"
+            ) from exc
+        if (
+            not all(math.isfinite(value) for value in (
+                expected_points, frozen_points, live_points,
+            ))
+            or abs(expected_points - _LEARNING_BATCH_POINTS_PER_EMPLOYEE) > 1e-9
+            or abs(frozen_points - expected_points) > 1e-9
+            or abs(live_points - frozen_points) > 1e-9
+        ):
+            raise employeelearning.InvalidTransitionError(
+                "进修计费单价已变化，本次未扣款也未联网"
+            )
+        op_key = _learning_billing_op_key(int(tenant_id), int(run_id))
+        started = billing.start_operation(
+            "learn",
+            tid=int(tenant_id),
+            note=str(note or "")[:200],
+            op_key=op_key,
+        )
+        operation = db.one(
+            "SELECT points,status FROM billing_operation WHERE op_key=?",
+            (op_key,),
+        )
+        wallet_points = (
+            0.0 if int(tenant_id) == 1 else expected_points
+        )
+        try:
+            operation_points = float((operation or {}).get("points"))
+        except (TypeError, ValueError):
+            operation_points = float("nan")
+        if (
+            started != op_key
+            or not operation
+            or str(operation.get("status") or "") != "charged"
+            or not math.isfinite(wallet_points)
+            or not math.isfinite(operation_points)
+            or abs(operation_points - wallet_points) > 1e-9
+        ):
+            raise employeelearning.InvalidTransitionError(
+                "进修计费操作与冻结预算不一致"
+            )
+        return op_key
+
+
+def _learning_checkpoint_billing_op(run: dict) -> str:
+    value = str(_learning_run_checkpoint(run).get("billing_op_key") or "").strip()
+    return value if re.fullmatch(r"employee-learning:\d+:\d+", value) else ""
+
+
+def _learning_run_has_durable_proposal_delivery(run: dict) -> bool:
+    """Prove that research produced the exact immutable proposal ledger."""
+    try:
+        run_id = int(run["id"])
+        proposal = db.jloads(run.get("proposal_json"), {})
+        checkpoint = _learning_run_checkpoint(run)
+        if (
+            not isinstance(proposal, dict)
+            or proposal.get("proposal_only") is not True
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(checkpoint.get("expected_bundle_sha256") or ""),
+            ) is None
+        ):
+            return False
+        source_ids = sorted({int(value) for value in proposal.get("source_ids", [])})
+        artifact_ids = sorted({
+            int(value) for value in proposal.get("artifact_ids", [])
+        })
+        if not source_ids or not artifact_ids or min(source_ids + artifact_ids) < 1:
+            return False
+        actual_sources = [
+            int(row["id"]) for row in db.q(
+                "SELECT id FROM employee_learning_source WHERE run_id=? ORDER BY id",
+                (run_id,),
+            )
+        ]
+        artifacts = db.q(
+            "SELECT id,source_ids_json FROM employee_learning_artifact "
+            "WHERE run_id=? ORDER BY id",
+            (run_id,),
+        )
+        if actual_sources != source_ids or [
+            int(row["id"]) for row in artifacts
+        ] != artifact_ids:
+            return False
+        for artifact in artifacts:
+            linked = db.jloads(artifact.get("source_ids_json"), [])
+            if (
+                not isinstance(linked, list)
+                or not linked
+                or any(int(value) not in source_ids for value in linked)
+            ):
+                return False
+        return True
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _terminalize_learning_run_after_worker_failure(
+    run_id: int, reason: str,
+) -> dict:
+    with db.atomic():
+        run = employeelearning.get_run(int(run_id))
+        if run.get("status") in {
+            employeelearning.RUN_QUEUED,
+            employeelearning.RUN_RESEARCHING,
+        }:
+            employeelearning.cancel_run(
+                int(run_id), reason=str(reason or "WORKER_FAILED")[:500],
+            )
+        employeelearning.release_budget(int(run_id))
+        return employeelearning.get_run(int(run_id))
+
+
+def _force_terminalize_learning_run_after_worker_failure(
+    run_id: int, reason: str,
+) -> dict:
+    """Last-resort service fallback after repeated transition-hook faults."""
+    with db.atomic():
+        run = employeelearning.get_run(int(run_id))
+        if run.get("status") in {
+            employeelearning.RUN_QUEUED,
+            employeelearning.RUN_RESEARCHING,
+        }:
+            employeelearning._set_run_status(
+                run,
+                employeelearning.RUN_CANCELLED,
+                error_code=str(reason or "WORKER_FAILED")[:500],
+            )
+            employeelearning._refresh_batch_progress(int(run["batch_id"]))
+        employeelearning.release_budget(int(run_id))
+        return employeelearning.get_run(int(run_id))
+
+
+async def _terminalize_learning_run_safely(
+    run_id: int, reason: str,
+) -> dict:
+    last_error = None
+    for _attempt in range(3):
+        try:
+            return await _run_db_safely(
+                _terminalize_learning_run_after_worker_failure,
+                int(run_id),
+                reason,
+            )
+        except BaseException as exc:
+            last_error = exc
+    try:
+        return await _run_db_safely(
+            _force_terminalize_learning_run_after_worker_failure,
+            int(run_id),
+            reason,
+        )
+    except BaseException:
+        if last_error is not None:
+            raise last_error
+        raise
+
+
+def _settle_failed_learning_run_atomically(
+    run_id: int,
+    op_key: str,
+    billing_reason: str,
+    terminal_reason: str,
+    *,
+    force_terminal: bool = False,
+) -> dict:
+    """Refund, terminalize and release the internal cap in one commit."""
+    with db.atomic():
+        run = employeelearning.get_run(int(run_id))
+        delivered = run.get("status") in {
+            employeelearning.RUN_AWAITING_APPROVAL,
+            employeelearning.RUN_ACTIVATED,
+            employeelearning.RUN_REJECTED,
+            employeelearning.RUN_STALE,
+        } or (
+            run.get("status") == employeelearning.RUN_EXPIRED
+            and _learning_run_has_durable_proposal_delivery(run)
+        )
+        if delivered:
+            # A notification/scheduler failure after the proposal commit is
+            # not a research failure. Preserve its consumed cap and settle
+            # the wallet operation as delivered.
+            if op_key:
+                billing.complete_operation(op_key)
+            employeelearning._refresh_batch_progress(int(run["batch_id"]))
+            return employeelearning.get_run(int(run_id))
+        if op_key:
+            billing.fail_operation(op_key, billing_reason)
+        if run.get("status") in {
+            employeelearning.RUN_QUEUED,
+            employeelearning.RUN_RESEARCHING,
+        }:
+            if force_terminal:
+                employeelearning._set_run_status(
+                    run,
+                    employeelearning.RUN_CANCELLED,
+                    error_code=str(terminal_reason or "WORKER_FAILED")[:500],
+                )
+                employeelearning._refresh_batch_progress(int(run["batch_id"]))
+            else:
+                employeelearning.cancel_run(
+                    int(run_id),
+                    reason=str(terminal_reason or "WORKER_FAILED")[:500],
+                )
+        employeelearning.release_budget(int(run_id))
+        # ``research_run`` can already have written failed/evidence_insufficient
+        # before this settlement begins.  Refresh even when no status mutation
+        # was needed so the durable batch counters agree with the terminal run.
+        employeelearning._refresh_batch_progress(int(run["batch_id"]))
+        return employeelearning.get_run(int(run_id))
+
+
+async def _settle_failed_learning_run_safely(
+    run_id: int,
+    op_key: str,
+    billing_reason: str,
+    terminal_reason: str,
+) -> dict:
+    last_error = None
+    for _attempt in range(3):
+        try:
+            return await _run_db_safely(
+                _settle_failed_learning_run_atomically,
+                int(run_id),
+                op_key,
+                billing_reason,
+                terminal_reason,
+            )
+        except BaseException as exc:
+            last_error = exc
+    try:
+        return await _run_db_safely(
+            _settle_failed_learning_run_atomically,
+            int(run_id),
+            op_key,
+            billing_reason,
+            terminal_reason,
+            force_terminal=True,
+        )
+    except BaseException:
+        if last_error is not None:
+            raise last_error
+        raise
+
+
+def _recover_employee_learning_billing() -> tuple[int, set[str]]:
+    """Settle delivered evidence runs and protect them from generic refunds."""
+    settled = 0
+    protected = set()
+    for row in db.q("SELECT id FROM employee_learning_run ORDER BY id"):
+        try:
+            run = employeelearning.get_run(int(row["id"]))
+            op_key = _learning_checkpoint_billing_op(run)
+        except (employeelearning.LearningError, HTTPException, TypeError, ValueError):
+            continue
+        if not op_key:
+            continue
+        delivered = run.get("status") in {
+            employeelearning.RUN_AWAITING_APPROVAL,
+            employeelearning.RUN_ACTIVATED,
+            employeelearning.RUN_REJECTED,
+            employeelearning.RUN_STALE,
+        } or (
+            run.get("status") == employeelearning.RUN_EXPIRED
+            and _learning_run_has_durable_proposal_delivery(run)
+        )
+        if delivered:
+            protected.add(op_key)
+            if billing.complete_operation(op_key):
+                settled += 1
+        elif run.get("status") == employeelearning.RUN_EXPIRED:
+            # Expired queued/in-flight work has no delivered proposal and is
+            # therefore refundable.  Settle both ledgers before the generic
+            # billing recovery sees the operation.
+            _settle_failed_learning_run_atomically(
+                int(run["id"]),
+                op_key,
+                "未交付的过期进修自动退回",
+                "EXPIRED_WITHOUT_DELIVERY",
+            )
+    return settled, protected
+
+
+def _learning_frozen_request_binding(run: dict, body: dict) -> dict:
+    """Validate only the browser echo against this run's frozen four-tuple."""
+    if not isinstance(body, dict):
+        raise HTTPException(400, "进修审批请求格式无效")
+    expected = {
+        "identity_ref": str(run.get("identity_ref") or ""),
+        "config_revision": int(
+            run.get("base_config_revision") or run.get("config_revision") or 0
+        ),
+        "config_sha256": str(run.get("base_config_sha256") or ""),
+        "bundle_sha256": _learning_run_bundle_sha256(run),
+    }
+    if any(body.get(field) in (None, "") for field in _ROLE_WRITE_BINDING_FIELDS):
+        raise HTTPException(400, "进修审批必须提交完整岗位四元绑定")
+    if (
+        str(body.get("identity_ref") or "").strip() != expected["identity_ref"]
+        or type(body.get("config_revision")) is not int
+        or int(body["config_revision"]) != expected["config_revision"]
+        or str(body.get("config_sha256") or "").strip()
+        != expected["config_sha256"]
+        or str(body.get("bundle_sha256") or "").strip()
+        != expected["bundle_sha256"]
+    ):
+        raise HTTPException(409, "进修提案绑定已变化，请刷新后重试")
+    return expected
+
+
+def _learning_current_run_binding(run: dict) -> dict:
+    """Compare the frozen proposal with authoritative current server state."""
+    expected = {
+        "identity_ref": str(run.get("identity_ref") or ""),
+        "config_revision": int(
+            run.get("base_config_revision") or run.get("config_revision") or 0
+        ),
+        "config_sha256": str(run.get("base_config_sha256") or ""),
+        "bundle_sha256": _learning_run_bundle_sha256(run),
+    }
+    try:
+        binding = _employee_current_write_binding(
+            _learning_run_idx(run), expected,
+        )
+    except HTTPException as exc:
+        if exc.status_code in {404, 409}:
+            raise HTTPException(
+                409, "员工岗位或配置已变更，该进修提案已过期"
+            ) from exc
+        raise
+    if not binding["identity"].get("can_learn"):
+        raise HTTPException(409, "员工当前不可进修，该进修提案已过期")
+    return binding
+
+
+def _learning_request_binding(run: dict, body: dict) -> dict:
+    """Validate browser echo first, then authoritative current server CAS."""
+    _learning_frozen_request_binding(run, body)
+    return _learning_current_run_binding(run)
+
+
+def _learning_high_risk(employee: dict) -> bool:
+    if str(employee.get("dept_key") or "") in {
+        "auto", "beauty", "fitness", "pet", "pharmacy",
+    }:
+        return True
+    decision = str(employee.get("primary_decision") or "")
+    return bool(re.search(
+        r"人身安全|食品安全|医疗|药品|处方|用药|隐私|金融|信贷|法律|许可",
+        decision,
+    ))
+
+
+def _learning_evidence_config() -> learningevidence.EvidenceConfig:
+    """Patchable boundary around the release-owned evidence sidecar loader."""
+    return learningevidence.load_default_config()
+
+
+def _learning_public_search_brief(employee: dict) -> str:
+    """Send only catalog-declared public topics, never employee/private data."""
+    public_industries = {
+        "auto": "汽车后市场", "beauty": "美容美业", "convenience": "便利店",
+        "fitness": "健身瑜伽", "grocery": "商超零售", "hotel": "酒店住宿",
+        "pet": "宠物服务", "pharmacy": "零售药房", "restaurant": "餐饮",
+        "snack": "量贩零食", "tea_coffee": "茶咖现制",
+    }
+    industry = public_industries.get(
+        str(employee.get("dept_key") or ""), "线下零售与服务业",
+    )
+    raw_topics = employee.get("public_research_topics")
+    topics = []
+    if isinstance(raw_topics, list):
+        for raw in raw_topics:
+            topic = re.sub(r"\s+", " ", str(raw or "")).strip()
+            if (
+                2 <= len(topic) <= 120
+                and not re.search(r"[\x00-\x1f\x7f]", topic)
+                and topic not in topics
+            ):
+                topics.append(topic)
+    is_v4 = (
+        str(employee.get("catalog_version") or "")
+        == departments.DECISION_V4_CATALOG_VERSION
+    )
+    if is_v4:
+        person = str(employee.get("person") or "").strip()
+        employee_idx = str(employee.get("idx") or "").strip()
+        job_title = str(employee.get("name") or "").strip()
+        forbidden_values = {
+            str(employee.get(field) or "").strip()
+            for field in (
+                "identity_ref", "config_sha256", "bundle_sha256",
+                "employee_spec_sha256", "spec_sha256",
+            )
+            if str(employee.get(field) or "").strip()
+        }
+        if (
+            not 3 <= len(topics) <= 6
+            or not job_title
+            or job_title not in topics
+            or any(person and person in topic for topic in topics)
+            or any(employee_idx and employee_idx in topic for topic in topics)
+            or any(secret in topic for secret in forbidden_values for topic in topics)
+        ):
+            raise employeelearning.LearningValidationError(
+                "岗位公开研究主题未通过隐私与完整性校验"
+            )
+    topic_block = ""
+    if topics:
+        topic_block = "公开岗位研究主题：" + "；".join(topics) + "。"
+    anchor_block = ""
+    if topics:
+        groups = _learning_role_anchor_groups(employee)
+        compact_groups = []
+        for group in groups:
+            public_values = [
+                *group["objects"], *group["methods"], group["topic"],
+            ]
+            if (
+                any(person and person in value for value in public_values)
+                or any(employee_idx and employee_idx in value for value in public_values)
+                or any(
+                    secret in value
+                    for secret in forbidden_values for value in public_values
+                )
+            ):
+                raise employeelearning.LearningValidationError(
+                    "岗位公开研究锚点未通过隐私校验"
+                )
+            compact_groups.append(
+                f"{group['topic']}（业务对象：{'、'.join(sorted(group['objects'])[:4])}；"
+                f"专业方法：{'、'.join(sorted(group['methods'])[:3])}）"
+            )
+        anchor_block = "公开检索约束：" + "；".join(compact_groups) + "。"
+    english_aliases = learningevidence.search_aliases(
+        employee, config=_learning_evidence_config(), maximum=24,
+    )
+    alias_block = ""
+    if english_aliases:
+        alias_block = (
+            "Bounded public English search aliases: "
+            + "; ".join(english_aliases)
+            + "."
+        )
+    return (
+        f"公开行业类别：{industry}。{topic_block}{anchor_block}{alias_block}"
+        "仅围绕以上公开主题检索近期可核验的官方规则、行业标准、专业协会方法、"
+        "高质量研究与实务案例；覆盖知识更新、专业方法、异常识别和可复核工作流程。"
+    )[:3000]
+
+
+_LEARNING_GENERIC_TERMS = {
+    "行业", "方法", "流程", "工作", "数据", "证据", "规则", "标准", "管理",
+    "能力", "技能", "知识", "分析", "决策", "识别", "核验", "复核", "负责",
+    "当前", "是否", "执行", "形成", "输出", "来源", "公开", "专业", "更新",
+    "对象", "适用", "情况", "系统", "岗位", "员工", "人工", "业务", "服务",
+}
+
+# Reviewed public vocabulary for the ten V4 industries.  A source must match
+# one of these anchors *and* one role topic.  This prevents a generic article
+# about, for example, electricity demand forecasting from training a tea-shop
+# demand employee merely because both pages say “需求预测”.
+_LEARNING_INDUSTRY_ANCHORS = {
+    "tea_coffee": {"茶咖", "茶饮", "咖啡", "现制饮品", "奶茶", "咖啡店"},
+    "convenience": {"便利店", "便利零售", "即时零售", "便利门店"},
+    "snack": {"零食", "休闲食品", "散装食品", "零食门店"},
+    "grocery": {"商超", "超市", "生鲜零售", "大型卖场"},
+    "pharmacy": {"药房", "药店", "药品零售", "零售药店"},
+    "hotel": {"酒店", "住宿业", "旅馆", "客房"},
+    "auto": {"汽车维修", "汽修", "机动车维修", "车辆维修", "新能源车"},
+    "fitness": {"健身", "健身房", "健身场馆", "私教", "团课"},
+    "beauty": {"美业", "美容", "美容院", "生活美容", "医疗美容"},
+    "pet": {"宠物", "动物诊疗", "兽医", "犬猫", "宠物医院"},
+}
+
+
+def _learning_role_anchor_groups(employee: dict) -> list[dict]:
+    """Load the explicit public object+method contract frozen in V4."""
+    raw = employee.get("public_research_anchor_groups")
+    if not isinstance(raw, list):
+        raise employeelearning.LearningValidationError("岗位缺少公开研究锚点组")
+    groups = []
+    employee_idx = str(employee.get("idx") or "").strip()
+    person = str(
+        employee.get("person_snapshot", employee.get("person")) or ""
+    ).strip()
+    for group in raw:
+        if not isinstance(group, dict):
+            raise employeelearning.LearningValidationError("岗位公开研究锚点组无效")
+        topic = str(group.get("topic") or "").strip()
+        raw_objects = group.get("object_anchors")
+        raw_methods = group.get("method_anchors")
+        if (
+            not isinstance(raw_objects, list)
+            or not isinstance(raw_methods, list)
+            or not all(isinstance(value, str) for value in raw_objects)
+            or not all(isinstance(value, str) for value in raw_methods)
+        ):
+            raise employeelearning.LearningValidationError("岗位公开研究锚点组无效")
+        objects = {
+            str(value).strip().lower()
+            for value in raw_objects
+            if str(value).strip()
+        }
+        methods = {
+            str(value).strip().lower()
+            for value in raw_methods
+            if str(value).strip()
+        }
+        if not topic or not objects or not methods:
+            raise employeelearning.LearningValidationError("岗位公开研究锚点组不完整")
+        if any(
+            (person and person in value)
+            or (employee_idx and employee_idx in value)
+            or re.search(
+                r"(?i)(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])", value,
+            ) is not None
+            for value in [*objects, *methods]
+        ):
+            raise employeelearning.LearningValidationError("岗位公开研究锚点包含身份字段")
+        if any(
+            obj in method or method in obj
+            for obj in objects for method in methods
+        ):
+            raise employeelearning.LearningValidationError("岗位公开研究锚点组相互重叠")
+        groups.append({"topic": topic, "objects": objects, "methods": methods})
+    if len(groups) < 2:
+        raise employeelearning.LearningValidationError("岗位公开研究锚点组不足")
+    return groups
+
+
+def _learning_semantic_haystack(source: dict) -> str:
+    """Normalize a small reviewed set of industry-method synonyms.
+
+    This is intentionally bounded and deterministic; it improves recall for
+    common professional paraphrases without asking a model to decide whether
+    arbitrary page text is relevant.
+    """
+    text = " ".join(str(source.get(key) or "") for key in (
+        "title", "publisher", "excerpt",
+    )).lower()
+    replacements = {
+        # Public wording -> frozen business-object anchors.  These are
+        # reviewed phrase mappings, not arbitrary substrings or model output.
+        "每十五分钟订单需求": "pos订单到达",
+        "十五分钟订单需求": "pos订单到达",
+        "每十五分钟订单量": "pos订单到达",
+        "十五分钟订单量": "pos订单到达",
+        "十五分钟订单": "pos订单到达",
+        "货架布局方案": "总部陈列图版本",
+        "替换商品": "缺货替代临时陈列",
+        "新版布局落店": "确认改版落地",
+        "通道遮挡安全": "货架安全可视规则",
+        "经理批准": "例外审批",
+        "平均绝对百分比误差": "mape",
+        "平均绝对百分误差": "mape",
+        "分位回归": "分位数",
+        "分位点": "分位数",
+        "预测区间": "置信区间",
+        "样本外偏移": "样本外漂移",
+        "每15分钟": "十五分钟",
+        "每十五分钟": "十五分钟",
+        "实际客房": "pms物理房号",
+        "线上售卖房类": "虚拟房型",
+        "建立对应关系": "映射",
+        "对应关系": "映射",
+        "建立映射": "映射",
+        "升等路径": "升级链",
+        "连续入住订单": "连住订单",
+        "连续入住": "连住",
+        "中断裂": "截断",
+        "关键路径法识别": "关键路径分析",
+    }
+    for source_value, target_value in replacements.items():
+        text = text.replace(source_value, target_value)
+    return text
+
+
+def _learning_relevant_sources(employee: dict, sources: list[dict]) -> list[dict]:
+    """Keep only evidence with role-specific lexical support.
+
+    Reachability and authority are necessary but not sufficient: unrelated
+    public pages must never be converted into a role capability merely because
+    they were fetched successfully.
+    """
+    prepared = []
+    for source in sources or []:
+        row = dict(source)
+        row["semantic_text"] = _learning_semantic_haystack(row)
+        prepared.append(row)
+    graph = learningevidence.evaluate_evidence(
+        employee,
+        prepared,
+        config=_learning_evidence_config(),
+        high_risk=_learning_high_risk(employee),
+    )
+    return list(graph["sources"])
+
+
+def _learning_semantic_source_gate(employee: dict, run: dict) -> list[dict]:
+    sources = [dict(row) for row in db.q(
+        "SELECT id,canonical_url AS url,title,publisher,source_level AS authority_level,"
+        "published_at,fetched_at,http_status,"
+        "CASE WHEN certificate_status='valid' THEN 1 ELSE 0 END AS tls_valid,"
+        "content_sha256,excerpt,"
+        "json_extract(metadata_json,'$.capture_event_id') AS capture_event_id,"
+        "json_extract(metadata_json,'$.capture_provider') AS capture_provider "
+        "FROM employee_learning_source WHERE run_id=? ORDER BY id",
+        (int(run["id"]),),
+    )]
+    return _learning_relevant_sources(employee, sources)
+
+
+def _learning_verify_frozen_artifact_evidence(
+    run: dict, relevant_sources: list[dict],
+) -> None:
+    """Bind every proposed delta to recomputed catalog topics and source hashes."""
+    by_index = {index + 1: row for index, row in enumerate(relevant_sources)}
+    rows = db.q(
+        "SELECT kind,statement,payload_json,source_ids_json "
+        "FROM employee_learning_artifact WHERE run_id=? ORDER BY id",
+        (int(run["id"]),),
+    )
+    if {str(row.get("kind") or "") for row in rows} != set(
+        _LEARNING_REQUIRED_ARTIFACT_KINDS
+    ):
+        raise employeelearning.LearningValidationError(
+            "进修产物缺少完整能力维度"
+        )
+    for row in rows:
+        payload = db.jloads(row.get("payload_json"), {})
+        refs = sorted({int(value) for value in db.jloads(
+            row.get("source_ids_json"), [],
+        )})
+        evidence = payload.get("evidence_sources") if isinstance(payload, dict) else None
+        declared_topics = payload.get("evidence_topics") if isinstance(payload, dict) else None
+        if not isinstance(evidence, list) or not isinstance(declared_topics, list):
+            raise employeelearning.LearningValidationError(
+                "进修产物缺少冻结证据主题"
+            )
+        seen_ids: set[int] = set()
+        source_indexes: set[int] = set()
+        verified_topics: set[str] = set()
+        for item in evidence:
+            if not isinstance(item, dict) or type(item.get("source_index")) is not int:
+                raise employeelearning.LearningValidationError("进修证据索引无效")
+            source = by_index.get(int(item["source_index"]))
+            if not source or int(source.get("id") or 0) not in refs:
+                raise employeelearning.LearningValidationError("进修证据与来源账本断链")
+            if str(item.get("content_sha256") or "") != str(
+                source.get("content_sha256") or ""
+            ):
+                raise employeelearning.LearningValidationError("进修证据内容摘要漂移")
+            source_topics = {str(value) for value in source.get("semantic_topics") or []}
+            item_topics = {str(value) for value in item.get("semantic_topics") or []}
+            if not item_topics or not item_topics <= source_topics:
+                raise employeelearning.LearningValidationError("进修证据主题无法回链")
+            seen_ids.add(int(source["id"]))
+            source_indexes.add(int(item["source_index"]))
+            verified_topics.update(item_topics)
+        if seen_ids != set(refs) or verified_topics != {
+            str(value) for value in declared_topics
+        }:
+            raise employeelearning.LearningValidationError("进修证据集与产物声明不一致")
+        artifact_topic = learningevidence.validate_artifact_evidence(
+            source_indexes, relevant_sources,
+        )
+        if artifact_topic not in verified_topics:
+            raise learningevidence.EvidenceGateError(
+                "EVIDENCE_ARTIFACT_TOPIC_MISMATCH",
+                "进修产物未引用同专题的直接与互补证据",
+            )
+        statement = str(row.get("statement") or "")
+        if not any(topic in statement for topic in verified_topics):
+            raise employeelearning.LearningValidationError("进修产物未体现来源支持的专题")
+
+
+def _normalize_learning_artifacts(raw, source_count: int) -> list[dict]:
+    payload = raw.get("data") if isinstance(raw, dict) else None
+    rows = payload.get("artifacts") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        raise employeelearning.LearningValidationError("进修模型未交付产物数组")
+    by_kind = {}
+    statements = set()
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "").strip().lower()
+        if kind not in _LEARNING_REQUIRED_ARTIFACT_KINDS or kind in by_kind:
+            continue
+        title = str(item.get("title") or "").strip()[:300]
+        statement = str(item.get("statement") or "").strip()[:4000]
+        indexes = item.get("source_indexes")
+        if not title or not statement or statement in statements:
+            continue
+        if not isinstance(indexes, list):
+            continue
+        try:
+            indexes = sorted({int(value) for value in indexes})
+        except (TypeError, ValueError):
+            continue
+        if len(indexes) < 2 or any(value < 1 or value > source_count for value in indexes):
+            continue
+        artifact_payload = item.get("payload")
+        if not isinstance(artifact_payload, dict):
+            artifact_payload = {}
+        if kind == "workflow" and not str(artifact_payload.get("step") or "").strip():
+            artifact_payload = {**artifact_payload, "step": statement}
+        by_kind[kind] = {
+            "kind": kind,
+            "title": title,
+            "statement": statement,
+            "payload": artifact_payload,
+            "source_indexes": indexes,
+        }
+        statements.add(statement)
+    missing = [kind for kind in _LEARNING_REQUIRED_ARTIFACT_KINDS if kind not in by_kind]
+    if missing:
+        raise employeelearning.LearningValidationError(
+            "进修结果未同时更新知识、技能、能力和工作流程"
+        )
+    return [by_kind[kind] for kind in _LEARNING_REQUIRED_ARTIFACT_KINDS]
+
+
+def _evidence_backed_learning_artifacts(employee: dict, sources: list[dict]) -> list[dict]:
+    """Project verified public evidence locally; no employee data leaves here."""
+    if len(sources) < 5:
+        raise employeelearning.LearningValidationError("公开证据不足，不能形成进修提案")
+
+    public_topics = [
+        str(value).strip() for value in employee.get("public_research_topics") or []
+        if str(value).strip()
+    ]
+    if public_topics and any(not source.get("semantic_topics") for source in sources):
+        sources = _learning_relevant_sources(employee, sources)
+
+    def label(index: int) -> str:
+        source = sources[index - 1]
+        if not re.sub(r"\s+", " ", str(source.get("excerpt") or "")).strip():
+            raise employeelearning.LearningValidationError("公开证据缺少可核验摘要")
+        # Untrusted page title/body never becomes an executable role prompt;
+        # reviewers inspect it through the separate immutable source ledger.
+        return f"来源{index}"
+
+    def evidence_payload(
+        indexes: list[int], required_topic: str | None = None,
+    ) -> tuple[list[str], list[dict]]:
+        rows = []
+        topics: set[str] = set()
+        for index in indexes:
+            source = sources[index - 1]
+            semantic_topics = [
+                str(value).strip() for value in source.get("semantic_topics") or []
+                if str(value).strip() in public_topics
+                and (required_topic is None or str(value).strip() == required_topic)
+            ]
+            if public_topics and not semantic_topics:
+                raise employeelearning.LearningValidationError(
+                    "公开证据未命中岗位专属研究主题"
+                )
+            if not semantic_topics:
+                semantic_topics = [str(
+                    (employee.get("decision_contract") or {}).get("decision")
+                    or employee.get("name") or "岗位专业更新"
+                ).strip()[:160]]
+            digest = str(source.get("content_sha256") or "").strip().lower()
+            if public_topics and not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise employeelearning.LearningValidationError("公开证据内容摘要无效")
+            rows.append({
+                "source_index": index,
+                "content_sha256": digest,
+                "semantic_topics": sorted(set(semantic_topics)),
+            })
+            topics.update(semantic_topics)
+        return sorted(topics), rows
+
+    job = str(employee.get("name") or "行业专属岗位").strip()[:80]
+    contract = employee.get("decision_contract")
+    contract = contract if isinstance(contract, dict) else {}
+    decision = str(
+        contract.get("decision") or employee.get("primary_decision") or job
+    ).strip()[:260]
+    workflow = [
+        str(value).strip()[:180]
+        for value in (
+            employee.get("workflow") or contract.get("workflow") or []
+        )
+        if str(value).strip()
+    ]
+    profile = employee.get("professional_profile")
+    profile = profile if isinstance(profile, dict) else {}
+    tracks = [
+        str(value).strip()[:120]
+        for value in profile.get("learning_tracks") or []
+        if str(value).strip()
+    ]
+    capabilities = [
+        str(value).strip()[:120]
+        for value in profile.get("capabilities") or []
+        if str(value).strip()
+    ]
+    outputs = [
+        str(value).strip()[:120]
+        for value in contract.get("outputs") or employee.get("outputs") or []
+        if str(value).strip()
+    ]
+    track = tracks[0] if tracks else decision
+    capability = capabilities[0] if capabilities else f"识别{decision}的证据缺口"
+    baseline_step = workflow[0] if workflow else f"核对{decision}的必需输入"
+    next_step = workflow[1] if len(workflow) > 1 else baseline_step
+    output = outputs[0] if outputs else "岗位决策证据包"
+    if public_topics:
+        eligible_pairs: list[tuple[list[int], str]] = []
+        for direct_index, source in enumerate(sources, start=1):
+            for topic_name, topic_gate in (
+                source.get("evidence_topics") or {}
+            ).items():
+                if not topic_gate.get("direct"):
+                    continue
+                for complement_index, complement in enumerate(sources, start=1):
+                    if complement_index == direct_index:
+                        continue
+                    complement_gate = (
+                        complement.get("evidence_topics") or {}
+                    ).get(topic_name, {})
+                    if complement_gate.get("application") or complement_gate.get("method"):
+                        pair = ([direct_index, complement_index], str(topic_name))
+                        if pair not in eligible_pairs:
+                            eligible_pairs.append(pair)
+        if not eligible_pairs:
+            raise learningevidence.EvidenceGateError(
+                "EVIDENCE_ARTIFACT_COMPLEMENT_MISSING",
+                "进修证据没有可供产物引用的同专题直接与互补来源",
+            )
+        selected_pairs = [
+            eligible_pairs[index % len(eligible_pairs)] for index in range(4)
+        ]
+        for indexes, _topic in selected_pairs:
+            learningevidence.validate_artifact_evidence(indexes, sources)
+    else:
+        # Compatibility for non-V4 pure projection callers; all real Schema55
+        # runs take the strict public-topic branch above.
+        selected_pairs = [
+            ([1, 2], ""), ([2, 3], ""), ([3, 4], ""), ([4, 5], ""),
+        ]
+    evidence_rows = [
+        evidence_payload(indexes, topic or None)
+        for indexes, topic in selected_pairs
+    ]
+    pair_indexes = [pair[0] for pair in selected_pairs]
+    rows = (
+        (
+            "knowledge", f"{track}规则知识更新",
+            f"来源支持的岗位专题“{' / '.join(evidence_rows[0][0])}”更新了"
+            f"“{decision}”的“{track}”知识基线；"
+            f"{label(pair_indexes[0][0])}与{label(pair_indexes[0][1])}"
+            "适用版本和证据冲突须在人工审批时逐项核对。",
+            {"decision_scope": decision, "learning_track": track,
+             "evidence_topics": evidence_rows[0][0],
+             "evidence_sources": evidence_rows[0][1]}, pair_indexes[0],
+        ),
+        (
+            "skill", f"{baseline_step}证据校准技能",
+            f"将“{' / '.join(evidence_rows[1][0])}”转化为岗位校准技能：执行"
+            f"“{baseline_step}”时，须把{label(pair_indexes[1][0])}与"
+            f"{label(pair_indexes[1][1])}按适用对象、"
+            f"发布日期和证据强度交叉校准，再进入“{next_step}”。",
+            {"method": "岗位步骤内多来源交叉校准", "baseline_step": baseline_step,
+             "evidence_topics": evidence_rows[1][0],
+             "evidence_sources": evidence_rows[1][1]}, pair_indexes[1],
+        ),
+        (
+            "capability", f"{capability}增强能力",
+            f"基于“{' / '.join(evidence_rows[2][0])}”为“{decision}”增强"
+            f"“{capability}”：用{label(pair_indexes[2][0])}和"
+            f"{label(pair_indexes[2][1])}识别"
+            f"规则变化、适用边界与来源冲突；冲突未消解时不得直接生成“{output}”。",
+            {"decision_scope": decision, "output_boundary": output,
+             "evidence_topics": evidence_rows[2][0],
+             "evidence_sources": evidence_rows[2][1]}, pair_indexes[2],
+        ),
+        (
+            "workflow", f"{job}证据门禁流程增量",
+            f"将“{' / '.join(evidence_rows[3][0])}”落到流程：在“{baseline_step}”与"
+            f"“{next_step}”之间增加岗位专属证据门禁："
+            f"核对{label(pair_indexes[3][0])}和{label(pair_indexes[3][1])}后，"
+            f"才可形成“{output}”的待审版本。",
+            {"step": (
+                f"完成“{baseline_step}”后，核验来源版本、适用对象和冲突项；"
+                f"证据满足再进入“{next_step}”，否则暂停“{output}”并提交人工复核"
+            ), "evidence_topics": evidence_rows[3][0],
+                "evidence_sources": evidence_rows[3][1]}, pair_indexes[3],
+        ),
+    )
+    return [
+        {
+            "kind": kind, "title": title, "statement": statement,
+            "payload": payload, "source_indexes": indexes,
+        }
+        for kind, title, statement, payload, indexes in rows
+    ]
+
+
+def _learning_gate_checkpoint(run_id: int, employee: dict) -> str:
+    """Freeze the exact release gate before any provider evidence is accepted."""
+    config = _learning_evidence_config()
+    # Binding the role here also detects a catalog/sidecar mismatch before a
+    # network result can become an approvable proposal.
+    learningevidence.search_aliases(employee, config=config, maximum=24)
+    run = employeelearning.get_run(int(run_id))
+    checkpoint = _learning_run_checkpoint(run)
+    frozen = str(checkpoint.get("evidence_gate_digest") or "")
+    if frozen and frozen != config.digest:
+        raise learningevidence.EvidenceGateError(
+            "EVIDENCE_GATE_DIGEST_DRIFT",
+            "进修运行冻结的证据门禁版本已漂移",
+        )
+    checkpoint["evidence_gate_digest"] = config.digest
+    employeelearning.checkpoint(int(run_id), checkpoint)
+    return config.digest
+
+
+def _verify_learning_gate_checkpoint(employee: dict, run: dict) -> str:
+    config = _learning_evidence_config()
+    learningevidence.search_aliases(employee, config=config, maximum=24)
+    frozen = str(
+        _learning_run_checkpoint(run).get("evidence_gate_digest") or ""
+    ).strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", frozen) or frozen != config.digest:
+        raise learningevidence.EvidenceGateError(
+            "EVIDENCE_GATE_DIGEST_DRIFT",
+            "审批使用的证据门禁版本与研究冻结版本不一致",
+        )
+    return frozen
+
+
+def _record_learning_evidence_gate_outcome(
+    run_id: int, error_code: str | None,
+) -> dict:
+    """Persist a batch-wide consecutive-zero-direct circuit breaker."""
+    with db.atomic():
+        run = employeelearning.get_run(int(run_id))
+        batch = employeelearning.get_batch(int(run["batch_id"]))
+        checkpoint = _learning_batch_json(batch.get("checkpoint_json"), {})
+        if error_code == "EVIDENCE_ZERO_DIRECT":
+            streak = int(checkpoint.get("evidence_zero_direct_streak") or 0) + 1
+        elif error_code is not None or str(run.get("status") or "") in {
+            employeelearning.RUN_AWAITING_APPROVAL,
+            employeelearning.RUN_ACTIVATED,
+        }:
+            streak = 0
+        else:
+            return batch
+        checkpoint["evidence_zero_direct_streak"] = min(streak, 3)
+        checkpoint["last_evidence_gate_error"] = error_code
+        now = time.time()
+        db.execute(
+            "UPDATE employee_learning_batch SET checkpoint_json=?,updated_at=? "
+            "WHERE id=?",
+            (
+                json.dumps(checkpoint, ensure_ascii=False, sort_keys=True),
+                now,
+                int(batch["id"]),
+            ),
+        )
+        queued = int((db.one(
+            "SELECT COUNT(*) AS n FROM employee_learning_run "
+            "WHERE batch_id=? AND status=?",
+            (int(batch["id"]), employeelearning.RUN_QUEUED),
+        ) or {}).get("n") or 0)
+        if streak >= 3 and queued > 0 and str(batch.get("status") or "") in {
+            employeelearning.BATCH_QUEUED,
+            employeelearning.BATCH_RUNNING,
+        }:
+            checkpoint["coordinator_generation"] = (
+                _learning_batch_coordinator_generation(batch) + 1
+            )
+            db.execute(
+                "UPDATE employee_learning_batch SET status=?,paused_reason=?,"
+                "checkpoint_json=?,updated_at=? WHERE id=? AND status IN (?,?)",
+                (
+                    employeelearning.BATCH_PAUSED,
+                    "连续3个岗位未检出同专题直接证据，已自动暂停",
+                    json.dumps(checkpoint, ensure_ascii=False, sort_keys=True),
+                    now,
+                    int(batch["id"]),
+                    employeelearning.BATCH_QUEUED,
+                    employeelearning.BATCH_RUNNING,
+                ),
+            )
+        return employeelearning.get_batch(int(batch["id"]))
+
+
+async def _employee_learning_research_worker(run_id: int, binding: dict) -> None:
+    """Capture real web evidence and leave an inert four-part proposal."""
+    employee = dict(binding["employee"])
+    try:
+        await _run_db_safely(_learning_gate_checkpoint, run_id, employee)
+        engine.broadcast({
+            "type": "employee_learning_update", "run_id": run_id,
+            "employee_idx": int(employee["idx"]), "status": "researching",
+        })
+        evidence = await providers.call_verified_learning_research(
+            _learning_public_search_brief(employee),
+            timeout=600,
+            token=f"employee-learning:{run_id}",
+            min_queries=3,
+            max_sources=12,
+        )
+        sources = evidence.get("sources") if isinstance(evidence, dict) else None
+        if not isinstance(sources, list):
+            sources = []
+        sources = _learning_relevant_sources(employee, sources)
+        # The role-specific projection happens locally.  Public page excerpts
+        # remain untrusted bounded strings and can only be cited by index; they
+        # are never interpreted as instructions and cannot add a URL/source.
+        artifacts = _evidence_backed_learning_artifacts(employee, sources)
+        await _run_db_safely(
+            employeelearning.research_run,
+            run_id,
+            lambda _context: {"sources": sources, "artifacts": artifacts},
+        )
+        await _run_db_safely(
+            _record_learning_evidence_gate_outcome, run_id, None,
+        )
+        try:
+            await _run_db_safely(_auto_activate_delivered_learning_run, int(run_id))
+        except BaseException as activate_exc:
+            # The immutable proposal is already durable.  A later operator
+            # retry can still use the explicit approve endpoint.
+            logging.getLogger("employeelearning").error(
+                "employee learning auto-activate failed run_id=%s error_type=%s",
+                run_id,
+                type(activate_exc).__name__,
+            )
+    except BaseException as exc:
+        # research_run owns the typed terminal transition and never persists
+        # raw provider errors or page content in an error field.
+        def fail_research(_context, error=exc):
+            raise error
+
+        try:
+            current = await _run_db_safely(employeelearning.get_run, run_id)
+            if current.get("status") == employeelearning.RUN_RESEARCHING:
+                await _run_db_safely(
+                    employeelearning.research_run, run_id, fail_research,
+                )
+        except BaseException:
+            pass
+        if isinstance(exc, learningevidence.EvidenceGateError):
+            try:
+                await _run_db_safely(
+                    _record_learning_evidence_gate_outcome,
+                    run_id,
+                    exc.code,
+                )
+            except BaseException:
+                pass
+        # ``research_run`` intentionally catches ordinary provider failures,
+        # but asyncio cancellation is a BaseException.  If it could not write
+        # a terminal state, force one through the cancellation-safe DB drain
+        # so the coordinator and immutable identity owner cannot hang forever.
+        try:
+            current = await _run_db_safely(employeelearning.get_run, run_id)
+            if current.get("status") == employeelearning.RUN_RESEARCHING:
+                await _terminalize_learning_run_safely(
+                    run_id,
+                    (
+                        "RESEARCH_CANCELLED"
+                        if isinstance(exc, asyncio.CancelledError)
+                        else "RESEARCH_FAILED"
+                    ),
+                )
+        except BaseException:
+            pass
+        logging.getLogger("employeelearning").error(
+            "employee learning research failed run_id=%s error_type=%s",
+            run_id, type(exc).__name__,
+        )
+    finally:
+        try:
+            current = await _run_db_safely(employeelearning.get_run, run_id)
+            status = str(current.get("status") or "failed")
+        except BaseException:
+            current = {}
+            status = "failed"
+        billing_op = _learning_checkpoint_billing_op(current)
+        if billing_op:
+            try:
+                if status in {
+                    employeelearning.RUN_AWAITING_APPROVAL,
+                    employeelearning.RUN_ACTIVATED,
+                    employeelearning.RUN_REJECTED,
+                    employeelearning.RUN_STALE,
+                }:
+                    await _run_db_safely(billing.complete_operation, billing_op)
+                else:
+                    await _settle_failed_learning_run_safely(
+                        run_id,
+                        billing_op,
+                        "员工证据进修失败自动退回",
+                        "RESEARCH_FAILED",
+                    )
+            except BaseException as settle_exc:
+                logging.getLogger("employeelearning").error(
+                    "employee learning settlement failed run_id=%s error_type=%s",
+                    run_id, type(settle_exc).__name__,
+                )
+        try:
+            engine.broadcast({
+                "type": "employee_learning_update", "run_id": run_id,
+                "employee_idx": int(employee["idx"]), "status": status,
+            })
+        except BaseException as notify_exc:
+            # Notification is observability only.  A completed immutable
+            # proposal and its succeeded billing operation must never be
+            # reclassified/refunded because a websocket listener failed.
+            logging.getLogger("employeelearning").warning(
+                "employee learning update broadcast failed run_id=%s "
+                "error_type=%s",
+                run_id,
+                type(notify_exc).__name__,
+            )
+
+
+def _learning_run_public(run: dict) -> dict:
+    run_id = int(run["id"])
+    checkpoint = _learning_run_checkpoint(run)
+    gate_digest = str(checkpoint.get("evidence_gate_digest") or "").lower()
+    gate_status = "missing"
+    if re.fullmatch(r"[0-9a-f]{64}", gate_digest):
+        try:
+            gate_status = (
+                "verified"
+                if gate_digest == _learning_evidence_config().digest
+                else "drift"
+            )
+        except employeelearning.LearningValidationError:
+            gate_status = "drift"
+    sources = []
+    for row in db.q(
+        "SELECT * FROM employee_learning_source WHERE run_id=? ORDER BY id",
+        (run_id,),
+    ):
+        sources.append({
+            "id": int(row["id"]),
+            "url": str(row.get("canonical_url") or row.get("url") or ""),
+            "source_url": str(row.get("canonical_url") or row.get("url") or ""),
+            "canonical_url": str(row.get("canonical_url") or row.get("url") or ""),
+            "title": str(row.get("title") or ""),
+            "source_title": str(row.get("title") or ""),
+            "publisher": str(row.get("publisher") or ""),
+            "authority_level": str(
+                row.get("authority_level") or row.get("source_level") or ""
+            ),
+            "published_at": row.get("published_at"),
+            "fetched_at": row.get("fetched_at"),
+            "retrieved_at": row.get("fetched_at"),
+            "content_sha256": str(row.get("content_sha256") or ""),
+            "excerpt": str(row.get("excerpt") or ""),
+        })
+    artifacts = []
+    for row in db.q(
+        "SELECT * FROM employee_learning_artifact WHERE run_id=? ORDER BY id",
+        (run_id,),
+    ):
+        artifacts.append({
+            "id": int(row["id"]),
+            "kind": str(row.get("kind") or row.get("artifact_type") or ""),
+            "title": str(row.get("title") or row.get("claim_text") or ""),
+            "statement": str(row.get("statement") or row.get("claim_text") or ""),
+            "payload": db.jloads(
+                row.get("payload_json") or row.get("delta_json"), {}
+            ),
+            "source_ids": db.jloads(row.get("source_ids_json"), []),
+            "status": str(row.get("status") or "proposed"),
+            "reviewer_id": (
+                int(row["reviewer_id"])
+                if row.get("reviewer_id") is not None else None
+            ),
+            "reviewed_at": row.get("reviewed_at"),
+        })
+    proposal = run.get("proposal_json")
+    if isinstance(proposal, str):
+        proposal = db.jloads(proposal, {})
+    return {
+        "id": run_id,
+        "batch_id": int(run["batch_id"]),
+        "employee_idx": _learning_run_idx(run),
+        "identity_ref": str(run.get("identity_ref") or ""),
+        "base_config_revision": int(
+            run.get("base_config_revision") or run.get("config_revision") or 0
+        ),
+        "base_config_sha256": str(run.get("base_config_sha256") or ""),
+        "bundle_sha256": _learning_run_bundle_sha256(run),
+        "status": str(run.get("status") or ""),
+        "high_risk": bool(run.get("high_risk")),
+        "budget_points": float(run.get("budget_points") or 0),
+        "spent_points": float(run.get("spent_points") or 0),
+        "error_code": run.get("error_code"),
+        "evidence_gate_status": gate_status,
+        "evidence_gate_digest_prefix": (
+            gate_digest[:12]
+            if re.fullmatch(r"[0-9a-f]{64}", gate_digest) else None
+        ),
+        "reviewer_id": (
+            int(run["reviewer_id"])
+            if run.get("reviewer_id") is not None else None
+        ),
+        "reviewed_at": run.get("reviewed_at"),
+        "proposal": proposal if isinstance(proposal, dict) else {},
+        "sources": sources,
+        "artifacts": artifacts,
+        "created_at": run.get("created_at"),
+        "updated_at": run.get("updated_at"),
+    }
+
+
+def _employee_learning_history(identity_ref: str, *, limit: int = 5) -> dict:
+    """Return a bounded, tenant-scoped ledger for one immutable role."""
+    role_ref = str(identity_ref or "").strip()
+    if re.fullmatch(r"[0-9a-f]{64}", role_ref) is None:
+        return {"runs": [], "activated": 0, "researching": False}
+    rows = db.q(
+        "SELECT r.id FROM employee_learning_run r "
+        "JOIN employee_learning_batch b ON b.id=r.batch_id "
+        "WHERE b.tenant_id=? AND r.identity_ref=? "
+        "ORDER BY r.id DESC LIMIT ?",
+        (TEN(), role_ref, max(1, min(int(limit), 5))),
+    )
+    runs = []
+    for row in rows:
+        try:
+            runs.append(_learning_run_public(
+                employeelearning.get_run(int(row["id"])),
+            ))
+        except (employeelearning.LearningError, HTTPException, ValueError, TypeError):
+            # An incomplete pre-schema55 record is not an authorizable
+            # proposal and must not be repaired from today's current config.
+            continue
+    activated = int((db.one(
+        "SELECT COUNT(*) AS n FROM employee_learning_run r "
+        "JOIN employee_learning_batch b ON b.id=r.batch_id "
+        "WHERE b.tenant_id=? AND r.identity_ref=? AND r.status='activated'",
+        (TEN(), role_ref),
+    ) or {}).get("n") or 0)
+    researching = any(
+        run.get("status") in {
+            employeelearning.RUN_QUEUED, employeelearning.RUN_RESEARCHING,
+        }
+        for run in runs
+    )
+    return {"runs": runs, "activated": activated, "researching": researching}
+
+
+_LEARNING_BATCH_POINTS_PER_EMPLOYEE = 3.0
+_LEARNING_BATCH_MAX_TARGETS = 360
+_LEARNING_BATCH_COORDINATORS: dict[int, asyncio.Task] = {}
+_LEARNING_BATCH_ACTIVE_RUNS: set[int] = set()
+_LEARNING_BATCH_TERMINAL_RUNS = {
+    employeelearning.RUN_ACTIVATED,
+    employeelearning.RUN_REJECTED,
+    employeelearning.RUN_STALE,
+    employeelearning.RUN_EXPIRED,
+    employeelearning.RUN_CANCELLED,
+    employeelearning.RUN_FAILED,
+    employeelearning.RUN_EVIDENCE_INSUFFICIENT,
+}
+
+
+def _learning_batch_json(value, default):
+    if isinstance(value, dict):
+        return dict(value)
+    parsed = db.jloads(value, default)
+    return dict(parsed) if isinstance(parsed, dict) else dict(default)
+
+
+def _learning_batch_metadata(batch: dict) -> dict:
+    return _learning_batch_json(batch.get("metadata_json"), {})
+
+
+def _learning_batch_v4_employees() -> list[dict]:
+    rows = []
+    for department in departments.list_depts():
+        for raw in department.get("employees") or []:
+            employee = {
+                **raw,
+                "dept_key": str(raw.get("dept_key") or department.get("key") or ""),
+                "dept_name": str(raw.get("dept_name") or department.get("name") or ""),
+            }
+            if (
+                str(employee.get("catalog_version") or "")
+                == departments.DECISION_V4_CATALOG_VERSION
+            ):
+                rows.append(employee)
+    rows.sort(key=lambda item: int(item["idx"]))
+    return rows
+
+
+def _learning_batch_request_key(body: dict) -> str:
+    value = str(body.get("request_key") or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,190}", value) is None:
+        raise HTTPException(400, "批量进修请求幂等键无效")
+    return value
+
+
+def _learning_batch_selection(body: dict) -> tuple[list[dict], dict]:
+    if not isinstance(body, dict):
+        raise HTTPException(400, "批量进修请求格式无效")
+    all_v4 = _learning_batch_v4_employees()
+    by_idx = {int(employee["idx"]): employee for employee in all_v4}
+    raw_idxs = body.get("idxs")
+    has_explicit_idxs = "idxs" in body
+    industry_key = str(body.get("industry_key") or "").strip()
+    if has_explicit_idxs and industry_key:
+        raise HTTPException(400, "行业范围与员工编号范围只能选择一种")
+    if has_explicit_idxs:
+        if not isinstance(raw_idxs, list) or not raw_idxs:
+            raise HTTPException(400, "idxs 必须是非空员工编号数组")
+        if len(raw_idxs) > _LEARNING_BATCH_MAX_TARGETS:
+            raise HTTPException(400, "单批最多进修 360 名员工")
+        idxs = []
+        for value in raw_idxs:
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise HTTPException(400, "idxs 含无效员工编号")
+            if value not in idxs:
+                idxs.append(value)
+        missing = [value for value in idxs if value not in by_idx]
+        if missing:
+            raise HTTPException(409, "批量进修仅适用于当前 V4 行业专属员工")
+        selected = [by_idx[value] for value in sorted(idxs)]
+        scope = {"mode": "employees", "idxs": sorted(idxs), "industry_key": None}
+    elif industry_key:
+        if re.fullmatch(r"[a-z][a-z0-9_]{1,39}", industry_key) is None:
+            raise HTTPException(400, "行业范围无效")
+        selected = [
+            employee for employee in all_v4
+            if str(employee.get("dept_key") or "") == industry_key
+        ]
+        if not selected:
+            raise HTTPException(404, "当前 V4 员工目录中没有这个行业")
+        scope = {"mode": "industry", "idxs": [], "industry_key": industry_key}
+    else:
+        selected = all_v4
+        if len(selected) != _LEARNING_BATCH_MAX_TARGETS:
+            raise HTTPException(503, "当前 V4 360 人目录不完整，不能创建全员进修批次")
+        scope = {"mode": "all_v4", "idxs": [], "industry_key": None}
+    return selected, scope
+
+
+def _learning_batch_preview_contract(body: dict, *, tenant_id: int) -> dict:
+    if not isinstance(body, dict):
+        raise HTTPException(400, "批量进修请求格式无效")
+    request_key = _learning_batch_request_key(body)
+    try:
+        configured_points = float(
+            (billing.prices().get("learn") or {}).get("points")
+        )
+    except (TypeError, ValueError):
+        configured_points = -1
+    if (
+        not math.isfinite(configured_points)
+        or abs(configured_points - _LEARNING_BATCH_POINTS_PER_EMPLOYEE) > 1e-9
+    ):
+        raise HTTPException(503, "进修计费单价不是每人 3 点，批次已安全拦截")
+    employees_selected, scope = _learning_batch_selection(body)
+    raw_concurrency = body.get("max_concurrency", 2)
+    if (
+        isinstance(raw_concurrency, bool)
+        or not isinstance(raw_concurrency, int)
+        or not 1 <= raw_concurrency <= 8
+    ):
+        raise HTTPException(400, "最大并发必须是 1 到 8 的整数")
+    target_rows = []
+    industry_counts: dict[str, int] = {}
+    for employee in employees_selected:
+        config = employees.get_config(int(employee["idx"]))
+        identity = _employee_public_contract(employee, config=config)
+        if not identity.get("can_learn"):
+            raise HTTPException(
+                409,
+                f"员工 {int(employee['idx'])} 当前不可进修，请先恢复在岗状态",
+            )
+        frozen = {
+            "idx": int(employee["idx"]),
+            "person": str(employee.get("person") or ""),
+            "name": str(employee.get("name") or ""),
+            "industry_key": str(employee.get("dept_key") or ""),
+            "high_risk": _learning_high_risk(employee),
+            "identity_ref": str(config.get("identity_ref") or ""),
+            "config_revision": int(config.get("config_revision") or 0),
+            "config_sha256": str(config.get("config_sha256") or ""),
+            "bundle_sha256": str(config.get("bundle_sha256") or ""),
+        }
+        if (
+            frozen["config_revision"] < 1
+            or any(
+                re.fullmatch(r"[0-9a-f]{64}", frozen[field]) is None
+                for field in ("identity_ref", "config_sha256", "bundle_sha256")
+            )
+        ):
+            raise HTTPException(409, "员工岗位四元组不完整，不能进入批量进修")
+        target_rows.append(frozen)
+        industry_counts[frozen["industry_key"]] = (
+            industry_counts.get(frozen["industry_key"], 0) + 1
+        )
+    target_count = len(target_rows)
+    required_budget = target_count * _LEARNING_BATCH_POINTS_PER_EMPLOYEE
+    # Tenant 1 is the platform headquarters and billing.start_operation has
+    # always treated it as plan-included. Keep the research-unit cap explicit
+    # while reporting the actual wallet debit truthfully to the boss.
+    billing_mode = "platform_included" if int(tenant_id) == 1 else "tenant_points"
+    wallet_charge_points = 0.0 if billing_mode == "platform_included" else required_budget
+    raw_budget = body.get("budget_cap_points", required_budget)
+    if isinstance(raw_budget, bool):
+        raise HTTPException(400, "批量进修预算上限无效")
+    try:
+        budget_cap = float(raw_budget)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "批量进修预算上限无效") from exc
+    if (
+        not math.isfinite(budget_cap)
+        or abs(budget_cap - required_budget) > 1e-9
+    ):
+        raise HTTPException(
+            400,
+            f"批量进修预算必须严格等于每人 3 点，共 {required_budget:g} 点",
+        )
+    target_digest = hashlib.sha256(json.dumps(
+        [
+            {
+                key: row[key]
+                for key in (
+                    "idx", "industry_key", "identity_ref", "config_revision",
+                    "config_sha256", "bundle_sha256", "high_risk",
+                )
+            }
+            for row in target_rows
+        ],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    token_payload = {
+        "schema": "schema55-learning-batch-preview-v1",
+        "tenant_id": int(tenant_id),
+        "request_key": request_key,
+        "scope": scope,
+        "target_count": target_count,
+        "target_digest": target_digest,
+        "budget_cap_points": required_budget,
+        "wallet_charge_points": wallet_charge_points,
+        "billing_mode": billing_mode,
+        "max_concurrency": raw_concurrency,
+        "auto_approve": False,
+    }
+    preview_token = hashlib.sha256(json.dumps(
+        token_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    return {
+        **token_payload,
+        "preview_token": preview_token,
+        "points_per_employee": _LEARNING_BATCH_POINTS_PER_EMPLOYEE,
+        "industry_counts": dict(sorted(industry_counts.items())),
+        "target_sample": [
+            {
+                key: row[key]
+                for key in (
+                    "idx", "person", "name", "industry_key",
+                    "config_revision", "identity_ref", "config_sha256",
+                    "bundle_sha256",
+                )
+            }
+            for row in target_rows[:8]
+        ],
+        "_targets": target_rows,
+    }
+
+
+def _learning_batch_public_preview(preview: dict) -> dict:
+    return {key: value for key, value in preview.items() if key != "_targets"}
+
+
+def _learning_owned_batch(batch_id: int) -> dict:
+    try:
+        batch = employeelearning.get_batch(int(batch_id))
+    except (TypeError, ValueError, employeelearning.LearningError) as exc:
+        raise HTTPException(404, "进修批次不存在") from exc
+    try:
+        tenant_id = int(batch.get("tenant_id"))
+    except (TypeError, ValueError):
+        tenant_id = -1
+    if tenant_id != TEN():
+        raise HTTPException(404, "进修批次不存在")
+    if str(
+        _learning_batch_metadata(batch).get("schema") or ""
+    ) != "schema55-learning-batch-v1":
+        raise HTTPException(404, "进修批次不存在")
+    return batch
+
+
+def _learning_batch_has_live_coordinator(batch_id: int) -> bool:
+    task = _LEARNING_BATCH_COORDINATORS.get(int(batch_id))
+    return bool(task is not None and not task.done())
+
+
+def _learning_run_refundable_without_delivery(run: dict) -> bool:
+    status = str(run.get("status") or "")
+    if status in {
+        employeelearning.RUN_FAILED,
+        employeelearning.RUN_CANCELLED,
+        employeelearning.RUN_EVIDENCE_INSUFFICIENT,
+    }:
+        return True
+    return (
+        status == employeelearning.RUN_EXPIRED
+        and not _learning_run_has_durable_proposal_delivery(run)
+    )
+
+
+def _reconcile_learning_batch_for_owner(batch_id: int, tenant_id: int) -> dict:
+    """Converge one explicitly tenant-owned batch without starting network work.
+
+    This is intentionally lazy and scope-bound.  Startup only reports orphaned
+    queued manifests; a named boss's list/detail/resume request authorizes
+    reconciliation of that tenant's selected batch, never every tenant's
+    historical learning rows.
+    """
+    batch_id = int(batch_id)
+    tenant_id = int(tenant_id)
+    live_coordinator = _learning_batch_has_live_coordinator(batch_id)
+    with db.atomic():
+        batch = employeelearning.get_batch(batch_id)
+        if int(batch.get("tenant_id") or -1) != tenant_id:
+            raise HTTPException(404, "进修批次不存在")
+        if str(
+            _learning_batch_metadata(batch).get("schema") or ""
+        ) != "schema55-learning-batch-v1":
+            raise HTTPException(404, "进修批次不存在")
+
+        _expire_due_learning_batch_runs(batch_id)
+        runs = employeelearning.list_batch_runs(batch_id)
+        for run in runs:
+            run_id = int(run["id"])
+            status = str(run.get("status") or "")
+            op_key = _learning_checkpoint_billing_op(run) or (
+                _learning_billing_op_key(tenant_id, run_id)
+            )
+            operation = db.one(
+                "SELECT status FROM billing_operation "
+                "WHERE op_key=? AND tenant_id=? AND action='learn'",
+                (op_key, tenant_id),
+            )
+            operation_status = str((operation or {}).get("status") or "")
+
+            if (
+                status == employeelearning.RUN_RESEARCHING
+                and run_id not in _LEARNING_BATCH_ACTIVE_RUNS
+            ):
+                _settle_failed_learning_run_atomically(
+                    run_id,
+                    op_key if operation else "",
+                    "无执行器的进修运行自动退回",
+                    "ORPHANED_RESEARCH_WORKER",
+                )
+                continue
+            if (
+                float(run.get("spent_points") or 0) > 0
+                and _learning_run_refundable_without_delivery(run)
+                and operation_status != "succeeded"
+            ):
+                _settle_failed_learning_run_atomically(
+                    run_id,
+                    op_key if operation_status == "charged" else "",
+                    "未交付的进修运行自动退回",
+                    "REFUNDABLE_TERMINAL_RECONCILE",
+                )
+
+        employeelearning._refresh_batch_progress(batch_id)
+        batch = employeelearning.get_batch(batch_id)
+        runs = employeelearning.list_batch_runs(batch_id)
+        queued = any(
+            run.get("status") == employeelearning.RUN_QUEUED for run in runs
+        )
+        if (
+            queued
+            and not live_coordinator
+            and str(batch.get("status") or "") in {
+                employeelearning.BATCH_QUEUED,
+                employeelearning.BATCH_RUNNING,
+            }
+        ):
+            db.execute(
+                "UPDATE employee_learning_batch "
+                "SET status=?,paused_reason=?,updated_at=? WHERE id=? "
+                "AND tenant_id=? AND status IN (?,?)",
+                (
+                    employeelearning.BATCH_PAUSED,
+                    "服务重启后需老板显式恢复批次",
+                    time.time(),
+                    batch_id,
+                    tenant_id,
+                    employeelearning.BATCH_QUEUED,
+                    employeelearning.BATCH_RUNNING,
+                ),
+            )
+        return employeelearning.get_batch(batch_id)
+
+
+def _learning_batch_compact_run(run: dict) -> dict:
+    checkpoint = _learning_run_checkpoint(run)
+    bundle_hash = str(checkpoint.get("expected_bundle_sha256") or "")
+    bundle = None
+    if re.fullmatch(r"[0-9a-f]{64}", bundle_hash):
+        bundle = db.get_employee_role_bundle(
+            str(run.get("identity_ref") or ""),
+            int(run.get("base_config_revision") or run.get("config_revision") or 0),
+            str(run.get("base_config_sha256") or ""),
+            bundle_hash,
+        )
+    return {
+        "id": int(run["id"]),
+        "employee_idx": _learning_run_idx(run),
+        "person": str((bundle or {}).get("person_snapshot") or ""),
+        "name": str((bundle or {}).get("employee_name_snapshot") or ""),
+        "industry_key": str(run.get("industry_key") or ""),
+        "status": str(run.get("status") or ""),
+        "identity_ref": str(run.get("identity_ref") or ""),
+        "config_revision": int(
+            run.get("base_config_revision") or run.get("config_revision") or 0
+        ),
+        "config_sha256": str(run.get("base_config_sha256") or ""),
+        "bundle_sha256": bundle_hash,
+        "budget_points": float(run.get("budget_points") or 0),
+        "spent_points": float(run.get("spent_points") or 0),
+        "error_code": run.get("error_code"),
+        "updated_at": run.get("updated_at"),
+    }
+
+
+def _learning_batch_manifest_digest(runs: list[dict]) -> str | None:
+    targets = []
+    for run in sorted(runs, key=lambda row: _learning_run_idx(row)):
+        checkpoint = _learning_run_checkpoint(run)
+        frozen = {
+            "idx": _learning_run_idx(run),
+            "industry_key": str(run.get("industry_key") or ""),
+            "identity_ref": str(run.get("identity_ref") or ""),
+            "config_revision": int(
+                run.get("base_config_revision")
+                or run.get("config_revision") or 0
+            ),
+            "config_sha256": str(run.get("base_config_sha256") or ""),
+            "bundle_sha256": str(
+                checkpoint.get("expected_bundle_sha256") or ""
+            ),
+            "high_risk": bool(run.get("high_risk")),
+        }
+        if (
+            frozen["config_revision"] <= 0
+            or any(
+                re.fullmatch(r"[0-9a-f]{64}", frozen[field]) is None
+                for field in (
+                    "identity_ref", "config_sha256", "bundle_sha256",
+                )
+            )
+        ):
+            return None
+        targets.append(frozen)
+    return hashlib.sha256(json.dumps(
+        targets,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+
+
+def _learning_batch_actual_wallet_debit(
+    batch: dict, runs: list[dict],
+) -> tuple[float, bool]:
+    """Return the current net durable debit, never the planned campaign cap."""
+    if not runs:
+        return 0.0, True
+    tenant_id = int(batch.get("tenant_id") or 0)
+    op_keys = [
+        _learning_billing_op_key(tenant_id, int(run["id"])) for run in runs
+    ]
+    placeholders = ",".join("?" for _ in op_keys)
+    rows = db.q(
+        "SELECT op_key,points,status FROM billing_operation "
+        "WHERE tenant_id=? AND action='learn' "
+        f"AND op_key IN ({placeholders})",
+        (tenant_id, *op_keys),
+    )
+    expected_points = 0.0 if tenant_id == 1 else _LEARNING_BATCH_POINTS_PER_EMPLOYEE
+    valid = len(rows) <= len(op_keys)
+    total = 0.0
+    for row in rows:
+        try:
+            points = float(row.get("points"))
+        except (TypeError, ValueError):
+            valid = False
+            continue
+        status = str(row.get("status") or "")
+        if (
+            row.get("op_key") not in op_keys
+            or status not in {"pending", "charged", "succeeded", "refunded"}
+            or not math.isfinite(points)
+            or abs(points - expected_points) > 1e-9
+        ):
+            valid = False
+        if status in {"charged", "succeeded"} and math.isfinite(points):
+            total += points
+    return total, valid
+
+
+def _learning_batch_public(batch: dict, *, include_runs: bool = True) -> dict:
+    _expire_due_learning_batch_runs(int(batch["id"]))
+    batch = employeelearning.get_batch(int(batch["id"]))
+    runs = employeelearning.list_batch_runs(int(batch["id"]))
+    counts: dict[str, int] = {}
+    for run in runs:
+        status = str(run.get("status") or "")
+        counts[status] = counts.get(status, 0) + 1
+    queued = counts.get(employeelearning.RUN_QUEUED, 0)
+    researching = counts.get(employeelearning.RUN_RESEARCHING, 0)
+    pending_review = counts.get(employeelearning.RUN_AWAITING_APPROVAL, 0)
+    failed = sum(counts.get(status, 0) for status in {
+        employeelearning.RUN_FAILED,
+        employeelearning.RUN_EVIDENCE_INSUFFICIENT,
+        employeelearning.RUN_STALE,
+        employeelearning.RUN_EXPIRED,
+        employeelearning.RUN_CANCELLED,
+    })
+    completed = sum(counts.get(status, 0) for status in _LEARNING_BATCH_TERMINAL_RUNS)
+    metadata = _learning_batch_metadata(batch)
+    billing_mode_value = str(metadata.get("billing_mode") or "").strip()
+    target_digest_value = str(metadata.get("target_digest") or "").strip()
+    try:
+        wallet_charge_value = float(metadata["wallet_charge_points"])
+        points_per_employee_value = float(metadata["points_per_employee"])
+    except (KeyError, TypeError, ValueError):
+        wallet_charge_value = -1.0
+        points_per_employee_value = -1.0
+    try:
+        frozen_target_count = int(metadata["target_count"])
+    except (KeyError, TypeError, ValueError):
+        frozen_target_count = -1
+    manifest_digest = _learning_batch_manifest_digest(runs)
+    batch_cap = float(
+        batch.get("budget_cap_points") or batch.get("budget_points") or 0
+    )
+    expected_planned_wallet = (
+        0.0
+        if billing_mode_value == "platform_included"
+        else points_per_employee_value * len(runs)
+    )
+    actual_wallet_debit, actual_ledger_valid = (
+        _learning_batch_actual_wallet_debit(batch, runs)
+    )
+    billing_proof_complete = (
+        str(metadata.get("schema") or "") == "schema55-learning-batch-v1"
+        and billing_mode_value in {"platform_included", "tenant_points"}
+        and wallet_charge_value >= 0
+        and points_per_employee_value > 0
+        and re.fullmatch(r"[0-9a-f]{64}", target_digest_value) is not None
+        and frozen_target_count == len(runs)
+        and target_digest_value == manifest_digest
+        and abs(batch_cap - points_per_employee_value * len(runs)) <= 1e-9
+        and abs(wallet_charge_value - expected_planned_wallet) <= 1e-9
+        and actual_ledger_valid
+        and actual_wallet_debit <= wallet_charge_value + 1e-9
+    )
+    if billing_proof_complete:
+        billing_mode = billing_mode_value
+        planned_wallet_charge_points = wallet_charge_value
+        wallet_charge_points = wallet_charge_value
+        points_per_employee = points_per_employee_value
+        target_digest = target_digest_value
+    else:
+        # Historical/foreign rows without the frozen proof must never infer a
+        # zero wallet debit from tenant id or current run count.
+        billing_mode = None
+        wallet_charge_points = None
+        planned_wallet_charge_points = None
+        points_per_employee = None
+        target_digest = None
+    stored_status = str(batch.get("status") or employeelearning.BATCH_QUEUED)
+    if stored_status == employeelearning.BATCH_PAUSED:
+        display_status = employeelearning.BATCH_PAUSED
+    elif queued or researching:
+        display_status = (
+            employeelearning.BATCH_RUNNING
+            if researching else employeelearning.BATCH_QUEUED
+        )
+    elif pending_review:
+        display_status = "awaiting_approval"
+    elif runs and completed == len(runs):
+        display_status = employeelearning.BATCH_COMPLETED
+    else:
+        display_status = stored_status
+    result = {
+        "id": int(batch["id"]),
+        "request_key": str(
+            batch.get("request_key") or batch.get("idempotency_key") or ""
+        ),
+        "status": display_status,
+        "stored_status": stored_status,
+        "target_count": len(runs),
+        "budget_cap_points": float(
+            batch.get("budget_cap_points") or batch.get("budget_points") or 0
+        ),
+        "spent_points": float(batch.get("spent_points") or 0),
+        "max_concurrency": int(metadata.get("max_concurrency") or 1),
+        "scope": metadata.get("scope") or {},
+        "billing_mode": billing_mode,
+        "wallet_charge_points": wallet_charge_points,
+        "planned_wallet_charge_points": planned_wallet_charge_points,
+        "actual_wallet_debit_points": actual_wallet_debit,
+        "actual_wallet_debit_proof_status": (
+            "verified" if billing_proof_complete else "proof_missing"
+        ),
+        "points_per_employee": points_per_employee,
+        "target_digest": target_digest,
+        "billing_proof_status": (
+            "verified" if billing_proof_complete else "proof_missing"
+        ),
+        "auto_approve": False,
+        "counts": {
+            "queued": queued,
+            "researching": researching,
+            "completed": completed,
+            "failed": failed,
+            "pending_review": pending_review,
+            "activated": counts.get(employeelearning.RUN_ACTIVATED, 0),
+            "rejected": counts.get(employeelearning.RUN_REJECTED, 0),
+        },
+        "can_pause": bool(queued) and stored_status not in {
+            employeelearning.BATCH_PAUSED,
+            employeelearning.BATCH_COMPLETED,
+            employeelearning.BATCH_CANCELLED,
+        },
+        "can_resume": bool(queued) and (
+            stored_status == employeelearning.BATCH_PAUSED
+            or int(batch["id"]) not in _LEARNING_BATCH_COORDINATORS
+        ),
+        "paused_reason": batch.get("paused_reason"),
+        "created_at": batch.get("created_at"),
+        "updated_at": batch.get("updated_at"),
+    }
+    if include_runs:
+        result["runs"] = [_learning_batch_compact_run(run) for run in runs]
+    return result
+
+
+def _materialize_learning_batch_manifest(preview: dict, *, actor_id: int) -> dict:
+    metadata = {
+        "schema": "schema55-learning-batch-v1",
+        "preview_token": preview["preview_token"],
+        "target_digest": preview["target_digest"],
+        "target_count": preview["target_count"],
+        "scope": preview["scope"],
+        "max_concurrency": preview["max_concurrency"],
+        "points_per_employee": _LEARNING_BATCH_POINTS_PER_EMPLOYEE,
+        "billing_mode": preview["billing_mode"],
+        "wallet_charge_points": preview["wallet_charge_points"],
+        "auto_approve": False,
+    }
+    batch = employeelearning.create_batch(
+        preview["request_key"],
+        budget_cap_points=preview["budget_cap_points"],
+        tenant_id=preview["tenant_id"],
+    )
+    existing_metadata = _learning_batch_metadata(batch)
+    if existing_metadata and existing_metadata.get("schema"):
+        if (
+            str(existing_metadata.get("preview_token") or "")
+            != preview["preview_token"]
+        ):
+            raise employeelearning.LearningValidationError(
+                "相同幂等键不能改变员工范围、预算或并发"
+            )
+    else:
+        db.execute(
+            "UPDATE employee_learning_batch SET metadata_json=?,max_runs=?,"
+            "created_by=?,checkpoint_json=?,updated_at=? WHERE id=?",
+            (
+                json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                int(preview["target_count"]),
+                int(actor_id) or None,
+                json.dumps({"stage": "preparing"}, ensure_ascii=False),
+                time.time(),
+                int(batch["id"]),
+            ),
+        )
+    for target in preview["_targets"]:
+        run_key = "batch-run-" + hashlib.sha256(
+            (
+                f"{preview['tenant_id']}:{preview['request_key']}:"
+                f"{target['idx']}:{target['identity_ref']}"
+            ).encode("utf-8")
+        ).hexdigest()
+        run = employeelearning.create_run(
+            int(batch["id"]),
+            run_key,
+            employee_idx=int(target["idx"]),
+            identity_ref=target["identity_ref"],
+            base_config_revision=int(target["config_revision"]),
+            base_config_sha256=target["config_sha256"],
+            industry_key=target["industry_key"],
+            budget_points=_LEARNING_BATCH_POINTS_PER_EMPLOYEE,
+            high_risk=bool(target["high_risk"]),
+            expires_at=time.time() + 7 * 24 * 3600,
+        )
+        if (
+            int(run.get("batch_id") or 0) != int(batch["id"])
+            or int(run.get("employee_idx") or 0) != int(target["idx"])
+            or str(run.get("identity_ref") or "") != target["identity_ref"]
+            or int(run.get("base_config_revision") or 0)
+            != int(target["config_revision"])
+            or str(run.get("base_config_sha256") or "")
+            != target["config_sha256"]
+            or abs(float(run.get("budget_points") or 0) - 3.0) > 1e-9
+        ):
+            raise employeelearning.LearningValidationError(
+                "批次运行幂等记录与预览四元组不一致"
+            )
+        checkpoint = _learning_run_checkpoint(run)
+        expected = {
+            "identity_ref": target["identity_ref"],
+            "config_revision": int(target["config_revision"]),
+            "config_sha256": target["config_sha256"],
+            "expected_bundle_sha256": target["bundle_sha256"],
+        }
+        if checkpoint:
+            for key, value in expected.items():
+                if checkpoint.get(key) not in (None, "", value):
+                    raise employeelearning.LearningValidationError(
+                        "批次运行冻结四元组已漂移"
+                    )
+        if run.get("status") == employeelearning.RUN_QUEUED:
+            employeelearning.checkpoint(
+                int(run["id"]),
+                {
+                    **checkpoint,
+                    **expected,
+                    "stage": str(checkpoint.get("stage") or "queued"),
+                },
+            )
+    manifest_count = len(employeelearning.list_batch_runs(int(batch["id"])))
+    if manifest_count != int(preview["target_count"]):
+        raise employeelearning.LearningValidationError("批次员工清单不完整")
+    latest_batch = employeelearning.get_batch(int(batch["id"]))
+    batch_checkpoint = _learning_batch_json(
+        latest_batch.get("checkpoint_json"), {},
+    )
+    batch_checkpoint.update({
+        "stage": "queued",
+        "manifest_count": manifest_count,
+    })
+    db.execute(
+        "UPDATE employee_learning_batch SET checkpoint_json=?,updated_at=? WHERE id=?",
+        (
+            json.dumps(batch_checkpoint, ensure_ascii=False, sort_keys=True),
+            time.time(),
+            int(batch["id"]),
+        ),
+    )
+    return employeelearning.get_batch(int(batch["id"]))
+
+
+def _create_learning_batch_manifest(preview: dict, *, actor_id: int) -> dict:
+    """Create one complete frozen manifest or leave no batch/run rows behind.
+
+    ``employeelearning.create_batch`` and ``create_run`` are individually
+    atomic, but a manifest spans up to 360 runs.  Without this outer
+    transaction, a live-identity conflict late in the list leaves the batch
+    and earlier runs committed.  ``BEGIN IMMEDIATE`` also serializes the full
+    owner preflight with creation, closing the check/create race between two
+    concurrent campaigns.
+    """
+    targets = preview.get("_targets")
+    if not isinstance(targets, list) or not targets:
+        raise employeelearning.LearningValidationError("批次员工清单不完整")
+    identities = [str(target.get("identity_ref") or "") for target in targets]
+    if len(set(identities)) != len(identities):
+        raise employeelearning.LearningValidationError("批次员工身份重复")
+
+    with db.atomic():
+        for target in targets:
+            idx = int(target.get("idx") or 0)
+            employee = employeeidentity.active_employee(idx)
+            config = employees.get_config(idx) if employee else None
+            identity = (
+                _employee_public_contract(employee, config=config)
+                if employee and config else {}
+            )
+            bundle = db.get_employee_role_bundle(
+                str(target.get("identity_ref") or ""),
+                int(target.get("config_revision") or 0),
+                str(target.get("config_sha256") or ""),
+                str(target.get("bundle_sha256") or ""),
+            )
+            if (
+                not employee
+                or str(employee.get("catalog_version") or "")
+                != departments.DECISION_V4_CATALOG_VERSION
+                or not config
+                or not identity.get("can_learn")
+                or employeeidentity.identity_ref(employee)
+                != str(target.get("identity_ref") or "")
+                or str(config.get("identity_ref") or "")
+                != str(target.get("identity_ref") or "")
+                or int(config.get("config_revision") or 0)
+                != int(target.get("config_revision") or 0)
+                or str(config.get("config_sha256") or "")
+                != str(target.get("config_sha256") or "")
+                or str(config.get("bundle_sha256") or "")
+                != str(target.get("bundle_sha256") or "")
+                or not bundle
+            ):
+                raise employeelearning.LearningValidationError(
+                    "员工岗位四元绑定已变化，请重新预览"
+                )
+        existing = db.one(
+            "SELECT * FROM employee_learning_batch "
+            "WHERE (request_key=? OR idempotency_key=?) "
+            "AND (tenant_id=? OR tenant_id IS NULL) ORDER BY id LIMIT 1",
+            (
+                preview["request_key"],
+                preview["request_key"],
+                int(preview["tenant_id"]),
+            ),
+        )
+        if existing and str(
+            _learning_batch_metadata(existing).get("schema") or ""
+        ) != "schema55-learning-batch-v1":
+            raise employeelearning.LearningValidationError(
+                "相同幂等键已用于其他进修模式"
+            )
+        replay_batch_id = int(existing["id"]) if existing else None
+        for identity_ref in identities:
+            _expire_due_learning_identity_runs(identity_ref)
+            owner = employeelearning._identity_run_owner(identity_ref)
+            if owner and int(owner.get("batch_id") or 0) != replay_batch_id:
+                raise employeelearning.InvalidTransitionError(
+                    "批次包含已有未结束进修运行的员工，"
+                    "请先完成或终止原运行"
+                )
+        return _materialize_learning_batch_manifest(preview, actor_id=actor_id)
+
+
+def _create_learning_batch_manifest_for_schedule(
+    preview: dict, *, actor_id: int,
+) -> dict:
+    """Return the manifest plus whether this request owns its compensation.
+
+    The existence check and manifest creation share one write transaction, so
+    a failed worker start can terminalize only rows created by this request.
+    An idempotent replay is durable state owned by the earlier request and must
+    never be deleted or cancelled by a later caller.
+    """
+    with db.atomic():
+        existing = db.one(
+            "SELECT id FROM employee_learning_batch "
+            "WHERE (request_key=? OR idempotency_key=?) "
+            "AND (tenant_id=? OR tenant_id IS NULL) ORDER BY id LIMIT 1",
+            (
+                preview["request_key"],
+                preview["request_key"],
+                int(preview["tenant_id"]),
+            ),
+        )
+        batch = _create_learning_batch_manifest(preview, actor_id=actor_id)
+        checkpoint = _learning_batch_json(batch.get("checkpoint_json"), {})
+        schedule_generation = _learning_batch_coordinator_generation(batch) + 1
+        checkpoint["coordinator_generation"] = schedule_generation
+        db.execute(
+            "UPDATE employee_learning_batch SET checkpoint_json=?,updated_at=? "
+            "WHERE id=?",
+            (
+                json.dumps(checkpoint, ensure_ascii=False, sort_keys=True),
+                time.time(),
+                int(batch["id"]),
+            ),
+        )
+        return {
+            "batch": employeelearning.get_batch(int(batch["id"])),
+            "created": existing is None,
+            "schedule_generation": schedule_generation,
+        }
+
+
+def _settle_unstarted_learning_batch_manifest(result: dict) -> bool:
+    """Close a newly-created orphan; fail-safe pause an idempotent replay."""
+    batch = dict(result.get("batch") or {})
+    batch_id = int(batch.get("id") or 0)
+    if batch_id <= 0:
+        return False
+    created = bool(result.get("created"))
+    try:
+        schedule_generation = int(result.get("schedule_generation"))
+    except (TypeError, ValueError):
+        return False
+    reason = "批次协调器启动失败，本次新建清单已安全终结"
+    with db.atomic():
+        current = employeelearning.get_batch(batch_id)
+        if _learning_batch_coordinator_generation(current) != schedule_generation:
+            # A same-key replay has durably taken a newer scheduling lease.
+            # This failed caller no longer owns compensation for the manifest.
+            return False
+        if str(current.get("status") or "") not in {
+            employeelearning.BATCH_QUEUED,
+            employeelearning.BATCH_RUNNING,
+        }:
+            # An explicit pause/terminal transition is also a newer owner even
+            # for legacy rows that predate schedule generations.
+            return False
+        if created:
+            for run in employeelearning.list_batch_runs(batch_id):
+                run_id = int(run["id"])
+                employeelearning.release_budget(run_id)
+                if str(run.get("status") or "") not in _LEARNING_BATCH_TERMINAL_RUNS:
+                    employeelearning.cancel_run(
+                        run_id, reason="COORDINATOR_START_FAILED",
+                    )
+            db.execute(
+                "UPDATE employee_learning_batch "
+                "SET status=?,paused_reason=?,checkpoint_json=?,updated_at=? "
+                "WHERE id=?",
+                (
+                    employeelearning.BATCH_CANCELLED,
+                    reason,
+                    json.dumps({
+                        "stage": "start_failed",
+                        "reason": "COORDINATOR_START_FAILED",
+                    }, ensure_ascii=False, sort_keys=True),
+                    time.time(),
+                    batch_id,
+                ),
+            )
+            return True
+        if str(current.get("status") or "") in {
+            employeelearning.BATCH_QUEUED,
+            employeelearning.BATCH_RUNNING,
+        }:
+            db.execute(
+                "UPDATE employee_learning_batch "
+                "SET status=?,paused_reason=?,updated_at=? WHERE id=?",
+                (
+                    employeelearning.BATCH_PAUSED,
+                    "批次协调器启动失败，请显式恢复",
+                    time.time(),
+                    batch_id,
+                ),
+            )
+            return True
+        return False
+
+
+def _learning_batch_frozen_binding(run: dict) -> dict | None:
+    checkpoint = _learning_run_checkpoint(run)
+    identity_ref = str(run.get("identity_ref") or "")
+    revision = int(run.get("base_config_revision") or run.get("config_revision") or 0)
+    config_hash = str(run.get("base_config_sha256") or "")
+    bundle_hash = str(checkpoint.get("expected_bundle_sha256") or "")
+    if (
+        checkpoint.get("identity_ref") != identity_ref
+        or checkpoint.get("config_revision") != revision
+        or checkpoint.get("config_sha256") != config_hash
+        or re.fullmatch(r"[0-9a-f]{64}", bundle_hash) is None
+    ):
+        return None
+    employee = employeeidentity.employee_by_identity_ref(identity_ref)
+    config = employees.get_config_by_identity(
+        identity_ref, revision=revision, config_sha256=config_hash,
+    )
+    bundle = db.get_employee_role_bundle(
+        identity_ref, revision, config_hash, bundle_hash,
+    )
+    active = employeeidentity.active_employee(_learning_run_idx(run))
+    current = employees.get_config(_learning_run_idx(run)) if active else None
+    identity = (
+        _employee_public_contract(active, config=current)
+        if active and current else {}
+    )
+    if (
+        not employee
+        or not config
+        or not bundle
+        or not active
+        or not identity.get("can_learn")
+        or employeeidentity.identity_ref(active) != identity_ref
+        or str((current or {}).get("identity_ref") or "") != identity_ref
+        or int((current or {}).get("config_revision") or 0) != revision
+        or str((current or {}).get("config_sha256") or "") != config_hash
+        or str((current or {}).get("bundle_sha256") or "") != bundle_hash
+    ):
+        return None
+    return {
+        "employee": employee,
+        "config": config,
+        "identity": identity,
+        "role_bundle": bundle,
+    }
+
+
+def _claim_learning_batch_run_for_launch(run_id: int) -> dict:
+    """Linearize expiry/eligibility with reserve, start and first checkpoint."""
+    with db.atomic():
+        run = _expire_learning_run_if_due(int(run_id))
+        if run.get("status") != employeelearning.RUN_QUEUED:
+            return {"claimed": False, "run": run, "binding": None}
+        batch = employeelearning.get_batch(int(run["batch_id"]))
+        if str(batch.get("status") or "") == employeelearning.BATCH_PAUSED:
+            return {"claimed": False, "run": run, "binding": None}
+        binding = _learning_batch_frozen_binding(run)
+        if not binding:
+            run = employeelearning.mark_stale(
+                int(run_id),
+                reason="IDENTITY_CONFIG_OR_ELIGIBILITY_STALE_BEFORE_RESEARCH",
+            )
+            return {"claimed": False, "run": run, "binding": None}
+        employeelearning.reserve_budget(int(run_id))
+        # Defensive re-read within the same BEGIN IMMEDIATE boundary.  It is
+        # normally identical because concurrent writers are excluded, but it
+        # also closes re-entrant slot/config mutations made by maintenance
+        # hooks during reservation.
+        run = _expire_learning_run_if_due(int(run_id))
+        binding = (
+            _learning_batch_frozen_binding(run)
+            if run.get("status") == employeelearning.RUN_QUEUED else None
+        )
+        if not binding:
+            employeelearning.release_budget(int(run_id))
+            if run.get("status") == employeelearning.RUN_QUEUED:
+                run = employeelearning.mark_stale(
+                    int(run_id),
+                    reason="IDENTITY_CONFIG_OR_ELIGIBILITY_STALE_AT_LAUNCH_CLAIM",
+                )
+            return {"claimed": False, "run": run, "binding": None}
+        employeelearning.start_run(int(run_id), allow_existing=False)
+        checkpoint = _learning_run_checkpoint(
+            employeelearning.get_run(int(run_id))
+        )
+        run = employeelearning.checkpoint(
+            int(run_id),
+            {**checkpoint, "stage": "billing_pending"},
+        )
+        return {"claimed": True, "run": run, "binding": binding}
+
+
+async def _execute_learning_batch_run(run_id: int, tenant_id: int) -> None:
+    op_key = _learning_billing_op_key(tenant_id, run_id)
+    billing_started = False
+    try:
+        prepared = await _run_db_safely(
+            _claim_learning_batch_run_for_launch, run_id,
+        )
+        if not prepared["claimed"]:
+            return
+        run = dict(prepared["run"])
+        binding = dict(prepared["binding"])
+        checkpoint = _learning_run_checkpoint(run)
+        billing_op = await _run_db_safely(
+            _start_learning_billing_at_frozen_price,
+            run_id,
+            int(tenant_id),
+            (
+                f"{binding['employee'].get('person') or binding['employee'].get('name') or '数字员工'}"
+                "批量证据进修"
+            ),
+        )
+        billing_started = True
+        await _run_db_safely(
+            employeelearning.checkpoint,
+            run_id,
+            {**checkpoint, "stage": "researching", "billing_op_key": billing_op},
+        )
+        await _employee_learning_research_worker(run_id, binding)
+    except billing.InsufficientPoints:
+        try:
+            await _run_db_safely(
+                employeelearning.defer_run_for_billing,
+                run_id,
+                reason="INSUFFICIENT_POINTS",
+            )
+            run = await _run_db_safely(employeelearning.get_run, run_id)
+            await _run_db_safely(
+                _pause_learning_batch_without_interrupting,
+                int(run["batch_id"]),
+                "余额不足，批次已暂停",
+            )
+        except BaseException:
+            pass
+    except BaseException as exc:
+        settled = False
+        if billing_started:
+            try:
+                # The post-charge checkpoint may be precisely the write that
+                # failed, so the durable run cannot be trusted to contain the
+                # op key yet.  Refund by the deterministic local key retained
+                # from before the charge.
+                await _settle_failed_learning_run_safely(
+                    run_id,
+                    op_key,
+                    "批量员工进修未启动自动退回",
+                    "START_FAILED",
+                )
+                settled = True
+            except BaseException as refund_exc:
+                logging.getLogger("employeelearning").error(
+                    "employee learning batch refund failed run_id=%s error_type=%s",
+                    run_id,
+                    type(refund_exc).__name__,
+                )
+        if not settled:
+            try:
+                await _terminalize_learning_run_safely(run_id, "START_FAILED")
+            except BaseException:
+                pass
+        logging.getLogger("employeelearning").error(
+            "employee learning batch run failed run_id=%s error_type=%s",
+            run_id,
+            type(exc).__name__,
+        )
+    finally:
+        _LEARNING_BATCH_ACTIVE_RUNS.discard(int(run_id))
+
+
+def _pause_learning_batch_without_interrupting(batch_id: int, reason: str) -> dict:
+    """Pause future launches while allowing already-running evidence capture to finish."""
+    with db.atomic():
+        batch = employeelearning.get_batch(batch_id)
+        if str(batch.get("status") or "") in {
+            employeelearning.BATCH_COMPLETED,
+            employeelearning.BATCH_CANCELLED,
+        }:
+            return batch
+        queued = db.one(
+            "SELECT COUNT(*) AS n FROM employee_learning_run "
+            "WHERE batch_id=? AND status=?",
+            (int(batch_id), employeelearning.RUN_QUEUED),
+        )
+        if int((queued or {}).get("n") or 0) <= 0:
+            return employeelearning.get_batch(batch_id)
+        checkpoint = _learning_batch_json(batch.get("checkpoint_json"), {})
+        checkpoint["coordinator_generation"] = (
+            _learning_batch_coordinator_generation(batch) + 1
+        )
+        db.execute(
+            "UPDATE employee_learning_batch SET status=?,paused_reason=?,"
+            "checkpoint_json=?,updated_at=? "
+            "WHERE id=? AND status IN (?,?)",
+            (
+                employeelearning.BATCH_PAUSED,
+                str(reason or "老板手动暂停")[:500],
+                json.dumps(checkpoint, ensure_ascii=False, sort_keys=True),
+                time.time(),
+                int(batch_id),
+                employeelearning.BATCH_QUEUED,
+                employeelearning.BATCH_RUNNING,
+            ),
+        )
+        return employeelearning.get_batch(batch_id)
+
+
+def _settle_learning_batch_coordinator_failure(
+    batch_id: int, reason: str, *, expected_generation: int | None = None,
+) -> bool:
+    """Turn ownerless queued work into an explicit, retryable paused state."""
+    with db.atomic():
+        batch = employeelearning.get_batch(int(batch_id))
+        if str(
+            _learning_batch_metadata(batch).get("schema") or ""
+        ) != "schema55-learning-batch-v1":
+            return False
+        if (
+            expected_generation is not None
+            and _learning_batch_coordinator_generation(batch)
+            != int(expected_generation)
+        ):
+            return False
+        queued = any(
+            run.get("status") == employeelearning.RUN_QUEUED
+            for run in employeelearning.list_batch_runs(int(batch_id))
+        )
+        if not queued or str(batch.get("status") or "") not in {
+            employeelearning.BATCH_QUEUED,
+            employeelearning.BATCH_RUNNING,
+        }:
+            return False
+        db.execute(
+            "UPDATE employee_learning_batch SET status=?,paused_reason=?,"
+            "updated_at=? WHERE id=?",
+            (
+                employeelearning.BATCH_PAUSED,
+                str(reason or "批次协调器中断，请显式恢复")[:500],
+                time.time(),
+                int(batch_id),
+            ),
+        )
+        return True
+
+
+def _learning_batch_coordinator_generation(batch: dict) -> int:
+    checkpoint = _learning_batch_json(batch.get("checkpoint_json"), {})
+    try:
+        value = int(checkpoint.get("coordinator_generation") or 0)
+    except (TypeError, ValueError):
+        value = 0
+    return max(0, value)
+
+
+def _detect_orphaned_learning_batches_for_restart() -> int:
+    """Read-only startup signal; never mutate or auto-start historical work.
+
+    A named boss may later reconcile one tenant-owned batch through its list,
+    detail or explicit resume path.  Startup deliberately has no authority to
+    pause or otherwise rewrite every tenant's historical queued manifests.
+    """
+    row = db.one(
+        "SELECT COUNT(*) AS n FROM employee_learning_batch AS batch "
+        "WHERE batch.status IN (?,?) "
+        "AND json_extract(CASE WHEN json_valid(batch.metadata_json) "
+        "THEN batch.metadata_json ELSE '{}' END,'$.schema')=? "
+        "AND EXISTS (SELECT 1 FROM employee_learning_run AS run "
+        "WHERE run.batch_id=batch.id AND run.status=?)",
+        (
+            employeelearning.BATCH_QUEUED,
+            employeelearning.BATCH_RUNNING,
+            "schema55-learning-batch-v1",
+            employeelearning.RUN_QUEUED,
+        ),
+    )
+    return int((row or {}).get("n") or 0)
+
+
+async def _employee_learning_batch_coordinator(
+    batch_id: int, coordinator_generation: int = 0,
+) -> None:
+    tasks: set[asyncio.Task] = set()
+    paused_exit = False
+    coordinator_failure = None
+    try:
+        while True:
+            batch = await db.arun(employeelearning.get_batch, batch_id)
+            metadata = _learning_batch_metadata(batch)
+            max_concurrency = max(1, min(int(metadata.get("max_concurrency") or 1), 8))
+            status = str(batch.get("status") or "")
+            runs = await db.arun(employeelearning.list_batch_runs, batch_id)
+            orphaned_researching = [
+                run for run in runs
+                if run.get("status") == employeelearning.RUN_RESEARCHING
+                and int(run["id"]) not in _LEARNING_BATCH_ACTIVE_RUNS
+            ]
+            if orphaned_researching:
+                for orphan in orphaned_researching:
+                    await _settle_failed_learning_run_safely(
+                        int(orphan["id"]),
+                        _learning_checkpoint_billing_op(orphan),
+                        "无执行器的进修运行自动退回",
+                        "ORPHANED_RESEARCH_WORKER",
+                    )
+                await _run_db_safely(
+                    _settle_learning_batch_coordinator_failure,
+                    int(batch_id),
+                    "检测到无执行器的研究运行，请显式恢复",
+                    expected_generation=int(coordinator_generation),
+                )
+                paused_exit = True
+                break
+            researching_ids = {
+                int(run["id"]) for run in runs
+                if run.get("status") == employeelearning.RUN_RESEARCHING
+            }
+            # A child is registered before its DB launch claim.  Count that
+            # pre-claim ACTIVE window against this batch's capacity as well;
+            # otherwise a coordinator handoff could launch a second child
+            # while the first still appears queued in SQLite.
+            batch_run_ids = {int(run["id"]) for run in runs}
+            active_ids = batch_run_ids.intersection(_LEARNING_BATCH_ACTIVE_RUNS)
+            launch_owners = researching_ids.union(active_ids)
+            if status not in {
+                employeelearning.BATCH_PAUSED,
+                employeelearning.BATCH_COMPLETED,
+                employeelearning.BATCH_CANCELLED,
+            }:
+                capacity = max(0, max_concurrency - len(launch_owners))
+                for run in (
+                    row for row in runs
+                    if row.get("status") == employeelearning.RUN_QUEUED
+                ):
+                    run_id = int(run["id"])
+                    if capacity <= 0:
+                        break
+                    if run_id in _LEARNING_BATCH_ACTIVE_RUNS:
+                        continue
+                    _LEARNING_BATCH_ACTIVE_RUNS.add(run_id)
+                    worker_coro = _execute_learning_batch_run(
+                        run_id, int(batch.get("tenant_id") or 0),
+                    )
+                    try:
+                        task = asyncio.create_task(worker_coro)
+                    except BaseException:
+                        worker_coro.close()
+                        _LEARNING_BATCH_ACTIVE_RUNS.discard(run_id)
+                        raise
+                    tasks.add(task)
+                    def release_child(
+                        completed: asyncio.Task, *, claimed_run_id: int = run_id,
+                    ) -> None:
+                        tasks.discard(completed)
+                        # A task cancelled before its coroutine's first step
+                        # never enters ``_execute_learning_batch_run.finally``.
+                        # Registry ownership therefore also belongs to this
+                        # done callback, with the run id frozen per child.
+                        _LEARNING_BATCH_ACTIVE_RUNS.discard(claimed_run_id)
+
+                    task.add_done_callback(release_child)
+                    capacity -= 1
+            if tasks:
+                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                continue
+            if status == employeelearning.BATCH_PAUSED:
+                # Resume can commit while this coordinator is between its
+                # paused snapshot and exit.  The resume endpoint then sees
+                # this task as active and correctly avoids a duplicate; re-read
+                # before exit so that active task also observes the hand-off.
+                latest = await db.arun(employeelearning.get_batch, batch_id)
+                if str(latest.get("status") or "") != employeelearning.BATCH_PAUSED:
+                    continue
+                paused_exit = True
+                break
+            runs = await db.arun(employeelearning.list_batch_runs, batch_id)
+            if any(
+                run.get("status") in {
+                    employeelearning.RUN_QUEUED,
+                    employeelearning.RUN_RESEARCHING,
+                }
+                for run in runs
+            ):
+                await asyncio.sleep(0.5)
+                continue
+            break
+    except BaseException as exc:
+        coordinator_failure = exc
+        raise
+    finally:
+        current = _LEARNING_BATCH_COORDINATORS.get(int(batch_id))
+        if current is asyncio.current_task():
+            shutting_down = bool(getattr(
+                app.state, "learning_batch_shutting_down", False,
+            ))
+            if coordinator_failure is not None and not paused_exit:
+                settlement_attempt = 0
+                while not shutting_down:
+                    try:
+                        await _run_db_safely(
+                            _settle_learning_batch_coordinator_failure,
+                            int(batch_id),
+                            "批次协调器异常中断，请显式恢复",
+                            expected_generation=int(coordinator_generation),
+                        )
+                        break
+                    except BaseException as exc:
+                        settlement_attempt += 1
+                        if settlement_attempt in {1, 10}:
+                            logging.getLogger("employeelearning").warning(
+                                "employee learning coordinator settlement retry "
+                                "batch_id=%s attempt=%s error_type=%s",
+                                batch_id,
+                                settlement_attempt,
+                                type(exc).__name__,
+                            )
+                        try:
+                            await asyncio.sleep(min(0.05 * settlement_attempt, 0.5))
+                        except asyncio.CancelledError:
+                            pass
+                        shutting_down = bool(getattr(
+                            app.state, "learning_batch_shutting_down", False,
+                        ))
+
+            if (
+                not shutting_down
+                and (paused_exit or coordinator_failure is not None)
+            ):
+                # Keep registry ownership while durable handoff reads retry.
+                # Once the latest state is known, pop + optional successor
+                # scheduling run without an await, closing the final-read race.
+                handoff_attempt = 0
+                while not shutting_down:
+                    try:
+                        latest = await _run_db_safely(
+                            employeelearning.get_batch, int(batch_id),
+                        )
+                        should_schedule = False
+                        if str(latest.get("status") or "") in {
+                            employeelearning.BATCH_QUEUED,
+                            employeelearning.BATCH_RUNNING,
+                        }:
+                            runs = await _run_db_safely(
+                                employeelearning.list_batch_runs, int(batch_id),
+                            )
+                            should_schedule = any(
+                                run.get("status") == employeelearning.RUN_QUEUED
+                                for run in runs
+                            )
+                        _LEARNING_BATCH_COORDINATORS.pop(int(batch_id), None)
+                        if should_schedule:
+                            try:
+                                _schedule_employee_learning_batch(int(batch_id))
+                            except BaseException:
+                                # Scheduling failed before registry ownership
+                                # transferred. Restore this recovery supervisor
+                                # and retry until it can settle/handoff safely.
+                                _LEARNING_BATCH_COORDINATORS[int(batch_id)] = (
+                                    asyncio.current_task()
+                                )
+                                raise
+                        break
+                    except BaseException as exc:
+                        handoff_attempt += 1
+                        if handoff_attempt in {1, 10}:
+                            logging.getLogger("employeelearning").warning(
+                                "employee learning coordinator handoff retry "
+                                "batch_id=%s attempt=%s error_type=%s",
+                                batch_id,
+                                handoff_attempt,
+                                type(exc).__name__,
+                            )
+                        try:
+                            await asyncio.sleep(min(0.05 * handoff_attempt, 0.5))
+                        except asyncio.CancelledError:
+                            pass
+                        shutting_down = bool(getattr(
+                            app.state, "learning_batch_shutting_down", False,
+                        ))
+            else:
+                _LEARNING_BATCH_COORDINATORS.pop(int(batch_id), None)
+
+
+def _schedule_employee_learning_batch(batch_id: int) -> bool:
+    batch_id = int(batch_id)
+    current = _LEARNING_BATCH_COORDINATORS.get(batch_id)
+    if current and not current.done():
+        return False
+    batch = employeelearning.get_batch(batch_id)
+    coordinator = _employee_learning_batch_coordinator(
+        batch_id, _learning_batch_coordinator_generation(batch),
+    )
+    try:
+        task = asyncio.create_task(coordinator)
+    except BaseException:
+        # ``asyncio.create_task(coro)`` does not consume/close ``coro`` when
+        # there is no running loop.  Close it explicitly so a failed schedule
+        # cannot also leak an un-awaited coroutine warning.
+        coordinator.close()
+        raise
+    _LEARNING_BATCH_COORDINATORS[batch_id] = task
+    return True
+
+
+def _resume_employee_learning_batch_state(
+    batch_id: int, tenant_id: int,
+) -> dict:
+    """Atomically validate and persist an idempotent resume transition."""
+    with db.atomic():
+        try:
+            batch = employeelearning.get_batch(int(batch_id))
+        except (TypeError, ValueError, employeelearning.LearningError) as exc:
+            raise HTTPException(404, "进修批次不存在") from exc
+        if int(batch.get("tenant_id") or -1) != int(tenant_id):
+            raise HTTPException(404, "进修批次不存在")
+        if str(
+            _learning_batch_metadata(batch).get("schema") or ""
+        ) != "schema55-learning-batch-v1":
+            raise HTTPException(404, "进修批次不存在")
+        runs = employeelearning.list_batch_runs(int(batch_id))
+        queued = sum(
+            str(run.get("status") or "") == employeelearning.RUN_QUEUED
+            for run in runs
+        )
+        if queued <= 0:
+            raise employeelearning.InvalidTransitionError(
+                "当前批次没有排队中的员工"
+            )
+        previous_status = str(batch.get("status") or "")
+        if previous_status in {
+            employeelearning.BATCH_COMPLETED,
+            employeelearning.BATCH_CANCELLED,
+        }:
+            raise employeelearning.InvalidTransitionError("终态批次不可恢复")
+        if previous_status not in {
+            employeelearning.BATCH_PAUSED,
+            employeelearning.BATCH_QUEUED,
+            employeelearning.BATCH_RUNNING,
+        }:
+            raise employeelearning.InvalidTransitionError("当前批次不可恢复")
+
+        transitioned = previous_status == employeelearning.BATCH_PAUSED
+        resumed_at = time.time()
+        checkpoint = _learning_batch_json(batch.get("checkpoint_json"), {})
+        generation = _learning_batch_coordinator_generation(batch) + 1
+        checkpoint["coordinator_generation"] = generation
+        db.execute(
+            "UPDATE employee_learning_batch SET status=?,paused_reason=?,"
+            "checkpoint_json=?,updated_at=? WHERE id=? AND tenant_id=?",
+            (
+                (
+                    employeelearning.BATCH_QUEUED
+                    if transitioned else previous_status
+                ),
+                None if transitioned else batch.get("paused_reason"),
+                json.dumps(checkpoint, ensure_ascii=False, sort_keys=True),
+                resumed_at,
+                int(batch_id),
+                int(tenant_id),
+            ),
+        )
+        return {
+            "batch_id": int(batch_id),
+            "tenant_id": int(tenant_id),
+            "transitioned": transitioned,
+            "previous_status": previous_status,
+            "previous_paused_reason": batch.get("paused_reason"),
+            "resumed_at": resumed_at,
+            "coordinator_generation": generation,
+        }
+
+
+def _settle_unstarted_employee_learning_batch(state: dict) -> bool:
+    """Fail closed when an accepted resume cannot start its coordinator."""
+    batch_id = int(state["batch_id"])
+    tenant_id = int(state["tenant_id"])
+    reason = (
+        str(state.get("previous_paused_reason") or "").strip()
+        if state.get("transitioned")
+        else "批次协调器启动失败，请重新恢复"
+    )
+    reason = reason or "批次协调器启动失败，请重新恢复"
+    with db.atomic():
+        batch = employeelearning.get_batch(batch_id)
+        if int(batch.get("tenant_id") or -1) != tenant_id:
+            return False
+        try:
+            expected_generation = int(state.get("coordinator_generation"))
+        except (TypeError, ValueError):
+            return False
+        if _learning_batch_coordinator_generation(batch) != expected_generation:
+            # A later explicit resume owns this generation; an older failed
+            # scheduler must not pause work already handed to its successor.
+            return False
+        if str(batch.get("status") or "") not in {
+            employeelearning.BATCH_QUEUED,
+            employeelearning.BATCH_RUNNING,
+        }:
+            return False
+        queued = db.one(
+            "SELECT COUNT(*) AS n FROM employee_learning_run "
+            "WHERE batch_id=? AND status=?",
+            (batch_id, employeelearning.RUN_QUEUED),
+        )
+        if int((queued or {}).get("n") or 0) <= 0:
+            return False
+        changed = db.execute(
+            "UPDATE employee_learning_batch "
+            "SET status=?,paused_reason=?,updated_at=? "
+            "WHERE id=? AND tenant_id=? AND status IN (?,?)",
+            (
+                employeelearning.BATCH_PAUSED,
+                reason[:500],
+                time.time(),
+                batch_id,
+                tenant_id,
+                employeelearning.BATCH_QUEUED,
+                employeelearning.BATCH_RUNNING,
+            ),
+        )
+        return changed == 1
+
+
+@app.post("/api/employee-learning/batches/dry-run")
+async def employee_learning_batch_dry_run(body: dict):
+    """Preview an exact V4 campaign without creating runs or charging points."""
+    _need_boss()
+    preview = await db.arun(
+        _learning_batch_preview_contract, body, tenant_id=TEN(),
+    )
+    return {"ok": True, "preview": _learning_batch_public_preview(preview)}
+
+
+@app.post("/api/employee-learning/batches")
+async def employee_learning_batch_create(body: dict):
+    """Create an inert manifest only after the exact preview is confirmed."""
+    _need_boss()
+    if not isinstance(body, dict) or body.get("confirm_execute") is not True:
+        raise HTTPException(400, "必须先预览并明确提交 confirm_execute=true")
+    if body.get("auto_approve") not in (None, False):
+        raise HTTPException(400, "批量进修不允许自动批准")
+    preview = await db.arun(
+        _learning_batch_preview_contract, body, tenant_id=TEN(),
+    )
+    preview_token = str(body.get("preview_token") or "").strip()
+    if preview_token != preview["preview_token"]:
+        raise HTTPException(409, "员工、岗位版本、预算或并发已变化，请重新预览")
+    schedule_result = {"started": False}
+
+    def start_coordinator(result: dict) -> None:
+        schedule_result["started"] = _schedule_employee_learning_batch(
+            int(result["batch"]["id"])
+        )
+
+    try:
+        result = await _run_db_then_start_worker_safely(
+            _create_learning_batch_manifest_for_schedule,
+            preview,
+            actor_id=int((auth.current() or {}).get("id") or 0),
+            start_worker=start_coordinator,
+            should_start=lambda value: str(
+                value["batch"].get("status") or ""
+            ) in {
+                employeelearning.BATCH_QUEUED,
+                employeelearning.BATCH_RUNNING,
+            },
+            settle_unstarted=_settle_unstarted_learning_batch_manifest,
+        )
+    except (
+        employeelearning.LearningValidationError,
+        employeelearning.InvalidTransitionError,
+    ) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    batch = result["batch"]
+    return {
+        "ok": True,
+        "started": schedule_result["started"],
+        "batch": await db.arun(_learning_batch_public, batch),
+    }
+
+
+@app.get("/api/employee-learning/batches")
+def employee_learning_batches_list(limit: int = 10):
+    _need_boss()
+    bounded = max(1, min(int(limit), 20))
+    rows = db.q(
+        "SELECT * FROM employee_learning_batch WHERE tenant_id=? "
+        "AND json_extract(CASE WHEN json_valid(metadata_json) "
+        "THEN metadata_json ELSE '{}' END,'$.schema')=? "
+        "ORDER BY id DESC LIMIT ?",
+        (TEN(), "schema55-learning-batch-v1", bounded),
+    )
+    return {
+        "batches": [
+            _learning_batch_public(dict(row), include_runs=False) for row in rows
+        ]
+    }
+
+
+@app.get("/api/employee-learning/batches/{batch_id}")
+def employee_learning_batch_get(batch_id: int):
+    _need_boss()
+    return {"batch": _learning_batch_public(_learning_owned_batch(batch_id))}
+
+
+@app.post("/api/employee-learning/batches/{batch_id}/pause")
+def employee_learning_batch_pause(batch_id: int, body: dict | None = None):
+    _need_boss()
+    batch = _learning_owned_batch(batch_id)
+    public = _learning_batch_public(batch, include_runs=False)
+    if not public["can_pause"]:
+        raise HTTPException(409, "当前批次没有可暂停的排队或研究任务")
+    try:
+        paused = _pause_learning_batch_without_interrupting(
+            int(batch_id), str((body or {}).get("reason") or "老板手动暂停"),
+        )
+    except employeelearning.InvalidTransitionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"ok": True, "batch": _learning_batch_public(paused)}
+
+
+@app.post("/api/employee-learning/batches/{batch_id}/resume")
+async def employee_learning_batch_resume(batch_id: int):
+    _need_boss()
+    tenant_id = TEN()
+    # Resume is the explicit, named-boss authorization boundary for repairing
+    # this one tenant-owned batch after a restart.  Reconciliation never
+    # schedules work; the accepted resume below is the only launch decision.
+    await db.arun(
+        _reconcile_learning_batch_for_owner,
+        int(batch_id),
+        int(tenant_id),
+    )
+    schedule_result = {"started": False}
+
+    def start_coordinator(state: dict) -> None:
+        schedule_result["started"] = _schedule_employee_learning_batch(
+            int(state["batch_id"])
+        )
+
+    try:
+        await _run_db_then_start_worker_safely(
+            _resume_employee_learning_batch_state,
+            int(batch_id),
+            int(tenant_id),
+            start_worker=start_coordinator,
+            settle_unstarted=_settle_unstarted_employee_learning_batch,
+        )
+    except employeelearning.InvalidTransitionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    resumed = await db.arun(_learning_owned_batch, int(batch_id))
+    return {
+        "ok": True,
+        "started": schedule_result["started"],
+        "batch": await db.arun(_learning_batch_public, resumed),
+    }
+
+
+def _prepare_single_employee_learning_run(
+    *,
+    idx: int,
+    request_key: str,
+    tenant_id: int,
+    actor_id: int,
+    binding: dict,
+) -> dict:
+    """Atomically freeze, reserve, start and checkpoint one run.
+
+    The transaction is the durable hand-off boundary for the async launcher.
+    It also permanently binds an idempotency key to its original employee and
+    four-tuple, and prevents single/bulk requests from sharing one manifest.
+    """
+    employee = dict(binding["employee"])
+    config = dict(binding["config"])
+    identity_ref = str(config.get("identity_ref") or "")
+    expected_bundle = str(config.get("bundle_sha256") or "")
+    run_key = "run-" + hashlib.sha256(
+        f"{int(tenant_id)}:{request_key}:{int(idx)}".encode("utf-8")
+    ).hexdigest()
+    single_schema = "schema55-learning-single-v1"
+    with db.atomic():
+        _expire_due_learning_identity_runs(identity_ref)
+
+        # Close the binding/read-to-manifest TOCTOU and the disabled-slot gap.
+        active = employeeidentity.active_employee(int(idx))
+        current = employees.get_config(int(idx)) if active else None
+        identity = (
+            _employee_public_contract(active, config=current)
+            if active and current else {}
+        )
+        bundle = db.get_employee_role_bundle(
+            identity_ref,
+            int(config.get("config_revision") or 0),
+            str(config.get("config_sha256") or ""),
+            expected_bundle,
+        )
+        if (
+            not active
+            or not current
+            or not identity.get("can_learn")
+            or employeeidentity.identity_ref(active) != identity_ref
+            or str(current.get("identity_ref") or "") != identity_ref
+            or int(current.get("config_revision") or 0)
+            != int(config.get("config_revision") or 0)
+            or str(current.get("config_sha256") or "")
+            != str(config.get("config_sha256") or "")
+            or str(current.get("bundle_sha256") or "") != expected_bundle
+            or not bundle
+        ):
+            raise employeelearning.InvalidTransitionError(
+                "员工当前岗位四元绑定已变化或不可进修"
+            )
+
+        existing_batch = db.one(
+            "SELECT * FROM employee_learning_batch "
+            "WHERE (request_key=? OR idempotency_key=?) "
+            "AND (tenant_id=? OR tenant_id IS NULL) ORDER BY id LIMIT 1",
+            (request_key, request_key, int(tenant_id)),
+        )
+        if existing_batch:
+            metadata = _learning_batch_metadata(existing_batch)
+            if str(metadata.get("schema") or "") != single_schema:
+                raise employeelearning.InvalidTransitionError(
+                    "相同幂等键已用于其他进修模式"
+                )
+        batch = employeelearning.create_batch(
+            request_key,
+            budget_cap_points=_LEARNING_BATCH_POINTS_PER_EMPLOYEE,
+            tenant_id=int(tenant_id),
+        )
+        if not existing_batch:
+            db.execute(
+                "UPDATE employee_learning_batch SET metadata_json=?,max_runs=?,"
+                "created_by=?,updated_at=? WHERE id=?",
+                (
+                    json.dumps({
+                        "schema": single_schema,
+                        "public_request_key": request_key,
+                        "employee_idx": int(idx),
+                        "identity_ref": identity_ref,
+                        "config_revision": int(config["config_revision"]),
+                        "config_sha256": str(config["config_sha256"]),
+                        "bundle_sha256": expected_bundle,
+                    }, ensure_ascii=False, sort_keys=True),
+                    1,
+                    int(actor_id) or None,
+                    time.time(),
+                    int(batch["id"]),
+                ),
+            )
+
+        existing_run = db.one(
+            "SELECT * FROM employee_learning_run "
+            "WHERE batch_id=? AND idempotency_key=?",
+            (int(batch["id"]), run_key),
+        )
+        other_run = db.one(
+            "SELECT id FROM employee_learning_run WHERE batch_id=? "
+            "AND (idempotency_key<>? OR idempotency_key IS NULL) LIMIT 1",
+            (int(batch["id"]), run_key),
+        )
+        if other_run:
+            raise employeelearning.InvalidTransitionError(
+                "单人进修幂等批次清单已变化"
+            )
+        run = employeelearning.create_run(
+            int(batch["id"]),
+            run_key,
+            employee_idx=int(idx),
+            identity_ref=identity_ref,
+            base_config_revision=int(config["config_revision"]),
+            base_config_sha256=str(config["config_sha256"]),
+            industry_key=str(employee.get("dept_key") or ""),
+            budget_points=_LEARNING_BATCH_POINTS_PER_EMPLOYEE,
+            high_risk=_learning_high_risk(employee),
+            expires_at=time.time() + 7 * 24 * 3600,
+        )
+        checkpoint = _learning_run_checkpoint(run)
+        frozen_matches = (
+            int(run.get("employee_idx") or 0) == int(idx)
+            and str(run.get("identity_ref") or "") == identity_ref
+            and int(
+                run.get("base_config_revision")
+                or run.get("config_revision") or 0
+            ) == int(config["config_revision"])
+            and str(run.get("base_config_sha256") or "")
+            == str(config["config_sha256"])
+            and (
+                existing_run is None
+                or str(checkpoint.get("expected_bundle_sha256") or "")
+                == expected_bundle
+            )
+        )
+        if not frozen_matches:
+            raise employeelearning.InvalidTransitionError(
+                "相同幂等键不能改变员工或岗位四元绑定"
+            )
+        if run.get("status") != employeelearning.RUN_QUEUED:
+            return {"batch": batch, "run": run, "claimed": False}
+
+        employeelearning.reserve_budget(int(run["id"]))
+        try:
+            employeelearning.start_run(int(run["id"]), allow_existing=False)
+        except employeelearning.InvalidTransitionError:
+            return {
+                "batch": batch,
+                "run": employeelearning.get_run(int(run["id"])),
+                "claimed": False,
+            }
+        run = employeelearning.checkpoint(
+            int(run["id"]),
+            {
+                **checkpoint,
+                "stage": "billing_pending",
+                "expected_bundle_sha256": expected_bundle,
+            },
+        )
+        return {"batch": batch, "run": run, "claimed": True}
+
+
+async def _start_single_employee_learning_run(
+    *,
+    idx: int,
+    request_key: str,
+    tenant_id: int,
+    actor_id: int,
+    binding: dict,
+) -> dict:
+    """Launch one atomically-prepared run and compensate every failed handoff."""
+    prepared = await db.arun(
+        _prepare_single_employee_learning_run,
+        idx=int(idx),
+        request_key=request_key,
+        tenant_id=int(tenant_id),
+        actor_id=int(actor_id),
+        binding=binding,
+    )
+    run = dict(prepared["run"])
+    if not prepared["claimed"]:
+        return {"started": False, "run": run}
+
+    run_id = int(run["id"])
+    op_key = _learning_billing_op_key(int(tenant_id), run_id)
+    billing_started = False
+    worker_coro = None
+    try:
+        billing_op = await _run_db_safely(
+            _start_learning_billing_at_frozen_price,
+            run_id,
+            int(tenant_id),
+            (
+                f"{binding['employee'].get('person') or binding['employee'].get('name') or '数字员工'}"
+                "证据进修"
+            ),
+        )
+        billing_started = True
+        if billing_op != op_key:
+            raise RuntimeError("进修计费操作编号不一致")
+        run = await _run_db_safely(
+            employeelearning.checkpoint,
+            run_id,
+            {
+                **_learning_run_checkpoint(run),
+                "stage": "researching",
+                "expected_bundle_sha256": binding["config"]["bundle_sha256"],
+                "billing_op_key": billing_op,
+            },
+        )
+        worker_coro = _employee_learning_research_worker(run_id, binding)
+        try:
+            asyncio.create_task(worker_coro)
+        except BaseException:
+            worker_coro.close()
+            raise
+        return {"started": True, "run": run}
+    except billing.InsufficientPoints:
+        await _run_db_safely(
+            employeelearning.defer_run_for_billing,
+            run_id,
+            reason="INSUFFICIENT_POINTS",
+        )
+        raise
+    except BaseException:
+        settled = False
+        if billing_started:
+            try:
+                await _settle_failed_learning_run_safely(
+                    run_id,
+                    op_key,
+                    "员工证据进修未启动自动退回",
+                    "START_FAILED",
+                )
+                settled = True
+            except BaseException:
+                logging.getLogger("employeelearning").error(
+                    "employee learning start refund failed run_id=%s", run_id,
+                )
+        if not settled:
+            try:
+                await _terminalize_learning_run_safely(run_id, "START_FAILED")
+            except BaseException:
+                pass
+        raise
+
+
+@app.post("/api/employees/{idx}/learning-runs")
+async def employee_learning_run_create(idx: int, body: dict):
+    """Start one V4 employee's evidence proposal; never a bulk campaign."""
+    _need_boss()
+    binding = _employee_current_write_binding(idx, body)
+    employee = binding["employee"]
+    if str(employee.get("catalog_version") or "") != departments.DECISION_V4_CATALOG_VERSION:
+        raise HTTPException(409, "证据进修仅适用于当前 V4 行业专属员工")
+    if not binding["identity"].get("can_learn"):
+        raise HTTPException(409, "当前岗位不可进修")
+    request_key = str(body.get("request_key") or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,190}", request_key) is None:
+        raise HTTPException(400, "进修请求幂等键无效")
+    tenant_id = TEN()
+    actor_id = int((auth.current() or {}).get("id") or 0)
+    operation = asyncio.create_task(_start_single_employee_learning_run(
+        idx=int(idx),
+        request_key=request_key,
+        tenant_id=int(tenant_id),
+        actor_id=actor_id,
+        binding=binding,
+    ))
+    cancellation = None
+    try:
+        try:
+            result = await asyncio.shield(operation)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+            result = await _drain_task_despite_cancellation(operation)
+        if cancellation is not None:
+            raise cancellation
+    except employeelearning.LearningValidationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except billing.InsufficientPoints as exc:
+        raise HTTPException(402, str(exc)) from exc
+    except (
+        employeelearning.BudgetExceededError,
+        employeelearning.InvalidTransitionError,
+        employeelearning.LearningError,
+    ) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {
+        "ok": True,
+        "started": bool(result["started"]),
+        "run": _learning_run_public(result["run"]),
+    }
+
+
+@app.get("/api/employee-learning/runs/{run_id}")
+def employee_learning_run_get(run_id: int):
+    _need_boss()
+    run, _batch = _learning_owned_run(run_id)
+    return {"run": _learning_run_public(run)}
+
+
+def _learning_auto_activate_reviewer_id(run: dict) -> int:
+    """Prefer the batch owner; fall back to the named boss account id."""
+    try:
+        created_by = int(
+            (employeelearning.get_batch(int(run["batch_id"])) or {}).get(
+                "created_by"
+            ) or 0
+        )
+    except (TypeError, ValueError, employeelearning.LearningError):
+        created_by = 0
+    if created_by > 0:
+        return created_by
+    boss = db.one(
+        "SELECT id FROM users WHERE username=? AND role=? AND enabled=1 "
+        "ORDER BY id LIMIT 1",
+        ("boss", "root"),
+    )
+    if boss and int(boss["id"] or 0) > 0:
+        return int(boss["id"])
+    return 1
+
+
+def _auto_activate_delivered_learning_run(run_id: int) -> dict:
+    run = employeelearning.get_run(int(run_id))
+    return _activate_employee_learning_run(
+        int(run_id), _learning_auto_activate_reviewer_id(run),
+    )
+
+
+def _activate_employee_learning_run(run_id: int, reviewer_id: int) -> dict:
+    """CAS-activate an evidence-backed proposal; shared by auto and boss approve."""
+    run = employeelearning.get_run(int(run_id))
+    if str(run.get("status") or "") != employeelearning.RUN_AWAITING_APPROVAL:
+        raise employeelearning.InvalidTransitionError(
+            f"运行不可审批: {run['status']}"
+        )
+    try:
+        binding = _learning_current_run_binding(run)
+    except HTTPException as exc:
+        if (
+            exc.status_code == 409
+            and run.get("status") == employeelearning.RUN_AWAITING_APPROVAL
+        ):
+            try:
+                employeelearning.mark_stale(run_id, reason="IDENTITY_CONFIG_CAS_STALE")
+            except employeelearning.LearningError:
+                pass
+        raise
+    _verify_learning_gate_checkpoint(binding["employee"], run)
+    relevant_sources = _learning_semantic_source_gate(binding["employee"], run)
+    _learning_verify_frozen_artifact_evidence(run, relevant_sources)
+    expected_bundle = _learning_run_bundle_sha256(run)
+
+    def activate(**kwargs):
+        # ``approve_run`` invokes this callback inside its BEGIN IMMEDIATE.
+        # Re-read slot eligibility and the current four-tuple in that same
+        # transaction so a disable/config write cannot slip between the API's
+        # preflight and the activation CAS.
+        active = employeeidentity.active_employee(_learning_run_idx(run))
+        current = (
+            employees.get_config(_learning_run_idx(run)) if active else None
+        )
+        identity = (
+            _employee_public_contract(active, config=current)
+            if active and current else {}
+        )
+        if (
+            not active
+            or not current
+            or not identity.get("can_learn")
+            or employeeidentity.identity_ref(active)
+            != str(kwargs.get("expected_identity_ref") or "")
+            or str(current.get("identity_ref") or "")
+            != str(kwargs.get("expected_identity_ref") or "")
+            or int(current.get("config_revision") or 0)
+            != int(kwargs.get("expected_config_revision") or 0)
+            or str(current.get("config_sha256") or "")
+            != str(kwargs.get("expected_config_sha256") or "")
+            or str(current.get("bundle_sha256") or "") != expected_bundle
+        ):
+            raise db.StaleWriteError(
+                "employee learning activation eligibility changed"
+            )
+        return employees.activate_learning_bundle(
+            **kwargs, expected_bundle_sha256=expected_bundle,
+        )
+
+    return employeelearning.approve_run(
+        int(run_id),
+        activate,
+        reviewer_id=int(reviewer_id),
+    )
+
+
+@app.post("/api/employee-learning/runs/{run_id}/approve")
+def employee_learning_run_approve(run_id: int, body: dict):
+    """Activate a leftover proposal; live research now auto-activates after evidence."""
+    _need_boss()
+    run, _batch = _learning_owned_run(run_id)
+    # A wrong/stale browser echo is a request conflict, not proof that the
+    # authoritative employee changed.  Never mutate the proposal on this
+    # first-layer 409.
+    _learning_frozen_request_binding(run, body)
+    try:
+        approved = _activate_employee_learning_run(
+            run_id,
+            int((auth.current() or {}).get("id") or 0),
+        )
+    except learningevidence.EvidenceConfigError as exc:
+        raise HTTPException(409, "证据门禁配置不可用，不能激活能力版本") from exc
+    except learningevidence.EvidenceGateError as exc:
+        if exc.code == "EVIDENCE_GATE_DIGEST_DRIFT":
+            raise HTTPException(409, "证据门禁版本已变化，请重新发起进修") from exc
+        raise HTTPException(409, "来源与该岗位不相关，不能激活能力版本") from exc
+    except employeelearning.StaleActivationError as exc:
+        raise HTTPException(409, "员工岗位或配置已变更，该进修提案已过期") from exc
+    except employeelearning.InvalidTransitionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except employeelearning.LearningValidationError as exc:
+        current = employeelearning.get_run(int(run_id))
+        if str(current.get("status") or "") == employeelearning.RUN_AWAITING_APPROVAL:
+            raise HTTPException(409, "来源与该岗位不相关，不能激活能力版本") from exc
+        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except db.StaleWriteError as exc:
+        try:
+            employeelearning.mark_stale(run_id, reason="IDENTITY_CONFIG_CAS_STALE")
+        except employeelearning.LearningError:
+            pass
+        raise HTTPException(409, "员工岗位或配置已变更，该进修提案已过期") from exc
+    except RuntimeError as exc:
+        # Activation integrity/storage failures are not authoritative evidence
+        # of identity drift.  ``approve_run`` rolled its transaction back, so
+        # preserve the awaiting proposal and owner for a safe operator retry.
+        logging.getLogger("employeelearning").error(
+            "employee learning activation failed run_id=%s error_type=%s",
+            run_id,
+            type(exc).__name__,
+        )
+        raise HTTPException(503, "进修提案激活暂时失败，请稍后重试") from exc
+    return {"ok": True, "run": _learning_run_public(approved)}
+
+
+@app.post("/api/employee-learning/runs/{run_id}/reject")
+def employee_learning_run_reject(run_id: int, body: dict):
+    _need_boss()
+    run, _batch = _learning_owned_run(run_id)
+    # Rejection terminates the exact frozen proposal and never activates a
+    # current config, so it intentionally needs no current-server CAS.  This
+    # keeps an auditable release path even after the live role has advanced.
+    _learning_frozen_request_binding(run, body)
+    reason = str(body.get("reason") or "老板拒绝该进修提案").strip()[:200]
+    try:
+        rejected = employeelearning.reject_run(
+            run_id,
+            reason=reason,
+            reviewer_id=int((auth.current() or {}).get("id") or 0),
+        )
+    except employeelearning.InvalidTransitionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"ok": True, "run": _learning_run_public(rejected)}
 
 
 @app.post("/api/employees/{idx}/learn")
-async def employee_learn(idx: int):
+async def employee_learn(idx: int, body: dict | None = None):
     _need_boss()   # 进修会覆写全平台共享的员工技能库,只有 boss 能发起
-    s = registry.BY_IDX.get(idx) or (departments.get(idx) and departments.learn_station(idx))
+    binding = _employee_current_write_binding(idx, body or {})
+    if (
+        str(binding["employee"].get("catalog_version") or "")
+        == departments.DECISION_V4_CATALOG_VERSION
+    ):
+        raise HTTPException(
+            409,
+            "V4 行业专属员工必须使用可核验全网证据进修，请刷新后重试",
+        )
+    if not binding["identity"]["can_learn"]:
+        raise HTTPException(409, "当前岗位不可进修")
+    s = registry.BY_IDX.get(idx) or (
+        departments.get_active(idx) and departments.learn_station(idx)
+    )
     if not s:
         raise HTTPException(404)
     if not employees.claim_learning(idx):
@@ -3926,6 +8604,9 @@ async def employee_learn(idx: int):
                 s,
                 broadcast=engine.broadcast,
                 claimed=True,
+                identity_ref=binding["identity"]["identity_ref"],
+                expected_revision=binding["config"]["config_revision"],
+                expected_config_sha256=binding["config"]["config_sha256"],
             )
         except BaseException as exc:
             try:
@@ -4673,8 +9354,18 @@ def _purge_job_snapshot(connection, tid: int, job_id: int, job_row) -> dict:
 
 def _trash_module(kind: str, row: dict) -> str:
     if kind == "task":
-        expert = departments.get(row.get("emp_idx"))
-        return (expert or {}).get("dept_key") or "content"
+        if int(row.get("emp_idx") or 0) == inspection.EMPLOYEE_IDX:
+            scoped = db.one(
+                "SELECT industry_key FROM inspection_visit WHERE task_id=? "
+                "AND tenant_id=? AND deleted_at IS NULL",
+                (int(row.get("id") or 0), TEN()),
+            )
+            # 孤儿巡店任务 fail closed，不降级为 content 泄露。
+            return str((scoped or {}).get("industry_key") or "__denied__")
+        employee = employeeidentity.resolve_task(row)
+        if not employee:
+            return "__denied__"
+        return str(row.get("employee_dept_key") or "__denied__")
     meta = _TRASH_TABLES.get(kind)
     return meta[1] if meta else ""
 
@@ -4710,31 +9401,58 @@ def trash_list(limit: int = 200, offset: int = 0):
         SELECT * FROM (
           SELECT 'job' AS kind,id,brief_json,NULL AS title,
                  NULL AS params_json,status,NULL AS emp_idx,
+                 NULL AS employee_key,
+                 NULL AS employee_catalog_version,
+                 NULL AS employee_name_snapshot,
+                 NULL AS employee_dept_key,
+                 NULL AS employee_spec_sha256,
                  deleted_at,created_at,delete_reason
           FROM job WHERE tenant_id=? AND deleted_at IS NOT NULL
           UNION ALL
           SELECT 'task' AS kind,id,brief_json,NULL AS title,
                  NULL AS params_json,status,emp_idx,
+                 employee_key,employee_catalog_version,
+                 employee_name_snapshot,employee_dept_key,employee_spec_sha256,
                  deleted_at,created_at,delete_reason
           FROM task WHERE tenant_id=? AND deleted_at IS NOT NULL
           UNION ALL
           SELECT 'knowledge' AS kind,id,NULL AS brief_json,title,
                  NULL AS params_json,'' AS status,NULL AS emp_idx,
+                 NULL AS employee_key,
+                 NULL AS employee_catalog_version,
+                 NULL AS employee_name_snapshot,
+                 NULL AS employee_dept_key,
+                 NULL AS employee_spec_sha256,
                  deleted_at,created_at,delete_reason
           FROM knowledge WHERE tenant_id=? AND deleted_at IS NOT NULL
           UNION ALL
           SELECT 'avatar' AS kind,id,NULL AS brief_json,NULL AS title,
                  params_json,status,NULL AS emp_idx,
+                 NULL AS employee_key,
+                 NULL AS employee_catalog_version,
+                 NULL AS employee_name_snapshot,
+                 NULL AS employee_dept_key,
+                 NULL AS employee_spec_sha256,
                  deleted_at,created_at,delete_reason
           FROM avatar_job WHERE tenant_id=? AND deleted_at IS NOT NULL
           UNION ALL
           SELECT 'profile' AS kind,id,NULL AS brief_json,name AS title,
                  NULL AS params_json,'' AS status,NULL AS emp_idx,
+                 NULL AS employee_key,
+                 NULL AS employee_catalog_version,
+                 NULL AS employee_name_snapshot,
+                 NULL AS employee_dept_key,
+                 NULL AS employee_spec_sha256,
                  deleted_at,created_at,delete_reason
           FROM account_profile WHERE tenant_id=? AND deleted_at IS NOT NULL
           UNION ALL
           SELECT 'asset' AS kind,id,NULL AS brief_json,NULL AS title,
                  payload_json AS params_json,'' AS status,NULL AS emp_idx,
+                 NULL AS employee_key,
+                 NULL AS employee_catalog_version,
+                 NULL AS employee_name_snapshot,
+                 NULL AS employee_dept_key,
+                 NULL AS employee_spec_sha256,
                  deleted_at,created_at,delete_reason
           FROM asset WHERE tenant_id=? AND deleted_at IS NOT NULL
         ) AS deleted_records
@@ -4746,22 +9464,18 @@ def trash_list(limit: int = 200, offset: int = 0):
     for row in rows[:limit]:
         kind = row["kind"]
         module = _trash_module(kind, row)
-        if not auth.allowed(module):
+        if module == "__denied__" or not auth.allowed(module):
             continue
-        employee = {}
-        if kind == "task":
-            employee = (
-                departments.get(row.get("emp_idx"))
-                or registry.BY_IDX.get(row.get("emp_idx"))
-                or {}
-            )
         items.append(
             {
                 "kind": kind,
                 "id": row["id"],
                 "title": _trash_title(kind, row),
                 "status": row.get("status") or "",
-                "assignee": employee.get("name") or "",
+                "assignee": (
+                    str(row.get("employee_name_snapshot") or "")
+                    if kind == "task" else ""
+                ),
                 "deleted_at": row.get("deleted_at") or 0,
                 "created_at": row.get("created_at") or 0,
                 "reason": (
@@ -4792,7 +9506,8 @@ def trash_restore(kind: str, rid: int):
         "AND deleted_at IS NOT NULL",
         (rid, TEN()),
     )
-    if not row or not auth.allowed(_trash_module(kind, row)):
+    module = _trash_module(kind, row) if row else "__denied__"
+    if not row or module == "__denied__" or not auth.allowed(module):
         raise HTTPException(404)
     try:
         with db.atomic() as connection:
@@ -4811,12 +9526,20 @@ def trash_restore(kind: str, rid: int):
                     "该记录正在等待彻底删除，部分文件可能已经销毁，不能恢复；"
                     "请再次点击彻底删除完成清理",
                 )
-            changed = connection.execute(
-                f"UPDATE {table} SET deleted_at=NULL,deleted_by=NULL,"
-                "delete_reason=NULL,updated_at=? "
-                "WHERE id=? AND tenant_id=? AND deleted_at IS NOT NULL",
-                (time.time(), rid, TEN()),
-            ).rowcount
+            if kind == "task":
+                # 使用与协作会话共享的恢复守卫；嵌套 savepoint 与
+                # 上面的 marker 检查处于同一写事务。
+                taskthreads.restore_task(rid, TEN())
+                changed = 1
+            else:
+                changed = connection.execute(
+                    f"UPDATE {table} SET deleted_at=NULL,deleted_by=NULL,"
+                    "delete_reason=NULL,updated_at=? "
+                    "WHERE id=? AND tenant_id=? AND deleted_at IS NOT NULL",
+                    (time.time(), rid, TEN()),
+                ).rowcount
+    except taskthreads.TaskThreadError as exc:
+        _raise_task_thread_error(exc)
     except sqlite3.IntegrityError as exc:
         # 已有新的定时工单/会议行动占用同一幂等键时，不能破坏唯一性。
         raise HTTPException(
@@ -4826,13 +9549,13 @@ def trash_restore(kind: str, rid: int):
         raise HTTPException(409, "记录状态刚刚发生变化，请刷新后再恢复")
     if kind == "task":
         taskrunner.sync_meeting_delivery_for_task(rid)
-        expert = departments.get(row.get("emp_idx"))
+        module = _trash_module(kind, row)
         engine.broadcast(
             {
                 "type": "task_update",
                 "tenant_id": TEN(),
                 "_required_modules": (
-                    str((expert or {}).get("dept_key") or "content"),
+                    module,
                 ),
                 "task_id": rid,
                 "idx": row.get("emp_idx"),
@@ -5107,8 +9830,19 @@ def trash_purge(kind: str, rid: int):
                 "files_failed": 0,
             }
         raise HTTPException(404)
-    if not auth.allowed(_trash_module(kind, row)):
+    module = _trash_module(kind, row)
+    if module == "__denied__" or not auth.allowed(module):
         raise HTTPException(404)
+    if kind == "task":
+        guard = taskthreads.task_hard_delete_guard(
+            rid, tid, include_deleted=True
+        )
+        if not guard.get("allowed"):
+            raise HTTPException(
+                409,
+                guard.get("message")
+                or "该任务属于持续协作版本链，不能彻底删除",
+            )
     active = _TRASH_ACTIVE_STATUS.get(kind, ())
     if (row.get("status") or "") in active:
         raise HTTPException(409, "该记录仍在进行中，请先等它收口再彻底删除")
@@ -5126,8 +9860,22 @@ def trash_purge(kind: str, rid: int):
         if not current:
             raise HTTPException(409, "记录状态刚刚发生变化，请刷新后再删除")
         current_row = dict(current)
-        if not auth.allowed(_trash_module(kind, current_row)):
+        current_module = _trash_module(kind, current_row)
+        if current_module == "__denied__" or not auth.allowed(current_module):
             raise HTTPException(404)
+        if kind == "task":
+            guard = taskthreads.task_hard_delete_guard(
+                rid,
+                tid,
+                include_deleted=True,
+                connection=connection,
+            )
+            if not guard.get("allowed"):
+                raise HTTPException(
+                    409,
+                    guard.get("message")
+                    or "该任务属于持续协作版本链，不能彻底删除",
+                )
         if active and (current["status"] or "") in active:
             raise HTTPException(409, "该记录仍在进行中，请先等它收口再彻底删除")
         if kind == "job":
@@ -5340,16 +10088,2718 @@ def company_restore_prev():
             "profile": db.jloads(previous, {}) or {}}
 
 
+# ---------------- V51:区域经理巡店 ----------------
+def _raise_inspection_error(exc: inspection.InspectionError):
+    if isinstance(exc, inspection.InspectionForbidden):
+        raise HTTPException(403, str(exc)) from exc
+    if isinstance(exc, inspection.InspectionNotFound):
+        raise HTTPException(404, str(exc)) from exc
+    if isinstance(exc, inspection.InspectionConflict):
+        raise HTTPException(409, str(exc)) from exc
+    raise HTTPException(400, str(exc)) from exc
+
+
+def _inspection_actor_id() -> int:
+    uid = int((auth.current() or {}).get("id") or 0)
+    if uid < 1:
+        raise HTTPException(401, "请先登录")
+    return uid
+
+
+def _inspection_scope(industry_key: str | None = None) -> tuple[str, list[dict]]:
+    current = auth.current() or {}
+    role = str(current.get("role") or "")
+    if role not in {"root", "owner", "member"}:
+        raise inspection.InspectionForbidden("当前账号角色不允许使用巡店能力")
+    if role == "root" and int(current.get("tenant_id") or 0) != 1:
+        raise inspection.InspectionForbidden("平台管理员账号归属无效")
+    catalog = {
+        str(item.get("key") or ""): item
+        for item in departments.list_depts()
+        if str(item.get("key") or "")
+    }
+    rows = db.q(
+        "SELECT industry_key,is_primary FROM tenant_industry WHERE tenant_id=? "
+        "ORDER BY is_primary DESC,industry_key",
+        (TEN(),),
+    )
+    choices = [
+        {
+            "key": row["industry_key"],
+            "name": str(catalog[row["industry_key"]].get("name") or row["industry_key"]),
+            "emoji": str(catalog[row["industry_key"]].get("emoji") or ""),
+            "is_primary": bool(row.get("is_primary")),
+        }
+        for row in rows
+        if row.get("industry_key") in catalog
+    ]
+    if role == "member":
+        # 企业可经营多个行业，但成员只能进入自己被明确分配的行业。
+        # 默认项也必须从这个子集选择，不能先选企业主行业再靠下游 403。
+        member_modules = {
+            str(item).strip()
+            for item in (current.get("modules") or [])
+            if str(item).strip()
+        }
+        choices = [
+            item for item in choices if item["key"] in member_modules
+        ]
+    if not choices:
+        raise inspection.InspectionForbidden("当前账号尚未授权可巡店行业")
+    selected = str(industry_key or "").strip() or choices[0]["key"]
+    if selected not in {item["key"] for item in choices}:
+        raise inspection.InspectionForbidden("企业未授权该行业")
+    return selected, choices
+
+
+def _inspection_manager_scope(
+    industry_key: str | None = None,
+) -> tuple[str, list[dict]]:
+    """批量主数据可改写门店、店长 PII 与经营数据，仅主账号可用。"""
+    selected, choices = _inspection_scope(industry_key)
+    inspection._actor(
+        TEN(), _inspection_actor_id(), selected, manager=True
+    )
+    return selected, choices
+
+
+_IMPORT_NOT_FOUND_CODES = {"IMPORT_NOT_FOUND", "BRANCH_NOT_FOUND"}
+_IMPORT_CONFLICT_CODES = {
+    "REQUEST_KEY_CONFLICT",
+    "IMPORT_HAS_ERRORS",
+    "IMPORT_STATE_CONFLICT",
+    "IMPORT_SOURCE_ACTIVE",
+    "IMPORT_PREVIEW_EXPIRED",
+}
+_IMPORT_RATE_LIMIT_CODES = {"IMPORT_PREVIEW_QUOTA_EXCEEDED"}
+
+
+def _raise_inspection_import_error(exc: inspectionimport.ImportContractError):
+    if exc.code == "SCOPE_FORBIDDEN":
+        status = 403
+    elif exc.code in _IMPORT_NOT_FOUND_CODES:
+        status = 404
+    elif exc.code in _IMPORT_CONFLICT_CODES:
+        status = 409
+    elif exc.code in _IMPORT_RATE_LIMIT_CODES:
+        status = 429
+    else:
+        status = 400
+    raise HTTPException(
+        status,
+        exc.safe_message,
+        headers={"X-Paihuo-Error-Code": exc.code},
+    ) from exc
+
+
+def _raise_inspection_override_error(
+    exc: inspectionoverrides.InspectionOverrideError,
+):
+    if exc.code == "OVERRIDE_FORBIDDEN":
+        status = 403
+    elif exc.code == "OVERRIDE_NOT_FOUND":
+        status = 404
+    elif exc.code in {"OVERRIDE_CONFLICT", "OVERRIDE_STATE_INVALID"}:
+        status = 409
+    else:
+        status = 400
+    raise HTTPException(
+        status,
+        exc.safe_message,
+        headers={"X-Paihuo-Error-Code": exc.code},
+    ) from exc
+
+
+def _inspection_search_text(value, *, field: str, limit: int) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise inspection.InspectionError(f"{field}格式无效")
+    clean = value.strip()
+    if len(clean) > limit or any(ord(char) < 32 for char in clean):
+        raise inspection.InspectionError(f"{field}格式无效")
+    return clean
+
+
+def _inspection_branch_search_db(
+    tid: int,
+    uid: int,
+    industry_key: str,
+    *,
+    q: str = "",
+    region: str = "",
+    limit: int = 20,
+    before_id: int | None = None,
+) -> dict:
+    """服务端权威 tenant + actor + industry 作用域的有界门店搜索。"""
+    inspection._actor(int(tid), int(uid), industry_key)
+    clean_q = _inspection_search_text(q, field="门店搜索词", limit=80)
+    clean_region = _inspection_search_text(region, field="门店区域", limit=60)
+    if isinstance(limit, bool):
+        raise inspection.InspectionError("门店分页条数无效")
+    try:
+        page_size = int(limit)
+    except (TypeError, ValueError):
+        raise inspection.InspectionError("门店分页条数无效") from None
+    if not 1 <= page_size <= 50:
+        raise inspection.InspectionError("门店分页条数必须在 1-50 之间")
+    cursor = None
+    if before_id is not None:
+        if isinstance(before_id, bool):
+            raise inspection.InspectionError("门店分页游标无效")
+        try:
+            cursor = int(before_id)
+        except (TypeError, ValueError):
+            raise inspection.InspectionError("门店分页游标无效") from None
+        if cursor < 1:
+            raise inspection.InspectionError("门店分页游标无效")
+
+    conditions = ["tenant_id=?", "industry_key=?", "active=1"]
+    params: list = [int(tid), industry_key]
+
+    def like(value: str) -> str:
+        return "%" + value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+    if clean_q:
+        conditions.append(
+            "(COALESCE(store_code,'') LIKE ? ESCAPE '\\' "
+            "OR name LIKE ? ESCAPE '\\')"
+        )
+        pattern = like(clean_q)
+        params.extend((pattern, pattern))
+    if clean_region:
+        conditions.append("region LIKE ? ESCAPE '\\'")
+        params.append(like(clean_region))
+    if cursor is not None:
+        conditions.append("id<?")
+        params.append(cursor)
+    rows = db.q(
+        "SELECT id,industry_key,store_code,name,region,address,active "
+        "FROM store_branch WHERE "
+        + " AND ".join(conditions)
+        + " ORDER BY id DESC LIMIT ?",
+        (*params, page_size + 1),
+    )
+    has_more = len(rows) > page_size
+    rows = rows[:page_size]
+    items = [{
+        "id": int(row["id"]),
+        "industry_key": str(row["industry_key"]),
+        "store_code": str(row.get("store_code") or ""),
+        "name": str(row.get("name") or ""),
+        "region": str(row.get("region") or ""),
+        "address": str(row.get("address") or ""),
+        "active": bool(row.get("active")),
+    } for row in rows]
+    return {
+        "items": items,
+        "next_before_id": items[-1]["id"] if has_more and items else None,
+        "limit": page_size,
+    }
+
+
+def _inspection_checklist_db(
+    tid: int,
+    uid: int,
+    industry_key: str,
+    branch_id: int,
+) -> dict:
+    inspection._actor(int(tid), int(uid), industry_key)
+    branch = inspection._branch_scope(int(tid), industry_key, int(branch_id))
+    try:
+        snapshot = inspectionoverrides.effective_snapshot(
+            int(tid), int(uid), industry_key, int(branch["id"]),
+        )
+        items = snapshot["items"]
+        slots = snapshot["capture_slots"]
+        registry = inspectionstandards.source_registry()
+    except (
+        inspectionstandards.InspectionStandardError,
+        inspectionoverrides.InspectionOverrideError,
+    ) as exc:
+        raise inspection.InspectionError("当前行业巡店标准不可用") from exc
+    try:
+        comparison = inspectionimport.business_comparison(
+            int(tid), industry_key, int(branch["id"])
+        )
+    except inspectionimport.ImportContractError:
+        raise
+    source_codes = sorted({
+        str(item.get("source_no") or "") for item in items
+        if str(item.get("source_no") or "") in registry
+    })
+    return {
+        "industry_key": industry_key,
+        "branch_id": int(branch["id"]),
+        "branch": {
+            "id": int(branch["id"]),
+            "name": str(branch.get("name") or ""),
+            "region": str(branch.get("region") or ""),
+        },
+        "catalog_version": snapshot["base_catalog_version"],
+        "template_version": snapshot["template_version"],
+        "as_of": snapshot["as_of"],
+        "catalog_sha256": snapshot["catalog_sha256"],
+        "base_catalog_sha256": snapshot["base_catalog_sha256"],
+        "override_summary": snapshot["override_summary"],
+        "items": items,
+        "capture_slots": slots,
+        "sources": {code: registry[code] for code in source_codes},
+        "metrics": comparison["metrics"],
+        "business_comparison": comparison,
+    }
+
+
+def _assert_inspection_http_replay_contract(
+    tid: int,
+    uid: int,
+    industry_key: str,
+    branch_id: int,
+    visit_id: int,
+    raw: dict,
+    prepared: list[dict],
+) -> None:
+    """Reject request-key reuse when any persisted HTTP input has changed."""
+    inspection._actor(int(tid), int(uid), industry_key)
+    inspection._branch_scope(int(tid), industry_key, int(branch_id))
+    row = db.one(
+        "SELECT request_key,industry_key,branch_id,visit_at,template_key,"
+        "template_version,template_snapshot_json,observations_json "
+        "FROM inspection_visit WHERE id=? AND tenant_id=? AND deleted_at IS NULL",
+        (int(visit_id), int(tid)),
+    )
+    if not row:
+        raise inspection.InspectionNotFound("巡店记录不存在")
+    event = db.one(
+        "SELECT payload_json FROM inspection_event WHERE tenant_id=? AND visit_id=? "
+        "AND kind='visit_created' ORDER BY id LIMIT 1",
+        (int(tid), int(visit_id)),
+    )
+    snapshot = db.jloads(row.get("template_snapshot_json"), None)
+    request = inspection.normalize_visit_input(
+        raw,
+        industry_key=industry_key,
+        standard_snapshot=snapshot if isinstance(snapshot, dict) else None,
+    )
+    stored_observations = db.jloads(row.get("observations_json"), None)
+    created_payload = db.jloads((event or {}).get("payload_json"), None)
+    mismatch = (
+        str(row.get("request_key") or "") != request["request_key"]
+        or str(row.get("industry_key") or "") != industry_key
+        or int(row.get("branch_id") or 0) != int(branch_id)
+        or str(row.get("template_key") or "")
+        != str(request.get("template_key") or "")
+        or str(row.get("template_version") or "")
+        != str(request.get("template_version") or "")
+        or not isinstance(snapshot, dict)
+        or list(snapshot.get("file_slots") or [])
+        != list(request.get("file_slots") or [])
+        or stored_observations != request.get("observations")
+        or not isinstance(created_payload, dict)
+        or str(created_payload.get("note") or "") != str(request.get("note") or "")
+    )
+    if raw.get("visit_at") not in (None, ""):
+        mismatch = mismatch or float(row.get("visit_at") or 0) != float(
+            request["visit_at"]
+        )
+
+    stored_photos = db.q(
+        "SELECT sha256,capture_slot,item_code FROM inspection_photo "
+        "WHERE tenant_id=? AND visit_id=? AND phase='before' ORDER BY id",
+        (int(tid), int(visit_id)),
+    )
+    if stored_photos:
+        stored_fingerprints = [
+            (
+                str(item.get("sha256") or ""),
+                str(item.get("capture_slot") or ""),
+                str(item.get("item_code") or ""),
+            )
+            for item in stored_photos
+        ]
+        incoming_fingerprints = [
+            (
+                str(item.get("sha256") or ""),
+                str(item.get("capture_slot") or ""),
+                str(item.get("item_code") or ""),
+            )
+            for item in prepared
+        ]
+        mismatch = mismatch or stored_fingerprints != incoming_fingerprints
+    if mismatch:
+        raise inspection.InspectionConflict(
+            "巡店请求号已用于不同内容，请刷新后重新提交"
+        )
+
+
+def _normalize_inspection_image(data: bytes, filename: str) -> dict:
+    """校验、纠正方向并重编码，彻底移除 EXIF 与上传文件名。"""
+    import io
+    from PIL import Image, ImageOps
+
+    ext = os.path.splitext(filename or "")[1].lower()
+    if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
+        raise ValueError("巡店照片仅支持 JPEG、PNG 或 WebP")
+    avatar.validate_upload_media(data, ext, "photo")
+    try:
+        with Image.open(io.BytesIO(data)) as source:
+            image = ImageOps.exif_transpose(source)
+            if "A" in image.getbands():
+                base = Image.new("RGB", image.size, "white")
+                base.paste(image, mask=image.getchannel("A"))
+                image = base
+            else:
+                image = image.convert("RGB")
+            image.thumbnail((4096, 4096))
+            width, height = image.size
+            output = io.BytesIO()
+            image.save(output, "JPEG", quality=88, optimize=True)
+            normalized = output.getvalue()
+    except (OSError, ValueError) as exc:
+        raise ValueError("巡店照片无法安全解析") from exc
+    if not normalized or len(normalized) > inspection.MAX_PHOTO_BYTES:
+        raise ValueError("巡店照片重编码后超过 8MB")
+    return {
+        "data": normalized,
+        "mime_type": "image/jpeg",
+        "byte_size": len(normalized),
+        "sha256": hashlib.sha256(normalized).hexdigest(),
+        "width": width,
+        "height": height,
+    }
+
+
+async def _prepare_inspection_uploads(files: list[UploadFile]) -> list[dict]:
+    if not files or len(files) > inspection.MAX_PHOTOS:
+        raise HTTPException(400, f"请上传 1-{inspection.MAX_PHOTOS} 张巡店照片")
+    declared = 0
+    for file in files:
+        try:
+            declared += max(0, int(getattr(file, "size", 0) or 0))
+        except (TypeError, ValueError):
+            pass
+    if declared > _INSPECTION_UPLOAD_MAX_BYTES:
+        raise HTTPException(413, "巡店照片总大小不能超过 38MB")
+    await asyncio.to_thread(
+        _assert_persistent_upload_capacity,
+        TEN(),
+        max(1, declared),
+        incoming_files=len(files),
+    )
+    prepared = []
+    total = 0
+    for file in files:
+        data = await _read_limited(
+            file,
+            inspection.MAX_PHOTO_BYTES,
+            "单张巡店照片不能超过 8MB",
+        )
+        try:
+            item = await asyncio.to_thread(
+                _normalize_inspection_image,
+                data,
+                file.filename or "photo.jpg",
+            )
+        except (avatar.InvalidAvatarMedia, ValueError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        total += int(item["byte_size"])
+        if total > _INSPECTION_UPLOAD_MAX_BYTES:
+            raise HTTPException(413, "巡店照片总大小不能超过 38MB")
+        prepared.append(item)
+    await asyncio.to_thread(
+        _assert_persistent_upload_capacity,
+        TEN(),
+        max(1, total),
+        incoming_files=len(prepared),
+    )
+    return prepared
+
+
+def _store_inspection_images(tid: int, visit_id: int, items: list[dict]) -> list[dict]:
+    root = os.path.realpath(assetfiles.ASSET_ROOT)
+    if not os.path.isdir(root) or os.path.islink(root):
+        raise ValueError("巡店素材根目录不安全")
+    directory = root
+    for component in ("inspections", str(int(tid)), str(int(visit_id))):
+        candidate = os.path.abspath(os.path.join(directory, component))
+        try:
+            inside = os.path.commonpath((root, candidate)) == root
+        except ValueError:
+            inside = False
+        if not inside:
+            raise ValueError("巡店照片目录不安全")
+        try:
+            os.mkdir(candidate, 0o750)
+        except FileExistsError:
+            pass
+        if (
+            os.path.islink(candidate)
+            or not os.path.isdir(candidate)
+            or os.path.realpath(candidate) != candidate
+        ):
+            raise ValueError("巡店照片目录不安全")
+        directory = candidate
+    records = []
+    created_paths: list[str] = []
+    try:
+        for item in items:
+            filename = os.urandom(16).hex() + ".jpg"
+            path = os.path.abspath(os.path.join(directory, filename))
+            if os.path.commonpath((directory, path)) != directory:
+                raise ValueError("巡店照片路径不安全")
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            if hasattr(os, "O_CLOEXEC"):
+                flags |= os.O_CLOEXEC
+            fd = os.open(path, flags, 0o640)
+            created_paths.append(path)
+            try:
+                with os.fdopen(fd, "wb", closefd=True) as handle:
+                    fd = -1
+                    handle.write(item["data"])
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except BaseException:
+                if fd >= 0:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                try:
+                    os.unlink(path)
+                    created_paths.remove(path)
+                except (OSError, ValueError):
+                    pass
+                raise
+            record = {
+                key: item[key]
+                for key in ("mime_type", "byte_size", "sha256", "width", "height")
+            } | {"storage_key": f"inspections/{int(tid)}/{int(visit_id)}/{filename}"}
+            for key in ("capture_slot", "item_code"):
+                if item.get(key) not in (None, ""):
+                    record[key] = item[key]
+            records.append(record)
+        directory_flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            directory_flags |= os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            directory_flags |= os.O_NOFOLLOW
+        directory_fd = os.open(directory, directory_flags)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except BaseException:
+        # 批量落图必须是文件层面的 all-or-nothing，不遗留前几张。
+        for path in created_paths:
+            try:
+                if not os.path.islink(path):
+                    os.unlink(path)
+            except FileNotFoundError:
+                pass
+        raise
+    return records
+
+
+def _cleanup_unreferenced_inspection_images(records: list[dict]) -> None:
+    root = os.path.realpath(assetfiles.ASSET_ROOT)
+    for record in records:
+        storage_key = str(record.get("storage_key") or "")
+        if not storage_key or db.one(
+            "SELECT 1 AS ok FROM inspection_photo WHERE storage_key=? LIMIT 1",
+            (storage_key,),
+        ):
+            continue
+        path = os.path.abspath(os.path.join(root, storage_key))
+        resolved = os.path.realpath(path)
+        if (
+            os.path.commonpath((root, path)) != root
+            or os.path.commonpath((root, resolved)) != root
+            or resolved != path
+            or os.path.islink(path)
+        ):
+            continue
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
+def _cleanup_empty_shell_inspection_files(tid: int, visit_id: int) -> int:
+    """清理进程崩溃留下的未入库初检文件，只处理空 preparing shell。"""
+    shell = db.one(
+        "SELECT id FROM inspection_visit WHERE id=? AND tenant_id=? "
+        "AND status='preparing' AND task_id IS NULL AND deleted_at IS NULL "
+        "AND NOT EXISTS(SELECT 1 FROM inspection_photo p "
+        "WHERE p.tenant_id=inspection_visit.tenant_id "
+        "AND p.visit_id=inspection_visit.id)",
+        (int(visit_id), int(tid)),
+    )
+    if not shell:
+        return 0
+    root = os.path.realpath(assetfiles.ASSET_ROOT)
+    directory = os.path.abspath(
+        os.path.join(root, "inspections", str(int(tid)), str(int(visit_id)))
+    )
+    try:
+        safe = (
+            os.path.commonpath((root, directory)) == root
+            and os.path.realpath(directory) == directory
+            and not os.path.islink(directory)
+        )
+    except ValueError:
+        safe = False
+    if not safe or not os.path.isdir(directory):
+        return 0
+    removed = 0
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            if not re.fullmatch(r"[a-f0-9]{32}\.jpg", entry.name):
+                continue
+            try:
+                if entry.is_file(follow_symlinks=False):
+                    os.unlink(entry.path)
+                    removed += 1
+            except FileNotFoundError:
+                pass
+    if removed:
+        directory_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    return removed
+
+
+async def _run_inspection_file_safely(fn, *args, **kwargs):
+    """等待已提交的文件写/删真实收口，避免请求取消后留孤儿文件。"""
+    operation = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
+    return await _drain_task_despite_cancellation(operation)
+
+
+def _abandon_empty_inspection_shell(
+    tid: int,
+    visit_id: int,
+    *,
+    industry_key: str,
+) -> bool:
+    """删掉还没有照片/任务的准备态空壳，让同一幂等号可安全重试。"""
+    with db.atomic() as connection:
+        row = connection.execute(
+            "SELECT id FROM inspection_visit WHERE id=? AND tenant_id=? "
+            "AND industry_key=? AND status='preparing' AND task_id IS NULL "
+            "AND deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM inspection_photo p "
+            "WHERE p.tenant_id=inspection_visit.tenant_id "
+            "AND p.visit_id=inspection_visit.id)",
+            (int(visit_id), int(tid), industry_key),
+        ).fetchone()
+        if not row:
+            return False
+        connection.execute(
+            "DELETE FROM inspection_event WHERE tenant_id=? AND visit_id=?",
+            (int(tid), int(visit_id)),
+        )
+        changed = connection.execute(
+            "DELETE FROM inspection_visit WHERE id=? AND tenant_id=? "
+            "AND status='preparing' AND task_id IS NULL",
+            (int(visit_id), int(tid)),
+        )
+        return changed.rowcount == 1
+
+
+def _inspection_brief(industry_key: str, branch: dict, note: str) -> dict:
+    return taskrunner.normalize_brief({
+        "direction": f"巡检门店“{branch.get('name') or '门店'}”，形成问题、整改与复查闭环",
+        "industry": industry_key,
+        "material": str(note or "")[:12000],
+        "length": "std",
+    })
+
+
+def _activate_inspection_job(
+    tid: int,
+    uid: int,
+    industry_key: str,
+    visit_id: int,
+    photo_records: list[dict],
+    brief: dict,
+) -> dict:
+    with db.atomic() as connection:
+        existing = connection.execute(
+            "SELECT task_id,status FROM inspection_visit WHERE id=? AND tenant_id=? "
+            "AND industry_key=? AND deleted_at IS NULL",
+            (visit_id, tid, industry_key),
+        ).fetchone()
+        if not existing:
+            raise inspection.InspectionNotFound("巡店记录不存在")
+        if existing["task_id"]:
+            return {
+                "created": False,
+                "inspection_id": visit_id,
+                "task_id": int(existing["task_id"]),
+            }
+        inspection.attach_visit_photos(
+            tid, uid, industry_key, visit_id, photo_records
+        )
+        task_id = _create_charged_expert_task(
+            {
+                "emp_idx": inspection.EMPLOYEE_IDX,
+                "tenant_id": tid,
+                "brief_json": json.dumps(brief, ensure_ascii=False),
+            },
+            note="巡店照片分析",
+        )
+        changed = connection.execute(
+            "UPDATE inspection_visit SET task_id=?,updated_at=? WHERE id=? "
+            "AND tenant_id=? AND industry_key=? AND task_id IS NULL "
+            "AND status='analyzing'",
+            (task_id, time.time(), visit_id, tid, industry_key),
+        )
+        if changed.rowcount != 1:
+            raise inspection.InspectionConflict("巡店任务已被另一个请求接管")
+        return {
+            "created": True,
+            "inspection_id": visit_id,
+            "task_id": task_id,
+        }
+
+
+def _claim_inspection_task(task_id: int) -> dict | None:
+    with db.atomic() as connection:
+        row = connection.execute(
+            "SELECT t.*,v.id inspection_id,v.industry_key,"
+            "v.created_by inspection_creator FROM task t "
+            "JOIN inspection_visit v ON v.task_id=t.id "
+            "AND v.tenant_id=t.tenant_id WHERE t.id=? AND t.emp_idx=? "
+            "AND t.status='queued' AND t.billing_status IN ('charged','included') "
+            "AND t.deleted_at IS NULL AND v.deleted_at IS NULL "
+            "AND v.status='analyzing' AND EXISTS("
+            "SELECT 1 FROM inspection_photo p WHERE p.tenant_id=v.tenant_id "
+            "AND p.visit_id=v.id AND p.phase='before')",
+            (task_id, inspection.EMPLOYEE_IDX),
+        ).fetchone()
+        if not row:
+            task = connection.execute(
+                "SELECT status FROM task WHERE id=? AND emp_idx=? "
+                "AND deleted_at IS NULL",
+                (task_id, inspection.EMPLOYEE_IDX),
+            ).fetchone()
+            if not task or task["status"] != "queued":
+                return None
+            raise inspection.InspectionConflict(
+                "巡店任务缺少可恢复的巡店记录或初检照片"
+            )
+        changed = connection.execute(
+            "UPDATE task SET status='running',summary_md=NULL,terminal_at=NULL,updated_at=? "
+            "WHERE id=? AND emp_idx=? AND status='queued' "
+            "AND billing_status IN ('charged','included') AND deleted_at IS NULL",
+            (time.time(), task_id, inspection.EMPLOYEE_IDX),
+        )
+        if changed.rowcount != 1:
+            return None
+        return dict(row)
+
+
+def _inspection_authoritative_contract(allowed_photo_ids: set[int]) -> str:
+    """生成位于所有可编辑模板之后的本次巡店唯一结构合同。"""
+    allowed = sorted(int(value) for value in allowed_photo_ids)
+    if not allowed or any(value <= 0 for value in allowed):
+        raise inspection.InspectionError("巡店照片标识无效")
+    expected = len(allowed)
+    schema = {
+        "type": "object",
+        "required": [
+            "analysis_status", "summary", "score", "photo_reviews", "issues",
+        ],
+        "properties": {
+            "analysis_status": {
+                "type": "string",
+                "enum": ["issues_found", "clean_candidate"],
+            },
+            "summary": {"type": "string", "minLength": 1, "maxLength": 4000},
+            "score": {"type": "number", "minimum": 0, "maximum": 100},
+            "photo_reviews": {
+                "type": "array",
+                "minItems": expected,
+                "maxItems": expected,
+                "items": {
+                    "type": "object",
+                    "required": [
+                        "photo_id", "analyzable", "verdict", "confidence",
+                        "visible_facts",
+                    ],
+                    "properties": {
+                        "photo_id": {"type": "integer", "enum": allowed},
+                        "analyzable": {"type": "boolean"},
+                        "verdict": {
+                            "type": "string",
+                            "enum": ["clean", "issue"],
+                        },
+                        "confidence": {
+                            "type": "number",
+                            "minimum": inspection.MIN_PHOTO_REVIEW_CONFIDENCE,
+                            "maximum": 1,
+                        },
+                        "visible_facts": {
+                            "type": "array", "minItems": 1, "maxItems": 12,
+                            "items": {"type": "string", "minLength": 1, "maxLength": 300},
+                        },
+                    },
+                },
+            },
+            "issues": {
+                "type": "array", "maxItems": 30,
+                "items": {
+                    "type": "object",
+                    "required": [
+                        "title", "description", "severity", "category",
+                        "confidence", "root_cause", "evidence", "action",
+                    ],
+                    "properties": {
+                        "title": {"type": "string", "minLength": 1, "maxLength": 120},
+                        "description": {"type": "string", "minLength": 1, "maxLength": 1500},
+                        "severity": {
+                            "type": "string",
+                            "enum": ["critical", "high", "medium", "low"],
+                        },
+                        "category": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9_\\-\\u4e00-\\u9fff]{1,50}$",
+                        },
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                        "root_cause": {"type": "string", "maxLength": 800},
+                        "evidence": {
+                            "type": "array", "minItems": 1, "maxItems": expected,
+                            "items": {
+                                "type": "object",
+                                "required": ["photo_id", "note"],
+                                "properties": {
+                                    "photo_id": {"type": "integer", "enum": allowed},
+                                    "note": {"type": "string", "maxLength": 300},
+                                    "bbox": {
+                                        "type": ["array", "null"],
+                                        "minItems": 4, "maxItems": 4,
+                                        "items": {"type": "number", "minimum": 0, "maximum": 1},
+                                    },
+                                },
+                            },
+                        },
+                        "action": {
+                            "type": "object",
+                            "required": ["plan", "owner", "due_days"],
+                            "properties": {
+                                "plan": {"type": "string", "minLength": 1, "maxLength": 1200},
+                                "owner": {"type": "string", "maxLength": 60},
+                                "due_days": {"type": "number", "minimum": 0, "maximum": 90},
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    }
+    return "\n".join((
+        _INSPECTION_CONTRACT_MARKER,
+        "本合同覆盖前文所有 JSON 样例、编号和字段说明；只能输出一个 JSON 对象，不要 Markdown。",
+        f"allowed_photo_ids={json.dumps(allowed, ensure_ascii=False)}",
+        f"expected_photo_review_count={expected}",
+        "所有 allowed_photo_ids 必须在 photo_reviews 中各出现一次，不得缺失、重复或引用外部 ID。",
+        "analyzable=false 表示照片不可分析，不得猜测或改成 true；每张可分析照片的 confidence 必须 >=0.8。",
+        "verdict=issue 的 photo_id 集合必须与 issues[*].evidence[*].photo_id 集合完全一致。",
+        "issues 非空时 analysis_status=issues_found；issues 为空时 analysis_status=clean_candidate。",
+        "完整 JSON Schema：" + json.dumps(
+            schema, ensure_ascii=False, separators=(",", ":")
+        ),
+    ))
+
+
+def _inspection_attempt_system(
+    base_system: str,
+    allowed_photo_ids: set[int],
+    *,
+    validation_code: str | None = None,
+    extra_instruction: str = "",
+) -> str:
+    """确保每次调用只有一份、且最后出现的动态权威合同。"""
+    prefix = str(base_system or "").split(_INSPECTION_CONTRACT_MARKER, 1)[0].rstrip()
+    pieces = [prefix]
+    if extra_instruction:
+        pieces.append(str(extra_instruction).strip())
+    if validation_code is not None:
+        safe_code = str(validation_code or "")
+        if not re.fullmatch(r"IC_[A-Z0-9_]{3,64}", safe_code):
+            safe_code = "IC_CONTRACT_INVALID"
+        pieces.append(
+            "【上一次仅格式校验未通过】"
+            f"validation_code={safe_code}。不提供上一版原文；"
+            "请重新独立查看同一批图片，严格遵守下方合同。"
+        )
+    pieces.append(_inspection_authoritative_contract(allowed_photo_ids))
+    return "\n\n".join(item for item in pieces if item)
+
+
+_INSPECTION_MODEL_ITEM_FIELDS = (
+    "item_code", "area_code", "label", "tier", "required", "evidence",
+    "shot_guide", "severity", "condition", "jurisdiction", "source_no",
+)
+_INSPECTION_MODEL_SLOT_FIELDS = (
+    "slot_code", "area_code", "label", "required", "shot_guide",
+    "min_photos", "max_photos",
+)
+
+
+def _inspection_frozen_standard_block(snapshot: dict) -> str:
+    """Render only visual-inspection instructions from the frozen snapshot.
+
+    The snapshot may also carry business metric definitions and submitted
+    observations for boss-facing views.  Those fields, source URLs and any
+    unexpected employee/tenant data must never be forwarded to the model.
+    """
+    if not isinstance(snapshot, dict) or not snapshot:
+        return ""
+
+    def whitelist(rows, fields: tuple[str, ...]) -> list[dict]:
+        return [
+            {
+                key: row[key]
+                for key in fields
+                if key in row and row[key] is not None
+            }
+            for row in (rows or [])
+            if isinstance(row, dict)
+        ]
+
+    safe_snapshot = {
+        key: snapshot[key]
+        for key in ("template_key", "template_version", "as_of", "catalog_sha256")
+        if key in snapshot and snapshot[key] is not None
+    }
+    safe_snapshot["items"] = whitelist(
+        snapshot.get("items"), _INSPECTION_MODEL_ITEM_FIELDS
+    )
+    safe_snapshot["capture_slots"] = whitelist(
+        snapshot.get("capture_slots"), _INSPECTION_MODEL_SLOT_FIELDS
+    )
+    if not safe_snapshot["items"] and not safe_snapshot["capture_slots"]:
+        return ""
+    return "【本次冻结巡店检查标准】\n" + json.dumps(
+        safe_snapshot, ensure_ascii=False, separators=(",", ":")
+    )
+
+
+def _inspection_prompt_bundle(
+    tid: int,
+    visit: dict,
+    *,
+    include_initial_contract: bool = True,
+) -> providers.PromptBundle:
+    station = registry.BY_IDX[inspection.EMPLOYEE_IDX]
+    config = employees.get_config(inspection.EMPLOYEE_IDX)
+    capabilities = [
+        item for item in registry.capabilities_for(inspection.EMPLOYEE_IDX)
+        if item.get("enabled")
+    ]
+    caps_text = "\n".join(
+        f"- {item['name']}：{item['desc']}" for item in capabilities
+    )
+    skills_text = employees.skills_block(inspection.EMPLOYEE_IDX)
+    template = str(
+        config.get("prompt_template")
+        or registry.DEFAULT_PROMPTS["inspection"]
+    )[:12000]
+    private_template = employees.render(template, {
+        "photos": "（读取用户消息中的照片编号）",
+        "scope": "（读取用户消息中的检查重点）",
+        "store": "（读取用户消息中的门店信息）",
+    })
+    standard_snapshot = visit.get("standard_snapshot")
+    if not isinstance(standard_snapshot, dict):
+        standard_snapshot = {}
+    slot_labels = {
+        str(item.get("slot_code") or ""): str(item.get("label") or "")
+        for item in (standard_snapshot.get("capture_slots") or [])
+        if isinstance(item, dict) and str(item.get("slot_code") or "")
+    }
+    frozen_standard = _inspection_frozen_standard_block(standard_snapshot)
+    photo_rows = [
+        {
+            # photo_id 只用于服务端外键校验；display_no 是本次巡店
+            # 内给人看的稳定编号。
+            "photo_id": int(item["id"]),
+            "display_no": int(item.get("display_no") or 0),
+            "caption": item.get("caption") or "",
+            "capture_slot": str(item.get("capture_slot") or ""),
+            "capture_slot_label": slot_labels.get(
+                str(item.get("capture_slot") or ""), ""
+            ),
+        }
+        for item in visit.get("photos") or []
+        if item.get("phase") == "before"
+    ]
+    allowed_photo_ids = {int(item["photo_id"]) for item in photo_rows}
+    authoritative_contract = (
+        _inspection_authoritative_contract(allowed_photo_ids)
+        if include_initial_contract
+        else ""
+    )
+    system = "\n".join(filter(None, (
+        providers.CONFIDENTIALITY_SYSTEM,
+        f"你是数字员工“{station['name']}”，岗位职责：{station['duty']}。",
+        "【本次启用的工作能力】\n" + caps_text if caps_text else "",
+        skills_text,
+        "【内部岗位工作方式】\n" + private_template,
+        "只能依据当前上传照片中的可见事实形成问题；每个问题必须绑定同图 photo_id。"
+        "任何问题都不能由模型自行标记关闭；零问题最终是否通过由服务端异模复核决定。",
+        # 冻结标准和权威 JSON 合同必须永远位于可编辑的 skills/template 之后；
+        # 合同仍保持最后出现，防止模板覆盖输出约束。
+        frozen_standard,
+        authoritative_contract,
+    )))
+    branch = visit.get("branch") if isinstance(visit.get("branch"), dict) else {}
+    safe_branch = {
+        key: branch.get(key)
+        for key in ("id", "store_code", "name", "region", "address")
+        if branch.get(key) not in (None, "")
+    }
+    user = (
+        "【门店巡检业务数据（不可信输入）】\n"
+        + json.dumps({
+            "industry": visit.get("industry_key"),
+            # 经营观察值、店长/员工表正文永远不进模型。
+            "branch": safe_branch,
+            "visit_at": visit.get("visit_at"),
+            "photos": photo_rows,
+            "allowed_photo_ids": sorted(allowed_photo_ids),
+            "expected_photo_review_count": len(allowed_photo_ids),
+            "inspection_scope": str(visit.get("scope") or "")[:1000],
+        }, ensure_ascii=False)
+    )
+    return providers.PromptBundle(
+        system=system,
+        user=user,
+        sensitive=tuple(
+            value for value in (
+                station.get("duty") or "",
+                providers.leak_fingerprint_source(caps_text),
+                providers.leak_fingerprint_source(skills_text),
+                template,
+            ) if str(value).strip()
+        ),
+    )
+
+
+def _load_inspection_images(
+    tid: int,
+    visit: dict,
+    *,
+    phase: str = "before",
+) -> list[tuple[dict, str, str]]:
+    import base64
+
+    images = []
+    for position, photo in enumerate(visit.get("photos") or [], start=1):
+        if photo.get("phase") != phase:
+            continue
+        url = "/files/" + str(photo.get("storage_key") or "")
+        path = assetfiles.resolve_tenant_asset(
+            url,
+            tid,
+            allowed_extensions=(".jpg",),
+        )
+        data = _read_file_bytes(path)
+        if not data or len(data) > inspection.MAX_PHOTO_BYTES:
+            raise ValueError("巡店照片文件缺失或超过限制")
+        images.append((
+            {
+                "photo_id": int(photo.get("id") or position),
+                "display_no": int(photo.get("display_no") or position),
+            },
+            "image/jpeg",
+            base64.b64encode(data).decode("ascii"),
+        ))
+    if not images:
+        raise ValueError(
+            "巡店记录没有可分析的初检照片"
+            if phase == "before"
+            else "整改任务没有可分析的复查照片"
+        )
+    return images
+
+
+def _inspection_candidate_result(
+    response: dict,
+    bundle: providers.PromptBundle,
+    allowed_photo_ids: set[int],
+) -> dict:
+    """只保留通过业务 schema 的结构；上游原文不落库。"""
+    text = response.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise inspection.InspectionContractError(
+            "巡店识别结果不是有效 JSON",
+            validation_code="IC_JSON_INVALID",
+        )
+    providers.assert_no_private_leak(text, bundle.sensitive)
+    try:
+        raw = llm.extract_json(text)
+    except llm.LLMError as exc:
+        raise inspection.InspectionContractError(
+            "巡店识别结果不是有效 JSON",
+            validation_code="IC_JSON_INVALID",
+        ) from exc
+    return inspection.normalize_model_result(
+        raw,
+        allowed_photo_ids,
+        allow_clean_candidate=True,
+    )
+
+
+def _inspection_usage_add(total: dict, response: dict) -> None:
+    """只累计网关明确返回的实际用量，不从文本推测。"""
+    total["cost_usd"] = (
+        float(total.get("cost_usd") or 0)
+        + float(response.get("cost_usd") or 0)
+    )
+    total["tokens"] = (
+        int(total.get("tokens") or 0)
+        + int(response.get("tokens") or 0)
+    )
+
+
+async def _inspection_visual_candidate(
+    *,
+    bundle: providers.PromptBundle,
+    images: list[tuple[dict, str, str]],
+    allowed_photo_ids: set[int],
+    model: str,
+    deadline: float,
+    stage: str,
+    token_prefix: str,
+    slot_label: str,
+    extra_instruction: str = "",
+) -> tuple[dict, dict]:
+    """在共享绝对截止时间内获取一个严格候选。
+
+    只有 JSON/字段/覆盖等合同遵循错误可以在不传第一版原文的
+    前提下同模重做一次。不可分析、低置信度、泄露、上游错误和
+    取消一律原样失败。
+    """
+    usage = {"cost_usd": 0.0, "tokens": 0}
+    validation_code: str | None = None
+    loop = asyncio.get_running_loop()
+    for attempt in range(2):
+        remaining = float(deadline) - loop.time()
+        if remaining <= 0:
+            raise TimeoutError("巡店视觉分析超时")
+        system_prompt = _inspection_attempt_system(
+            bundle.system,
+            allowed_photo_ids,
+            validation_code=validation_code,
+            extra_instruction=extra_instruction,
+        )
+        # timeout 包住 AI 槽等待与供应商调用；每轮都使用同一
+        # absolute deadline 的剩余值，不得重置 300s。
+        async with asyncio.timeout(remaining):
+            async with _free_ai_slot(slot_label):
+                provider_remaining = float(deadline) - loop.time()
+                if provider_remaining <= 0:
+                    raise TimeoutError("巡店视觉分析超时")
+                response = await providers.call_vision(
+                    inspection.EMPLOYEE_IDX,
+                    bundle.user,
+                    images,
+                    timeout=provider_remaining,
+                    token=f"{token_prefix}:attempt:{attempt + 1}",
+                    system_prompt=system_prompt,
+                    max_tokens=5000,
+                    model_override=model,
+                )
+        _inspection_usage_add(usage, response)
+        try:
+            candidate = _inspection_candidate_result(
+                response,
+                bundle,
+                allowed_photo_ids,
+            )
+        except providers.PrivatePromptLeak:
+            raise
+        except inspection.InspectionContractError as exc:
+            code = str(exc.validation_code)
+            # 日志/指标只包含有限稳定码与固定阶段，不记任何
+            # 照片、门店、任务 ID、业务文字或模型原文。
+            log.warning(
+                "inspection candidate rejected stage=%s attempt=%d validation_code=%s",
+                stage,
+                attempt + 1,
+                code,
+            )
+            obs.count(f"inspection.validation.{code}")
+            if not exc.retryable or attempt == 1:
+                raise
+            obs.count("inspection.validation.format_retry")
+            validation_code = code
+            continue
+        if attempt:
+            obs.count("inspection.validation.format_retry_succeeded")
+        return candidate, usage
+    raise inspection.InspectionContractError(
+        "巡店识别结果未通过合同",
+        validation_code="IC_CONTRACT_INVALID",
+    )
+
+
+def _finalize_inspection_candidates(
+    primary: dict,
+    review: dict | None,
+    *,
+    primary_model: str,
+    review_model: str | None,
+) -> dict:
+    """风险取发现问题的复核结果；零问题必须双模完整 clean。"""
+    if review is None:
+        if not primary["issues"]:
+            raise inspection.InspectionError("零问题巡店结果未经异模复核")
+        return {**primary, "analysis_status": "issues_found"}
+    if not review_model or review_model == primary_model:
+        raise inspection.InspectionError("巡店复核模型必须与主模型不同")
+    if review["issues"]:
+        return {**review, "analysis_status": "issues_found"}
+    if primary["issues"]:
+        return {**primary, "analysis_status": "issues_found"}
+    conservative = (
+        primary if float(primary["score"]) <= float(review["score"]) else review
+    )
+    return {
+        **conservative,
+        "analysis_status": "clean_verified",
+        "score": min(float(primary["score"]), float(review["score"])),
+        "verification": {
+            "primary_model": primary_model,
+            "review_model": review_model,
+            "both_clean": True,
+        },
+    }
+
+
+def _inspection_markdown(visit: dict) -> str:
+    branch = visit.get("branch") or {}
+    lines = [
+        f"# {branch.get('name') or '门店'}巡店记录",
+        "",
+        f"- 综合评分：{visit.get('score') if visit.get('score') is not None else '待人工确认'}",
+        f"- 巡店结论：{visit.get('summary') or ''}",
+        "",
+        "## 问题与整改计划",
+    ]
+    for index, issue in enumerate(visit.get("issues") or [], 1):
+        action = issue.get("action") or {}
+        photos = "、".join(
+            f"照片{item.get('display_no') or '?'}"
+            for item in issue.get("evidence") or []
+        )
+        lines.extend((
+            f"### {index}. [{issue.get('severity')}] {issue.get('title')}",
+            str(issue.get("description") or ""),
+            f"- 证据：{photos or '待人工核查'}",
+            f"- 整改：{action.get('plan') or '待确认'}",
+            f"- 负责人：{action.get('owner') or '待指派'}",
+            "",
+        ))
+    lines.append("## 下一步")
+    lines.append("整改负责人提交复查照片后，由企业主人工确认是否真正关闭问题。")
+    return "\n".join(lines)
+
+
+def _commit_inspection_delivery(
+    task_id: int,
+    tid: int,
+    uid: int,
+    industry_key: str,
+    visit_id: int,
+    model_result: dict,
+    usage: dict,
+) -> bool:
+    with db.atomic() as connection:
+        visit = inspection.complete_visit(
+            tid, uid, industry_key, visit_id, model_result
+        )
+        markdown = _inspection_markdown(visit)
+        now = time.time()
+        changed = connection.execute(
+            "UPDATE task SET status='done',output_md=?,summary_md=?,cost_usd=?,"
+            "tokens=?,steps_json=?,billing_status=CASE WHEN billing_status='charged' "
+            "THEN 'succeeded' ELSE billing_status END,terminal_at=?,updated_at=? "
+            "WHERE id=? "
+            "AND status='running' AND billing_status IN ('charged','included') "
+            "AND deleted_at IS NULL",
+            (
+                markdown,
+                str(visit.get("summary") or "")[:800],
+                float(usage.get("cost_usd") or 0),
+                int(usage.get("tokens") or 0),
+                json.dumps([
+                    {"step": "photo_review", "msg": "现场照片已逐张核查"},
+                    {"step": "capa", "msg": "问题、整改与复查计划已形成"},
+                ], ensure_ascii=False),
+                now,
+                now,
+                task_id,
+            ),
+        )
+        if changed.rowcount != 1:
+            raise inspection.InspectionConflict("巡店任务状态已发生变化")
+        connection.execute(
+            "INSERT INTO asset(type,tenant_id,payload_json,created_at,updated_at) "
+            "VALUES('report',?,?,?,?)",
+            (
+                tid,
+                json.dumps({
+                    "title": f"{(visit.get('branch') or {}).get('name') or '门店'}巡店记录",
+                    "emp": "巡店经理",
+                    "task_id": task_id,
+                    "inspection_id": visit_id,
+                    "route": (
+                        f"#/inspections/{visit_id}/"
+                        f"{visit.get('industry_key') or ''}"
+                    ).rstrip("/"),
+                }, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+        return True
+
+
+def _settle_inspection_failure(
+    task_id: int,
+    tid: int,
+    uid: int,
+    visit_id: int,
+    message: str,
+) -> bool:
+    with db.atomic():
+        settled = taskrunner.settle_failure(task_id, message)
+        inspection._mark_visit_failed(
+            tid, uid, visit_id, RuntimeError("inspection_failed")
+        )
+        return settled
+
+
+def _settle_inspection_task_by_id(task_id: int, message: str) -> bool:
+    """不依赖请求作用域收口巡店任务，供启动恢复/启动失败使用。"""
+    row = db.one(
+        "SELECT t.tenant_id,v.id visit_id,v.created_by FROM task t "
+        "LEFT JOIN inspection_visit v ON v.task_id=t.id "
+        "AND v.tenant_id=t.tenant_id AND v.deleted_at IS NULL "
+        "WHERE t.id=? AND t.emp_idx=?",
+        (int(task_id), inspection.EMPLOYEE_IDX),
+    )
+    if not row:
+        return False
+    settled = taskrunner.settle_failure(int(task_id), message)
+    if row.get("visit_id"):
+        inspection._mark_visit_failed(
+            int(row["tenant_id"]),
+            int(row.get("created_by") or 0),
+            int(row["visit_id"]),
+            RuntimeError("inspection_worker_unavailable"),
+        )
+    return settled
+
+
+def _prepare_inspection_retry(task_id: int, tenant_id: int) -> bool:
+    """将失败巡店的 task + visit 在同一 SQLite 事务里恢复。"""
+    with db.atomic() as connection:
+        row = connection.execute(
+            "SELECT v.id FROM task t JOIN inspection_visit v ON v.task_id=t.id "
+            "AND v.tenant_id=t.tenant_id WHERE t.id=? AND t.tenant_id=? "
+            "AND t.emp_idx=? AND t.status='failed' "
+            "AND t.billing_status IN ('refunded','included') "
+            "AND v.status='failed' AND v.deleted_at IS NULL "
+            "AND EXISTS(SELECT 1 FROM inspection_photo p "
+            "WHERE p.tenant_id=v.tenant_id AND p.visit_id=v.id "
+            "AND p.phase='before')",
+            (int(task_id), int(tenant_id), inspection.EMPLOYEE_IDX),
+        ).fetchone()
+        if not row:
+            return False
+        if not taskrunner.prepare_retry(int(task_id), int(tenant_id)):
+            return False
+        changed = connection.execute(
+            "UPDATE inspection_visit SET status='analyzing',terminal_at=NULL,updated_at=?,"
+            "version=version+1 WHERE id=? AND tenant_id=? AND status='failed' "
+            "AND deleted_at IS NULL",
+            (time.time(), int(row["id"]), int(tenant_id)),
+        )
+        if changed.rowcount != 1:
+            raise inspection.InspectionConflict(
+                "巡店记录已更新，请刷新后重试"
+            )
+        return True
+
+
+def _recover_inspection_tasks() -> dict:
+    """服务重启时只恢复有完整 visit + before photo 证据的巡店任务。"""
+    resumable: list[int] = []
+    invalid: list[int] = []
+    rows = db.q(
+        "SELECT t.id,t.status,t.billing_status,t.tenant_id,"
+        "v.id visit_id,v.status visit_status,v.created_by,"
+        "EXISTS(SELECT 1 FROM inspection_photo p "
+        "WHERE p.tenant_id=t.tenant_id AND p.visit_id=v.id "
+        "AND p.phase='before') has_before FROM task t "
+        "LEFT JOIN inspection_visit v ON v.task_id=t.id "
+        "AND v.tenant_id=t.tenant_id AND v.deleted_at IS NULL "
+        "WHERE t.emp_idx=? AND t.deleted_at IS NULL "
+        "AND t.status IN ('queued','running','failed')",
+        (inspection.EMPLOYEE_IDX,),
+    )
+    for row in rows:
+        task_id = int(row["id"])
+        status = str(row.get("status") or "")
+        if status == "failed":
+            # generic resume 已会幂等退回 charged；这里补齐 visit 终态。
+            if row.get("visit_id") and row.get("visit_status") in {
+                "preparing", "analyzing"
+            }:
+                inspection._mark_visit_failed(
+                    int(row["tenant_id"]),
+                    int(row.get("created_by") or 0),
+                    int(row["visit_id"]),
+                    RuntimeError("inspection_restart_recovery"),
+                )
+            continue
+        if (
+            row.get("visit_id")
+            and row.get("visit_status") == "analyzing"
+            and bool(row.get("has_before"))
+            and row.get("billing_status") in {"charged", "included"}
+        ):
+            changed = db.execute(
+                "UPDATE task SET status='queued',terminal_at=NULL,updated_at=? WHERE id=? "
+                "AND emp_idx=? AND status IN ('queued','running') "
+                "AND billing_status IN ('charged','included') "
+                "AND deleted_at IS NULL",
+                (time.time(), task_id, inspection.EMPLOYEE_IDX),
+            )
+            if changed == 1:
+                resumable.append(task_id)
+            continue
+        invalid.append(task_id)
+    for task_id in invalid:
+        _settle_inspection_task_by_id(
+            task_id,
+            "巡店任务的现场证据不完整，已安全终止并退回点数",
+        )
+    return {"task_ids": resumable, "invalid": len(invalid)}
+
+
+async def _resume_inspection_tasks() -> dict:
+    recovered = await db.arun(_recover_inspection_tasks)
+    for task_id in recovered["task_ids"]:
+        asyncio.create_task(_run_inspection_task(int(task_id)))
+    if recovered["task_ids"] or recovered["invalid"]:
+        log.warning(
+            "inspection recovery resumed=%d invalid=%d",
+            len(recovered["task_ids"]),
+            int(recovered["invalid"]),
+        )
+    return recovered
+
+
+async def _run_inspection_task(task_id: int):
+    try:
+        claimed = await _run_db_safely(_claim_inspection_task, task_id)
+    except inspection.InspectionError as exc:
+        log.error(
+            "inspection claim failed task_id=%s error_type=%s",
+            task_id,
+            type(exc).__name__,
+        )
+        await db.arun(
+            _settle_inspection_task_by_id,
+            task_id,
+            "巡店任务的现场证据不完整，已安全终止并退回点数",
+        )
+        return
+    if not claimed:
+        return
+    tid = int(claimed["tenant_id"])
+    uid = int(claimed.get("inspection_creator") or claimed.get("created_by") or 0)
+    visit_id = int(claimed["inspection_id"])
+    industry_key = str(claimed["industry_key"])
+    engine.broadcast({
+        "type": "task_update",
+        "tenant_id": tid,
+        "_required_modules": (industry_key,),
+        "task_id": task_id,
+        "idx": inspection.EMPLOYEE_IDX,
+    })
+    try:
+        analysis_deadline = (
+            asyncio.get_running_loop().time()
+            + _INSPECTION_ANALYSIS_MODEL_TIMEOUT_SECONDS
+        )
+        visit = await db.arun(
+            inspection.get_visit, tid, uid, industry_key, visit_id
+        )
+        brief = db.jloads(claimed.get("brief_json"), {}) or {}
+        visit["scope"] = str(brief.get("material") or "")[:1000]
+        bundle = await db.arun(_inspection_prompt_bundle, tid, visit)
+        images = await asyncio.to_thread(_load_inspection_images, tid, visit)
+        allowed_photo_ids = {
+            int(photo["id"])
+            for photo in visit.get("photos") or []
+            if photo.get("phase") == "before"
+        }
+        primary_model = await db.arun(
+            providers.vision_model_for,
+            inspection.EMPLOYEE_IDX,
+        )
+        primary, primary_usage = await _inspection_visual_candidate(
+            bundle=bundle,
+            images=images,
+            allowed_photo_ids=allowed_photo_ids,
+            model=primary_model,
+            deadline=analysis_deadline,
+            stage="primary",
+            token_prefix=f"inspection:{visit_id}:primary",
+            slot_label="store-inspection",
+        )
+        review = None
+        review_model = None
+        review_usage = {"cost_usd": 0.0, "tokens": 0}
+        if not primary["issues"]:
+            review_model = providers.vision_review_model_for(primary_model)
+            review_instruction = (
+                "【独立异模复核】不要假设主模型结论正确，独立逐图检查。"
+                "尤其审查通道遮挡、积水、电线、堆箱、卫生、消防与设备风险。"
+                "仍严格输出本次最终权威 JSON 合同。"
+            )
+            review, review_usage = await _inspection_visual_candidate(
+                bundle=bundle,
+                images=images,
+                allowed_photo_ids=allowed_photo_ids,
+                model=review_model,
+                deadline=analysis_deadline,
+                stage="review",
+                token_prefix=f"inspection:{visit_id}:review",
+                slot_label="store-inspection-review",
+                extra_instruction=review_instruction,
+            )
+        model_result = _finalize_inspection_candidates(
+            primary,
+            review,
+            primary_model=primary_model,
+            review_model=review_model,
+        )
+        usage = {
+            "cost_usd": (
+                float(primary_usage.get("cost_usd") or 0)
+                + float(review_usage.get("cost_usd") or 0)
+            ),
+            "tokens": (
+                int(primary_usage.get("tokens") or 0)
+                + int(review_usage.get("tokens") or 0)
+            ),
+        }
+        await _run_db_safely(
+            _commit_inspection_delivery,
+            task_id,
+            tid,
+            uid,
+            industry_key,
+            visit_id,
+            model_result,
+            usage,
+        )
+    except asyncio.CancelledError:
+        await _run_db_safely(
+            _settle_inspection_failure,
+            task_id,
+            tid,
+            uid,
+            visit_id,
+            "巡店分析被服务中断，已自动退回点数，请免费重试",
+        )
+        raise
+    except Exception as exc:
+        log.error(
+            "inspection task failed task_id=%s error_type=%s",
+            task_id,
+            type(exc).__name__,
+        )
+        await _run_db_safely(
+            _settle_inspection_failure,
+            task_id,
+            tid,
+            uid,
+            visit_id,
+            providers.public_failure_message(exc),
+        )
+    finally:
+        engine.broadcast({
+            "type": "task_update",
+            "tenant_id": tid,
+            "_required_modules": (industry_key,),
+            "task_id": task_id,
+            "idx": inspection.EMPLOYEE_IDX,
+        })
+
+
+def _start_inspection_task(result: dict):
+    return asyncio.create_task(_run_inspection_task(int(result["task_id"])))
+
+
+@app.get("/api/inspections/meta")
+def inspection_meta(industry_key: str | None = None):
+    try:
+        selected, choices = _inspection_scope(industry_key)
+        branch_page = _inspection_branch_search_db(
+            TEN(), _inspection_actor_id(), selected, limit=20
+        )
+        is_manager = auth.is_admin()
+        return {
+            "industry_key": selected,
+            "industries": choices,
+            # 只保留首页兼容旧前端，数千门店必须走有界搜索。
+            "branches": branch_page["items"],
+            "branch_search": {
+                "enabled": True,
+                "endpoint": "/api/inspections/branches/search",
+                "default_limit": 20,
+                "max_limit": 50,
+                "next_before_id": branch_page["next_before_id"],
+            },
+            "permissions": {
+                "can_import_branches": is_manager,
+                "can_create_branch": True,
+                "can_review": is_manager,
+            },
+            "employee": _public_station(registry.BY_IDX[inspection.EMPLOYEE_IDX]),
+        }
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
+
+
+@app.get("/api/inspections/branches/import-template")
+async def inspection_branch_import_template(industry_key: str):
+    _need_admin()
+    try:
+        await db.arun(_inspection_manager_scope, industry_key)
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
+    path = os.path.join(ROOT, "static", "inspection-store-import-template.xlsx")
+    static_root = os.path.realpath(os.path.join(ROOT, "static"))
+    real_path = os.path.realpath(path)
+    try:
+        safe = os.path.commonpath((static_root, real_path)) == static_root
+    except ValueError:
+        safe = False
+    if not safe or not os.path.isfile(real_path) or os.path.islink(path):
+        raise HTTPException(404, "巡店门店导入模板不存在")
+    return FileResponse(
+        real_path,
+        filename="inspection-store-import-template.xlsx",
+        media_type=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        headers={
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.post("/api/inspections/branches/imports")
+async def inspection_branch_import_preview(
+    industry_key: str = Form(...),
+    request_key: str = Form(...),
+    file: UploadFile = File(...),
+):
+    _need_admin()
+    filename = file.filename or "branches.xlsx"
+    try:
+        selected, _choices = await db.arun(
+            _inspection_manager_scope, industry_key
+        )
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
+    size = getattr(file, "size", None)
+    if size is not None:
+        try:
+            if int(size) > inspectionimport.MAX_FILE_BYTES:
+                raise HTTPException(
+                    413,
+                    f"XLSX 文件超过 {inspectionimport.MAX_FILE_MIB}MB",
+                )
+        except (TypeError, ValueError):
+            raise HTTPException(400, "上传文件大小无效") from None
+    try:
+        try:
+            data = await _read_limited(
+                file,
+                inspectionimport.MAX_FILE_BYTES,
+                f"XLSX 文件超过 {inspectionimport.MAX_FILE_MIB}MB",
+            )
+        except HTTPException as exc:
+            too_large_message = (
+                f"XLSX 文件超过 {inspectionimport.MAX_FILE_MIB}MB"
+            )
+            if exc.status_code == 400 and exc.detail == too_large_message:
+                raise HTTPException(413, str(exc.detail)) from exc
+            raise
+    finally:
+        await file.close()
+    try:
+        return await _run_db_safely(
+            inspectionimport.preview_import,
+            TEN(),
+            _inspection_actor_id(),
+            selected,
+            request_key,
+            filename,
+            data,
+        )
+    except inspectionimport.ImportContractError as exc:
+        _raise_inspection_import_error(exc)
+
+
+@app.get("/api/inspections/branches/imports/{import_id}")
+async def inspection_branch_import_detail(
+    import_id: int,
+    industry_key: str,
+    limit: int = inspectionimport.DEFAULT_IMPORT_PAGE_LIMIT,
+    cursor: str | None = None,
+    errors_only: bool = False,
+    row_kind: str | None = None,
+):
+    _need_admin()
+    try:
+        selected, _choices = await db.arun(
+            _inspection_manager_scope, industry_key
+        )
+        return await db.arun(
+            inspectionimport.get_import,
+            TEN(),
+            _inspection_actor_id(),
+            import_id,
+            selected,
+            limit=limit,
+            cursor=cursor,
+            errors_only=errors_only,
+            row_kind=row_kind,
+        )
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
+    except inspectionimport.ImportContractError as exc:
+        _raise_inspection_import_error(exc)
+
+
+@app.post("/api/inspections/branches/imports/{import_id}/commit")
+async def inspection_branch_import_commit(import_id: int, body: dict):
+    _need_admin()
+    try:
+        selected, _choices = await db.arun(
+            _inspection_manager_scope, body.get("industry_key")
+        )
+        return await _run_db_safely(
+            inspectionimport.commit_import,
+            TEN(),
+            _inspection_actor_id(),
+            import_id,
+            selected,
+        )
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
+    except inspectionimport.ImportContractError as exc:
+        _raise_inspection_import_error(exc)
+
+
+@app.get("/api/inspections/branches/search")
+async def inspection_branch_search(
+    industry_key: str,
+    q: str = "",
+    region: str = "",
+    limit: int = 20,
+    before_id: int | None = None,
+):
+    try:
+        selected, _choices = await db.arun(
+            _inspection_scope, industry_key
+        )
+        return await db.arun(
+            _inspection_branch_search_db,
+            TEN(),
+            _inspection_actor_id(),
+            selected,
+            q=q,
+            region=region,
+            limit=limit,
+            before_id=before_id,
+        )
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
+
+
+@app.get("/api/inspections/standards/overrides")
+async def inspection_standard_overrides(
+    industry_key: str,
+    scope_kind: str | None = None,
+    scope_key: str | None = None,
+):
+    _need_admin()
+    try:
+        selected, _choices = await db.arun(
+            _inspection_manager_scope, industry_key,
+        )
+        return await db.arun(
+            inspectionoverrides.list_overrides,
+            TEN(),
+            _inspection_actor_id(),
+            selected,
+            scope_kind=scope_kind,
+            scope_key=scope_key,
+        )
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
+    except inspectionoverrides.InspectionOverrideError as exc:
+        _raise_inspection_override_error(exc)
+
+
+@app.put("/api/inspections/standards/overrides")
+async def inspection_standard_override_put(body: dict):
+    _need_admin()
+    try:
+        selected, _choices = await db.arun(
+            _inspection_manager_scope, body.get("industry_key"),
+        )
+        return await _run_db_safely(
+            inspectionoverrides.upsert_override,
+            TEN(),
+            _inspection_actor_id(),
+            selected,
+            body,
+        )
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
+    except inspectionoverrides.InspectionOverrideError as exc:
+        _raise_inspection_override_error(exc)
+
+
+@app.delete("/api/inspections/standards/overrides/{override_id}")
+async def inspection_standard_override_delete(override_id: int, body: dict):
+    _need_admin()
+    try:
+        selected, _choices = await db.arun(
+            _inspection_manager_scope, body.get("industry_key"),
+        )
+        return await _run_db_safely(
+            inspectionoverrides.disable_override,
+            TEN(),
+            _inspection_actor_id(),
+            selected,
+            override_id,
+            body.get("expected_version"),
+        )
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
+    except inspectionoverrides.InspectionOverrideError as exc:
+        _raise_inspection_override_error(exc)
+
+
+@app.get("/api/inspections/checklist")
+async def inspection_checklist(industry_key: str, branch_id: int):
+    try:
+        selected, _choices = await db.arun(
+            _inspection_scope, industry_key
+        )
+        return await db.arun(
+            _inspection_checklist_db,
+            TEN(),
+            _inspection_actor_id(),
+            selected,
+            branch_id,
+        )
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
+    except inspectionimport.ImportContractError as exc:
+        _raise_inspection_import_error(exc)
+
+
+@app.post("/api/inspections/branches")
+def inspection_branch_create(body: dict, industry_key: str | None = None):
+    try:
+        selected, _choices = _inspection_scope(industry_key or body.get("industry_key"))
+        return inspection.create_branch(
+            TEN(), _inspection_actor_id(), selected, body
+        )
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
+
+
+_INSPECTION_RISK_BRANCH_LIMIT = 20
+_INSPECTION_REGION_SUMMARY_LIMIT = 50
+
+
+def _bounded_inspection_summary(
+    summary: dict,
+    *,
+    selected_branch_id: int | None = None,
+) -> dict:
+    """Keep dashboard summary payloads bounded for very large branch fleets.
+
+    ``inspection.aggregate`` already orders both collections by operational
+    risk.  Preserve those arrays for the current frontend, but return only the
+    highest-priority rows plus exact fleet/coverage counts.  When history is
+    filtered to a lower-risk branch, retain that branch in the bounded array so
+    the existing selected-branch UI can still resolve its label.
+    """
+    result = dict(summary or {})
+    raw_branches = result.get("branches")
+    branches = raw_branches if isinstance(raw_branches, list) else []
+    selected_id = int(selected_branch_id) if selected_branch_id is not None else None
+    selected_row = None
+    computed_visited = 0
+    for item in branches:
+        if not isinstance(item, dict):
+            continue
+        if int(item.get("visits") or 0) > 0:
+            computed_visited += 1
+        if selected_id is not None and int(item.get("id") or 0) == selected_id:
+            selected_row = item
+
+    top_branches = [
+        item for item in branches[:_INSPECTION_RISK_BRANCH_LIMIT]
+        if isinstance(item, dict)
+    ]
+    if selected_row is not None and not any(
+        int(item.get("id") or 0) == selected_id for item in top_branches
+    ):
+        if len(top_branches) >= _INSPECTION_RISK_BRANCH_LIMIT:
+            top_branches[-1] = selected_row
+        else:
+            top_branches.append(selected_row)
+
+    raw_regions = result.get("regions")
+    regions = raw_regions if isinstance(raw_regions, list) else []
+    top_regions = [
+        item for item in regions[:_INSPECTION_REGION_SUMMARY_LIMIT]
+        if isinstance(item, dict)
+    ]
+    total_branches = int(result.get("total_branches") or len(branches))
+    visited_branches = (
+        int(result["visited_branches"])
+        if result.get("visited_branches") is not None
+        else computed_visited
+    )
+    total_regions = int(result.get("total_regions") or len(regions))
+    result.update({
+        "branches": top_branches,
+        "regions": top_regions,
+        "total_branches": total_branches,
+        "visited_branches": visited_branches,
+        "total_regions": total_regions,
+        "branch_summary_limit": _INSPECTION_RISK_BRANCH_LIMIT,
+        "region_summary_limit": _INSPECTION_REGION_SUMMARY_LIMIT,
+        "branches_truncated": total_branches > len(top_branches),
+        "regions_truncated": total_regions > len(top_regions),
+    })
+    return result
+
+
+@app.get("/api/inspections")
+def inspection_list(
+    industry_key: str | None = None,
+    branch_id: int | None = None,
+    region: str | None = None,
+    limit: int = 40,
+    before_id: int | None = None,
+):
+    try:
+        selected, _choices = _inspection_scope(industry_key)
+        uid = _inspection_actor_id()
+        result = inspection.list_visits(
+            TEN(), uid, selected, branch_id=branch_id, region=region,
+            limit=limit, before_id=before_id,
+        )
+        try:
+            # 门店筛选只缩小下方巡店记录；风险优先门店与
+            # 区域汇总保持全局，才能直接切到另一家店。
+            result["summary"] = _bounded_inspection_summary(
+                inspection.aggregate(
+                    TEN(),
+                    uid,
+                    selected,
+                    branch_limit=_INSPECTION_RISK_BRANCH_LIMIT,
+                    region_limit=_INSPECTION_REGION_SUMMARY_LIMIT,
+                    pinned_branch_id=branch_id,
+                ),
+                selected_branch_id=branch_id,
+            )
+        except inspection.InspectionForbidden:
+            result["summary"] = {"availability": False}
+        return result
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
+
+
+@app.get("/api/inspections/{visit_id}")
+def inspection_detail(visit_id: int, industry_key: str | None = None):
+    try:
+        selected, _choices = _inspection_scope(industry_key)
+        return inspection.get_visit(
+            TEN(), _inspection_actor_id(), selected, visit_id
+        )
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
+
+
+@app.post("/api/inspections")
+async def inspection_create(
+    branch_id: int = Form(...),
+    visit_at: str = Form(""),
+    scope: str = Form(""),
+    request_key: str = Form(...),
+    industry_key: str = Form(""),
+    files: list[UploadFile] = File(...),
+    file_slots: list[str] = Form(...),
+    template_version: str = Form(...),
+    observations_json: str = Form(""),
+):
+    try:
+        selected, _choices = await db.arun(
+            _inspection_scope, industry_key or None
+        )
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
+    uid, tid = _inspection_actor_id(), TEN()
+    visit_timestamp = None
+    if visit_at:
+        try:
+            visit_timestamp = time.mktime(time.strptime(visit_at, "%Y-%m-%d"))
+        except ValueError as exc:
+            raise HTTPException(400, "巡检日期格式无效") from exc
+    if len(files) != len(file_slots):
+        raise HTTPException(400, "上传文件与照片采集位必须一一对应")
+    clean_slots = []
+    for value in file_slots:
+        clean = str(value or "").strip()
+        if not clean or len(clean) > 80:
+            raise HTTPException(400, "照片采集位格式无效")
+        clean_slots.append(clean)
+    if len(observations_json) > 50_000:
+        raise HTTPException(400, "巡店观察值内容过长")
+    try:
+        observations = json.loads(observations_json or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(400, "巡店观察值格式无效") from exc
+    if not isinstance(observations, dict):
+        raise HTTPException(400, "巡店观察值格式无效")
+    raw = {
+        "request_key": request_key,
+        "visit_at": visit_timestamp,
+        "note": scope,
+        "require_checklist": True,
+        "template_version": template_version,
+        "file_slots": clean_slots,
+        "observations": observations,
+    }
+    visit_id = 0
+    records: list[dict] = []
+    async with _persistent_upload_slot("inspection"):
+        prepared = await _prepare_inspection_uploads(files)
+        prepared = [
+            {**item, "capture_slot": clean_slots[index]}
+            for index, item in enumerate(prepared)
+        ]
+        try:
+            shell = await _run_db_safely(
+                inspection.create_visit_shell,
+                tid,
+                uid,
+                selected,
+                branch_id,
+                raw,
+            )
+            visit_id = int(shell["id"])
+            await _run_db_safely(
+                _assert_inspection_http_replay_contract,
+                tid,
+                uid,
+                selected,
+                branch_id,
+                visit_id,
+                raw,
+                prepared,
+            )
+            if shell.get("task_id"):
+                # 同一 request_key 的重放只返回原任务，不二次落图/扣点。
+                return {
+                    "created": False,
+                    "inspection_id": visit_id,
+                    "task_id": int(shell["task_id"]),
+                    "status": shell.get("status"),
+                }
+            if shell.get("status") == "analyzing" and shell.get("photos"):
+                # 上次可能已经绑图，但在创建计费任务前中断；复用原证据。
+                photo_records = [
+                    {
+                        key: photo.get(key)
+                        for key in (
+                            "storage_key", "mime_type", "byte_size", "sha256",
+                            "width", "height", "caption", "capture_slot",
+                            "item_code",
+                        )
+                    }
+                    for photo in shell.get("photos") or []
+                    if photo.get("phase") == "before"
+                ]
+            elif shell.get("status") == "preparing" and not shell.get("photos"):
+                await _run_inspection_file_safely(
+                    _cleanup_empty_shell_inspection_files, tid, visit_id
+                )
+                records = await _run_inspection_file_safely(
+                    _store_inspection_images, tid, visit_id, prepared
+                )
+                photo_records = records
+            elif shell.get("status") == "failed":
+                raise inspection.InspectionConflict(
+                    "这次巡店已失败，请在原任务上点击免费重试"
+                )
+            else:
+                raise inspection.InspectionConflict(
+                    "巡店请求正在处理，请刷新查看原记录"
+                )
+            brief = _inspection_brief(selected, shell["branch"], scope)
+            result = await _run_db_then_start_worker_safely(
+                _activate_inspection_job,
+                tid,
+                uid,
+                selected,
+                visit_id,
+                photo_records,
+                brief,
+                start_worker=_start_inspection_task,
+                should_start=lambda row: bool(row.get("created")),
+                settle_unstarted=lambda row: _settle_inspection_failure(
+                    row["task_id"], tid, uid, visit_id,
+                    "巡店任务未能启动，已自动退回点数",
+                ),
+            )
+        except billing.InsufficientPoints as exc:
+            raise HTTPException(402, str(exc)) from exc
+        except inspection.InspectionError as exc:
+            _raise_inspection_error(exc)
+        finally:
+            try:
+                if records:
+                    await _run_inspection_file_safely(
+                        _cleanup_unreferenced_inspection_images, records
+                    )
+            finally:
+                if visit_id:
+                    await _run_db_safely(
+                        _abandon_empty_inspection_shell,
+                        tid,
+                        visit_id,
+                        industry_key=selected,
+                    )
+    return result
+
+
+@app.patch("/api/inspections/{visit_id}/issues/{issue_id}")
+def inspection_action_update(visit_id: int, issue_id: int, body: dict):
+    try:
+        selected, _choices = _inspection_scope(body.get("industry_key"))
+        action_id = int(body.get("action_id") or 0)
+        if action_id < 1:
+            raise inspection.InspectionError("整改任务编号无效")
+        detail = inspection.get_visit(
+            TEN(), _inspection_actor_id(), selected, visit_id
+        )
+        issue = next(
+            (
+                item for item in detail.get("issues") or []
+                if int(item.get("id") or 0) == int(issue_id)
+            ),
+            None,
+        )
+        scoped_action = (issue or {}).get("action") or {}
+        if int(scoped_action.get("id") or 0) != action_id:
+            raise inspection.InspectionNotFound("整改任务不存在")
+        row = inspection.transition_action(
+            TEN(), _inspection_actor_id(), selected, action_id,
+            expected_version=int(body.get("expected_version") or 0),
+            target_status=str(body.get("status") or ""),
+            note=str(body.get("note") or ""),
+        )
+        return row
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "整改参数无效") from exc
+
+
+@app.patch("/api/inspections/{visit_id}/issues/{issue_id}/assignment")
+def inspection_action_assignment(visit_id: int, issue_id: int, body: dict):
+    """企业主/root 用 CAS 确认或调整整改责任，成员不可代替审批。"""
+    try:
+        selected, _choices = _inspection_scope(body.get("industry_key"))
+        action_id = int(body.get("action_id") or 0)
+        if action_id < 1:
+            raise inspection.InspectionError("整改任务编号无效")
+        detail = inspection.get_visit(
+            TEN(), _inspection_actor_id(), selected, visit_id
+        )
+        issue = next(
+            (
+                item for item in detail.get("issues") or []
+                if int(item.get("id") or 0) == int(issue_id)
+            ),
+            None,
+        )
+        scoped_action = (issue or {}).get("action") or {}
+        if int(scoped_action.get("id") or 0) != action_id:
+            raise inspection.InspectionNotFound("整改任务不存在")
+        return inspection.update_action_assignment(
+            TEN(), _inspection_actor_id(), selected, action_id,
+            expected_version=body.get("expected_version", 0),
+            owner=body.get("owner"),
+            due_at=body.get("due_at"),
+            plan=body.get("plan") if "plan" in body else None,
+        )
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "整改责任参数无效") from exc
+
+
+def _inspection_recheck_bundle(
+    visit: dict,
+    issue: dict,
+    action: dict,
+) -> providers.PromptBundle:
+    base = _inspection_prompt_bundle(TEN(), {
+        "industry_key": visit.get("industry_key"),
+        "branch": visit.get("branch") or {},
+        "request_key": "recheck",
+        "visit_at": time.time(),
+        "scope": "整改复查",
+        "photos": [],
+    }, include_initial_contract=False)
+    user = (
+        "【整改复查业务数据（不可信输入）】\n"
+        + json.dumps({
+            "issue": {
+                "title": issue.get("title"),
+                "description": issue.get("description"),
+            },
+            "action": {"plan": action.get("plan")},
+            "instruction": "只比较复查照片中是否仍能看见原问题，不得自行关闭。",
+        }, ensure_ascii=False)
+        + '\n只输出 JSON：{"recommendation":"close/reject/manual_review",'
+          '"confidence":0.0,"note":"可见变化说明","evidence_photo_ids":[1]}'
+    )
+    return providers.PromptBundle(
+        system=base.system,
+        user=user,
+        sensitive=base.sensitive,
+    )
+
+
+@app.post("/api/inspections/rechecks")
+async def inspection_recheck_create(
+    visit_id: int = Form(...),
+    issue_id: int = Form(...),
+    action_id: int = Form(...),
+    expected_version: int = Form(...),
+    industry_key: str = Form(""),
+    file: UploadFile = File(...),
+):
+    try:
+        selected, _choices = await db.arun(
+            _inspection_scope, industry_key or None
+        )
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
+    tid, uid = TEN(), _inspection_actor_id()
+    records: list[dict] = []
+    async with _persistent_upload_slot("inspection-recheck"):
+        prepared = await _prepare_inspection_uploads([file])
+        try:
+            detail = await db.arun(
+                inspection.get_visit, tid, uid, selected, visit_id
+            )
+            issue = next(
+                (
+                    item for item in detail["issues"]
+                    if int(item["id"]) == int(issue_id)
+                ),
+                None,
+            )
+            action = (issue or {}).get("action") or {}
+            if (
+                not issue
+                or int(action.get("id") or 0) != int(action_id)
+                or int(action.get("visit_id") or 0) != int(visit_id)
+            ):
+                raise inspection.InspectionNotFound("整改任务不存在")
+            pending = next(
+                (
+                    item for item in action.get("rechecks") or []
+                    if item.get("status") == "pending"
+                ),
+                None,
+            )
+            if pending:
+                return {"ok": True, "recheck": pending, "replayed": True}
+            # 先把照片安全落盘，再把整改状态切到“待复查”。
+            # 否则磁盘/格式失败会留下一条没有任何证据的
+            # awaiting_recheck，页面也无法继续补传。
+            records = await _run_inspection_file_safely(
+                _store_inspection_images, tid, visit_id, prepared
+            )
+            if action.get("status") != "awaiting_recheck":
+                action = await _run_db_safely(
+                    inspection.transition_action,
+                    tid, uid, selected, action_id,
+                    expected_version=expected_version,
+                    target_status="awaiting_recheck",
+                    note="已提交复查照片",
+                )
+            photos = await _run_db_safely(
+                inspection.add_recheck_photos,
+                tid, uid, selected, action_id, records,
+            )
+            cancellation = None
+            try:
+                # 从照片入库起就进入可收口区：bundle 构建、读图或
+                # 模型调用任一阶段失败/取消，都必须留下 pending 人审锚点。
+                bundle = await db.arun(
+                    _inspection_recheck_bundle, detail, issue, action
+                )
+                images = await asyncio.to_thread(
+                    _load_inspection_images,
+                    tid,
+                    {"photos": photos},
+                    phase="recheck",
+                )
+                # 不只把超时参数传给 HTTP 客户端：连同模型队列等待在内，
+                # 整段视觉调用都必须先于前端 120s 超时完成或降级人工复核。
+                async with asyncio.timeout(
+                    _INSPECTION_RECHECK_MODEL_TIMEOUT_SECONDS
+                ):
+                    async with _free_ai_slot("inspection-recheck"):
+                        response = await providers.call_vision(
+                            inspection.EMPLOYEE_IDX,
+                            bundle.user,
+                            images,
+                            timeout=_INSPECTION_RECHECK_MODEL_TIMEOUT_SECONDS,
+                            token=f"inspection-recheck:{action_id}",
+                            system_prompt=bundle.system,
+                            max_tokens=1000,
+                        )
+                providers.assert_no_private_leak(
+                    response.get("text") or "", bundle.sensitive
+                )
+                analysis = llm.extract_json(response.get("text") or "")
+            except asyncio.CancelledError as exc:
+                # 照片与待复核状态已经持久化；即使客户端断开，
+                # 也要先落一条人工复核记录，避免重试再写一组照片。
+                cancellation = exc
+                analysis = {
+                    "recommendation": "manual_review",
+                    "confidence": 0,
+                    "note": "复查请求中断，请企业主人工对照整改前后照片",
+                    "evidence_photo_ids": [int(item["id"]) for item in photos],
+                }
+            except Exception as exc:
+                log.warning(
+                    "inspection recheck degraded action_id=%s error_type=%s",
+                    action_id,
+                    type(exc).__name__,
+                )
+                analysis = {
+                    "recommendation": "manual_review",
+                    "confidence": 0,
+                    "note": "AI复查未形成可靠判断，请企业主人工对照整改前后照片",
+                    "evidence_photo_ids": [int(item["id"]) for item in photos],
+                }
+            analysis["evidence_photo_ids"] = [int(item["id"]) for item in photos]
+            # record_recheck 是这批文件的幂等锚点。若取消恰好发生
+            # 在它的 SQLite 事务进池之后，必须先观测真实提交结果，
+            # 再向上传播取消；否则客户端重试会再落一组照片。
+            record_operation = asyncio.create_task(db.arun(
+                inspection.record_recheck,
+                tid,
+                uid,
+                selected,
+                action_id,
+                analysis,
+            ))
+            try:
+                record = await asyncio.shield(record_operation)
+            except asyncio.CancelledError as exc:
+                cancellation = cancellation or exc
+                record = await _drain_task_despite_cancellation(record_operation)
+            if cancellation is not None:
+                raise cancellation
+        except inspection.InspectionError as exc:
+            _raise_inspection_error(exc)
+        finally:
+            if records:
+                await _run_inspection_file_safely(
+                    _cleanup_unreferenced_inspection_images, records
+                )
+    return {"ok": True, "recheck": record}
+
+
+@app.post("/api/inspections/rechecks/{recheck_id}/review")
+def inspection_recheck_review(recheck_id: int, body: dict):
+    try:
+        selected, _choices = _inspection_scope(body.get("industry_key"))
+        return inspection.review_recheck(
+            TEN(), _inspection_actor_id(), selected, recheck_id,
+            decision=str(body.get("decision") or ""),
+            expected_action_version=int(body.get("expected_action_version") or 0),
+            note=str(body.get("note") or ""),
+        )
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "复核参数无效") from exc
+
+
+# ---------------- V51:行业老板决策看板 ----------------
+def _raise_dashboard_error(exc: bossdashboard.DashboardError):
+    if isinstance(exc, bossdashboard.DashboardAccessDenied):
+        raise HTTPException(403, str(exc)) from exc
+    if isinstance(exc, bossdashboard.DashboardValidationError):
+        raise HTTPException(400, str(exc)) from exc
+    raise HTTPException(404, str(exc)) from exc
+
+
+def _dashboard_legacy_identity_ref(employee: dict) -> str:
+    frozen = employeeidentity.snapshot(employee)
+    signature = (
+        frozen["idx"], frozen["key"], frozen["catalog_version"],
+        frozen["name"], frozen["dept_key"], frozen["spec_sha256"],
+    )
+    return hashlib.sha256(
+        json.dumps(signature, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()[:20]
+
+
+def _dashboard_employee_binding(
+    idx: int, identity_ref: str | None,
+) -> dict | None:
+    """Resolve the dashboard's compatibility ref to one exact role identity."""
+    value = str(identity_ref or "").strip()
+    if value == "inspection":
+        employee = employeeidentity.active_employee(idx)
+    elif re.fullmatch(r"[0-9a-f]{64}", value):
+        employee = employeeidentity.employee_by_identity_ref(value)
+        if employee and int(employee.get("idx") or 0) != int(idx):
+            employee = None
+    else:
+        versions = getattr(departments, "identity_versions", None)
+        candidates = versions(idx) if callable(versions) else []
+        active = employeeidentity.active_employee(idx)
+        if active and not any(
+            employeeidentity.identity_ref(candidate)
+            == employeeidentity.identity_ref(active)
+            for candidate in candidates
+        ):
+            candidates = [active, *candidates]
+        employee = next(
+            (
+                candidate for candidate in candidates
+                if _dashboard_legacy_identity_ref(candidate) == value
+            ),
+            None,
+        )
+    if not employee:
+        return None
+    config = employees.ensure_role_config(employee)
+    return {
+        "employee": employee,
+        "config": config,
+        "legacy_identity_ref": _dashboard_legacy_identity_ref(employee),
+        "public": _employee_public_contract(employee, config=config),
+    }
+
+
+def _dashboard_unknown_identity(row: dict) -> dict:
+    return {
+        "person_status": "inactive", "identity_status": "unknown",
+        "identity_ref": str(row.get("identity_ref") or ""),
+        "config_revision": 0, "config_sha256": "",
+        "can_assign_new": False, "can_continue": False, "can_learn": False,
+        "role_profile_summary": {}, "roster_status": "legacy",
+        "can_assign": False,
+    }
+
+
+def _dashboard_enrich_employee(row: dict) -> dict:
+    binding = _dashboard_employee_binding(
+        int(row.get("idx") or 0), row.get("identity_ref"),
+    )
+    if not binding:
+        return {**row, **_dashboard_unknown_identity(row)}
+    return {
+        **row,
+        **binding["public"],
+        "compat_identity_ref": binding["legacy_identity_ref"],
+    }
+
+
+def _task_identity_public(task_id: int, tenant_id: int) -> dict | None:
+    row = db.one(
+        "SELECT emp_idx," + ",".join(_TASK_IDENTITY_COLUMNS) + " "
+        "FROM task WHERE id=? AND tenant_id=? AND deleted_at IS NULL",
+        (int(task_id), int(tenant_id)),
+    )
+    if not row:
+        return None
+    binding = employeeidentity.resolve_task_binding(row)
+    if not binding:
+        return _dashboard_unknown_identity(row)
+    return _employee_public_contract(
+        binding["employee"], config=binding["config"],
+    )
+
+
+def _dashboard_enrich_result(result: dict) -> dict:
+    enriched = dict(result)
+    enriched["employees"] = [
+        _dashboard_enrich_employee(row)
+        for row in result.get("employees") or []
+    ]
+    tenant_id = int((result.get("scope") or {}).get("tenant_id") or TEN())
+    activity = []
+    for row in result.get("recent_activity") or []:
+        item = dict(row)
+        if item.get("kind") == "task":
+            identity = _task_identity_public(item["record_id"], tenant_id)
+        else:
+            employee = employeeidentity.active_employee(item.get("employee_idx"))
+            config = employees.get_config(int(employee["idx"])) if employee else None
+            identity = (
+                _employee_public_contract(employee, config=config)
+                if employee and config else None
+            )
+        if identity:
+            item.update(identity)
+        activity.append(item)
+    enriched["recent_activity"] = activity
+    return enriched
+
+
+@app.get("/api/boss/dashboard/scopes")
+def boss_dashboard_scopes():
+    try:
+        return bossdashboard.scopes(auth.current(), is_boss=_is_boss())
+    except bossdashboard.DashboardError as exc:
+        _raise_dashboard_error(exc)
+
+
+@app.get("/api/boss/dashboard/summary")
+def boss_dashboard_summary(
+    tenant_id: int | None = None,
+    industry_key: str | None = None,
+    days: int = 30,
+):
+    try:
+        result = bossdashboard.summary(
+            auth.current(),
+            is_boss=_is_boss(),
+            tenant_id=tenant_id,
+            industry_key=industry_key,
+            days=days,
+        )
+        return _dashboard_enrich_result(result)
+    except bossdashboard.DashboardError as exc:
+        _raise_dashboard_error(exc)
+
+
+@app.get("/api/boss/dashboard/employees/{employee_idx}")
+def boss_dashboard_employee(
+    employee_idx: int,
+    identity_ref: str | None = None,
+    tenant_id: int | None = None,
+    industry_key: str | None = None,
+    limit: int = 25,
+    offset: int = 0,
+    days: int = 30,
+):
+    try:
+        translated_ref = identity_ref
+        selected_binding = None
+        if identity_ref not in (None, "inspection"):
+            selected_binding = _dashboard_employee_binding(
+                employee_idx, identity_ref,
+            )
+            if not selected_binding:
+                raise bossdashboard.DashboardValidationError(
+                    "员工身份参数无效"
+                )
+            translated_ref = (
+                "inspection"
+                if employee_idx == inspection.EMPLOYEE_IDX
+                else selected_binding["legacy_identity_ref"]
+            )
+        result = bossdashboard.employee_detail(
+            auth.current(),
+            employee_idx=employee_idx,
+            identity_ref=translated_ref,
+            is_boss=_is_boss(),
+            tenant_id=tenant_id,
+            industry_key=industry_key,
+            limit=limit,
+            offset=offset,
+            days=days,
+        )
+        result = dict(result)
+        result["employee"] = _dashboard_enrich_employee(result["employee"])
+        scope_tenant = int((result.get("scope") or {}).get("tenant_id") or TEN())
+        task_items = []
+        for row in (result.get("tasks") or {}).get("items") or []:
+            item = dict(row)
+            identity = _task_identity_public(item["id"], scope_tenant)
+            if identity:
+                item.update(identity)
+            task_items.append(item)
+        if "tasks" in result:
+            result["tasks"] = {**result["tasks"], "items": task_items}
+        return result
+    except bossdashboard.DashboardError as exc:
+        _raise_dashboard_error(exc)
+
+
 # ---------------- V22:老板视角——员工产出总览(产出/token/费用) ----------------
 def _emp_name_dept(idx: int):
-    if idx in registry.BY_IDX:
-        s = registry.BY_IDX[idx]
-        return s["name"], s["dept"]
-    e = departments.get(idx)
-    if e:
-        nm = f"{e.get('person','')}·{e['name']}".strip("·")
-        return nm, e["dept_name"]
+    employee = employeeidentity.active_employee(idx)
+    if employee:
+        if str(employee.get("dept_key") or "") == "content":
+            return employee["name"], employee.get("dept") or "内容生产部"
+        nm = f"{employee.get('person','')}·{employee['name']}".strip("·")
+        return nm, employee["dept_name"]
     return f"#{idx}", ""
+
+
+_PRODUCTION_IDENTITY_FIELDS = (
+    "employee_key",
+    "employee_catalog_version",
+    "employee_name_snapshot",
+    "employee_dept_key",
+    "employee_spec_sha256",
+    "employee_identity_ref",
+    "employee_config_revision",
+    "employee_config_sha256",
+    "person_snapshot",
+    "identity_scheme",
+    "bundle_sha256",
+)
+
+
+def _production_dept_name(dept_key: str) -> str:
+    if dept_key == "content":
+        return "内容生产部"
+    for item in departments.list_depts():
+        if str(item.get("key") or "") == dept_key:
+            return str(item.get("name") or dept_key)
+    return f"岗位部门·{dept_key}" if dept_key else "岗位部门待核"
+
+
+def _production_compat_ref(signature: tuple) -> str:
+    """One-release lookup alias for links created before 64-char refs."""
+    return hashlib.sha256(
+        json.dumps(
+            signature[:6], ensure_ascii=False, separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:20]
+
+
+def _production_identity(row: dict) -> tuple[tuple, dict]:
+    """按 task 的完整岗位+配置冻结归档，绝不只按 idx 合并。"""
+    idx = int(row.get("idx", row.get("emp_idx")) or 0)
+    frozen = {}
+    for field in _PRODUCTION_IDENTITY_FIELDS:
+        value = row.get(field)
+        frozen[field] = (
+            int(value or 0) if field == "employee_config_revision"
+            else str(value or "").strip()
+        )
+    signature = (idx, *(frozen[field] for field in _PRODUCTION_IDENTITY_FIELDS))
+    binding = employeeidentity.resolve_task_binding({"emp_idx": idx, **frozen})
+    if not binding:
+        return signature, {
+            "idx": idx,
+            "name": f"岗位身份待核 #{idx}" if idx else "岗位身份待核",
+            "dept": "岗位部门待核",
+            "dept_key": "unknown",
+            "catalog_version": "unknown",
+            "person_status": "inactive",
+            "identity_status": "unknown",
+            "identity_ref": frozen["employee_identity_ref"],
+            "config_revision": frozen["employee_config_revision"],
+            "config_sha256": frozen["employee_config_sha256"],
+            "can_assign_new": False,
+            "can_continue": False,
+            "can_learn": False,
+            "role_profile_summary": {},
+            "roster_status": "legacy",
+            "can_assign": False,
+            "compat_identity_ref": _production_compat_ref(signature),
+        }
+    employee, config = binding["employee"], binding["config"]
+    identity = _employee_public_contract(employee, config=config)
+    # Display the immutable work snapshot.  A reused idx may now point at a
+    # different person, so production history must never read today's person.
+    name = str(frozen["employee_name_snapshot"] or employee.get("name") or "")
+    if str(employee.get("dept_key") or "") != "content":
+        name = f"{frozen['person_snapshot']}·{name}".strip("·")
+    return signature, {
+        "idx": idx,
+        "name": name,
+        "dept": str(employee.get("dept_name") or employee.get("dept") or
+                    _production_dept_name(frozen["employee_dept_key"])),
+        "dept_key": frozen["employee_dept_key"],
+        "catalog_version": frozen["employee_catalog_version"],
+        "person_snapshot": frozen["person_snapshot"],
+        "identity_scheme": frozen["identity_scheme"],
+        **identity,
+        "compat_identity_ref": _production_compat_ref(signature),
+    }
+
+
+def _production_active_identity(idx: int) -> tuple[tuple, dict]:
+    employee = employeeidentity.active_employee(idx)
+    if employee:
+        config = employees.get_config(idx)
+        return _production_identity({
+            "idx": idx,
+            **employeeidentity.task_fields(employee, config=config),
+        })
+    return _production_identity({"idx": idx})
+
+
+def _production_identity_visible(public: dict) -> bool:
+    """Old production routes must obey the same frozen department scope.
+
+    Unknown/malformed historical identities are useful for internal migration
+    diagnostics, but they have no authorizable business module and therefore
+    must never expose titles or output previews through an owner-facing route.
+    """
+    dept_key = str(public.get("dept_key") or "").strip()
+    if dept_key in {"", "unknown", "mixed", "__denied__"}:
+        return False
+    return auth.allowed(dept_key)
 
 
 @app.get("/api/boss/production")
@@ -5359,8 +12809,21 @@ def boss_production():
     tid = TEN()
     agg = {}
 
-    def _acc(idx, n, tokens, cost, last):
-        a = agg.setdefault(idx, {"n": 0, "tokens": 0, "cost": 0.0, "last": 0})
+    def _acc(_frozen_signature, public, n, tokens, cost, last):
+        if not _production_identity_visible(public):
+            return
+        identity = (int(public["idx"]), str(public["identity_ref"]))
+        a = agg.setdefault(
+            identity,
+            {**public, "n": 0, "tokens": 0, "cost": 0.0, "last": 0},
+        )
+        # One immutable role can legitimately have several config revisions.
+        # Keep one role-level card and expose its newest resolved config while
+        # every individual output below retains the exact frozen revision.
+        if int(public.get("config_revision") or 0) > int(
+            a.get("config_revision") or 0
+        ):
+            a.update(public)
         a["n"] += n or 0
         a["tokens"] += tokens or 0
         a["cost"] += cost or 0
@@ -5371,17 +12834,41 @@ def boss_production():
                   "FROM station_run sr JOIN job j ON sr.job_id=j.id "
                   "WHERE j.tenant_id=? AND sr.status IN ('done','awaiting_review') "
                   "GROUP BY sr.station_idx", (tid,)):
-        _acc(r["idx"], r["n"], r["tk"], r["cost"], r["last"])
-    for r in db.q("SELECT emp_idx idx, COUNT(*) n, COALESCE(SUM(tokens),0) tk, "
-                  "COALESCE(SUM(cost_usd),0) cost, MAX(created_at) last FROM task "
-                  "WHERE tenant_id=? AND status='done' GROUP BY emp_idx", (tid,)):
-        _acc(r["idx"], r["n"], r["tk"], r["cost"], r["last"])
+        identity, public = _production_active_identity(int(r["idx"]))
+        _acc(identity, public, r["n"], r["tk"], r["cost"], r["last"])
+    for r in db.q(
+        "SELECT emp_idx idx,employee_key,employee_catalog_version,"
+        "employee_name_snapshot,employee_dept_key,employee_spec_sha256,"
+        "employee_identity_ref,employee_config_revision,employee_config_sha256,"
+        "person_snapshot,identity_scheme,bundle_sha256,"
+        "COUNT(*) n,COALESCE(SUM(tokens),0) tk,"
+        "COALESCE(SUM(cost_usd),0) cost,MAX(created_at) last FROM task "
+        "WHERE tenant_id=? AND deleted_at IS NULL AND status='done' "
+        "GROUP BY emp_idx,employee_key,employee_catalog_version,"
+        "employee_name_snapshot,employee_dept_key,employee_spec_sha256,"
+        "employee_identity_ref,employee_config_revision,employee_config_sha256,"
+        "person_snapshot,identity_scheme,bundle_sha256",
+        (tid,),
+    ):
+        identity, public = _production_identity(r)
+        _acc(identity, public, r["n"], r["tk"], r["cost"], r["last"])
 
     rows = []
-    for idx, a in agg.items():
-        name, dept = _emp_name_dept(idx)
-        rows.append({"idx": idx, "name": name, "dept": dept, "runs": a["n"],
-                     "tokens": a["tokens"], "cost_usd": round(a["cost"], 4), "last_at": a["last"]})
+    for a in agg.values():
+        rows.append({
+            **{key: a.get(key) for key in (
+                "idx", "name", "dept", "dept_key", "catalog_version",
+                "person_snapshot", "identity_scheme",
+                "person_status", "identity_status", "identity_ref",
+                "config_revision", "config_sha256", "bundle_sha256", "can_assign_new",
+                "can_continue", "can_learn", "role_profile_summary",
+                "roster_status", "can_assign",
+            )},
+            "runs": a["n"],
+            "tokens": a["tokens"],
+            "cost_usd": round(a["cost"], 4),
+            "last_at": a["last"],
+        })
     rows.sort(key=lambda x: -x["cost_usd"])
     total = {"employees": len(rows), "runs": sum(r["runs"] for r in rows),
              "tokens": sum(r["tokens"] for r in rows),
@@ -5390,35 +12877,144 @@ def boss_production():
 
 
 @app.get("/api/boss/production/{idx}")
-def boss_production_detail(idx: int):
+def boss_production_detail(idx: int, identity_ref: str | None = None):
     """某个员工的逐条产出:标题/预览/tokens/费用/时间,可点进原件."""
     _need_admin()
     tid = TEN()
     items = []
-    for t in db.q("SELECT id, output_md, tokens, cost_usd, created_at, status FROM task "
-                  "WHERE emp_idx=? AND tenant_id=? ORDER BY id DESC LIMIT 50", (idx, tid)):
+    identities = {}
+    selected_identity = None
+    _active_identity, active_public = _production_active_identity(idx)
+    if identity_ref is not None:
+        if re.fullmatch(r"(?:[0-9a-f]{20}|[0-9a-f]{64})", identity_ref) is None:
+            raise HTTPException(400, "员工身份参数无效")
+        candidates = {}
+
+        def _remember_candidate(public: dict) -> None:
+            role_ref = str(public["identity_ref"])
+            candidate = (role_ref, public)
+            for lookup in (role_ref, public["compat_identity_ref"]):
+                previous = candidates.get(lookup)
+                if previous is None or int(public.get("config_revision") or 0) > int(
+                    previous[1].get("config_revision") or 0
+                ):
+                    candidates[lookup] = candidate
+
+        if _production_identity_visible(active_public):
+            _remember_candidate(active_public)
+        for frozen in db.q(
+            "SELECT DISTINCT employee_key,employee_catalog_version,"
+            "employee_name_snapshot,employee_dept_key,employee_spec_sha256,"
+            "employee_identity_ref,employee_config_revision,employee_config_sha256,"
+            "person_snapshot,identity_scheme,bundle_sha256 "
+            "FROM task WHERE emp_idx=? AND tenant_id=? AND deleted_at IS NULL",
+            (idx, tid),
+        ):
+            _signature, public = _production_identity({"idx": idx, **frozen})
+            if _production_identity_visible(public):
+                _remember_candidate(public)
+        selected_identity = candidates.get(identity_ref)
+        if selected_identity is None:
+            raise HTTPException(404)
+
+    task_sql = (
+        "SELECT id,output_md,tokens,cost_usd,created_at,status,"
+        "employee_key,employee_catalog_version,employee_name_snapshot,"
+        "employee_dept_key,employee_spec_sha256,employee_identity_ref,"
+        "employee_config_revision,employee_config_sha256,person_snapshot,"
+        "identity_scheme,bundle_sha256 FROM task "
+        "WHERE emp_idx=? AND tenant_id=? AND deleted_at IS NULL"
+    )
+    task_args: tuple = (idx, tid)
+    if selected_identity is not None:
+        selected_ref, _selected_public = selected_identity
+        task_sql += " AND employee_identity_ref=?"
+        task_args += (selected_ref,)
+    task_sql += " ORDER BY id DESC LIMIT 50"
+    for t in db.q(task_sql, task_args):
+        _identity, public = _production_identity({"idx": idx, **t})
+        if not _production_identity_visible(public):
+            continue
+        previous = identities.get(public["identity_ref"])
+        if previous is None or int(public.get("config_revision") or 0) > int(
+            previous.get("config_revision") or 0
+        ):
+            identities[public["identity_ref"]] = public
         md = t["output_md"] or ""
         title = next((ln.lstrip("# ").strip() for ln in md.splitlines() if ln.startswith("#")),
                      (md[:24] or "(无标题)"))
         items.append({"kind": "task", "id": t["id"], "title": title[:50], "preview": md[:240],
                       "tokens": t["tokens"] or 0, "cost_usd": round(t["cost_usd"] or 0, 4),
-                      "at": t["created_at"], "status": t["status"]})
-    for r in db.q("SELECT sr.id, sr.job_id, sr.output_json, sr.tokens, sr.cost_usd, sr.created_at, "
-                  "sr.status, j.brief_json FROM station_run sr JOIN job j ON sr.job_id=j.id "
-                  "WHERE sr.station_idx=? AND j.tenant_id=? AND sr.status IN ('done','awaiting_review') "
-                  "ORDER BY sr.id DESC LIMIT 50", (idx, tid)):
+                      "at": t["created_at"], "status": t["status"], "employee": public})
+    include_station_runs = (
+        _production_identity_visible(active_public)
+        and (
+            selected_identity is None
+            or selected_identity[0] == active_public["identity_ref"]
+        )
+    )
+    station_rows = db.q(
+        "SELECT sr.id, sr.job_id, sr.output_json, sr.tokens, sr.cost_usd, sr.created_at, "
+        "sr.status, j.brief_json FROM station_run sr JOIN job j ON sr.job_id=j.id "
+        "WHERE sr.station_idx=? AND j.tenant_id=? AND sr.status IN ('done','awaiting_review') "
+        "ORDER BY sr.id DESC LIMIT 50", (idx, tid),
+    ) if include_station_runs else []
+    for r in station_rows:
         o = db.jloads(r["output_json"], {})
         direction = (db.jloads(r["brief_json"], {}) or {}).get("direction", "")
         title = (o.get("title") or (o.get("title_candidates") or [None])[0]
                  or (direction and f"工单#{r['job_id']}·{direction}") or f"工单#{r['job_id']} 产出")
         preview = (o.get("body") or json.dumps(o, ensure_ascii=False))[:240]
+        _identity, public = _production_active_identity(idx)
+        previous = identities.get(public["identity_ref"])
+        if previous is None or int(public.get("config_revision") or 0) > int(
+            previous.get("config_revision") or 0
+        ):
+            identities[public["identity_ref"]] = public
         items.append({"kind": "station", "id": r["id"], "job_id": r["job_id"],
                       "title": str(title)[:50], "preview": preview, "tokens": r["tokens"] or 0,
                       "cost_usd": round(r["cost_usd"] or 0, 4), "at": r["created_at"],
-                      "status": r["status"]})
+                      "status": r["status"], "employee": public})
+    if identity_ref is not None and not items:
+        raise HTTPException(404)
     items.sort(key=lambda x: -(x["at"] or 0))
-    name, dept = _emp_name_dept(idx)
-    return {"idx": idx, "name": name, "dept": dept, "items": items[:80]}
+    public_identities = sorted(
+        identities.values(),
+        key=lambda item: (
+            item["identity_status"] != "current",
+            item["config_revision"], item["identity_ref"],
+        ),
+    )
+    if len(public_identities) == 1:
+        public = public_identities[0]
+    elif public_identities:
+        public = {
+            "name": "多个岗位版本",
+            "dept": "多个岗位部门",
+            "dept_key": "mixed",
+            "catalog_version": "mixed",
+            "person_status": "inactive",
+            "identity_status": "unknown",
+            "config_revision": 0,
+            "config_sha256": "",
+            "can_assign_new": False,
+            "can_continue": False,
+            "can_learn": False,
+            "role_profile_summary": {},
+            "roster_status": "mixed",
+            "can_assign": False,
+            "identity_ref": None,
+        }
+    else:
+        _identity, public = _production_active_identity(idx)
+        if not _production_identity_visible(public):
+            raise HTTPException(404)
+    return {
+        "idx": idx,
+        **public,
+        "identities": public_identities,
+        "items": items[:80],
+    }
 
 
 # ---------------- V4:定时任务 ----------------
@@ -5575,7 +13171,7 @@ _transient_upload_active_tenants: set[int] = set()
 
 
 def _persistent_upload_usage(tid: int) -> dict:
-    """Aggregate tenant-owned avatar media and Vlog clips without other tenants."""
+    """Aggregate all tenant-owned persistent media without crossing tenants."""
     from . import avatar as _avatar
     from . import textvideo as _textvideo
 
@@ -5590,6 +13186,38 @@ def _persistent_upload_usage(tid: int) -> dict:
                     if entry.is_file(follow_symlinks=False):
                         files += 1
                         used_bytes += entry.stat(follow_symlinks=False).st_size
+                except OSError:
+                    continue
+    asset_root = os.path.realpath(assetfiles.ASSET_ROOT)
+    inspection_root = os.path.abspath(
+        os.path.join(asset_root, "inspections", str(int(tid)))
+    )
+    try:
+        inspection_inside = (
+            os.path.commonpath((asset_root, inspection_root)) == asset_root
+        )
+    except ValueError:
+        inspection_inside = False
+    if (
+        inspection_inside
+        and os.path.isdir(inspection_root)
+        and not os.path.islink(inspection_root)
+        and os.path.realpath(inspection_root) == inspection_root
+    ):
+        for current_root, directories, filenames in os.walk(
+            inspection_root, followlinks=False
+        ):
+            directories[:] = [
+                name
+                for name in directories
+                if not os.path.islink(os.path.join(current_root, name))
+            ]
+            for name in filenames:
+                path = os.path.join(current_root, name)
+                try:
+                    if os.path.isfile(path) and not os.path.islink(path):
+                        files += 1
+                        used_bytes += os.stat(path, follow_symlinks=False).st_size
                 except OSError:
                     continue
     return {"files": files, "bytes": used_bytes}
@@ -6659,31 +14287,118 @@ def avatar_job_delete(jid: int):
 from fastapi.responses import Response  # noqa: E402
 
 
-def _meeting_member_view(idx: int) -> dict:
+def _meeting_member_view(idx: int, *, binding: dict | None = None) -> dict:
     """会议花名片遵守员工资料权限：外部只显示姓名与公开介绍。"""
-    b = meeting.emp_brief(idx)
+    employee = (
+        binding.get("employee") if isinstance(binding, dict)
+        else employeeidentity.active_employee(idx)
+    )
+    if not employee:
+        return {}
+    config = (
+        binding.get("config") if isinstance(binding, dict)
+        else employees.get_config(idx)
+    )
+    b = meeting.emp_brief(
+        idx, active_only=True, employee=employee, config=config,
+    )
     if not b:
         return {}
+    identity = _employee_public_contract(employee, config=config)
+    enabled = identity["person_status"] == "active"
     if _is_boss():
-        return {k: v for k, v in b.items() if k != "md"}
-    e = departments.get(idx)
-    if e:
-        public = _public_expert(e)
+        return {
+            k: v for k, v in b.items()
+            if k != "md" and not str(k).startswith("_")
+        } | identity | {"enabled": enabled}
+    if employee.get("dept_key") != "content":
+        public = _public_expert(employee, config=config)
         intro = public["intro"]
     else:
-        s = registry.BY_IDX.get(idx) or {}
-        intro = s.get("intro", "")
-    return {k: b[k] for k in ("idx", "name", "color", "emoji")} | {"intro": intro}
+        intro = employee.get("intro", "")
+    return (
+        {k: b[k] for k in ("idx", "name", "color", "emoji")}
+        | {"intro": intro}
+        | identity
+        | {"enabled": enabled}
+    )
+
+
+def _meeting_binding_snapshot(binding: dict) -> dict:
+    """Freeze the exact person, role, config and effective bundle for a meeting."""
+    employee = binding["employee"]
+    config = binding["config"]
+    frozen = employeeidentity.snapshot(employee)
+    return {
+        **frozen,
+        "identity_ref": config["identity_ref"],
+        "config_revision": config["config_revision"],
+        "config_sha256": config["config_sha256"],
+        "person_snapshot": str(
+            frozen.get("person_snapshot") or config.get("person_snapshot") or ""
+        ),
+        "identity_scheme": str(
+            frozen.get("identity_scheme")
+            or config.get("identity_scheme")
+            or "legacy-six"
+        ),
+        "bundle_sha256": config["bundle_sha256"],
+    }
+
+
+def _meeting_frozen_members(m: dict) -> list[dict] | None:
+    return employeeidentity.member_snapshot_contract(
+        db.jloads(m.get("emp_idxs_json"), []),
+        db.jloads(m.get("member_snapshot_json"), []),
+    )
+
+
+def _meeting_history_member_views(m: dict) -> list[dict]:
+    frozen_rows = _meeting_frozen_members(m) or []
+    views = []
+    for frozen in frozen_rows:
+        employee = employeeidentity.resolve_snapshot(frozen)
+        config = employees.get_config_by_identity(
+            str(frozen.get("identity_ref") or ""),
+            revision=frozen.get("config_revision"),
+            config_sha256=frozen.get("config_sha256"),
+        )
+        if not employee or not config:
+            continue
+        identity = _employee_public_contract(employee, config=config)
+        enabled = identity["person_status"] == "active"
+        display_name = (
+            f"{employee.get('person', '')}·{employee.get('name', '')}".strip("·")
+            if employee.get("dept_key") != "content"
+            else str(employee.get("name") or frozen["name"])
+        )
+        brief = {
+            "idx": int(frozen["idx"]),
+            "name": display_name,
+            "duty": str(employee.get("duty") or ""),
+            "color": str(employee.get("color") or "#7d756a"),
+            "emoji": str(employee.get("emoji") or "🧑‍💼"),
+        }
+        if _is_boss():
+            public = {
+                k: v for k, v in brief.items()
+                if k != "md" and not str(k).startswith("_")
+            }
+        else:
+            public = {
+                k: brief[k] for k in ("idx", "name", "color", "emoji")
+            } | {"intro": str(employee.get("intro") or "岗位档案可回看")}
+        views.append(public | identity | {"enabled": enabled})
+    return views
 
 
 def _meeting_visible(m: dict) -> bool:
     """成员账号必须拥有会议涉及的全部板块，避免混合部门会议泄露。"""
-    idxs = db.jloads(m.get("emp_idxs_json"), [])
-    if not idxs:
+    frozen_rows = _meeting_frozen_members(m)
+    if not frozen_rows:
         return False
-    for idx in idxs:
-        expert = departments.get(idx)
-        if not auth.allowed(expert["dept_key"] if expert else "content"):
+    for frozen in frozen_rows:
+        if not auth.allowed(frozen["dept_key"]):
             return False
     return True
 
@@ -6707,8 +14422,38 @@ def _create_charged_meeting(data: dict, member_count: int) -> int:
         "billing_status": "pending",
         "billing_points": points,
     })
+    strict_snapshots = (
+        db.jloads(data.get("member_snapshot_json"), None)
+        if "member_snapshot_json" in data else None
+    )
+    strict_indices = (
+        db.jloads(data.get("emp_idxs_json"), None)
+        if "member_snapshot_json" in data else None
+    )
+    if strict_snapshots is not None and (
+        not isinstance(strict_indices, list)
+        or not isinstance(strict_snapshots, list)
+        or len(strict_indices) != len(strict_snapshots)
+        or len(strict_snapshots) != int(member_count)
+    ):
+        db.q(
+            "DELETE FROM meeting WHERE id=? AND status='pending_charge' "
+            "AND billing_status='pending'",
+            (meeting_id,),
+        )
+        raise RuntimeError("会议员工冻结绑定结构无效")
 
     def claim(connection):
+        if strict_snapshots is not None and any(
+            type(idx) is not int
+            or not isinstance(frozen, dict)
+            or int(frozen.get("idx", -1)) != idx
+            or not _role_binding_matches(
+                connection, frozen, require_current=True,
+            )
+            for idx, frozen in zip(strict_indices, strict_snapshots)
+        ):
+            raise RuntimeError("会议员工岗位配置已更新，请刷新后重试")
         changed = connection.execute(
             "UPDATE meeting SET status='queued',billing_status='charged',updated_at=? "
             "WHERE id=? AND status='pending_charge' AND billing_status='pending'",
@@ -6745,30 +14490,69 @@ def _settle_unstarted_meeting(meeting_id: int) -> bool:
     )
 
 
+def _meeting_current_write_bindings(raw_idxs, raw_bindings) -> list[dict]:
+    """Validate one exact current role/config binding for every roster slot."""
+    if not isinstance(raw_idxs, list) or not isinstance(raw_bindings, list):
+        raise HTTPException(400, "会议成员与岗位绑定必须是数组")
+    if len(raw_idxs) > meeting.MAX_MEMBERS:
+        raise HTTPException(400, f"会议最多 {meeting.MAX_MEMBERS} 位成员")
+    if len(raw_idxs) != len(raw_bindings):
+        raise HTTPException(400, "会议成员与岗位绑定数量不一致")
+    if any(type(idx) is not int for idx in raw_idxs):
+        raise HTTPException(400, "会议员工编号无效")
+    if len(set(raw_idxs)) != len(raw_idxs):
+        raise HTTPException(400, "会议成员不得重复")
+    by_idx: dict[int, dict] = {}
+    for item in raw_bindings:
+        if not isinstance(item, dict) or type(item.get("idx")) is not int:
+            raise HTTPException(400, "会议岗位绑定结构无效")
+        if any(item.get(field) in (None, "") for field in _ROLE_WRITE_BINDING_FIELDS):
+            raise HTTPException(400, "会议岗位身份、配置与能力包绑定不完整")
+        idx = int(item["idx"])
+        if idx in by_idx:
+            raise HTTPException(400, "会议岗位绑定不得重复")
+        by_idx[idx] = item
+    if set(by_idx) != set(raw_idxs):
+        raise HTTPException(400, "会议岗位绑定存在缺失或额外成员")
+    ordered = []
+    for idx in raw_idxs:
+        binding = _employee_current_write_binding(idx, by_idx[idx])
+        if not binding["identity"].get("can_assign_new"):
+            raise HTTPException(409, "会议成员岗位已变更，请刷新后重试")
+        ordered.append(binding)
+    return ordered
+
+
 @app.post("/api/meetings")
 async def meeting_create(body: dict):
-    # 先做类型净化、去重、权限校验，再计费；重复 idx 不再重复发言/重复收费。
-    raw_idxs = tuple(body.get("emp_idxs") or ())
+    # 成员列表与身份、配置、能力包绑定必须精确一一对应，任何静默过滤都会改变参会人与计费。
+    raw_idxs = body.get("emp_idxs")
+    raw_bindings = body.get("member_bindings")
 
-    def select_members() -> tuple[list[int], list[dict]]:
-        idxs, seen = [], set()
-        for raw in raw_idxs:
-            try:
-                idx = int(raw)
-            except (TypeError, ValueError):
-                continue
-            if idx in seen or not meeting.emp_brief(idx):
-                continue
-            seen.add(idx)
+    def select_members() -> tuple[list[int], list[dict], list[dict]]:
+        bindings = _meeting_current_write_bindings(raw_idxs, raw_bindings)
+        idxs = []
+        member_views = []
+        for binding in bindings:
+            idx = int(binding["employee"]["idx"])
+            if idx == inspection.EMPLOYEE_IDX:
+                raise HTTPException(400, "巡店经理不参加无照片圆桌会议")
+            if not binding["config"].get("enabled", True):
+                raise HTTPException(409, "会议成员已停用，请刷新后重试")
+            if not meeting.emp_brief(
+                idx,
+                active_only=True,
+                employee=binding["employee"],
+                config=binding["config"],
+            ):
+                raise HTTPException(409, "会议成员当前不可用")
+            dept_key = str(binding["employee"].get("dept_key") or "content")
+            _need_module(dept_key)
             idxs.append(idx)
-            if len(idxs) >= meeting.MAX_MEMBERS:
-                break
-        for idx in idxs:
-            expert = departments.get(idx)
-            _need_module(expert["dept_key"] if expert else "content")
-        return idxs, [_meeting_member_view(idx) for idx in idxs]
+            member_views.append(_meeting_member_view(idx, binding=binding))
+        return idxs, member_views, bindings
 
-    idxs, member_views = await db.arun(select_members)
+    idxs, member_views, bindings = await db.arun(select_members)
     q = (body.get("question") or "").strip()
     if not q or len(idxs) < 2:
         raise HTTPException(400, "议题必填,且至少拉 2 位员工进群")
@@ -6786,6 +14570,11 @@ async def meeting_create(body: dict):
                 "constraints": constraints,
                 "acceptance_criteria": acceptance,
                 "emp_idxs_json": json.dumps(idxs),
+                "member_snapshot_json": json.dumps(
+                    [_meeting_binding_snapshot(binding) for binding in bindings],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
                 "auto_execute": 0 if body.get("auto_execute") is False else 1,
                 "phase": "queued",
                 "round_no": 0,
@@ -6796,6 +14585,8 @@ async def meeting_create(body: dict):
         )
     except billing.InsufficientPoints as e:
         raise HTTPException(402, str(e))
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
     return {"meeting_id": mid, "members": member_views}
 
 
@@ -6833,6 +14624,7 @@ async def meeting_suggest(body: dict):
             candidates.extend(
                 {"idx": s["idx"], "name": s["name"], "duty": s["duty"]}
                 for s in registry.STATIONS
+                if int(s.get("idx") or 0) != inspection.EMPLOYEE_IDX
             )
         for department in departments.list_depts():
             if not auth.allowed(department["key"]):
@@ -6903,7 +14695,7 @@ def meetings_list(limit: int | None = None, offset: int = 0):
     select = (
         "SELECT id, question, status, phase, decision, next_action, "
         "execution_task_ids_json, actions_json, emp_idxs_json, "
-        "tenant_id, created_at FROM meeting "
+        "member_snapshot_json,tenant_id, created_at FROM meeting "
         "WHERE tenant_id=? ORDER BY id DESC LIMIT ? OFFSET ?"
     )
     if paged:
@@ -6927,10 +14719,10 @@ def meetings_list(limit: int | None = None, offset: int = 0):
         rows = [r for r in rows if _meeting_visible(r)]
         total = 0
     for r in rows:
-        r["members"] = [_meeting_member_view(i)
-                        for i in db.jloads(r.pop("emp_idxs_json"), [])
-                        if meeting.emp_brief(i)]
         r["task_count"] = len(meeting.validated_execution_task_ids(r))
+        r["members"] = _meeting_history_member_views(r)
+        r.pop("emp_idxs_json", None)
+        r.pop("member_snapshot_json", None)
         r.pop("execution_task_ids_json", None)
         r.pop("actions_json", None)
         r.pop("tenant_id", None)
@@ -6987,7 +14779,11 @@ def meeting_get(mid: int):
     if task_ids:
         marks = ",".join("?" for _ in task_ids)
         rows = db.q(
-            f"SELECT id, emp_idx, status, brief_json, created_at FROM task "
+            f"SELECT id,emp_idx,status,brief_json,employee_key,"
+            f"employee_catalog_version,employee_name_snapshot,"
+            f"employee_dept_key,employee_spec_sha256,employee_identity_ref,"
+            f"employee_config_revision,employee_config_sha256,person_snapshot,"
+            f"identity_scheme,bundle_sha256,created_at FROM task "
             f"WHERE tenant_id=? AND deleted_at IS NULL "
             f"AND id IN ({marks})",
             (TEN(), *task_ids),
@@ -6997,15 +14793,23 @@ def meeting_get(mid: int):
             if tid not in by_id:
                 continue
             t = by_id[tid]
+            binding = employeeidentity.resolve_task_binding(t)
+            if (
+                not binding
+                or not auth.allowed(str(t.get("employee_dept_key") or ""))
+            ):
+                continue
             brief = db.jloads(t.pop("brief_json"), {})
-            employee = departments.get(t["emp_idx"]) or registry.BY_IDX.get(t["emp_idx"]) or {}
-            t["name"] = employee.get("name", "数字员工")
+            t["name"] = t.pop("employee_name_snapshot", None) or "岗位身份待核"
             t["task"] = (brief.get("direction") or "")[:360]
+            t.update(_employee_public_contract(
+                binding["employee"], config=binding["config"],
+            ))
             tasks.append(t)
     m["execution_tasks"] = tasks
-    m["members"] = [_meeting_member_view(i)
-                    for i in db.jloads(m.pop("emp_idxs_json"), [])
-                    if meeting.emp_brief(i)]
+    m["members"] = _meeting_history_member_views(m)
+    m.pop("emp_idxs_json", None)
+    m.pop("member_snapshot_json", None)
     return m
 
 
@@ -7074,8 +14878,71 @@ def _task_or_404(tid: int) -> dict:
 
 @app.put("/api/tasks/{tid}/output")
 def task_output_edit(tid: int, body: dict):
-    _task_or_404(tid)
-    db.update("task", tid, {"output_md": (body.get("md") or "").strip()})
+    task = _task_or_404(tid)
+    if int(task.get("emp_idx") or 0) == inspection.EMPLOYEE_IDX:
+        raise HTTPException(
+            409,
+            "巡店结论来自照片证据链，不能在通用编辑器改写",
+        )
+    raw_md = body.get("md")
+    if not isinstance(raw_md, str):
+        raise HTTPException(400, "交付内容格式无效")
+    stored_md = raw_md.strip()
+    decision_summary = None
+    frozen_employee = task.get("_frozen_employee")
+    if departments.is_decision_employee(frozen_employee):
+        # Manual correction is still a V2 delivery boundary.  Revalidate the
+        # frozen manifest; corruption or absence deliberately becomes a
+        # provenance-less gate call and therefore HOLD, never a bypass to GO.
+        provenance = None
+        try:
+            _brief, provenance = taskrunner.validate_persisted_task_brief(
+                db.jloads(task.get("brief_json"), None),
+                frozen_employee,
+                int(task.get("tenant_id") or TEN()),
+            )
+        except ValueError:
+            provenance = None
+        gate = departments.enforce_decision_output(
+            frozen_employee, stored_md, provenance=provenance
+        )
+        stored_md = gate["output"]
+        decision_summary = "\n".join(
+            taskrunner._decision_summary_lines(
+                stored_md, frozen_employee, decision_gate=gate
+            )
+        )
+    with db.atomic() as connection:
+        current = connection.execute(
+            "SELECT id,status,thread_id FROM task WHERE id=? AND tenant_id=? "
+            "AND deleted_at IS NULL",
+            (tid, TEN()),
+        ).fetchone()
+        if not current:
+            raise HTTPException(404)
+        current = dict(current)
+        if current.get("status") != "done":
+            raise HTTPException(409, "只有已交付任务才能手工编辑")
+        if current.get("thread_id") is not None:
+            raise HTTPException(
+                409,
+                "连续协作的每轮交付是不可改的版本记录；请用“继续沟通”生成下一轮",
+            )
+        if decision_summary is None:
+            changed = connection.execute(
+                "UPDATE task SET output_md=?,updated_at=? WHERE id=? AND tenant_id=? "
+                "AND status='done' AND thread_id IS NULL AND deleted_at IS NULL",
+                (stored_md, time.time(), tid, TEN()),
+            )
+        else:
+            changed = connection.execute(
+                "UPDATE task SET output_md=?,summary_md=?,updated_at=? "
+                "WHERE id=? AND tenant_id=? AND status='done' "
+                "AND thread_id IS NULL AND deleted_at IS NULL",
+                (stored_md, decision_summary, time.time(), tid, TEN()),
+            )
+        if changed.rowcount != 1:
+            raise HTTPException(409, "任务版本刚刚发生变化，请刷新后重试")
     return {"ok": True}
 
 
@@ -10911,10 +18778,17 @@ app.mount("/static", StaticFiles(directory=os.path.join(ROOT, "static")), name="
 app.mount("/pub", StaticFiles(directory=avatar.PUBLIC_DIR, follow_symlink=False), name="pub")
 
 
+_HTML_ENTRY_NO_CACHE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+
 @app.get("/login")
 def login_page():
     with open(os.path.join(ROOT, "static", "login.html"), encoding="utf-8") as f:
-        return HTMLResponse(f.read())
+        return HTMLResponse(f.read(), headers=_HTML_ENTRY_NO_CACHE_HEADERS)
 
 
 @app.get("/promo")
@@ -10923,7 +18797,33 @@ def promo_page():
         return HTMLResponse(f.read())
 
 
+_ENTRY_ASSET_VERSION: str | None = None
+
+
+def _entry_asset_version() -> str:
+    """app.js 内容哈希：发版换文件 → 换 URL → 浏览器必拉新版，不再靠手工改 ?v=。"""
+    global _ENTRY_ASSET_VERSION
+    if _ENTRY_ASSET_VERSION is None:
+        try:
+            with open(os.path.join(ROOT, "static", "app.js"), "rb") as fh:
+                _ENTRY_ASSET_VERSION = hashlib.sha256(fh.read()).hexdigest()[:12]
+        except OSError:
+            _ENTRY_ASSET_VERSION = "unversioned"
+    return _ENTRY_ASSET_VERSION
+
+
+def _inject_entry_asset_version(html: str) -> str:
+    return re.sub(
+        r"(/static/app\.js\?v=)[0-9A-Za-z]+",
+        lambda match: match.group(1) + _entry_asset_version(),
+        html,
+    )
+
+
 @app.get("/")
 def index():
     with open(os.path.join(ROOT, "static", "index.html"), encoding="utf-8") as f:
-        return HTMLResponse(f.read())
+        return HTMLResponse(
+            _inject_entry_asset_version(f.read()),
+            headers=_HTML_ENTRY_NO_CACHE_HEADERS,
+        )

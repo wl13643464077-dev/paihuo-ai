@@ -88,7 +88,17 @@ class CapabilityRenderingTests(unittest.TestCase):
 
     def test_every_specialist_exposes_capabilities(self):
         specialists = departments.specialists()
-        self.assertGreaterEqual(len(specialists), 400)
+        # Schema 55 keeps 360 V4 industry people active, plus restaurant's 60
+        # unchanged specialists.
+        self.assertEqual(420, len(specialists))
+        # The legacy idx-keyed compatibility map still collapses same-slot
+        # versions, while the lossless registry retains V1 + V2 + V3.
+        self.assertEqual(420, len(departments.legacy_specialists()))
+        self.assertEqual(780, len(departments.historical_specialists()))
+        # The active-first idx compatibility view keeps the 360 shared slots
+        # once and also retains the 60 independent 20xxx historical ids.
+        self.assertEqual(480, len(departments.all_specialists()))
+        self.assertEqual(1200, len(departments.all_identity_versions()))
         empty = [
             idx for idx in specialists
             if not departments.capabilities_for(idx, [])
@@ -137,6 +147,57 @@ class CapabilityRenderingTests(unittest.TestCase):
                 [c["desc"] for c in caps],
                 list(employee.get("steps") or []),
             )
+
+    def test_v4_capabilities_carry_display_detail_without_touching_desc(self):
+        """detail 只服务界面展示；desc（提示词载荷）必须保持档案原文不变。"""
+        idx = 1001  # V4 行业员工：能力行来自专业岗位档案而非 steps
+        employee = departments.get(idx)
+        profile_caps = list(
+            (employee.get("professional_profile") or {}).get("capabilities")
+            or []
+        )
+        self.assertTrue(profile_caps, "1001 应有 V4 岗位档案能力")
+        caps = departments.capabilities_for(idx, [])
+        self.assertEqual([c["desc"] for c in caps], profile_caps)
+        detailed = [c for c in caps if c.get("detail")]
+        self.assertEqual(
+            len(profile_caps), len(detailed),
+            "V4 员工每条能力都应有 detail 详细介绍（capability_details_v1.json）",
+        )
+        for cap in detailed:
+            self.assertGreaterEqual(len(cap["detail"]), 20)
+            self.assertNotEqual(cap["detail"], cap["desc"])
+
+    def test_restaurant_and_content_roles_have_factory_profiles(self):
+        """餐饮/内容部老岗位升级到 V4 展示标准：出厂档案 + 每项详细介绍。
+
+        sidecar 只服务展示层：冻结身份、配置包与任务提示词永远不读它，
+        技能卡（skills_json）也一个字不动。
+        """
+        from app.skills import registry as skills_registry
+
+        with open(
+            os.path.join(DEPT_DIR, "restaurant.json"), encoding="utf-8",
+        ) as handle:
+            restaurant = json.load(handle)
+        keys = [s["key"] for s in skills_registry.STATIONS]
+        keys += [e["key"] for e in restaurant.get("employees") or []]
+        self.assertGreaterEqual(len(keys), 70)
+        for key in keys:
+            row = departments.factory_profile_for(key)
+            self.assertTrue(row, f"{key} 缺出厂能力档案")
+            profile = row["professional_profile"]
+            self.assertTrue(profile.get("scope"), f"{key} 缺职责域")
+            details = row["capability_details"]
+            for group in ("skill_tree", "capabilities"):
+                items = profile.get(group) or []
+                self.assertGreaterEqual(len(items), 3, f"{key} {group} 过薄")
+                for item in items:
+                    self.assertGreaterEqual(
+                        len((details.get(group) or {}).get(item, "")), 20,
+                        f"{key} {group} «{item}» 缺详细介绍",
+                    )
+        self.assertEqual({}, departments.factory_profile_for("no_such_role"))
 
 
 if __name__ == "__main__":

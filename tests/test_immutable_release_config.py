@@ -41,6 +41,15 @@ class ImmutableReleaseConfigCase(unittest.TestCase):
         with (
             patch.object(departments, "CONFIG_DEPT_DIR", str(immutable)),
             patch.object(departments, "LEGACY_DEPT_DIR", str(mutable)),
+            # This test isolates base-directory precedence.  Keep the V4/V3/V2
+            # overlays absent so the real 360-role source tree cannot be
+            # combined with its intentionally tiny one-department fixture.
+            patch.object(departments, "CONFIG_DECISION_V4_DIR", str(self.base / "missing-v4")),
+            patch.object(departments, "SOURCE_DECISION_V4_DIR", str(self.base / "missing-source-v4")),
+            patch.object(departments, "CONFIG_DECISION_V3_DIR", str(self.base / "missing-v3")),
+            patch.object(departments, "SOURCE_DECISION_V3_DIR", str(self.base / "missing-source-v3")),
+            patch.object(departments, "CONFIG_DECISION_DIR", str(self.base / "missing-v2")),
+            patch.object(departments, "LEGACY_DECISION_DIR", str(self.base / "missing-source-v2")),
             patch.object(departments, "MANIFEST_PATH", str(self.base / "missing-manifest")),
         ):
             departments._cache = None

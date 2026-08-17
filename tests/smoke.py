@@ -134,8 +134,18 @@ def main():
 
     # 5. 专家任务(派活)一条,验证扣费+产出
     bal0 = _req("GET", "/api/billing", cookie=ck)[1].get("balance", 0)
+    task_employee = root_expert or (root_emps[0] if root_emps else {})
+    if not task_employee:
+        ok("schema54", False, "")
+        return finish()
     st, d, _ = _req("POST", "/api/tasks",
-                    {"emp_idx": 140, "brief": {"direction": "冒烟:一句话slogan"}}, ck)
+                    {
+                        "emp_idx": task_employee.get("idx"),
+                        "identity_ref": task_employee.get("identity_ref"),
+                        "config_revision": task_employee.get("config_revision"),
+                        "config_sha256": task_employee.get("config_sha256"),
+                        "brief": {"direction": "smoke schema54 binding"},
+                    }, ck)
     tid = d.get("task_id") if st == 200 else None
     ok("派活专家任务", bool(tid), d)
     if tid:

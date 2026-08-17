@@ -120,7 +120,12 @@ def _session_signature(raw: str, password_hash: str, uid: int) -> str:
 
 
 def make_session(uid: int) -> str:
-    user = db.one("SELECT password_hash FROM users WHERE id=? AND enabled=1", (uid,))
+    user = db.one(
+        "SELECT u.password_hash FROM users u "
+        "JOIN tenants t ON t.id=u.tenant_id "
+        "WHERE u.id=? AND u.enabled=1 AND t.enabled=1",
+        (uid,),
+    )
     if not user:
         raise ValueError("用户不存在或已停用")
     exp = int(time.time() + SESSION_DAYS * 86400)
@@ -137,7 +142,12 @@ def parse_session(token: str):
         if int(exp) < time.time():
             return None
         uid_int = int(uid)
-        user = db.one("SELECT password_hash FROM users WHERE id=? AND enabled=1", (uid_int,))
+        user = db.one(
+            "SELECT u.password_hash FROM users u "
+            "JOIN tenants t ON t.id=u.tenant_id "
+            "WHERE u.id=? AND u.enabled=1 AND t.enabled=1",
+            (uid_int,),
+        )
         if not user:
             return None
         raw = f"{version}.{uid}.{exp}"
@@ -152,11 +162,23 @@ def parse_session(token: str):
 def revoke_sessions(uid: int):
     """让该账号所有已签发 cookie 立即失效；下一次登录会使用新版本。"""
     uid = int(uid)
-    db.set_setting(f"session_epoch:{uid}", str(_session_epoch(uid) + 1))
+    # 必须是一条原子递增。SELECT 后再 set 会在并发退出/停用时丢更新，
+    # 让两次撤销之间签发的 Cookie 在第二次撤销后继续有效。
+    db.execute(
+        "INSERT INTO app_setting(key,value,updated_at) VALUES(?, '1', ?) "
+        "ON CONFLICT(key) DO UPDATE SET "
+        "value=CAST(COALESCE(app_setting.value,'0') AS INTEGER)+1,"
+        "updated_at=excluded.updated_at",
+        (f"session_epoch:{uid}", time.time()),
+    )
 
 
 def get_user(uid: int):
-    u = db.one("SELECT * FROM users WHERE id=? AND enabled=1", (uid,))
+    u = db.one(
+        "SELECT u.* FROM users u JOIN tenants t ON t.id=u.tenant_id "
+        "WHERE u.id=? AND u.enabled=1 AND t.enabled=1",
+        (uid,),
+    )
     if u:
         u["modules"] = db.jloads(u.pop("modules_json"), [])
     return u
@@ -189,21 +211,34 @@ BASE_MODULES = ("content", "avatar", "library")
 
 
 def tenant_industries() -> list:
-    """当前租户被授权的行业部门 key 列表;空=不限(平台方全开)."""
+    """当前租户被授权的显式行业列表；平台租户/root 单独视为全开。"""
     u = current()
     if not u:
         return []
     tid = u["tenant_id"]
     if tid == 1 or u["role"] == "root":
         return []  # 平台方/root 不限行业
-    r = db.one("SELECT industries_json FROM tenants WHERE id=?", (tid,))
-    return db.jloads((r or {}).get("industries_json"), []) or []
+    return [
+        str(row["industry_key"])
+        for row in db.q(
+            "SELECT industry_key FROM tenant_industry WHERE tenant_id=? "
+            "ORDER BY is_primary DESC,industry_key",
+            (tid,),
+        )
+        if row.get("industry_key")
+    ]
 
 
 def dept_visible(dept_key: str) -> bool:
     """该行业部门当前租户是否可见(受租户行业授权限制)."""
+    u = current()
+    if not u:
+        return False
+    if u.get("tenant_id") == 1 or u.get("role") == "root":
+        return True
     inds = tenant_industries()
-    return (not inds) or dept_key in inds
+    # 非平台租户没有显式行业绑定时 fail closed，不能再把空列表解释为全行业。
+    return dept_key in inds
 
 
 def allowed(module: str) -> bool:

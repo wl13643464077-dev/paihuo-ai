@@ -8,18 +8,24 @@ import unittest
 
 from fastapi import HTTPException
 
-from app import auth, db
+from app import auth, db, employeeidentity
 
 
 class RemainingListPaginationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.old_db_path = db.DB_PATH
-        if db._conn is not None:
-            db._conn.close()
+        db._shutdown_async_pool(wait=True)
+        db._close_all_connections()
         db._conn = None
+        db._conn_path = None
         db.DB_PATH = os.path.join(self.tmp.name, "remaining-pagination.db")
         db.conn()
+        self.member_snapshot_json = json.dumps(
+            employeeidentity.member_snapshots([0, 1], active_only=True),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         db.insert("tenants", {"id": 2, "name": "租户甲"})
         db.insert("tenants", {"id": 3, "name": "租户乙"})
         auth.set_current({
@@ -32,9 +38,10 @@ class RemainingListPaginationTests(unittest.TestCase):
 
     def tearDown(self):
         auth.set_current(None)
-        if db._conn is not None:
-            db._conn.close()
+        db._shutdown_async_pool(wait=True)
+        db._close_all_connections()
         db._conn = None
+        db._conn_path = None
         db.DB_PATH = self.old_db_path
         self.tmp.cleanup()
 
@@ -126,6 +133,7 @@ class RemainingListPaginationTests(unittest.TestCase):
                 "tenant_id": 2,
                 "question": f"会议-{index:03d}",
                 "emp_idxs_json": "[0,1]",
+                "member_snapshot_json": self.member_snapshot_json,
                 "status": "done",
                 "phase": "completed",
                 "execution_task_ids_json": "[]",
@@ -136,6 +144,7 @@ class RemainingListPaginationTests(unittest.TestCase):
             "tenant_id": 3,
             "question": "外租户会议",
             "emp_idxs_json": "[0,1]",
+            "member_snapshot_json": self.member_snapshot_json,
             "status": "done",
             "phase": "completed",
             "execution_task_ids_json": "[]",
@@ -164,6 +173,7 @@ class RemainingListPaginationTests(unittest.TestCase):
             "tenant_id": 2,
             "question": "内容部会议",
             "emp_idxs_json": "[0,1]",
+            "member_snapshot_json": self.member_snapshot_json,
             "status": "done",
             "phase": "completed",
             "execution_task_ids_json": "[]",

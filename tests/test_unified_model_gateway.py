@@ -12,6 +12,11 @@ ROOT = Path(__file__).resolve().parents[1]
 PROVIDER_MODULE = ROOT / "app" / "providers.py"
 
 
+async def _inline_db_run(call, *args, **kwargs):
+    """Exercise resolver forwarding without opening the repository DB."""
+    return call(*args, **kwargs)
+
+
 class GatewayBoundaryAstTests(unittest.TestCase):
     def test_only_provider_module_may_assemble_model_http_endpoints(self):
         offenders = []
@@ -52,7 +57,7 @@ class GatewayBoundaryAstTests(unittest.TestCase):
                     continue
                 if (
                     isinstance(node, ast.Attribute)
-                    and node.attr in {"DEFAULT_TEXT", "DEFAULT_IMAGE"}
+                    and node.attr in {"DEFAULT_TEXT", "DEFAULT_VISION", "DEFAULT_IMAGE"}
                 ):
                     offenders.append(
                         f"{path.relative_to(ROOT)}:{node.lineno}=provider-default"
@@ -78,7 +83,7 @@ class GatewayBoundaryAstTests(unittest.TestCase):
                         )
                     elif (
                         isinstance(value, ast.Attribute)
-                        and value.attr in {"DEFAULT_TEXT", "DEFAULT_IMAGE"}
+                        and value.attr in {"DEFAULT_TEXT", "DEFAULT_VISION", "DEFAULT_IMAGE"}
                     ):
                         offenders.append(
                             f"{path.relative_to(ROOT)}:{node.lineno}=DEFAULT"
@@ -100,9 +105,176 @@ class ProviderGatewayBehaviorTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(providers.ProviderError, "文本模型不可用"):
                 await providers.chat("测试", model="invented-model")
 
-    async def test_vision_resolves_employee_text_model(self):
+    async def test_internal_text_override_rejects_unknown_and_local_tool_models(self):
+        for model in ("invented-model", providers.CLAUDE_LOCAL, 123):
+            with self.subTest(model=model), patch.object(
+                providers, "text_model_for", return_value="deepseek-v4-flash"
+            ), patch.object(
+                providers,
+                "yunwu_conf",
+                side_effect=AssertionError("非法临时路由不应触及凭据"),
+            ):
+                with self.assertRaisesRegex(providers.ProviderError, "临时路由不可用"):
+                    await providers.call_text(
+                        1, "分析已核验摘要", model_override=model
+                    )
+
+        future_catalog = [
+            *providers.TEXT_MODELS,
+            {"id": "future-non-api", "label": "Future", "provider": "other"},
+        ]
         with patch.object(
-            providers, "text_model_for", return_value="gpt-5.5"
+            providers, "TEXT_MODELS", future_catalog
+        ), patch.object(
+            providers, "TEXT_IDS", {*providers.TEXT_IDS, "future-non-api"}
+        ), patch.object(
+            providers, "text_model_for", return_value="deepseek-v4-flash"
+        ), patch.object(
+            providers,
+            "yunwu_conf",
+            side_effect=AssertionError("其他 provider 不应触及凭据"),
+        ):
+            with self.assertRaisesRegex(providers.ProviderError, "临时路由不可用"):
+                await providers.call_text(
+                    1,
+                    "分析已核验摘要",
+                    model_override="future-non-api",
+                )
+
+    async def test_internal_text_override_only_changes_final_api_model(self):
+        research = {"text": "公开证据包", "cost_usd": 0.1, "tokens": 3}
+        final = {"text": '{"ok":true}', "cost_usd": 0.2, "tokens": 5}
+        with patch.object(
+            providers, "text_model_for", return_value="deepseek-v4-flash"
+        ), patch.object(
+            providers, "yunwu_conf", return_value=("https://proxy.example", "key")
+        ), patch(
+            "app.llm.call", AsyncMock(return_value=research)
+        ) as web_agent, patch.object(
+            providers, "chat", AsyncMock(return_value=final)
+        ) as final_api:
+            got = await providers.call_text_json(
+                1,
+                "分析已核验摘要",
+                web=True,
+                timeout=55,
+                retries=0,
+                progress=lambda *_args: None,
+                token="leads:1:analysis:fallback",
+                system_prompt="PRIVATE-SYSTEM",
+                research_brief="PUBLIC-RESEARCH",
+                sensitive_texts=("PRIVATE-SENSITIVE",),
+                model_override="gpt-5.5",
+            )
+
+        self.assertEqual(got["data"], {"ok": True})
+        self.assertEqual(web_agent.await_args.kwargs["model"], providers.AGENT_MODEL)
+        self.assertTrue(web_agent.await_args.kwargs["web"])
+        self.assertEqual(final_api.await_args.kwargs["model"], "gpt-5.5")
+        self.assertEqual(final_api.await_args.kwargs["timeout"], 55)
+        self.assertEqual(
+            final_api.await_args.kwargs["token"],
+            "leads:1:analysis:fallback",
+        )
+        self.assertEqual(final_api.await_args.kwargs["system_prompt"], "PRIVATE-SYSTEM")
+
+    async def test_resolved_model_rejects_unknown_and_is_mutually_exclusive(self):
+        invalid_calls = (
+            {"resolved_model": "invented-model"},
+            {"resolved_model": 123},
+            {
+                "resolved_model": "gpt-5.5",
+                "model_override": "claude-opus-4-8",
+            },
+        )
+        for kwargs in invalid_calls:
+            with self.subTest(kwargs=kwargs), patch.object(
+                providers,
+                "text_model_for",
+                side_effect=AssertionError("已解析快照不应重读配置"),
+            ), patch.object(
+                providers,
+                "yunwu_conf",
+                side_effect=AssertionError("非法快照不应触及凭据"),
+            ):
+                with self.assertRaisesRegex(
+                    providers.ProviderError, "(?:已解析模型|不能同时)"
+                ):
+                    await providers.call_text(1, "分析已核验摘要", **kwargs)
+
+    async def test_resolved_local_snapshot_uses_cloud_agent_without_rereading_config(self):
+        agent_result = {"text": "安全交付", "cost_usd": 0.1, "tokens": 3}
+        with patch.object(
+            providers,
+            "text_model_for",
+            side_effect=AssertionError("已解析快照不应重读配置"),
+        ), patch.object(
+            providers, "yunwu_conf", return_value=("https://proxy.example", "key")
+        ), patch(
+            "app.llm.call", AsyncMock(return_value=agent_result)
+        ) as cloud_agent:
+            got = await providers.call_text(
+                1,
+                "分析已核验摘要",
+                resolved_model=providers.CLAUDE_LOCAL,
+                timeout=55,
+            )
+
+        self.assertEqual(got["text"], "安全交付")
+        cloud_agent.assert_awaited_once()
+        self.assertEqual(cloud_agent.await_args.kwargs["model"], providers.AGENT_MODEL)
+        self.assertFalse(cloud_agent.await_args.kwargs["web"])
+        self.assertEqual(
+            cloud_agent.await_args.kwargs["provider_env"]["ANTHROPIC_AUTH_TOKEN"],
+            "key",
+        )
+
+    async def test_default_text_call_still_resolves_config_exactly_once(self):
+        route = unittest.mock.Mock(return_value="gpt-5.5")
+        final = {"text": "安全交付", "cost_usd": 0.1, "tokens": 3}
+        with patch.object(
+            providers, "text_model_for", new=route
+        ), patch.object(
+            providers, "yunwu_conf", return_value=("https://proxy.example", "key")
+        ), patch.object(
+            providers, "chat", AsyncMock(return_value=final)
+        ):
+            got = await providers.call_text(1, "普通员工任务")
+
+        route.assert_called_once_with(
+            1,
+            web_required=False,
+            identity_ref=None,
+            config_revision=None,
+            config_sha256=None,
+            bundle_sha256=None,
+        )
+        self.assertEqual(got["text"], "安全交付")
+
+    def test_vision_catalog_is_explicit_and_text_only_models_are_excluded(self):
+        by_id = {item["id"]: item for item in providers.TEXT_MODELS}
+        self.assertFalse(by_id["deepseek-v4-flash"]["supports_vision"])
+        self.assertTrue(by_id["gpt-5.5"]["supports_vision"])
+        self.assertTrue(by_id["claude-opus-4-8"]["supports_vision"])
+        self.assertEqual("gpt-5.5", providers.DEFAULT_VISION)
+        with patch.object(
+            providers.db,
+            "one",
+            return_value={"model_text": "deepseek-v4-flash"},
+        ):
+            self.assertEqual(
+                providers.DEFAULT_VISION,
+                providers.vision_model_for(10),
+            )
+
+    async def test_vision_resolves_independent_employee_vision_model(self):
+        identity_ref = "a" * 64
+        config_sha256 = "b" * 64
+        bundle_sha256 = "c" * 64
+        with patch.object(
+            providers.db, "arun", new=_inline_db_run,
+        ), patch.object(
+            providers, "vision_model_for", return_value="gpt-5.5"
         ) as route, patch.object(
             providers,
             "_chat_content",
@@ -115,11 +287,116 @@ class ProviderGatewayBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 [("image/png", "YWJj")],
                 timeout=12,
                 token="vision:test",
+                identity_ref=identity_ref,
+                config_revision=7,
+                config_sha256=config_sha256,
+                bundle_sha256=bundle_sha256,
             )
 
-        route.assert_called_once_with(5)
+        route.assert_called_once_with(
+            5,
+            identity_ref=identity_ref,
+            config_revision=7,
+            config_sha256=config_sha256,
+            bundle_sha256=bundle_sha256,
+        )
         self.assertEqual(request.await_args.kwargs["model"], "gpt-5.5")
         self.assertEqual(got["text"], "识别结果")
+        self.assertEqual(got["model"], "gpt-5.5")
+
+    async def test_vision_rejects_partial_frozen_binding_before_route(self):
+        with patch.object(
+            providers,
+            "vision_model_for",
+            side_effect=AssertionError("不得解析不完整绑定"),
+        ), patch.object(
+            providers,
+            "_chat_content",
+            side_effect=AssertionError("不得发起视觉请求"),
+        ):
+            with self.assertRaisesRegex(providers.ProviderError, "四元"):
+                await providers.call_vision(
+                    5,
+                    "识别图片",
+                    [("image/png", "YWJj")],
+                    identity_ref="a" * 64,
+                )
+
+    async def test_vision_valid_override_still_verifies_frozen_binding(self):
+        binding = {
+            "identity_ref": "a" * 64,
+            "config_revision": 7,
+            "config_sha256": "b" * 64,
+            "bundle_sha256": "c" * 64,
+        }
+        route = unittest.mock.Mock(return_value="claude-opus-4-8")
+        request = AsyncMock(
+            return_value={"text": "复核结果", "cost_usd": 0.0, "tokens": 3}
+        )
+        with patch.object(
+            providers.db, "arun", new=_inline_db_run,
+        ), patch.object(
+            providers, "vision_model_for", new=route,
+        ), patch.object(providers, "_chat_content", request):
+            result = await providers.call_vision(
+                5,
+                "复核图片",
+                [("image/png", "YWJj")],
+                model_override="gpt-5.5",
+                **binding,
+            )
+        route.assert_called_once_with(5, **binding)
+        self.assertEqual("gpt-5.5", request.await_args.kwargs["model"])
+        self.assertEqual("gpt-5.5", result["model"])
+
+    async def test_vision_override_rejects_text_only_before_route_or_network(self):
+        with patch.object(
+            providers,
+            "vision_model_for",
+            side_effect=AssertionError("严格 override 不应重读配置"),
+        ), patch.object(
+            providers,
+            "_chat_content",
+            side_effect=AssertionError("文本模型不应收到图片"),
+        ):
+            with self.assertRaisesRegex(providers.ProviderError, "视觉模型临时路由不可用"):
+                await providers.call_vision(
+                    10,
+                    "识别图片",
+                    [("image/png", "YWJj")],
+                    model_override="deepseek-v4-flash",
+                )
+
+    async def test_vision_interleaves_each_photo_label_with_its_image(self):
+        request = AsyncMock(
+            return_value={"text": "{}", "cost_usd": 0.0, "tokens": 1}
+        )
+        with patch.object(
+            providers.db, "arun", new=_inline_db_run,
+        ), patch.object(
+            providers, "vision_model_for", return_value="gpt-5.5",
+        ), patch.object(providers, "_chat_content", request):
+            await providers.call_vision(
+                10,
+                "逐图检查",
+                [
+                    ({"photo_id": 91, "display_no": 2}, "image/png", "YWJj"),
+                    ({"photo_id": 77, "display_no": 1}, "image/jpeg", "ZGVm"),
+                ],
+                model_override="gpt-5.5",
+            )
+
+        content = request.await_args.kwargs["content"]
+        self.assertEqual(
+            ["text", "text", "image_url", "text", "image_url"],
+            [item["type"] for item in content],
+        )
+        self.assertIn("photo_id=91", content[1]["text"])
+        self.assertIn("display_no=2", content[1]["text"])
+        self.assertTrue(content[2]["image_url"]["url"].endswith("YWJj"))
+        self.assertIn("photo_id=77", content[3]["text"])
+        self.assertIn("display_no=1", content[3]["text"])
+        self.assertTrue(content[4]["image_url"]["url"].endswith("ZGVm"))
 
     async def test_web_json_repair_keeps_configured_cloud_tool_model(self):
         research = {
@@ -162,7 +439,13 @@ class ProviderGatewayBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 5, "美化产品图", b"source", size="1024x1024"
             )
 
-        route.assert_called_once_with(5)
+        route.assert_called_once_with(
+            5,
+            identity_ref=None,
+            config_revision=None,
+            config_sha256=None,
+            bundle_sha256=None,
+        )
         self.assertEqual(
             request.await_args.kwargs["model"], "doubao-seedream-5-0-260128"
         )
@@ -180,7 +463,13 @@ class ProviderGatewayBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 6, "生成封面", size="1024x1536"
             )
 
-        route.assert_called_once_with(6)
+        route.assert_called_once_with(
+            6,
+            identity_ref=None,
+            config_revision=None,
+            config_sha256=None,
+            bundle_sha256=None,
+        )
         self.assertEqual(
             request.await_args.kwargs["model"], "doubao-seedream-5-0-260128"
         )
@@ -292,11 +581,22 @@ class BusinessGatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_product_shot_uses_media_employee_image_route(self):
         with patch.object(
+            providers,
+            "call_vision",
+            AsyncMock(return_value={
+                "text": '{"edit_prompt":"商业产品图编辑"}',
+                "cost_usd": 0,
+                "tokens": 1,
+            }),
+            create=True,
+        ) as planner, patch.object(
             providers, "edit_image", AsyncMock(return_value=b"edited"), create=True
         ) as gateway:
             got = await growth.product_shot(1, b"source", "桌面场景")
 
         self.assertEqual(got, b"edited")
+        self.assertEqual(planner.await_args.args[0], 5)
+        self.assertTrue(planner.await_args.kwargs.get("system_prompt"))
         self.assertEqual(gateway.await_args.args[0], 5)
 
     async def test_video_script_uses_writer_employee_text_route(self):

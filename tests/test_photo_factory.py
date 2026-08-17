@@ -26,10 +26,12 @@ class PhotoFactoryTests(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.old_path = db.DB_PATH
+        cls.old_root = main.ROOT
         if db._conn is not None:
             db._conn.close()
         db._conn = None
         db.DB_PATH = os.path.join(cls.tmp.name, "factory.db")
+        main.ROOT = cls.tmp.name
         db.conn()
         db.insert("tenants", {"id": 2, "name": "租户甲", "balance": 100})
         cls.uid = db.insert("users", {
@@ -45,6 +47,7 @@ class PhotoFactoryTests(unittest.TestCase):
             db._conn.close()
         db._conn = None
         db.DB_PATH = cls.old_path
+        main.ROOT = cls.old_root
         cls.tmp.cleanup()
 
     def setUp(self):

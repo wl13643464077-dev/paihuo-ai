@@ -236,6 +236,13 @@ class SpecialistPromptInjectionTests(unittest.TestCase):
         # 老板的任务书仍然只在 user 侧,知识底座不得把业务数据提升为 system。
         self.assertIn("帮我看看这个月的经营", bundle.user)
         self.assertNotIn("帮我看看这个月的经营", bundle.system)
+        # 缓存契约：知识底座按任务方向召回、随任务变化，必须位于全部稳定
+        # 段（身份/手册/交付规则）之后，否则跨任务字节级稳定前缀被拦腰
+        # 截断，供应商自动前缀缓存永远无法命中。
+        self.assertLess(
+            bundle.system.index("【交付规则】"),
+            bundle.system.index("行业知识底座"),
+        )
 
 
 if __name__ == "__main__":

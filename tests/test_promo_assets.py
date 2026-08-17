@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROMO = ROOT / "static" / "promo.html"
+LOGIN = ROOT / "static" / "login.html"
 
 
 def _asset_size(relative_path: str) -> int:
@@ -18,6 +19,17 @@ def _asset_size(relative_path: str) -> int:
 
 
 class PromoAssetContractCase(unittest.TestCase):
+    def test_public_copy_does_not_advertise_retired_roster_counts(self) -> None:
+        public_copy = (
+            PROMO.read_text(encoding="utf-8")
+            + LOGIN.read_text(encoding="utf-8")
+        )
+        self.assertNotIn("431 位", public_copy)
+        self.assertNotIn("420 名", public_copy)
+        self.assertNotIn("其他申请转人工审核并明确反馈", public_copy)
+        self.assertNotIn("其他申请进入人工审核", public_copy)
+        self.assertIn("专属决策员工", public_copy)
+
     def test_promo_hero_images_use_small_webp_with_png_fallbacks(self) -> None:
         page = PROMO.read_text(encoding="utf-8")
 

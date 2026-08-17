@@ -79,7 +79,7 @@ class NoLocalModelFallbackTests(unittest.TestCase):
             "/opt/claude",
             model="claude-opus-4-8",
             web=True,
-            system_prompt="isolated system",
+            system_prompt_file="/private/runtime/system-prompt.txt",
         )
 
         for flag in (
@@ -100,17 +100,155 @@ class NoLocalModelFallbackTests(unittest.TestCase):
         self.assertEqual("5", command[budget_index + 1])
         self.assertNotIn("--max-turns", command)
         self.assertNotIn("Bash,Read,Write", " ".join(command))
+        self.assertIn("--system-prompt-file", command)
+        self.assertEqual(
+            "/private/runtime/system-prompt.txt",
+            command[command.index("--system-prompt-file") + 1],
+        )
+        self.assertNotIn("--system-prompt", command)
 
         no_web = llm._runner_command(
             "/opt/claude",
             model="claude-opus-4-8",
             web=False,
-            system_prompt=None,
+            system_prompt_file=None,
         )
         self.assertEqual("", no_web[no_web.index("--tools") + 1])
         self.assertEqual(
             "2",
             no_web[no_web.index("--max-budget-usd") + 1],
+        )
+
+    def test_web_runner_uses_explicit_allowlist_and_noninteractive_permissions(self):
+        command = llm._runner_command(
+            "/opt/claude",
+            model="claude-opus-4-8",
+            web=True,
+        )
+
+        allowed_index = command.index("--allowedTools")
+        self.assertEqual("WebSearch", command[allowed_index + 1])
+        permission_index = command.index("--permission-mode")
+        self.assertEqual("dontAsk", command[permission_index + 1])
+        self.assertNotIn("bypassPermissions", command)
+
+    def test_tool_usage_aggregates_only_websearch_metadata(self):
+        state = {"chars": 0, "tool_usage": {}}
+        progress = []
+        llm._step_of(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{
+                        "type": "tool_use",
+                        "name": "WebSearch",
+                        "input": {"query": "secret query must not be retained"},
+                    }],
+                },
+            },
+            state,
+            lambda kind, label: progress.append((kind, label)),
+        )
+        llm._step_of(
+            {
+                "type": "user",
+                "message": {
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "tool-1",
+                        "is_error": False,
+                        "content": "sensitive result body must not be retained",
+                    }],
+                },
+            },
+            state,
+            lambda kind, label: progress.append((kind, label)),
+        )
+
+        self.assertEqual(
+            {"WebSearch": {"attempts": 1, "success": 1, "errors": 0}},
+            state["tool_usage"],
+        )
+        self.assertTrue(any(kind == "search" for kind, _ in progress))
+        self.assertTrue(any("有效检索 1" in label for _, label in progress))
+        self.assertNotIn("sensitive result body", repr(state))
+
+    def test_web_runner_fails_closed_without_successful_websearch(self):
+        self.assertTrue(hasattr(llm, "_require_successful_websearch"))
+        with self.assertRaises(llm.LLMError):
+            llm._require_successful_websearch(
+                {"WebSearch": {"attempts": 1, "success": 0, "errors": 1}}
+            )
+
+    def test_tool_usage_accepts_single_block_content_and_deduplicates_results(self):
+        state = {"chars": 0, "tool_usage": {}}
+        progress = lambda *_args: None
+        llm._step_of({
+            "type": "assistant",
+            "message": {"content": {
+                "type": "tool_use", "id": "search-1", "name": "WebSearch",
+                "input": {"query": "private"},
+            }},
+        }, state, progress)
+        result = {
+            "type": "user",
+            "message": {"content": {
+                "type": "tool_result", "tool_use_id": "search-1",
+                "is_error": False, "content": "private result",
+            }},
+        }
+        llm._step_of(result, state, progress)
+        llm._step_of(result, state, progress)
+
+        self.assertEqual(
+            {"attempts": 1, "success": 1, "errors": 0},
+            state["tool_usage"]["WebSearch"],
+        )
+
+    def test_anonymous_or_foreign_tool_results_cannot_count_as_websearch_success(self):
+        state = {"chars": 0, "tool_usage": {}}
+        progress = lambda *_args: None
+        llm._step_of({
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use", "id": "search-1", "name": "WebSearch",
+                "input": {"query": "private"},
+            }]},
+        }, state, progress)
+        for block in (
+            {"type": "tool_result", "is_error": False},
+            {"type": "tool_result", "tool_use_id": "other-1", "is_error": False},
+            {"type": "tool_result", "name": "OtherTool", "is_error": False},
+        ):
+            llm._step_of(
+                {"type": "user", "message": {"content": [block]}},
+                state,
+                progress,
+            )
+
+        self.assertEqual(0, state["tool_usage"]["WebSearch"]["success"])
+
+    def test_string_error_marker_is_not_counted_as_success(self):
+        state = {"chars": 0, "tool_usage": {}}
+        progress = lambda *_args: None
+        llm._step_of({
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use", "id": "search-1", "name": "WebSearch",
+                "input": {"query": "private"},
+            }]},
+        }, state, progress)
+        llm._step_of({
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result", "tool_use_id": "search-1",
+                "is_error": "true", "content": "private error",
+            }]},
+        }, state, progress)
+
+        self.assertEqual(
+            {"attempts": 1, "success": 0, "errors": 1},
+            state["tool_usage"]["WebSearch"],
         )
 
     def test_runner_no_longer_uses_a_persistent_project_workdir(self):

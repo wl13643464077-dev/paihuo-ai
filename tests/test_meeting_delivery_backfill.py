@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from app import auth, db, main, taskrunner
+from app import auth, db, employeeidentity, main, taskrunner
 
 
 FOREIGN_SENTINEL = "FOREIGN_TENANT_DELIVERY_SECRET_7f41e8b186fd"
@@ -17,6 +17,7 @@ class MeetingDeliveryBackfillTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.old_db_path = db.DB_PATH
+        db._shutdown_async_pool(wait=True)
         db._close_all_connections()
         db._conn = None
         db._conn_path = None
@@ -44,6 +45,11 @@ class MeetingDeliveryBackfillTests(unittest.TestCase):
             "tenant_id": 1,
             "question": "完成本周发布",
             "emp_idxs_json": "[0,1]",
+            "member_snapshot_json": json.dumps(
+                employeeidentity.member_snapshots([0, 1], active_only=True),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
             "status": "done",
             "phase": "completed",
             "decision": "GO",
@@ -55,6 +61,7 @@ class MeetingDeliveryBackfillTests(unittest.TestCase):
 
     def tearDown(self):
         auth.set_current(None)
+        db._shutdown_async_pool(wait=True)
         db._close_all_connections()
         db._conn = None
         db._conn_path = None
@@ -87,9 +94,13 @@ class MeetingDeliveryBackfillTests(unittest.TestCase):
                 emp_idx if action_idx is None else action_idx,
                 direction,
             )
+        employee = employeeidentity.active_employee(emp_idx)
+        if not employee:
+            raise AssertionError(f"测试员工 {emp_idx} 不可用")
         return db.insert("task", {
             "tenant_id": tenant_id,
             "emp_idx": emp_idx,
+            **employeeidentity.task_fields(employee),
             "brief_json": json.dumps(
                 {"direction": direction}, ensure_ascii=False
             ),
@@ -318,6 +329,26 @@ class MeetingDeliveryBackfillTests(unittest.TestCase):
         meeting = self._meeting()
         self.assertIn("执行失败，可免费重试", meeting["consensus_md"])
         self.assertNotIn(FOREIGN_SENTINEL, meeting["consensus_md"])
+
+    def test_tampered_person_or_bundle_snapshot_never_enters_handoff(self):
+        for field, forged in (
+            ("person_snapshot", "伪造人名"),
+            ("bundle_sha256", "f" * 64),
+        ):
+            with self.subTest(field=field):
+                sentinel = f"TAMPERED-{field}-DELIVERY"
+                task_id = self._task(
+                    status="done",
+                    direction=f"核验{field}",
+                    summary=sentinel,
+                )
+                db.update("task", task_id, {field: forged})
+                self.assertFalse(
+                    taskrunner.sync_meeting_delivery_for_task(task_id)
+                )
+                self.assertNotIn(
+                    sentinel, self._meeting().get("consensus_md") or ""
+                )
 
 
 if __name__ == "__main__":

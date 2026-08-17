@@ -119,7 +119,9 @@ class AsyncFacadeSemanticsTests(_DbCase):
                 "SELECT name FROM tenants WHERE id=?", (tenant_id,)
             )
             self.assertEqual("新代", row["name"])
-            self.assertEqual(os.path.abspath(new_path), db._conn_path)
+            self.assertEqual(
+                os.path.realpath(os.path.abspath(new_path)), db._conn_path,
+            )
 
         asyncio.run(scenario())
 
@@ -151,7 +153,9 @@ class AsyncFacadeSemanticsTests(_DbCase):
                 "SELECT name FROM tenants WHERE id=?", (tenant_id,)
             )
             self.assertEqual("切换期间提交", row["name"])
-            self.assertEqual(os.path.abspath(new_path), db._conn_path)
+            self.assertEqual(
+                os.path.realpath(os.path.abspath(new_path)), db._conn_path,
+            )
 
         try:
             asyncio.run(scenario())
@@ -403,16 +407,17 @@ class EventLoopFreezeTests(_DbCase):
 
     def test_employee_learning_write_lock_does_not_freeze_loop(self):
         """员工进修的读取和最终技能写入必须完整卸载到 DB 线程池。"""
-        from app import employees, providers
+        from app import employeeidentity, employees, providers
 
         release = threading.Event()
         holding = threading.Event()
-        station = {
-            "idx": 9876,
-            "name": "进修并发测试员",
-            "dept": "测试部",
-            "duty": "验证异步数据库边界",
-            "skill": "并发回归",
+        station = employeeidentity.active_employee(1)
+        self.assertIsNotNone(station, "核心员工身份未被初始化")
+        config = employees.get_config(station["idx"])
+        learn_binding = {
+            "identity_ref": config["identity_ref"],
+            "expected_revision": config["config_revision"],
+            "expected_config_sha256": config["config_sha256"],
         }
 
         def hold_write_lock():
@@ -444,7 +449,9 @@ class EventLoopFreezeTests(_DbCase):
         }
 
         async def scenario():
-            worker = asyncio.create_task(employees.learn(station))
+            worker = asyncio.create_task(
+                employees.learn(station, **learn_binding)
+            )
             timer = threading.Timer(0.65, release.set)
             timer.start()
             try:
@@ -482,14 +489,15 @@ class EventLoopFreezeTests(_DbCase):
 
     def test_employee_learning_releases_claim_when_initial_read_fails(self):
         """首次异步读取失败/取消也不能让员工永久卡在“进修中”状态。"""
-        from app import employees
+        from app import employeeidentity, employees
 
-        station = {
-            "idx": 9877,
-            "name": "进修清理测试员",
-            "dept": "测试部",
-            "duty": "验证失败清理",
-            "skill": "故障恢复",
+        station = employeeidentity.active_employee(1)
+        self.assertIsNotNone(station, "核心员工身份未被初始化")
+        config = employees.get_config(station["idx"])
+        learn_binding = {
+            "identity_ref": config["identity_ref"],
+            "expected_revision": config["config_revision"],
+            "expected_config_sha256": config["config_sha256"],
         }
 
         async def scenario():
@@ -501,7 +509,7 @@ class EventLoopFreezeTests(_DbCase):
                 ),
             ):
                 with self.assertRaises(sqlite3.OperationalError):
-                    await employees.learn(station)
+                    await employees.learn(station, **learn_binding)
 
         try:
             asyncio.run(scenario())
@@ -712,7 +720,7 @@ class ReviewedAsyncCallGraphTests(unittest.TestCase):
             "_need_module", "employees.is_enabled",
             "_create_charged_expert_task", "funnel.record_first_work",
         },
-        ("main.py", "task_redo"): {
+        ("main.py", "_create_task_followup"): {
             "_task_row_or_404", "_create_charged_expert_task",
         },
         ("main.py", "avatar_job_create"): {
@@ -778,7 +786,7 @@ class ReviewedAsyncCallGraphTests(unittest.TestCase):
         ("expertmatch.py", "preflight_fit"): {"_dept_peers"},
         ("providers.py", "chat"): {"yunwu_conf"},
         ("providers.py", "_chat_content"): {"yunwu_conf"},
-        ("providers.py", "call_vision"): {"text_model_for"},
+        ("providers.py", "call_vision"): {"vision_model_for"},
         ("providers.py", "image"): {"yunwu_conf"},
         ("providers.py", "call_image"): {"image_model_for"},
         ("providers.py", "_image_edit"): {"yunwu_conf"},

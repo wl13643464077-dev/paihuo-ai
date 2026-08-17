@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 
-from . import db, departments
+from . import db, departments, employeeidentity, employees, inspection
 from .skills import registry
 
 
@@ -190,17 +190,13 @@ def _item(kind: str, row: dict, *, title: str, assignee: str, source_label: str,
     return item
 
 
-def _employee(idx: int) -> tuple[dict, str]:
-    expert = departments.get(idx)
-    if expert:
-        return expert, expert.get("dept_key") or ""
-    station = registry.BY_IDX.get(idx) or {}
-    return station, "content"
-
-
 def _json_array(values) -> str:
     """把内部 ID/枚举集合压成单个 SQLite JSON 参数，避开变量数量上限。"""
-    return json.dumps(sorted(values), ensure_ascii=False, separators=(",", ":"))
+    rows = list(values)
+    rows.sort(key=lambda value: json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ))
+    return json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
 
 
 def _status_group_sql(column: str) -> str:
@@ -232,54 +228,122 @@ def _safe_meeting_members_sql(alias: str) -> str:
     )
 
 
-def _meeting_visibility_sql(alias: str) -> str:
-    """会议必须有成员，且每位成员都是当前账号可识别、可见的数字员工。
+def _safe_meeting_snapshots_sql(alias: str) -> str:
+    """Only expose a persisted meeting roster when it is a valid JSON array."""
+    value = f"{alias}.member_snapshot_json"
+    return (
+        "CASE WHEN json_valid(" + value + ") THEN "
+        "CASE WHEN json_type(" + value + ")='array' "
+        "THEN " + value + " ELSE '[]' END "
+        "ELSE '[]' END"
+    )
 
-    参数是一个 JSON 整数数组。未知成员、字符串 ID、损坏 JSON 和空数组都
-    fail closed，避免仅凭默认板块猜测权限。
+
+def _task_identity_visibility_sql(alias: str) -> str:
+    """Match a task against one exact catalog snapshot JSON parameter."""
+    allowed = "allowed.value"
+    exact = (
+        f"{alias}.employee_key=json_extract({allowed},'$.key') AND "
+        f"{alias}.employee_catalog_version="
+        f"json_extract({allowed},'$.catalog_version') AND "
+        f"{alias}.employee_name_snapshot=json_extract({allowed},'$.name') AND "
+        f"{alias}.employee_dept_key=json_extract({allowed},'$.dept_key') AND "
+        f"{alias}.employee_spec_sha256="
+        f"json_extract({allowed},'$.spec_sha256')"
+    )
+    core_legacy = (
+        f"COALESCE(json_extract({allowed},'$.core_legacy'),0)=1 AND "
+        f"{alias}.employee_key='legacy.idx.'||CAST({alias}.emp_idx AS TEXT) AND "
+        f"{alias}.employee_catalog_version='legacy-unknown' AND "
+        f"{alias}.employee_dept_key='content' AND "
+        f"{alias}.employee_name_snapshot IN (json_extract({allowed},'$.name'),"
+        f"'历史员工#'||CAST({alias}.emp_idx AS TEXT)) AND "
+        f"({alias}.employee_spec_sha256='legacy-unknown' OR ("
+        f"LENGTH({alias}.employee_spec_sha256)=64 AND "
+        f"{alias}.employee_spec_sha256 NOT GLOB '*[^0-9a-f]*'))"
+    )
+    return (
+        "EXISTS (SELECT 1 FROM json_each(?) allowed WHERE "
+        f"CAST(json_extract({allowed},'$.idx') AS INTEGER)={alias}.emp_idx "
+        f"AND (({exact}) OR ({core_legacy})))"
+    )
+
+
+def _meeting_visibility_sql(alias: str) -> str:
+    """Authorize meetings exclusively from their persisted roster snapshot.
+
+    The parameter is a JSON array of exact active and retained V1 identities.
+    Missing, malformed or unknown snapshots fail closed.  The only wildcard is
+    the deliberately narrow pre-schema53 built-in content compatibility shape.
     """
     members = _safe_meeting_members_sql(alias)
+    snapshots = _safe_meeting_snapshots_sql(alias)
+    allowed = "allowed.value"
+    frozen_value = "frozen.value"
+    exact = (
+        f"json_extract({frozen_value},'$.key')="
+        f"json_extract({allowed},'$.key') AND "
+        f"json_extract({frozen_value},'$.name')="
+        f"json_extract({allowed},'$.name') AND "
+        f"json_extract({frozen_value},'$.dept_key')="
+        f"json_extract({allowed},'$.dept_key') AND "
+        f"json_extract({frozen_value},'$.catalog_version')="
+        f"json_extract({allowed},'$.catalog_version') AND "
+        f"json_extract({frozen_value},'$.spec_sha256')="
+        f"json_extract({allowed},'$.spec_sha256')"
+    )
+    core_legacy = (
+        f"COALESCE(json_extract({allowed},'$.core_legacy'),0)=1 AND "
+        f"json_extract({frozen_value},'$.key')='legacy.idx.'||"
+        f"CAST(json_extract({frozen_value},'$.idx') AS TEXT) AND "
+        f"json_extract({frozen_value},'$.catalog_version')='legacy-unknown' AND "
+        f"json_extract({frozen_value},'$.dept_key')='content' AND "
+        f"json_extract({frozen_value},'$.name') IN ("
+        f"json_extract({allowed},'$.name'),'历史员工#'||"
+        f"CAST(json_extract({frozen_value},'$.idx') AS TEXT)) AND "
+        f"(json_extract({frozen_value},'$.spec_sha256')='legacy-unknown' OR ("
+        f"LENGTH(json_extract({frozen_value},'$.spec_sha256'))=64 AND "
+        f"json_extract({frozen_value},'$.spec_sha256') "
+        f"NOT GLOB '*[^0-9a-f]*'))"
+    )
     return (
-        f"EXISTS (SELECT 1 FROM json_each({members}) member) "
+        f"EXISTS (SELECT 1 FROM json_each({snapshots}) frozen) "
+        f"AND json_array_length({members})=json_array_length({snapshots}) "
+        f"AND json_array_length({members})=("
+        f"SELECT COUNT(DISTINCT CAST(value AS INTEGER)) FROM json_each({members})"
+        f") "
+        f"AND NOT EXISTS (SELECT 1 FROM json_each({members}) member "
+        "WHERE member.type!='integer') "
         f"AND NOT EXISTS ("
-        f"SELECT 1 FROM json_each({members}) member "
-        "WHERE member.type!='integer' OR CAST(member.value AS INTEGER) "
-        "NOT IN (SELECT CAST(value AS INTEGER) FROM json_each(?))"
+        f"SELECT 1 FROM json_each({snapshots}) frozen "
+        "WHERE frozen.type!='object' "
+        "OR json_type(frozen.value,'$.idx')!='integer' "
+        f"OR CAST(json_extract(frozen.value,'$.idx') AS INTEGER)!="
+        f"CAST(json_extract({members},'$['||frozen.key||']') AS INTEGER) "
+        "OR json_type(frozen.value,'$.key')!='text' "
+        "OR json_type(frozen.value,'$.name')!='text' "
+        "OR json_type(frozen.value,'$.catalog_version')!='text' "
+        "OR json_type(frozen.value,'$.spec_sha256')!='text' "
+        "OR json_type(frozen.value,'$.dept_key')!='text' "
+        "OR COALESCE(json_extract(frozen.value,'$.key'),'')='' "
+        "OR json_extract(frozen.value,'$.key')!=TRIM(json_extract(frozen.value,'$.key')) "
+        "OR COALESCE(json_extract(frozen.value,'$.name'),'')='' "
+        "OR json_extract(frozen.value,'$.name')!=TRIM(json_extract(frozen.value,'$.name')) "
+        "OR COALESCE(json_extract(frozen.value,'$.catalog_version'),'')='' "
+        "OR json_extract(frozen.value,'$.catalog_version')!="
+        "TRIM(json_extract(frozen.value,'$.catalog_version')) "
+        "OR COALESCE(json_extract(frozen.value,'$.spec_sha256'),'')='' "
+        "OR json_extract(frozen.value,'$.spec_sha256')!="
+        "TRIM(json_extract(frozen.value,'$.spec_sha256')) "
+        "OR COALESCE(json_extract(frozen.value,'$.dept_key'),'')='' "
+        "OR json_extract(frozen.value,'$.dept_key')!="
+        "TRIM(json_extract(frozen.value,'$.dept_key')) "
+        "OR NOT EXISTS (SELECT 1 FROM json_each(?) allowed WHERE "
+        f"CAST(json_extract({allowed},'$.idx') AS INTEGER)="
+        f"CAST(json_extract({frozen_value},'$.idx') AS INTEGER) "
+        f"AND (({exact}) OR ({core_legacy})))"
         ")"
     )
-
-
-def _employee_scope(tenant_id: int, allowed_modules: set[str]
-                    ) -> tuple[set[int], set[int]]:
-    """只读取去重后的员工编号，计算任务与会议的板块可见范围。
-
-    任务保留历史兼容语义：未知编号仍归内容板块并显示为“员工 N”。会议更
-    保守，只有能解析出姓名的真实员工才能成为可见成员。
-    """
-    rows = db.q(
-        "SELECT DISTINCT emp_idx FROM task "
-        "WHERE tenant_id=? AND deleted_at IS NULL "
-        "UNION "
-        "SELECT DISTINCT CAST(member.value AS INTEGER) AS emp_idx "
-        "FROM meeting m "
-        f"JOIN json_each({_safe_meeting_members_sql('m')}) member "
-        "WHERE m.tenant_id=? AND member.type='integer'",
-        (tenant_id, tenant_id),
-    )
-    task_idxs: set[int] = set()
-    meeting_idxs: set[int] = set()
-    for row in rows:
-        try:
-            idx = int(row["emp_idx"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        employee, module = _employee(idx)
-        if module not in allowed_modules:
-            continue
-        task_idxs.add(idx)
-        if employee.get("name"):
-            meeting_idxs.add(idx)
-    return task_idxs, meeting_idxs
 
 
 def _like_value(value: str, max_length: int = 100) -> str:
@@ -319,8 +383,6 @@ def _safe_json_search_sql(
 
 
 def _visible_header_query(tenant_id: int, allowed_modules: set[str],
-                          task_idxs: set[int],
-                          meeting_idxs: set[int],
                           q: str = "") -> tuple[str, list]:
     """构造只含排序/计数列的跨业务表 UNION，不触碰正文和结果 JSON。
 
@@ -347,12 +409,44 @@ def _visible_header_query(tenant_id: int, allowed_modules: set[str],
         )
         args.extend(vals)
 
-    if task_idxs:
+    frozen_modules = {
+        str(value).strip() for value in allowed_modules
+        if str(value).strip() not in {"unknown", "__denied__"}
+    }
+    frozen_identities = employeeidentity.visible_catalog_snapshots(frozen_modules)
+    if frozen_identities:
         add(
             "expert", "task", "status",
-            "tenant_id=? AND deleted_at IS NULL AND emp_idx IN "
-            "(SELECT CAST(value AS INTEGER) FROM json_each(?))",
-            (tenant_id, _json_array(task_idxs)),
+            "tenant_id=? AND deleted_at IS NULL AND "
+            "(thread_id IS NULL OR id=(SELECT tt.current_task_id "
+            "FROM task_thread tt WHERE tt.id=task.thread_id "
+            "AND tt.tenant_id=task.tenant_id)) AND emp_idx<>? AND "
+            + _task_identity_visibility_sql("task"),
+            (
+                tenant_id, inspection.EMPLOYEE_IDX,
+                _json_array(frozen_identities),
+            ),
+            search_expr=_safe_json_search_sql(
+                "brief_json", "$.direction"
+            ),
+        )
+
+    inspection_modules = {
+        str(value).strip() for value in allowed_modules
+        if str(value).strip() not in {"", "unknown", "__denied__"}
+    }
+    if inspection_modules:
+        add(
+            "expert", "task", "status",
+            "tenant_id=? AND deleted_at IS NULL AND emp_idx=? AND EXISTS("
+            "SELECT 1 FROM inspection_visit iv WHERE iv.task_id=task.id "
+            "AND iv.tenant_id=task.tenant_id AND iv.deleted_at IS NULL "
+            "AND iv.industry_key IN (SELECT value FROM json_each(?)))",
+            (
+                tenant_id,
+                inspection.EMPLOYEE_IDX,
+                _json_array(inspection_modules),
+            ),
             search_expr=_safe_json_search_sql(
                 "brief_json", "$.direction"
             ),
@@ -386,12 +480,12 @@ def _visible_header_query(tenant_id: int, allowed_modules: set[str],
             "tenant_id=?", (tenant_id,),
             search_expr="COALESCE(title,'')")
 
-    if meeting_idxs:
+    if frozen_identities:
         add(
             "meeting", "meeting",
             "COALESCE(NULLIF(phase,''),status,'queued')",
             "tenant_id=? AND " + _meeting_visibility_sql("meeting"),
-            (tenant_id, _json_array(meeting_idxs)),
+            (tenant_id, _json_array(frozen_identities)),
             search_expr="COALESCE(question,'')",
         )
 
@@ -457,11 +551,8 @@ def list_items(
               "failed": 0, "cancelled": 0}
     kind_counts: dict[str, int] = {}
 
-    task_idxs, meeting_idxs = _employee_scope(
-        tenant_id, allowed_modules
-    )
     headers_sql, header_args = _visible_header_query(
-        tenant_id, allowed_modules, task_idxs, meeting_idxs, q=q
+        tenant_id, allowed_modules, q=q
     )
     if not headers_sql:
         counts["open"] = 0
@@ -528,7 +619,12 @@ def list_items(
     details: dict[str, dict[int, dict]] = {}
     details["expert"] = _rows_for_ids(
         "id,emp_idx,brief_json,status,source_meeting_id,source_task_id,"
-        "billing_status,retry_count,created_by,created_at,updated_at",
+        "thread_id,revision_no,phase,billing_status,retry_count,created_by,"
+        "employee_key,employee_catalog_version,employee_name_snapshot,"
+        "employee_dept_key,employee_spec_sha256,"
+        "employee_identity_ref,employee_config_revision,"
+        "employee_config_sha256,person_snapshot,identity_scheme,bundle_sha256,"
+        "created_at,updated_at",
         "task", tenant_id, ids_by_kind.get("expert", []),
         extra_where="deleted_at IS NULL",
     )
@@ -540,6 +636,7 @@ def list_items(
     )
     details["meeting"] = _rows_for_ids(
         "id,question,phase,status,billing_status,retry_count,emp_idxs_json,"
+        "member_snapshot_json,"
         "execution_task_ids_json,created_by,created_at,updated_at",
         "meeting", tenant_id, ids_by_kind.get("meeting", []),
     )
@@ -582,12 +679,47 @@ def list_items(
 
     # 页内来源/重试所需的辅助状态，也全部限制在本页关联 ID。
     expert_rows = list(details["expert"].values())
+    expert_configs = employees.get_configs({
+        int(row.get("emp_idx") or -1) for row in expert_rows
+    })
+    inspection_task_ids = {
+        int(row["id"]) for row in expert_rows
+        if int(row.get("emp_idx") or -1) == inspection.EMPLOYEE_IDX
+    }
+    inspection_visits_by_task: dict[int, dict] = {}
+    if inspection_task_ids:
+        permitted_inspection_modules = {
+            str(value).strip() for value in allowed_modules
+            if str(value).strip() not in {"", "unknown", "__denied__"}
+        }
+        inspection_visits_by_task = {
+            int(row["task_id"]): {
+                "id": int(row["id"]),
+                "industry_key": str(row["industry_key"]),
+            }
+            for row in db.q(
+                "SELECT id,task_id,industry_key FROM inspection_visit WHERE tenant_id=? "
+                "AND deleted_at IS NULL AND industry_key IN "
+                "(SELECT value FROM json_each(?)) AND task_id IN "
+                "(SELECT CAST(value AS INTEGER) FROM json_each(?))",
+                (
+                    tenant_id,
+                    _json_array(permitted_inspection_modules),
+                    _json_array(inspection_task_ids),
+                ),
+            )
+        }
     source_meeting_ids = {
         int(row["source_meeting_id"]) for row in expert_rows
         if row.get("source_meeting_id")
     }
     visible_source_meetings: dict[int, dict] = {}
-    if source_meeting_ids and meeting_idxs:
+    frozen_modules = {
+        str(value).strip() for value in allowed_modules
+        if str(value).strip() not in {"unknown", "__denied__"}
+    }
+    frozen_identities = employeeidentity.visible_catalog_snapshots(frozen_modules)
+    if source_meeting_ids and frozen_identities:
         rows = db.q(
             "SELECT id,question FROM meeting WHERE tenant_id=? "
             "AND id IN (SELECT CAST(value AS INTEGER) FROM json_each(?)) "
@@ -595,7 +727,7 @@ def list_items(
             (
                 tenant_id,
                 _json_array(source_meeting_ids),
-                _json_array(meeting_idxs),
+                _json_array(frozen_identities),
             ),
         )
         visible_source_meetings = {int(row["id"]): row for row in rows}
@@ -605,17 +737,16 @@ def list_items(
         if row.get("source_task_id")
     }
     visible_parent_task_ids: set[int] = set()
-    if parent_task_ids and task_idxs:
+    if parent_task_ids and frozen_identities:
         visible_parent_task_ids = {
             int(row["id"]) for row in db.q(
                 "SELECT id FROM task WHERE tenant_id=? AND deleted_at IS NULL "
                 "AND id IN (SELECT CAST(value AS INTEGER) FROM json_each(?)) "
-                "AND emp_idx IN "
-                "(SELECT CAST(value AS INTEGER) FROM json_each(?))",
+                "AND " + _task_identity_visibility_sql("task"),
                 (
                     tenant_id,
                     _json_array(parent_task_ids),
-                    _json_array(task_idxs),
+                    _json_array(frozen_identities),
                 ),
             )
         }
@@ -718,11 +849,28 @@ def list_items(
 
     built: dict[tuple[str, int], dict] = {}
     for row in expert_rows:
-        employee, module = _employee(row["emp_idx"])
+        module = str(row.get("employee_dept_key") or "")
         brief = parsed.get(("expert", row["id"])) or {}
         mid = row.get("source_meeting_id")
         parent = row.get("source_task_id")
-        if mid:
+        revision_no = max(1, int(row.get("revision_no") or 1))
+        inspection_visit = inspection_visits_by_task.get(int(row["id"]))
+        inspection_visit_id = (
+            int(inspection_visit["id"]) if inspection_visit else None
+        )
+        if inspection_visit:
+            source_label = "巡店工作台 · 到店检查"
+            source_route = (
+                f"#/inspections/0/{inspection_visit['industry_key']}"
+            )
+            source_detail = "照片问题、整改计划与人工复核闭环"
+        elif row.get("thread_id"):
+            source_label = f"持续协作 · 第{revision_no}轮"
+            source_route = ""
+            source_detail = (
+                "这是当前最新版本；历史版本可在任务详情中查看"
+            )
+        elif mid:
             source = visible_source_meetings.get(int(mid))
             source_label = f"AI会议 #{mid}" if source else "原会议已删除"
             source_route = f"#/meetings/{mid}" if source else ""
@@ -739,13 +887,35 @@ def list_items(
             source_label = "员工面板·直接派活"
             source_route = ""
             source_detail = ""
-        built[("expert", row["id"])] = _item(
+        item = _item(
             "expert", row, title=brief.get("direction"),
-            assignee=employee.get("name") or f"员工 {row['emp_idx']}",
+            assignee=(
+                f"{str(row.get('person_snapshot') or '').strip()}·"
+                f"{str(row.get('employee_name_snapshot') or '').strip()}"
+            ).strip("·") or "历史岗位版本",
             source_label=source_label, source_detail=source_detail,
-            source_route=source_route, target_route=f"#/tasks/{row['id']}",
+            source_route=source_route,
+            target_route=(
+                f"#/inspections/{inspection_visit_id}/"
+                f"{inspection_visit['industry_key']}"
+                if inspection_visit else f"#/tasks/{row['id']}"
+            ),
             module=module,
+            subkind="inspection" if inspection_visit_id else "",
         )
+        item["thread_id"] = row.get("thread_id")
+        item["revision_no"] = revision_no
+        roster = employeeidentity.roster_metadata_from_task(row) or {
+            "roster_status": "legacy", "can_assign": False,
+        }
+        enabled = bool(
+            expert_configs.get(
+                int(row.get("emp_idx") or -1), {"enabled": True}
+            ).get("enabled", True)
+        )
+        item["roster_status"] = roster["roster_status"]
+        item["can_assign"] = bool(roster["can_assign"] and enabled)
+        built[("expert", row["id"])] = item
 
     for row in content_rows:
         brief = parsed.get(("content", row["id"])) or {}
@@ -780,11 +950,12 @@ def list_items(
         )
 
     for row in details["meeting"].values():
-        names = []
-        for idx in parsed.get(("meeting", row["id"])) or []:
-            employee, _module = _employee(idx)
-            if employee.get("name"):
-                names.append(employee["name"])
+        snapshots = db.jloads(row.get("member_snapshot_json"), [])
+        names = [
+            str(item.get("name") or "").strip()
+            for item in snapshots if isinstance(item, dict)
+            and str(item.get("name") or "").strip()
+        ] if isinstance(snapshots, list) else []
         meeting_retry = retry_meta("meeting", row)
         execution_ids = db.jloads(
             row.get("execution_task_ids_json"), []

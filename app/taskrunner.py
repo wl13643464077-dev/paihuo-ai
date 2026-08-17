@@ -9,7 +9,7 @@ import logging
 import re
 import time
 
-from . import billing, db, departments, employees, llm, providers
+from . import billing, db, departments, employeeidentity, employees, llm, providers
 
 log = logging.getLogger("taskrunner")
 
@@ -17,6 +17,115 @@ RUNNING: set = set()   # task_id 正在执行
 MAX_FREE_RETRIES = 3
 _MEETING_DELIVERY_START = "<!-- execution-deliveries:start -->"
 _MEETING_DELIVERY_END = "<!-- execution-deliveries:end -->"
+
+
+def _approved_effective_role_context(binding: dict) -> dict:
+    """Return the exact approved execution view from a frozen role bundle.
+
+    The config row is the immutable revision anchor, while ``effective`` is the
+    approved execution payload for that revision.  Learning proposals and
+    current-slot state are deliberately absent from this path: a historical
+    task must keep replaying the bundle hash persisted on the task itself.
+    """
+    if not isinstance(binding, dict):
+        raise ValueError("员工岗位绑定缺失")
+    role_bundle = binding.get("role_bundle")
+    config = binding.get("config")
+    employee = binding.get("employee")
+    if (
+        not isinstance(role_bundle, dict)
+        or not isinstance(config, dict)
+        or not isinstance(employee, dict)
+        or str(role_bundle.get("status") or "") not in {"active", "historical"}
+        or not db.employee_role_bundle_row_valid(role_bundle)
+    ):
+        raise ValueError("员工岗位 role bundle 未批准或完整性校验失败")
+    effective = role_bundle.get("effective")
+    if not isinstance(effective, dict):
+        raise ValueError("员工岗位 role bundle 有效档案缺失")
+    effective_profile = effective.get("professional_profile")
+    if not isinstance(effective_profile, dict):
+        raise ValueError("员工岗位 role bundle 专业档案无效")
+    workflow = effective.get("workflow", [])
+    if not isinstance(workflow, (str, list, dict)):
+        raise ValueError("员工岗位 role bundle 工作流程无效")
+    capabilities = effective.get(
+        "capabilities", effective_profile.get("capabilities", [])
+    )
+    if not isinstance(capabilities, (list, dict)):
+        raise ValueError("员工岗位 role bundle 专业能力无效")
+    effective_config = db.normalize_employee_config(effective.get("config"))
+    skills = effective.get("skills", effective_config.get("skills", []))
+    if not isinstance(skills, list):
+        raise ValueError("员工岗位 role bundle 技能无效")
+    effective_config = {**config, **effective_config, "skills": skills}
+    contract = effective.get("decision_contract") or {}
+    # 泄露检测的指纹源保持与旧实现同构的紧凑 JSON：可读渲染逐行是自然
+    # 中文，会把「员工在交付里正常运用岗位口径」误判为 32 字逐行泄露；
+    # JSON 形态只在 64 字滑窗粒度拦截大段复制，保护粒度与优化前一致。
+    approved_sensitive = json.dumps(
+        {
+            "professional_profile": effective_profile,
+            "workflow": workflow,
+            "capabilities": capabilities,
+            "skills": skills,
+            "decision_contract": contract,
+            "outputs": effective.get("outputs") or [],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )[:24000]
+    # build_task_prompt 用同一批准配置全文渲染手册、工作流步骤、技能库与
+    # （目录版本一致时的）决策合同；这里只补档案与指纹，不再重复原始 JSON。
+    approved_context = employees.approved_role_context_text(
+        fingerprint=(
+            f"config_revision={role_bundle.get('config_revision')} "
+            f"config_sha256={str(role_bundle.get('config_sha256') or '')[:16]} "
+            f"bundle_sha256={str(role_bundle.get('bundle_sha256') or '')[:16]}"
+        ),
+        profile=effective_profile,
+        workflow=workflow,
+        capabilities=capabilities,
+        skills=skills,
+        outputs=effective.get("outputs") or [],
+        decision_contract=contract,
+        profile_rendered=False,
+        workflow_rendered=False,
+        skills_rendered=True,
+        contract_rendered=bool(
+            contract and contract == (employee.get("decision_contract") or {})
+        ),
+    )
+    return {
+        "employee": {**employee, "professional_profile": effective_profile},
+        "config": effective_config,
+        "role_bundle": role_bundle,
+        "effective_profile": effective_profile,
+        "workflow": workflow,
+        "capabilities": capabilities,
+        "skills": skills,
+        "approved_context": approved_context,
+        "approved_sensitive": approved_sensitive,
+    }
+
+
+def _with_approved_role_context(
+    prompt: providers.PromptBundle, context: dict,
+) -> providers.PromptBundle:
+    approved = context["approved_context"]
+    leak_source = context.get("approved_sensitive") or approved
+    return providers.PromptBundle(
+        system=(
+            prompt.system
+            + "\n\n【已批准的冻结岗位能力包】\n"
+            + approved
+            + "\n必须实际使用该版本的岗位档案、技能、能力与工作流程完成任务。"
+        ),
+        user=prompt.user,
+        research=prompt.research,
+        sensitive=tuple(prompt.sensitive) + (leak_source,),
+    )
 
 
 def normalize_brief(raw) -> dict:
@@ -37,14 +146,26 @@ def normalize_brief(raw) -> dict:
             raise ValueError(f"{field} 最多 {limit} 个字符")
         return value
 
+    forbidden_server_fields = {
+        "decision_evidence", "provenance", "web_sources", "supplemental_provenance",
+    }
+    injected = sorted(forbidden_server_fields & set(raw))
+    if injected:
+        raise ValueError("任务书包含不可由客户端写入的证据字段")
+
     result = {
         "direction": text("direction", 2000, required=True),
     }
     for field, limit in (
         ("industry", 120),
         ("material", 12000),
+        # 持续协作的本轮新材料单独保留，防止被首轮长材料
+        # 挤出模型实际读取范围。累计 material 仍是完整审计副本。
+        ("revision_material", 12000),
         ("feedback", 2000),
-        ("prev_excerpt", 1500),
+        # 持续协作由服务端从同线程上一版读取；上限足以保留一份正常交付，
+        # 又避免无界历史在每轮指数膨胀。
+        ("prev_excerpt", 12000),
         ("context", 4000),
     ):
         value = text(field, limit)
@@ -58,6 +179,47 @@ def normalize_brief(raw) -> dict:
     if length:
         result["length"] = length
     return result
+
+
+def normalize_task_brief(raw, employee: dict | None, tenant_id: int) -> dict:
+    """Normalize a client task brief, then attach server-owned V2 provenance."""
+    result = normalize_brief(raw)
+    if not departments.is_decision_employee(employee):
+        # Unknown brief fields were historically ignored for V1.  Preserve
+        # that behavior; evidence_items has no effect and is not persisted.
+        return result
+    if "evidence_items" not in raw:
+        return result
+    result["decision_evidence"] = departments.normalize_decision_evidence(
+        employee, tenant_id, raw.get("evidence_items")
+    )
+    return result
+
+
+def validate_persisted_task_brief(
+    raw, employee: dict | None, tenant_id: int,
+) -> tuple[dict, dict | None]:
+    """Revalidate the canonical manifest every time a task is executed."""
+    if not isinstance(raw, dict):
+        raise ValueError("任务书格式无效")
+    client_fields = {
+        key: value for key, value in raw.items()
+        if key not in {"decision_evidence"}
+    }
+    if "evidence_items" in raw:
+        raise ValueError("已持久化任务书不得包含客户端证据输入")
+    brief = normalize_brief(client_fields)
+    manifest = None
+    if departments.is_decision_employee(employee):
+        raw_manifest = raw.get("decision_evidence")
+        if raw_manifest is not None:
+            manifest = departments.validate_decision_evidence(
+                employee, tenant_id, raw_manifest
+            )
+            brief["decision_evidence"] = manifest
+    elif "decision_evidence" in raw:
+        raise ValueError("非 V2 任务不得携带决策证据 manifest")
+    return brief, manifest
 
 
 def _broadcast_safely(broadcast, payload: dict):
@@ -76,7 +238,8 @@ def _claim_task(task_id: int) -> dict | None:
     now = time.time()
     with db.atomic() as connection:
         changed = connection.execute(
-            "UPDATE task SET status='running',summary_md=NULL,updated_at=? "
+            "UPDATE task SET status='running',summary_md=NULL,terminal_at=NULL,"
+            "updated_at=? "
             "WHERE id=? AND status='queued' "
             "AND billing_status IN ('charged','included') "
             "AND deleted_at IS NULL",
@@ -98,7 +261,8 @@ def _meeting_delivery_section(
 ) -> tuple[str, str, str] | None:
     """Build a deterministic handoff section from real derived-task state."""
     meeting = connection.execute(
-        "SELECT tenant_id,emp_idxs_json,actions_json,consensus_md,summary_md "
+        "SELECT tenant_id,emp_idxs_json,member_snapshot_json,actions_json,"
+        "consensus_md,summary_md "
         "FROM meeting WHERE id=?",
         (meeting_id,),
     ).fetchone()
@@ -111,14 +275,14 @@ def _meeting_delivery_section(
     ):
         return None
 
-    member_idxs = set()
-    for raw_idx in db.jloads(meeting["emp_idxs_json"], []) or []:
-        try:
-            member_idxs.add(int(raw_idx))
-        except (TypeError, ValueError):
-            continue
-    if not member_idxs:
+    frozen_members = employeeidentity.member_snapshot_contract(
+        db.jloads(meeting["emp_idxs_json"], []),
+        db.jloads(meeting["member_snapshot_json"], []),
+    )
+    if not frozen_members:
         return None
+    frozen_by_idx = {int(row["idx"]): row for row in frozen_members}
+    member_idxs = set(frozen_by_idx)
 
     # ``source_meeting_id`` alone is not an ownership proof: legacy/corrupt
     # rows can point an unrelated same-tenant task at this meeting.  Only the
@@ -162,7 +326,11 @@ def _meeting_delivery_section(
     placeholders = ",".join("?" for _ in action_contracts)
     rows = connection.execute(
         "SELECT id,emp_idx,brief_json,status,output_md,summary_md,deleted_at,"
-        "source_action_key FROM task WHERE source_meeting_id=? AND tenant_id=? "
+        "source_action_key,employee_key,employee_catalog_version,"
+        "employee_name_snapshot,employee_dept_key,employee_spec_sha256,"
+        "employee_identity_ref,employee_config_revision,employee_config_sha256,"
+        "person_snapshot,identity_scheme,bundle_sha256 "
+        "FROM task WHERE source_meeting_id=? AND tenant_id=? "
         f"AND source_action_key IN ({placeholders}) ORDER BY id",
         (
             meeting_id,
@@ -174,6 +342,26 @@ def _meeting_delivery_section(
     for row in rows:
         contract = action_contracts.get(row["source_action_key"])
         if not contract or contract[0] != int(row["emp_idx"]):
+            continue
+        frozen = frozen_by_idx.get(int(row["emp_idx"]))
+        if not frozen or any(
+            str(row[field] or "") != str(frozen[snapshot_field])
+            for field, snapshot_field in (
+                ("employee_key", "key"),
+                ("employee_catalog_version", "catalog_version"),
+                ("employee_name_snapshot", "name"),
+                ("employee_dept_key", "dept_key"),
+                ("employee_spec_sha256", "spec_sha256"),
+                ("employee_identity_ref", "identity_ref"),
+                ("employee_config_revision", "config_revision"),
+                ("employee_config_sha256", "config_sha256"),
+                ("person_snapshot", "person_snapshot"),
+                ("identity_scheme", "identity_scheme"),
+                ("bundle_sha256", "bundle_sha256"),
+            )
+        ):
+            continue
+        if not employeeidentity.resolve_task_binding(dict(row)):
             continue
         brief = db.jloads(row["brief_json"], {}) or {}
         if not isinstance(brief, dict):
@@ -201,9 +389,9 @@ def _meeting_delivery_section(
         "## 执行交付结果",
     ]
     for row in rows:
-        employee = departments.get(row["emp_idx"]) or registry.BY_IDX.get(
-            row["emp_idx"]) or {}
-        name = employee.get("name") or f"员工 {row['emp_idx']}"
+        binding = employeeidentity.resolve_task_binding(dict(row)) or {}
+        employee = binding.get("employee") or {}
+        name = row["employee_name_snapshot"] or employee.get("name") or f"员工 {row['emp_idx']}"
         brief = db.jloads(row["brief_json"], {}) or {}
         task_name = " ".join(str(brief.get("direction") or "会议行动").split())[:160]
         if row["deleted_at"] is not None:
@@ -322,6 +510,7 @@ def prepare_retry(
             "steps_json='[]'",
             "cost_usd=0",
             "tokens=0",
+            "terminal_at=NULL",
             "retry_count=COALESCE(retry_count,0)+1",
             "updated_at=?",
         ]
@@ -369,12 +558,14 @@ def settle_failure(task_id: int, message: str) -> bool:
             )
 
         def claim(connection):
+            terminal_at = time.time()
             changed = connection.execute(
                 "UPDATE task SET status='failed',billing_status='refunded',"
-                "output_md=?,updated_at=? "
+                "output_md=?,terminal_at=COALESCE(terminal_at,?),"
+                "refunded_at=?,updated_at=? "
                 "WHERE id=? AND billing_status='charged' "
                 "AND status IN ('pending_charge','queued','running','failed')",
-                (text, time.time(), task_id),
+                (text, terminal_at, terminal_at, terminal_at, task_id),
             )
             if changed.rowcount == 1 and row.get("source_meeting_id"):
                 _sync_meeting_delivery(
@@ -392,11 +583,12 @@ def settle_failure(task_id: int, message: str) -> bool:
             "退回:行业专家任务/单独派活 · 执行失败",
         )
     with db.atomic() as connection:
+        terminal_at = time.time()
         changed = connection.execute(
-            "UPDATE task SET status='failed',output_md=?,updated_at=? "
+            "UPDATE task SET status='failed',output_md=?,terminal_at=?,updated_at=? "
             "WHERE id=? AND billing_status='included' "
             "AND status IN ('queued','running')",
-            (text, time.time(), task_id),
+            (text, terminal_at, terminal_at, task_id),
         )
         if changed.rowcount == 1 and row.get("source_meeting_id"):
             _sync_meeting_delivery(
@@ -424,14 +616,39 @@ async def run_task(task_id: int, broadcast):
     if not t or t["status"] != "queued":
         return
     idx = t["emp_idx"]
-    e = departments.get(idx)
-    solo_content = e is None and idx in registry.BY_IDX
-    if not e and not solo_content:
-        await db.arun(settle_failure, task_id, "员工不存在")
+    binding = await db.arun(employeeidentity.resolve_task_binding, t)
+    if not binding:
+        await db.arun(
+            settle_failure,
+            task_id,
+            "员工身份、岗位配置或能力包版本不匹配，已安全停止并退回点数",
+        )
         return
+    try:
+        effective_role = _approved_effective_role_context(binding)
+    except (TypeError, ValueError) as exc:
+        await db.arun(
+            settle_failure,
+            task_id,
+            "员工已批准能力包无法验证，已安全停止并退回点数",
+        )
+        log.warning(
+            "task %s role bundle rejected error_type=%s",
+            task_id,
+            type(exc).__name__,
+        )
+        return
+    e = effective_role["employee"]
+    cfg = effective_role["config"]
+    role_bundle = effective_role["role_bundle"]
+    effective_profile = effective_role["effective_profile"]
+    workflow = effective_role["workflow"]
+    capabilities = effective_role["capabilities"]
+    skills = effective_role["skills"]
+    solo_content = e.get("dept_key") == "content"
     if solo_content:
-        s = registry.BY_IDX[idx]
-        e = {"name": s["name"], "dept_name": "内容生产部", "group": s["dept"]}
+        s = e
+        e = {**s, "name": s["name"], "dept_name": "内容生产部", "group": s["dept"]}
     required_modules = (
         (str(e.get("dept_key") or "content"),)
         if e
@@ -505,8 +722,11 @@ async def run_task(task_id: int, broadcast):
     )
     md_done = None
     try:
-        brief = normalize_brief(db.jloads(t["brief_json"], None))
-        cfg = employees.get_config(idx)
+        brief, decision_provenance = validate_persisted_task_brief(
+            db.jloads(t["brief_json"], None),
+            e,
+            int(t.get("tenant_id") or 1),
+        )
         ctx_text, recall = await db.arun(
             _context_text,
             t.get("tenant_id") or 1,
@@ -524,19 +744,51 @@ async def run_task(task_id: int, broadcast):
             )
         if solo_content:
             prompt = registry.solo_prompt(
-                idx, brief, employees.skills_block(idx), ctx_text
+                idx, brief, employees.skills_block(idx, config=cfg), ctx_text,
+                config=cfg,
             )
             web = registry.BY_IDX[idx]["key"] in (
                 "trend", "research", "benchmark"
             )
+            enabled_caps_count = sum(
+                1 for cap in registry.capabilities_for(idx, config=cfg)
+                if isinstance(cap, dict) and cap.get("enabled")
+            )
         else:
-            caps = departments.capabilities_for(idx, cfg.get("caps_off"))
+            caps = departments.capabilities_for(
+                idx, cfg.get("caps_off"), employee=e
+            )
             prompt = departments.build_task_prompt(
-                e, brief, employees.skills_block(idx), ctx_text, caps,
+                e, brief, employees.skills_block(idx, config=cfg), ctx_text, caps,
                 private_template=cfg.get("prompt_template"),
             )
             # 产品承诺「派活即联网核实」:所有产业专家都经能力网关先核实事实与数据。
             web = True
+            enabled_caps_count = sum(
+                1 for cap in caps if isinstance(cap, dict) and cap.get("enabled")
+            )
+        # 老板要求每单任务都必须实际调用能力与技能：这里把装载量作为
+        # 可见凭证写进任务步骤，老板打开任意任务都能核对。
+        enabled_skill_count = sum(
+            1 for skill in (skills or [])
+            if isinstance(skill, dict) and skill.get("enabled", True)
+        )
+        progress(
+            "tool",
+            f"已装载批准能力包 r{cfg.get('config_revision')}："
+            f"启用能力 {enabled_caps_count} 项 · 进修技能 {enabled_skill_count} 条，"
+            "已全部注入本单执行上下文",
+        )
+        # Both core and industry employees execute the exact approved effective
+        # bundle.  Keeping these named values explicit makes it impossible for
+        # a future refactor to silently fall back to static profile data.
+        if not isinstance(effective_profile, dict) or not isinstance(skills, list):
+            raise ValueError("员工有效岗位档案结构无效")
+        if not isinstance(capabilities, (list, dict)) or not isinstance(
+            workflow, (str, list, dict)
+        ):
+            raise ValueError("员工有效能力或工作流程结构无效")
+        prompt = _with_approved_role_context(prompt, effective_role)
     except Exception as exc:
         log.error(
             "task %s preparation failed error_type=%s",
@@ -561,18 +813,34 @@ async def run_task(task_id: int, broadcast):
             system_prompt=prompt.system,
             research_brief=prompt.research,
             sensitive_texts=prompt.sensitive,
+            identity_ref=cfg["identity_ref"],
+            config_revision=cfg["config_revision"],
+            config_sha256=cfg["config_sha256"],
+            bundle_sha256=cfg["bundle_sha256"],
         )
         md = (r["text"] or "").strip()
-        md, extra_cost = await _enforce_length(idx, md, brief, progress)
+        md, extra_cost = await _enforce_length(
+            idx, md, brief, progress, config=cfg
+        )
         title = next((ln.lstrip("# ").strip() for ln in md.splitlines()
                       if ln.startswith("#")), brief.get("direction", "")[:30])
+        # V2 决策员工在模型和篇幅压缩之后、数据库事务之前经过纯函数门禁。
+        # 门禁只改交付正文（必要时将状态降为 HOLD 并保留原文），不增加模型
+        # 调用、不改变成本/错误结算，也不授予任何自动执行权限；V1 原样通过。
+        decision_gate = departments.enforce_decision_output(
+            e, md, provenance=decision_provenance
+        )
+        if decision_gate["is_decision"]:
+            md = decision_gate["output"]
+            if decision_gate["status"] == "HOLD":
+                progress("review", "决策机器门禁：HOLD · 保留原始输出，等待人工复核")
         now = time.time()
         def _commit_delivery():
             with db.atomic() as connection:
                 changed = connection.execute(
                     "UPDATE task SET status='done',output_md=?,cost_usd=?,tokens=?,"
                     "steps_json=?,billing_status=CASE WHEN billing_status='charged' "
-                    "THEN 'succeeded' ELSE billing_status END,updated_at=? "
+                    "THEN 'succeeded' ELSE billing_status END,terminal_at=?,updated_at=? "
                     "WHERE id=? AND status='running' "
                     "AND billing_status IN ('charged','included') "
                     "AND deleted_at IS NULL",
@@ -581,6 +849,7 @@ async def run_task(task_id: int, broadcast):
                         r["cost_usd"] + extra_cost,
                         r["tokens"],
                         json.dumps(steps, ensure_ascii=False),
+                        now,
                         now,
                         task_id,
                     ),
@@ -630,7 +899,16 @@ async def run_task(task_id: int, broadcast):
         await cleanup()
     # 任务已交付(done)后再补「老板速览」——绝不拖慢交付感知,失败也不回退状态
     if md_done and len(md_done) > DIGEST_MIN_CHARS:
-        await _gen_summary(task_id, md_done, t["emp_idx"], t.get("tenant_id") or 1, broadcast)
+        await _gen_summary(
+            task_id,
+            md_done,
+            t["emp_idx"],
+            t.get("tenant_id") or 1,
+            broadcast,
+            employee=e,
+            decision_gate=decision_gate,
+            config=cfg,
+        )
 
 
 DIGEST_MIN_CHARS = 1500
@@ -640,7 +918,9 @@ DIGEST_MIN_CHARS = 1500
 _LEN_TARGET = {"lite": 800, "std": 2000}
 
 
-async def _enforce_length(idx: int, md: str, brief: dict, progress) -> tuple:
+async def _enforce_length(
+    idx: int, md: str, brief: dict, progress, *, config: dict | None = None,
+) -> tuple:
     """返回 (md, 压缩产生的平台LLM成本) —— 成本记进 task.cost_usd,老板产出总览才看得到真实账."""
     target = _LEN_TARGET.get((brief or {}).get("length") or "")
     cost = 0.0
@@ -658,7 +938,15 @@ async def _enforce_length(idx: int, md: str, brief: dict, progress) -> tuple:
                 "结尾的「下一步建议」;删掉:铺垫、论证过程、重复内容、可有可无的展开。\n"
                 "保持 Markdown 结构,开头一行仍是「# 标题」。只输出压缩后的 Markdown,不要任何说明。\n\n"
                 + md)
-            r = await providers.call_text(idx, prompt, web=False, timeout=300)
+            identity_args = ({
+                "identity_ref": config["identity_ref"],
+                "config_revision": config["config_revision"],
+                "config_sha256": config["config_sha256"],
+                "bundle_sha256": config["bundle_sha256"],
+            } if config else {})
+            r = await providers.call_text(
+                idx, prompt, web=False, timeout=300, **identity_args
+            )
             cost += r.get("cost_usd") or 0
             short = (r["text"] or "").strip()
             # 压缩结果要像样:非空、确实变短、没有腰斩(至少给到目标的三成)
@@ -675,13 +963,101 @@ async def _enforce_length(idx: int, md: str, brief: dict, progress) -> tuple:
     return md, cost
 
 
-async def _gen_summary(task_id: int, md: str, idx: int, tid: int, broadcast):
+def _decision_summary_lines(
+    md: str,
+    employee: dict,
+    decision_gate: dict | None = None,
+) -> list[str]:
+    """从已门禁正文生成 V2 摘要，不再让二次模型改写安全字段。"""
+    if decision_gate is not None:
+        gate = decision_gate
+    else:
+        # 任务重启或独立补摘要时正文可能已经带有门禁头。只重审“原始输出”
+        # 段，避免门禁头的 HOLD 与原始 GO 被当成两个冲突状态。
+        raw_md = md
+        marker = "## 原始输出（人工复核）"
+        if marker in raw_md:
+            raw_md = raw_md.split(marker, 1)[1].lstrip()
+        gate = departments.enforce_decision_output(employee, raw_md)
+    if not gate.get("is_decision"):
+        return []
+    contract = departments.decision_output_contract(employee) or {}
+    source_md = md
+    marker = "## 原始输出（人工复核）"
+    if marker in source_md:
+        source_md = source_md.split(marker, 1)[1].lstrip()
+    gap_sections = departments._decision_field_sections(source_md, "data_gaps")
+    gap_state = departments._decision_gap_state(gap_sections)
+    gap_detail = " ".join(" ".join(str(item).split()) for item in gap_sections).strip()
+    if gap_state == "none":
+        gap_line = "已声明无未闭合数据缺口（仍需人工复核）"
+    elif gap_state == "present":
+        gap_line = f"存在未闭合数据缺口：{gap_detail[:320] or '见原始输出'}"
+    else:
+        gap_line = "数据缺口声明缺失，必须补齐后重审"
+    approval = str(contract.get("approval_boundary") or "未加载有效审批边界；必须人工复核").strip()
+    forbidden = "；".join(str(item).strip() for item in contract.get("forbidden_actions") or () if str(item).strip())
+    if not forbidden:
+        forbidden = "不得执行任何业务写操作"
+    lines = [
+        f"- 决策状态：{gate.get('status') or 'HOLD'}",
+        "- 人工审批语义：GO 仅表示可进入人工审批，不代表允许系统自动执行任何业务写操作。",
+        "- 用户提交覆盖：" + str(
+            gate.get("coverage_text")
+            or "覆盖状态不可用；内容未核验"
+        ),
+        f"- 数据缺口：{gap_line}",
+        f"- 审批边界：{approval}",
+        f"- 禁止动作：{forbidden}",
+    ]
+    reasons = [str(reason).strip() for reason in gate.get("reasons") or () if str(reason).strip()]
+    if reasons:
+        lines.append(f"- 门禁原因：{'；'.join(dict.fromkeys(reasons))}")
+    return lines
+
+
+async def _gen_summary(
+    task_id: int,
+    md: str,
+    idx: int,
+    tid: int,
+    broadcast,
+    employee: dict | None = None,
+    decision_gate: dict | None = None,
+    config: dict | None = None,
+):
     """给「很忙的老板」补一张十秒读完的速览卡:3-5 条要点 + 一句话行动建议。
 
     全程 try/except,失败静默(summary_md 留空),绝不影响已交付的产出;
     走通用文本模型(非联网),不额外扣用户点数。
     """
     try:
+        expert = employee or employeeidentity.any_employee(idx)
+        if departments.is_decision_employee(expert):
+            # V2 决策摘要必须继承正文门禁结果，完全绕开普通摘要模型，
+            # 防止二次模型把 HOLD 改写成 GO 或丢失禁止动作/审批边界。
+            lines = _decision_summary_lines(md, expert, decision_gate=decision_gate)
+            if not lines:
+                return
+            cur = await db.aone(
+                "SELECT output_md, cost_usd FROM task WHERE id=?", (task_id,)
+            )
+            if not cur or (cur.get("output_md") or "").strip() != md.strip():
+                return
+            await db.aupdate(
+                "task",
+                task_id,
+                {"summary_md": "\n".join(lines)},
+            )
+            await db.arun(sync_meeting_delivery_for_task, task_id)
+            broadcast({
+                "type": "task_update",
+                "tenant_id": tid,
+                "_required_modules": (str((expert or {}).get("dept_key") or "content"),),
+                "task_id": task_id,
+                "idx": idx,
+            })
+            return
         from . import providers
         prompt = (
             "你是给「很忙的老板」做速览的助理。下面是数字员工刚交付的完整产出(Markdown)。\n"
@@ -690,7 +1066,15 @@ async def _gen_summary(task_id: int, md: str, idx: int, tid: int, broadcast):
             "2)再单独给一句可直接落地的行动建议(告诉老板下一步该干什么)。\n"
             '只输出 JSON:{"points":["要点", ...], "action":"一句话行动建议"}\n\n'
             "【完整产出】\n" + md[:8000])
-        r = await providers.call_text_json(idx, prompt, web=False, timeout=240)
+        identity_args = ({
+            "identity_ref": config["identity_ref"],
+            "config_revision": config["config_revision"],
+            "config_sha256": config["config_sha256"],
+            "bundle_sha256": config["bundle_sha256"],
+        } if config else {})
+        r = await providers.call_text_json(
+            idx, prompt, web=False, timeout=240, **identity_args
+        )
         data = r.get("data") or {}
         points = [str(p).strip()[:60] for p in (data.get("points") or []) if str(p).strip()][:5]
         action = str(data.get("action") or "").strip()[:80]
@@ -716,7 +1100,7 @@ async def _gen_summary(task_id: int, md: str, idx: int, tid: int, broadcast):
             },
         )
         await db.arun(sync_meeting_delivery_for_task, task_id)
-        expert = departments.get(idx)
+        expert = employeeidentity.any_employee(idx)
         broadcast({
             "type": "task_update",
             "tenant_id": tid,
@@ -748,7 +1132,8 @@ def resume_pending(broadcast):
         settle_failure(row["id"], "服务启动补做失败结算")
     for r in db.q(
         "SELECT id FROM task WHERE status IN ('queued','running') "
-        "AND billing_status IN ('charged','included') AND deleted_at IS NULL"
+        "AND billing_status IN ('charged','included') AND deleted_at IS NULL "
+        "AND emp_idx!=10"
     ):
-        db.update("task", r["id"], {"status": "queued"})
+        db.update("task", r["id"], {"status": "queued", "terminal_at": None})
         asyncio.create_task(run_task(r["id"], broadcast))

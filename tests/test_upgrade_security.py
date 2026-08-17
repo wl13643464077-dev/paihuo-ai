@@ -12,6 +12,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fastapi import HTTPException
+from starlette.requests import Request
+from starlette.responses import Response
 
 from app import auth, avatar, db, llm, providers
 
@@ -75,11 +77,239 @@ class UpgradeSecurityCase(unittest.TestCase):
         self.assertEqual(2, main._file_owner_tid(f"/files/job{own_job}/cover.png"))
         self.assertEqual(3, main._file_owner_tid(f"/files/job{foreign_job}/cover.png"))
 
+    def test_inspection_file_keeps_industry_scope_inside_same_tenant(self):
+        from app import assetfiles, main
+
+        db.conn().executemany(
+            "INSERT INTO tenant_industry(tenant_id,industry_key,is_primary,created_at) "
+            "VALUES(2,?,?,0)",
+            (("restaurant", 1), ("auto", 0)),
+        )
+        branch = db.insert("store_branch", {
+            "tenant_id": 2,
+            "industry_key": "auto",
+            "name": "汽车门店",
+        })
+        visit = db.insert("inspection_visit", {
+            "tenant_id": 2,
+            "industry_key": "auto",
+            "branch_id": branch,
+            "status": "completed",
+        })
+        storage_key = f"inspections/2/{visit}/" + "a" * 32 + ".jpg"
+        db.conn().execute(
+            "INSERT INTO inspection_photo(tenant_id,visit_id,storage_key,"
+            "mime_type,byte_size,sha256,phase,created_at) VALUES(?,?,?,?,?,?,?,0)",
+            (2, visit, storage_key, "image/jpeg", 3, "b" * 64, "before"),
+        )
+        db.conn().commit()
+        path = "/files/" + storage_key
+        self.assertEqual("auto", assetfiles.file_required_module(path))
+
+        async def request_as(user):
+            request = Request({
+                "type": "http",
+                "http_version": "1.1",
+                "method": "GET",
+                "scheme": "https",
+                "path": path,
+                "raw_path": path.encode("ascii"),
+                "query_string": b"",
+                "headers": [(b"cookie", b"cc_sess=test")],
+                "client": ("127.0.0.1", 12345),
+                "server": ("paihuo.ai", 443),
+            })
+
+            async def next_handler(_request):
+                return Response(status_code=200)
+
+            with patch.object(auth, "parse_session", return_value=user["id"]), \
+                    patch.object(auth, "get_user", return_value=user):
+                return await main._auth_mw(request, next_handler)
+
+        member = {
+            "id": 20, "tenant_id": 2, "username": "restaurant-member",
+            "role": "member", "modules": ["restaurant"], "enabled": 1,
+            "must_change_password": 0,
+        }
+        denied = asyncio.run(request_as(member))
+        self.assertEqual(403, denied.status_code)
+        allowed = asyncio.run(request_as({**member, "modules": ["restaurant", "auto"]}))
+        self.assertEqual(200, allowed.status_code)
+        owner = asyncio.run(request_as({**member, "role": "owner", "modules": []}))
+        self.assertEqual(200, owner.status_code)
+        db.execute(
+            "DELETE FROM tenant_industry WHERE tenant_id=2 AND industry_key='auto'"
+        )
+        revoked_owner = asyncio.run(request_as({
+            **member,
+            "role": "owner",
+            "modules": [],
+        }))
+        self.assertEqual(403, revoked_owner.status_code)
+
+    def test_every_private_file_family_declares_its_narrowest_module(self):
+        from app import assetfiles, main
+
+        content_job = db.insert("job", {
+            "tenant_id": 2,
+            "brief_json": json.dumps({"direction": "私密内容"}),
+        })
+        avatar_job = db.insert("avatar_job", {
+            "tenant_id": 2,
+            "params_json": "{}",
+        })
+        tv_job = db.insert("tv_job", {
+            "tenant_id": 2,
+            "params_json": "{}",
+        })
+        pub_task = db.insert("pub_task", {
+            "tenant_id": 2,
+            "platform": "xhs",
+            "payload_json": "{}",
+        })
+        avatar_name = "c" * 32 + ".mp3"
+        with open(os.path.join(avatar.PUBLIC_DIR, avatar_name), "wb") as handle:
+            handle.write(b"voice-preview")
+        avatar.remember_asset(avatar_name, "voice", 2)
+
+        cases = {
+            f"/files/job{content_job}/cover.png": (2, "content"),
+            f"/files/avatar/avatar_{avatar_job}.mp4": (2, "avatar"),
+            "/files/tvclips/2/clip.mp4": (2, "content"),
+            f"/files/tv/tv_{tv_job}.mp4": (2, "content"),
+            f"/files/pub/fail_{pub_task}.png": (2, "content"),
+            "/files/tools/2/product.png": (2, "content"),
+        }
+        for path, (tenant_id, module) in cases.items():
+            with self.subTest(path=path):
+                scope = assetfiles.file_access_scope(path)
+                self.assertEqual(tenant_id, scope["tenant_id"])
+                self.assertEqual(module, scope["required_module"])
+                self.assertEqual(module, assetfiles.file_required_module(path))
+
+        avatar_scope = main._file_access_scope(
+            f"/files/avatar-public/{avatar_name}"
+        )
+        self.assertEqual(2, avatar_scope["tenant_id"])
+        self.assertEqual("avatar", avatar_scope["required_module"])
+
+        unknown = assetfiles.file_access_scope("/files/unknown/secret.bin")
+        self.assertEqual(0, unknown["tenant_id"])
+        self.assertFalse(unknown.get("required_module"))
+
+    def test_private_file_middleware_requires_exact_tenant_and_member_module(self):
+        from app import main
+
+        content_job = db.insert("job", {
+            "tenant_id": 2,
+            "brief_json": json.dumps({"direction": "企业私密"}),
+        })
+        avatar_name = "d" * 32 + ".mp3"
+        with open(os.path.join(avatar.PUBLIC_DIR, avatar_name), "wb") as handle:
+            handle.write(b"voice-preview")
+        avatar.remember_asset(avatar_name, "voice", 2)
+
+        async def request_as(path, user):
+            request = Request({
+                "type": "http",
+                "http_version": "1.1",
+                "method": "GET",
+                "scheme": "https",
+                "path": path,
+                "raw_path": path.encode("ascii"),
+                "query_string": b"",
+                "headers": [(b"cookie", b"cc_sess=test")],
+                "client": ("127.0.0.1", 12345),
+                "server": ("paihuo.ai", 443),
+            })
+
+            async def next_handler(_request):
+                return Response(status_code=200)
+
+            with patch.object(
+                auth,
+                "parse_session",
+                return_value=(user or {}).get("id"),
+            ), patch.object(auth, "get_user", return_value=user):
+                return await main._auth_mw(request, next_handler)
+
+        job_path = f"/files/job{content_job}/cover.png"
+        avatar_path = f"/files/avatar-public/{avatar_name}"
+        member = {
+            "id": 20,
+            "tenant_id": 2,
+            "username": "member-a",
+            "role": "member",
+            "modules": [],
+            "enabled": 1,
+            "must_change_password": 0,
+        }
+        self.assertEqual(
+            403,
+            asyncio.run(request_as(job_path, member)).status_code,
+        )
+        self.assertEqual(
+            200,
+            asyncio.run(request_as(
+                job_path, {**member, "modules": ["content"]}
+            )).status_code,
+        )
+        self.assertEqual(
+            403,
+            asyncio.run(request_as(
+                avatar_path, {**member, "modules": ["content"]}
+            )).status_code,
+        )
+        self.assertEqual(
+            200,
+            asyncio.run(request_as(
+                avatar_path, {**member, "modules": ["avatar"]}
+            )).status_code,
+        )
+
+        owner = {**member, "role": "owner", "modules": []}
+        self.assertEqual(
+            200,
+            asyncio.run(request_as(job_path, owner)).status_code,
+        )
+
+        # 平台 root/命名 boss 的看板能跨租户看结构化指标，但不能直读原文附件。
+        foreign_boss = {
+            **member,
+            "id": 1,
+            "tenant_id": 1,
+            "username": "boss",
+            "role": "root",
+            "modules": ["content", "avatar"],
+        }
+        self.assertEqual(
+            403,
+            asyncio.run(request_as(job_path, foreign_boss)).status_code,
+        )
+        same_tenant_root = {**foreign_boss, "tenant_id": 2}
+        self.assertEqual(
+            200,
+            asyncio.run(request_as(job_path, same_tenant_root)).status_code,
+        )
+
+        # 供外部生成供应商拉取的 /pub 端点不属于登录态 /files 预览门，
+        # 保留既有的公开音色/素材传输语义。
+        self.assertEqual(
+            200,
+            asyncio.run(request_as(f"/pub/{avatar_name}", None)).status_code,
+        )
+        self.assertEqual(
+            401,
+            asyncio.run(request_as(avatar_path, None)).status_code,
+        )
+
     def test_meta_exposes_loaded_department_counts_without_internal_employee_details(self):
         from app import departments, main
 
         departments._cache = [{
             "key": "test",
+            "name": "测试部门",
             "employees": [{"idx": 9001}, {"idx": 9002}],
         }]
         try:
@@ -203,21 +433,17 @@ class UpgradeSecurityCase(unittest.TestCase):
         self.assertNotIn("duty", public)
 
     def test_public_expert_fallback_never_reuses_internal_duty(self):
-        from app import main
+        from app import departments, main
 
-        internal_duty = "内部岗位档案：使用秘密渠道矩阵与专属拆解步骤"
-        public = main._public_expert({
-            "idx": 101,
-            "name": "经营顾问",
-            "role": "经营顾问",
-            "dept_name": "企业增长部",
-            "duty": internal_duty,
-            "intro": "",
-        })
+        # Schema54 的公开名片必须来自受信岗位身份；用真实在岗员工触发
+        # 空 intro 回退，仍然验证内部岗位手册不会被拿来拼公开介绍。
+        expert = dict(next(iter(departments.specialists().values())))
+        internal_duty = expert["duty"]
+        expert["intro"] = ""
+        public = main._public_expert(expert)
 
         self.assertTrue(public["intro"])
         self.assertNotIn(internal_duty, public["intro"])
-        self.assertNotIn("秘密渠道矩阵", public["intro"])
 
     def test_module_permissions_hide_content_and_block_library_and_avatar_side_effects(self):
         from app import main
@@ -653,6 +879,537 @@ class UpgradeSecurityCase(unittest.TestCase):
             db.LATEST_SCHEMA_VERSION,
             db.one("PRAGMA user_version")["user_version"],
         )
+
+    def test_schema51_migrates_threads_inspections_and_explicit_industries(self):
+        connection = db.conn()
+        connection.execute(
+            "UPDATE tenants SET industries_json=?,enabled=0 WHERE id=2",
+            (json.dumps(["food", "retail", "food"]),),
+        )
+        connection.execute(
+            "UPDATE tenants SET industries_json='[]' WHERE id=3"
+        )
+        for index in (
+            "idx_task_thread_root", "idx_task_thread_revision",
+            "idx_task_request_key", "idx_task_thread_one_active",
+            "idx_task_dashboard_employee",
+            "idx_task_thread_current", "idx_tenant_industry_scope",
+            "idx_store_branch_name", "idx_inspection_request",
+            "idx_inspection_visit_scope", "idx_inspection_visit_dashboard",
+            "idx_inspection_visit_status", "idx_inspection_photo_visit",
+            "idx_inspection_issue_due", "idx_inspection_issue_visit",
+            "idx_inspection_action_issue", "idx_inspection_event_visit",
+        ):
+            connection.execute(f"DROP INDEX IF EXISTS {index}")
+        for table in (
+            "inspection_event", "inspection_recheck", "inspection_action",
+            "inspection_evidence", "inspection_issue", "inspection_photo",
+            "inspection_visit", "store_branch", "tenant_industry",
+            "task_thread",
+        ):
+            connection.execute(f"DROP TABLE IF EXISTS {table}")
+        for column in ("thread_id", "revision_no", "phase", "request_key"):
+            connection.execute(f"ALTER TABLE task DROP COLUMN {column}")
+        connection.execute("DELETE FROM schema_version WHERE version>=51")
+        connection.execute("PRAGMA user_version=50")
+        connection.commit()
+        db._close_all_connections()
+        db._conn = None
+        db._conn_path = None
+
+        db.conn()
+
+        task_columns = {row["name"] for row in db.q("PRAGMA table_info(task)")}
+        self.assertTrue(
+            {"thread_id", "revision_no", "phase", "request_key"}
+            <= task_columns
+        )
+        tables = {
+            row["name"] for row in db.q(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        self.assertTrue({
+            "task_thread", "tenant_industry", "store_branch",
+            "inspection_visit", "inspection_photo", "inspection_issue",
+            "inspection_evidence", "inspection_action",
+            "inspection_recheck", "inspection_event",
+        } <= tables)
+        indexes = {
+            row["name"] for row in db.q(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            )
+        }
+        self.assertTrue({
+            "idx_task_thread_root", "idx_task_thread_revision",
+            "idx_task_request_key", "idx_task_thread_one_active",
+            "idx_task_dashboard_employee",
+            "idx_inspection_visit_dashboard", "idx_inspection_issue_visit",
+            "idx_inspection_action_issue",
+        } <= indexes)
+        self.assertEqual(
+            [("food", 1), ("retail", 0)],
+            [
+                (row["industry_key"], row["is_primary"])
+                for row in db.q(
+                    "SELECT industry_key,is_primary FROM tenant_industry "
+                    "WHERE tenant_id=2 ORDER BY created_at,industry_key"
+                )
+            ],
+        )
+        # 升级时停用不代表丢弃其显式行业配置；重新启用不能变成无行业死户。
+        db.execute("UPDATE tenants SET enabled=1 WHERE id=2")
+        self.assertEqual(
+            2,
+            db.one(
+                "SELECT COUNT(*) n FROM tenant_industry WHERE tenant_id=2"
+            )["n"],
+        )
+        self.assertEqual(
+            0,
+            db.one(
+                "SELECT COUNT(*) n FROM tenant_industry WHERE tenant_id=3"
+            )["n"],
+        )
+        self.assertEqual(
+            "inspection-task-threads-industry-dashboard",
+            db.one(
+                "SELECT name FROM schema_version WHERE version=51"
+            )["name"],
+        )
+        db.insert("task", {
+            "tenant_id": 2,
+            "emp_idx": 100,
+            "brief_json": "{}",
+            "status": "queued",
+            "thread_id": 999,
+            "revision_no": 1,
+        })
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.insert("task", {
+                "tenant_id": 2,
+                "emp_idx": 100,
+                "brief_json": "{}",
+                "status": "running",
+                "thread_id": 999,
+                "revision_no": 2,
+            })
+        self.assertEqual(
+            db.LATEST_SCHEMA_VERSION,
+            db.one("PRAGMA user_version")["user_version"],
+        )
+
+    def test_schema52_migrates_branch_import_ledger_and_legacy_store_codes(self):
+        connection = db.conn()
+        connection.execute(
+            "INSERT INTO tenant_industry(tenant_id,industry_key,is_primary,created_at) "
+            "VALUES(2,'restaurant',1,0) ON CONFLICT DO NOTHING"
+        )
+        legacy_id = db.insert("store_branch", {
+            "tenant_id": 2,
+            "industry_key": "restaurant",
+            "name": "旧版无编号门店",
+        })
+        for index in (
+            "idx_store_branch_code", "idx_inspection_branch_import_request",
+            "idx_inspection_branch_import_source",
+            "idx_inspection_branch_import_status_updated",
+            "idx_inspection_branch_import_retention",
+            "idx_inspection_import_row",
+            "idx_inspection_business_value_natural",
+            "idx_inspection_business_value_period",
+        ):
+            connection.execute(f"DROP INDEX IF EXISTS {index}")
+        for table in (
+            "inspection_business_value", "inspection_branch_import_row",
+            "inspection_branch_import",
+        ):
+            connection.execute(f"DROP TABLE IF EXISTS {table}")
+        for table, columns in {
+            "inspection_visit": (
+                "template_key", "template_version", "template_snapshot_json",
+                "observations_json",
+            ),
+            "inspection_photo": ("capture_slot", "item_code"),
+        }.items():
+            for column in columns:
+                connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+        for column in (
+            "store_code", "province", "city", "district", "manager_name",
+            "manager_employee_no", "manager_phone", "store_type", "opened_on",
+            "area_sqm", "seat_count", "longitude", "latitude", "remark",
+            "row_version",
+        ):
+            if column in {
+                row["name"] for row in connection.execute(
+                    "PRAGMA table_info(store_branch)"
+                )
+            }:
+                connection.execute(f"ALTER TABLE store_branch DROP COLUMN {column}")
+        connection.execute("DELETE FROM schema_version WHERE version>=52")
+        connection.execute("PRAGMA user_version=51")
+        connection.commit()
+        db._close_all_connections()
+        db._conn = None
+        db._conn_path = None
+
+        db.conn()
+
+        branch_columns = {
+            row["name"] for row in db.q("PRAGMA table_info(store_branch)")
+        }
+        self.assertTrue({
+            "store_code", "province", "city", "district", "manager_name",
+            "manager_employee_no", "manager_phone", "store_type", "opened_on",
+            "area_sqm", "seat_count", "longitude", "latitude", "remark",
+            "row_version",
+        } <= branch_columns)
+        tables = {
+            row["name"] for row in db.q(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        self.assertTrue({
+            "inspection_branch_import", "inspection_branch_import_row",
+            "inspection_business_value",
+        } <= tables)
+        self.assertTrue({
+            "catalog_version", "catalog_sha256",
+            "business_create_count", "business_update_count",
+            "business_skip_count", "business_error_count",
+            "staging_purged_at",
+        } <= {
+            row["name"]
+            for row in db.q("PRAGMA table_info(inspection_branch_import)")
+        })
+        self.assertTrue({
+            "existing_branch_id", "existing_row_version",
+            "existing_business_value_id", "existing_business_row_version",
+        } <= {
+            row["name"]
+            for row in db.q("PRAGMA table_info(inspection_branch_import_row)")
+        })
+        self.assertTrue({
+            "template_key", "template_version", "template_snapshot_json",
+            "observations_json",
+        } <= {
+            row["name"] for row in db.q("PRAGMA table_info(inspection_visit)")
+        })
+        self.assertTrue({"capture_slot", "item_code"} <= {
+            row["name"] for row in db.q("PRAGMA table_info(inspection_photo)")
+        })
+        self.assertIn("row_version", {
+            row["name"]
+            for row in db.q("PRAGMA table_info(inspection_business_value)")
+        })
+        indexes = {
+            row["name"] for row in db.q(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            )
+        }
+        self.assertTrue({
+            "idx_store_branch_code", "idx_inspection_branch_import_request",
+            "idx_inspection_branch_import_source",
+            "idx_inspection_branch_import_status_updated",
+            "idx_inspection_branch_import_retention",
+            "idx_inspection_import_row",
+            "idx_inspection_business_value_natural",
+            "idx_inspection_business_value_period",
+        } <= indexes)
+        name_index = next(
+            row for row in db.q("PRAGMA index_list(store_branch)")
+            if row["name"] == "idx_store_branch_name"
+        )
+        self.assertEqual(0, name_index["unique"])
+        self.assertIsNone(db.one(
+            "SELECT store_code FROM store_branch WHERE id=?", (legacy_id,)
+        )["store_code"])
+        self.assertEqual(
+            "inspection-branch-master-import",
+            db.one("SELECT name FROM schema_version WHERE version=52")["name"],
+        )
+        self.assertEqual(
+            db.LATEST_SCHEMA_VERSION,
+            db.one("PRAGMA user_version")["user_version"],
+        )
+
+    def test_stamped_schema52_old_import_status_check_fails_closed(self):
+        connection = db.conn()
+        schema_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='inspection_branch_import'"
+        ).fetchone()["sql"]
+        self.assertIn("'expired'", schema_sql)
+        old_sql = schema_sql.replace(
+            "'previewed','committed','expired'", "'previewed','committed'"
+        )
+        self.assertNotEqual(schema_sql, old_sql)
+        connection.execute("PRAGMA writable_schema=ON")
+        connection.execute(
+            "UPDATE sqlite_master SET sql=? WHERE type='table' "
+            "AND name='inspection_branch_import'", (old_sql,),
+        )
+        connection.execute("PRAGMA writable_schema=OFF")
+        connection.commit()
+        db._close_all_connections()
+        db._conn = None
+        db._conn_path = None
+
+        with self.assertRaisesRegex(RuntimeError, "状态约束不完整"):
+            db.conn()
+        self.assertIsNone(db._conn)
+
+    def test_real_schema52_two_state_import_ledger_upgrades_atomically(self):
+        connection = db.conn()
+        for index in (
+            "idx_inspection_branch_import_request",
+            "idx_inspection_branch_import_source",
+            "idx_inspection_branch_import_status_updated",
+            "idx_inspection_branch_import_retention",
+        ):
+            connection.execute(f"DROP INDEX IF EXISTS {index}")
+        connection.execute("DROP TABLE inspection_branch_import")
+        connection.execute("""
+            CREATE TABLE inspection_branch_import(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              tenant_id INTEGER NOT NULL,
+              industry_key TEXT NOT NULL,
+              request_key TEXT NOT NULL,
+              source_sha256 TEXT NOT NULL,
+              filename TEXT NOT NULL,
+              catalog_version TEXT NOT NULL DEFAULT '',
+              catalog_sha256 TEXT NOT NULL DEFAULT '',
+              business_values_json TEXT NOT NULL DEFAULT '[]',
+              status TEXT NOT NULL DEFAULT 'previewed'
+                CHECK(status IN ('previewed','committed')),
+              total_rows INTEGER NOT NULL DEFAULT 0,
+              create_count INTEGER NOT NULL DEFAULT 0,
+              update_count INTEGER NOT NULL DEFAULT 0,
+              skip_count INTEGER NOT NULL DEFAULT 0,
+              error_count INTEGER NOT NULL DEFAULT 0,
+              business_create_count INTEGER NOT NULL DEFAULT 0,
+              business_update_count INTEGER NOT NULL DEFAULT 0,
+              business_skip_count INTEGER NOT NULL DEFAULT 0,
+              business_error_count INTEGER NOT NULL DEFAULT 0,
+              created_by INTEGER NOT NULL,
+              committed_by INTEGER,
+              committed_at REAL,
+              created_at REAL,
+              updated_at REAL
+            )
+        """)
+        connection.executemany(
+            "INSERT INTO inspection_branch_import("
+            "id,tenant_id,industry_key,request_key,source_sha256,filename,"
+            "status,total_rows,create_count,created_by,committed_by,"
+            "committed_at,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                (7001, 2, "auto", "schema52-preview", "a" * 64,
+                 "preview.xlsx", "previewed", 1, 1, 20, None, None, 1.0, 2.0),
+                (7002, 2, "auto", "schema52-committed", "b" * 64,
+                 "committed.xlsx", "committed", 1, 1, 20, 20, 3.0, 1.0, 3.0),
+            ),
+        )
+        connection.executemany(
+            "INSERT INTO inspection_branch_import_row("
+            "import_id,tenant_id,row_number,store_code,action,error_code,"
+            "error_message,payload_json,masked_payload_json,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                (7001, 2, 1, "A001", "create", None, None, "{}", "{}", 1.0),
+                (7002, 2, 1, "A002", "create", None, None, "{}", "{}", 1.0),
+            ),
+        )
+        connection.execute("DELETE FROM schema_version WHERE version>=53")
+        connection.execute("PRAGMA user_version=52")
+        connection.commit()
+        db._close_all_connections()
+        db._conn = None
+        db._conn_path = None
+
+        db.conn()
+
+        table_sql = db.one(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='inspection_branch_import'"
+        )["sql"]
+        self.assertIn("'expired'", table_sql)
+        self.assertIn("staging_purged_at", {
+            row["name"]
+            for row in db.q("PRAGMA table_info(inspection_branch_import)")
+        })
+        self.assertEqual(
+            [(7001, "previewed", 1), (7002, "committed", 1)],
+            [
+                (row["id"], row["status"], row["create_count"])
+                for row in db.q(
+                    "SELECT id,status,create_count "
+                    "FROM inspection_branch_import ORDER BY id"
+                )
+            ],
+        )
+        self.assertEqual(
+            [(7001, "A001"), (7002, "A002")],
+            [
+                (row["import_id"], row["store_code"])
+                for row in db.q(
+                    "SELECT import_id,store_code "
+                    "FROM inspection_branch_import_row "
+                    "WHERE import_id IN (7001,7002) ORDER BY import_id"
+                )
+            ],
+        )
+        new_id = db.insert("inspection_branch_import", {
+            "tenant_id": 2,
+            "industry_key": "auto",
+            "request_key": "schema53-expired",
+            "source_sha256": "c" * 64,
+            "filename": "expired.xlsx",
+            "status": "expired",
+            "created_by": 20,
+        })
+        self.assertGreater(new_id, 7002)
+        self.assertEqual("ok", db.one("PRAGMA quick_check")["quick_check"])
+        self.assertEqual(
+            db.LATEST_SCHEMA_VERSION,
+            db.one("PRAGMA user_version")["user_version"],
+        )
+        self.assertEqual(
+            "versioned-industry-decision-employees",
+            db.one("SELECT name FROM schema_version WHERE version=53")["name"],
+        )
+
+        db._close_all_connections()
+        db._conn = None
+        db._conn_path = None
+        db.conn()
+        self.assertEqual(3, db.one(
+            "SELECT COUNT(*) AS n FROM inspection_branch_import "
+            "WHERE id IN (7001,7002,?)", (new_id,),
+        )["n"])
+
+    def test_stamped_schema52_upgrades_row_versions_and_legacy_name_index(self):
+        connection = db.conn()
+        connection.execute("DROP INDEX idx_store_branch_name")
+        connection.execute(
+            "CREATE UNIQUE INDEX idx_store_branch_name "
+            "ON store_branch(tenant_id,industry_key,name)"
+        )
+        for table, column in (
+            ("store_branch", "row_version"),
+            ("inspection_branch_import_row", "existing_branch_id"),
+            ("inspection_branch_import_row", "existing_row_version"),
+            ("inspection_branch_import_row", "existing_business_value_id"),
+            ("inspection_branch_import_row", "existing_business_row_version"),
+            ("inspection_business_value", "row_version"),
+            ("inspection_branch_import", "business_create_count"),
+            ("inspection_branch_import", "business_update_count"),
+            ("inspection_branch_import", "business_skip_count"),
+            ("inspection_branch_import", "business_error_count"),
+        ):
+            if column in {
+                row["name"] for row in connection.execute(
+                    f"PRAGMA table_info({table})"
+                )
+            }:
+                connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+        connection.commit()
+        db._close_all_connections()
+        db._conn = None
+        db._conn_path = None
+
+        db.conn()
+
+        self.assertIn(
+            "row_version",
+            {row["name"] for row in db.q("PRAGMA table_info(store_branch)")},
+        )
+        self.assertTrue({
+            "existing_branch_id", "existing_row_version",
+            "existing_business_value_id", "existing_business_row_version",
+        } <= {
+            row["name"]
+            for row in db.q("PRAGMA table_info(inspection_branch_import_row)")
+        })
+        self.assertIn("row_version", {
+            row["name"]
+            for row in db.q("PRAGMA table_info(inspection_business_value)")
+        })
+        self.assertTrue({
+            "business_create_count", "business_update_count",
+            "business_skip_count", "business_error_count",
+            "staging_purged_at",
+        } <= {
+            row["name"]
+            for row in db.q("PRAGMA table_info(inspection_branch_import)")
+        })
+        name_index = next(
+            row for row in db.q("PRAGMA index_list(store_branch)")
+            if row["name"] == "idx_store_branch_name"
+        )
+        self.assertEqual(0, name_index["unique"])
+        db.insert("store_branch", {
+            "tenant_id": 2, "industry_key": "restaurant",
+            "store_code": "DUPNAME001", "name": "同名门店",
+        })
+        db.insert("store_branch", {
+            "tenant_id": 2, "industry_key": "restaurant",
+            "store_code": "DUPNAME002", "name": "同名门店",
+        })
+
+    def test_stamped_schema52_unknown_name_index_shape_fails_closed(self):
+        connection = db.conn()
+        connection.execute("DROP INDEX idx_store_branch_name")
+        connection.execute(
+            "CREATE INDEX idx_store_branch_name "
+            "ON store_branch(tenant_id,name,industry_key)"
+        )
+        connection.commit()
+        db._close_all_connections()
+        db._conn = None
+        db._conn_path = None
+
+        with self.assertRaisesRegex(RuntimeError, "索引结构不完整"):
+            db.conn()
+        self.assertIsNone(db._conn)
+
+    def test_schema52_stamped_wrong_business_natural_index_fails_closed(self):
+        connection = db.conn()
+        connection.execute(
+            "DROP INDEX idx_inspection_business_value_natural"
+        )
+        connection.execute(
+            "CREATE UNIQUE INDEX idx_inspection_business_value_natural "
+            "ON inspection_business_value(tenant_id,industry_key,branch_id,"
+            "metric_key,period_start,period_end,source_ref)"
+        )
+        connection.commit()
+        db._close_all_connections()
+        db._conn = None
+        db._conn_path = None
+
+        with self.assertRaisesRegex(RuntimeError, "索引结构不完整"):
+            db.conn()
+        self.assertIsNone(db._conn)
+
+        check = sqlite3.connect(db.DB_PATH)
+        try:
+            columns = [
+                row[2] for row in check.execute(
+                    "PRAGMA index_info(idx_inspection_business_value_natural)"
+                )
+            ]
+            self.assertEqual([
+                "tenant_id", "industry_key", "branch_id", "metric_key",
+                "period_start", "period_end", "source_ref",
+            ], columns)
+            self.assertEqual(
+                db.LATEST_SCHEMA_VERSION,
+                check.execute("PRAGMA user_version").fetchone()[0],
+            )
+        finally:
+            check.close()
 
     def test_future_database_is_rejected_before_wal_or_schema_mutation(self):
         if db._conn is not None:

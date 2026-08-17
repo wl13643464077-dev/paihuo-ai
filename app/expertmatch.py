@@ -132,7 +132,7 @@ async def preflight_fit(idx: int, direction: str) -> dict:
     LLM 异常/超时/挑不出一律 fit=True 放行,绝不拦死派单。
     """
     direction = (direction or "").strip()
-    e = departments.get(idx)
+    e = departments.get_active(idx)
     if not e or not direction:
         return {"fit": True, "why": "", "suggestions": []}
     peers = await db.arun(_dept_peers, e["dept_key"], idx)

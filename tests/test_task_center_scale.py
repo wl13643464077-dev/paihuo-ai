@@ -10,7 +10,26 @@ import time
 import unittest
 from unittest.mock import patch
 
-from app import db, departments, taskcenter
+from app import db, departments, employeeidentity, taskcenter
+
+
+CORE_TASK_IDENTITY = (
+    "legacy.idx.0", "legacy-unknown", "趋势官", "content", "legacy-unknown",
+)
+
+
+def _member_snapshot(idx: int, dept_key: str) -> dict:
+    employee = employeeidentity.any_employee(idx)
+    if employee and employee.get("dept_key") == dept_key and dept_key != "content":
+        return employeeidentity.snapshot(employee)
+    return {
+        "idx": idx,
+        "key": f"legacy.idx.{idx}",
+        "name": f"历史员工#{idx}",
+        "dept_key": dept_key,
+        "catalog_version": "legacy-unknown",
+        "spec_sha256": "legacy-unknown",
+    }
 
 
 class TaskCenterScaleCase(unittest.TestCase):
@@ -46,10 +65,13 @@ class TaskCenterScaleCase(unittest.TestCase):
         connection.executemany(
             "INSERT INTO task("
             "tenant_id,emp_idx,brief_json,status,billing_status,retry_count,"
+            "employee_key,employee_catalog_version,employee_name_snapshot,"
+            "employee_dept_key,employee_spec_sha256,"
             "created_at,updated_at"
-            ") VALUES(?,?,?,?,?,?,?,?)",
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 (1, 0, task_brief, statuses[index % 4], "refunded", 0,
+                 *CORE_TASK_IDENTITY,
                  float(index + 1), float(index + 1))
                 for index in range(12_000)
             ),
@@ -68,20 +90,27 @@ class TaskCenterScaleCase(unittest.TestCase):
         # 两类噪声都不能进入计数或页内详情：别的租户，以及当前账号无权看的部门。
         connection.executemany(
             "INSERT INTO task("
-            "tenant_id,emp_idx,brief_json,status,created_at,updated_at"
-            ") VALUES(?,?,?,?,?,?)",
+            "tenant_id,emp_idx,brief_json,status,employee_key,"
+            "employee_catalog_version,employee_name_snapshot,"
+            "employee_dept_key,employee_spec_sha256,created_at,updated_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (
-                (2, 0, task_brief, "running", float(40_000 + index),
+                (2, 0, task_brief, "running", *CORE_TASK_IDENTITY,
+                 float(40_000 + index),
                  float(40_000 + index))
                 for index in range(1_000)
             ),
         )
         connection.executemany(
             "INSERT INTO task("
-            "tenant_id,emp_idx,brief_json,status,created_at,updated_at"
-            ") VALUES(?,?,?,?,?,?)",
+            "tenant_id,emp_idx,brief_json,status,employee_key,"
+            "employee_catalog_version,employee_name_snapshot,"
+            "employee_dept_key,employee_spec_sha256,created_at,updated_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (
-                (1, 9001, task_brief, "running", float(50_000 + index),
+                (1, 9001, task_brief, "running", "restaurant.test.legacy",
+                 "test.v1", "餐饮经营顾问", "restaurant", "d" * 64,
+                 float(50_000 + index),
                  float(50_000 + index))
                 for index in range(1_000)
             ),
@@ -170,41 +199,40 @@ class TaskCenterScaleCase(unittest.TestCase):
         })
 
     def test_meeting_visibility_fails_closed_for_hidden_unknown_or_malformed_members(self):
+        restaurant_idx = 101
         rows = (
-            ("纯内容部会议", "[0]"),
-            ("跨部门会议", "[0,9001]"),
-            ("未知成员会议", "[0,999999]"),
-            ("损坏成员会议", "{broken"),
+            ("纯内容部会议", "[0]", json.dumps([
+                _member_snapshot(0, "content")
+            ], ensure_ascii=False)),
+            ("跨部门会议", f"[0,{restaurant_idx}]", json.dumps([
+                _member_snapshot(0, "content"),
+                _member_snapshot(restaurant_idx, "restaurant"),
+            ], ensure_ascii=False)),
+            ("未知成员会议", "[0,999999]", json.dumps([
+                _member_snapshot(0, "content"),
+                _member_snapshot(999999, "unknown"),
+            ], ensure_ascii=False)),
+            ("损坏成员会议", "{broken", "{broken"),
         )
         ids = {
             question: db.insert("meeting", {
                 "tenant_id": 1,
                 "question": question,
                 "emp_idxs_json": members,
+                "member_snapshot_json": snapshots,
                 "status": "running",
                 "phase": "brainstorm",
                 "created_at": index + 1,
                 "updated_at": index + 1,
             })
-            for index, (question, members) in enumerate(rows)
+            for index, (question, members, snapshots) in enumerate(rows)
         }
-        industry_expert = {
-            "idx": 9001,
-            "dept_key": "restaurant",
-            "name": "餐饮经营顾问",
-        }
-        real_get = departments.get
-
-        def expert_get(index):
-            return industry_expert if index == 9001 else real_get(index)
-
-        with patch.object(departments, "get", side_effect=expert_get):
-            content_rows = taskcenter.list_items(
-                1, {"content"}, limit=20
-            )["items"]
-            mixed_rows = taskcenter.list_items(
-                1, {"content", "restaurant"}, limit=20
-            )["items"]
+        content_rows = taskcenter.list_items(
+            1, {"content"}, limit=20
+        )["items"]
+        mixed_rows = taskcenter.list_items(
+            1, {"content", "restaurant"}, limit=20
+        )["items"]
 
         content_meetings = {
             item["record_id"] for item in content_rows
@@ -231,14 +259,16 @@ class TaskCenterScaleCase(unittest.TestCase):
 
         connection.executemany(
             "INSERT INTO task("
-            "tenant_id,emp_idx,brief_json,status,created_at,updated_at"
-            ") VALUES(?,?,?,?,?,?)",
+            "tenant_id,emp_idx,brief_json,status,employee_key,"
+            "employee_catalog_version,employee_name_snapshot,"
+            "employee_dept_key,employee_spec_sha256,created_at,updated_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (
                 (
                     1, 0,
                     json.dumps({"direction": f"专家{index}", "material": body},
                                ensure_ascii=False),
-                    status(index), index + 1, index + 1,
+                    status(index), *CORE_TASK_IDENTITY, index + 1, index + 1,
                 )
                 for index in range(1_000)
             ),
@@ -262,12 +292,14 @@ class TaskCenterScaleCase(unittest.TestCase):
         ).fetchone()[0])
         connection.executemany(
             "INSERT INTO meeting("
-            "tenant_id,question,emp_idxs_json,status,phase,"
+            "tenant_id,question,emp_idxs_json,member_snapshot_json,status,phase,"
             "execution_task_ids_json,created_at,updated_at"
-            ") VALUES(?,?,?,?,?,?,?,?)",
+            ") VALUES(?,?,?,?,?,?,?,?,?)",
             (
                 (
-                    1, f"会议{index}{body}", "[0]", status(index),
+                    1, f"会议{index}{body}", "[0]", json.dumps([
+                        _member_snapshot(0, "content")
+                    ], ensure_ascii=False), status(index),
                     status(index), "[]", 4_000 + index, 4_000 + index,
                 )
                 for index in range(1_000)
@@ -414,7 +446,8 @@ class TaskCenterScaleCase(unittest.TestCase):
         self.assertLessEqual(
             sum(stat["body_rows"] for stat in query_stats), 8, query_stats
         )
-        self.assertLessEqual(json_loads, 8)
+        # 8 张页内详情卡，会议卡还需单独解析一次冻结成员快照。
+        self.assertLessEqual(json_loads, 9)
         self.assertLessEqual(len(query_stats), 20, query_stats)
         self.assertLess(elapsed, 2.0, {
             "elapsed": elapsed,

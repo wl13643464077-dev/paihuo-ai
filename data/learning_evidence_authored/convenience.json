@@ -1,0 +1,2512 @@
+{
+ "convenience-v4-1101": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "日内多季节性分解",
+    "object_aliases": [
+     "store visit counts",
+     "pos timestamps",
+     "store closure logs"
+    ],
+    "method_aliases": [
+     "intraday seasonal decomposition",
+     "multiple seasonality modeling",
+     "hourly weather adjustment"
+    ]
+   },
+   {
+    "topic": "拟合半小时分位",
+    "object_aliases": [
+     "store visit counts",
+     "pos timestamps",
+     "store closure logs"
+    ],
+    "method_aliases": [
+     "half hour quantile fit",
+     "quantile regression",
+     "demand percentile estimation"
+    ]
+   },
+   {
+    "topic": "划定样本支持范围",
+    "object_aliases": [
+     "store visit counts",
+     "pos timestamps",
+     "store closure logs"
+    ],
+    "method_aliases": [
+     "sample support range",
+     "data coverage bounds",
+     "training sample selection"
+    ]
+   },
+   {
+    "topic": "客流到交易转化",
+    "object_aliases": [
+     "store visit counts",
+     "pos transactions",
+     "conversion events"
+    ],
+    "method_aliases": [
+     "traffic conversion rate",
+     "visitor to sale ratio",
+     "basket conversion analysis"
+    ]
+   },
+   {
+    "topic": "社区事件样本外校准",
+    "object_aliases": [
+     "store visit counts",
+     "pos timestamps",
+     "community event logs"
+    ],
+    "method_aliases": [
+     "out of sample calibration",
+     "event based adjustment",
+     "external shock validation"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1102": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "任务型品类管理",
+    "object_aliases": [
+     "sku margin",
+     "fresh food sku",
+     "basket affinity"
+    ],
+    "method_aliases": [
+     "mission-based merchandising",
+     "category roles",
+     "shopping mission segmentation"
+    ]
+   },
+   {
+    "topic": "绘制替代网络",
+    "object_aliases": [
+     "stockout substitute",
+     "sku adjacency",
+     "basket items"
+    ],
+    "method_aliases": [
+     "demand substitution network",
+     "affinity analysis",
+     "market basket analysis"
+    ]
+   },
+   {
+    "topic": "发现品类缺口",
+    "object_aliases": [
+     "assortment gaps",
+     "sku coverage",
+     "category whitespace"
+    ],
+    "method_aliases": [
+     "gap analysis",
+     "assortment planning",
+     "planogram optimization"
+    ]
+   },
+   {
+    "topic": "短保组合优化",
+    "object_aliases": [
+     "short shelf life",
+     "sku spoilage",
+     "display capacity"
+    ],
+    "method_aliases": [
+     "fresh assortment optimization",
+     "waste reduction planning",
+     "supply window scheduling"
+    ]
+   },
+   {
+    "topic": "需求替代网络",
+    "object_aliases": [
+     "substitute sku",
+     "demand transfer",
+     "out-of-stock item"
+    ],
+    "method_aliases": [
+     "substitution modeling",
+     "demand network analysis",
+     "stockout recovery"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1103": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "报童模型与双边损失",
+    "object_aliases": [
+     "stockout units",
+     "case pack",
+     "remaining shelf life"
+    ],
+    "method_aliases": [
+     "newsvendor model",
+     "underage cost",
+     "overage cost"
+    ]
+   },
+   {
+    "topic": "估计缺货损失",
+    "object_aliases": [
+     "stockout rate",
+     "lost sales",
+     "fill rate"
+    ],
+    "method_aliases": [
+     "lost sales estimation",
+     "stockout cost modeling",
+     "demand censoring"
+    ]
+   },
+   {
+    "topic": "解释箱规尾差",
+    "object_aliases": [
+     "case pack quantity",
+     "rounding remainder",
+     "order multiple"
+    ],
+    "method_aliases": [
+     "lot size rounding",
+     "integer order constraint",
+     "case pack reconciliation"
+    ]
+   },
+   {
+    "topic": "保质期库存约束",
+    "object_aliases": [
+     "expiry date",
+     "shelf life",
+     "aging inventory"
+    ],
+    "method_aliases": [
+     "shelf life constraint",
+     "FEFO policy",
+     "expiry risk control"
+    ]
+   },
+   {
+    "topic": "箱规整数订货",
+    "object_aliases": [
+     "case pack",
+     "order multiple",
+     "integer lot size"
+    ],
+    "method_aliases": [
+     "integer order quantity",
+     "lot size rounding",
+     "case pack ordering"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1104": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "剩余寿命定价",
+    "object_aliases": [
+     "remaining shelf life",
+     "sellable inventory",
+     "price version"
+    ],
+    "method_aliases": [
+     "markdown optimization",
+     "dynamic pricing",
+     "discount ladder"
+    ]
+   },
+   {
+    "topic": "保护毛利底线",
+    "object_aliases": [
+     "gross margin floor",
+     "shrink allowance",
+     "promotion rule"
+    ],
+    "method_aliases": [
+     "margin floor control",
+     "price floor guard",
+     "gross margin protection"
+    ]
+   },
+   {
+    "topic": "阻止过期销售",
+    "object_aliases": [
+     "expiration date",
+     "sellable inventory",
+     "markdown price"
+    ],
+    "method_aliases": [
+     "expiry cutoff",
+     "last sale date",
+     "sell-by enforcement"
+    ]
+   },
+   {
+    "topic": "需求价格弹性",
+    "object_aliases": [
+     "price elasticity",
+     "demand curve",
+     "unit sales"
+    ],
+    "method_aliases": [
+     "elasticity estimation",
+     "price sensitivity",
+     "demand modeling"
+    ]
+   },
+   {
+    "topic": "清价与残值比较",
+    "object_aliases": [
+     "clearance price",
+     "salvage value",
+     "markdown discount"
+    ],
+    "method_aliases": [
+     "clearance decision",
+     "salvage comparison",
+     "liquidation analysis"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1105": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "批次物料守恒",
+    "object_aliases": [
+     "batch receipts",
+     "store transfers",
+     "expiry writeoffs"
+    ],
+    "method_aliases": [
+     "inventory balance check"
+    ]
+   },
+   {
+    "topic": "关联缺货和清价",
+    "object_aliases": [
+     "stockout alerts",
+     "markdown events",
+     "order schedules"
+    ],
+    "method_aliases": [
+     "root cause linkage"
+    ]
+   },
+   {
+    "topic": "验证不复发",
+    "object_aliases": [
+     "repeat incident logs",
+     "corrective actions",
+     "audit trails"
+    ],
+    "method_aliases": [
+     "recurrence testing"
+    ]
+   },
+   {
+    "topic": "因果反证",
+    "object_aliases": [
+     "causal factors",
+     "temporal records",
+     "batch images"
+    ],
+    "method_aliases": [
+     "counterfactual analysis"
+    ]
+   },
+   {
+    "topic": "CAPA有效性评估",
+    "object_aliases": [
+     "capa records",
+     "effectiveness checks",
+     "closure reports"
+    ],
+    "method_aliases": [
+     "effectiveness verification"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1106": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "库存事件溯源",
+    "object_aliases": [
+     "pos sales returns",
+     "inventory adjustment ledger",
+     "online sellable quantity"
+    ],
+    "method_aliases": [
+     "event sourcing audit",
+     "inventory event log",
+     "reconciliation trail"
+    ]
+   },
+   {
+    "topic": "定位负库存",
+    "object_aliases": [
+     "negative inventory",
+     "stock adjustment records",
+     "substitution logs"
+    ],
+    "method_aliases": [
+     "stockout root cause",
+     "inventory variance analysis",
+     "exception flagging"
+    ]
+   },
+   {
+    "topic": "减少无货取消",
+    "object_aliases": [
+     "out-of-stock cancellations",
+     "substitution records",
+     "channel stock availability"
+    ],
+    "method_aliases": [
+     "fill rate improvement",
+     "order cancellation reduction",
+     "stockout prevention"
+    ]
+   },
+   {
+    "topic": "缓存一致性",
+    "object_aliases": [
+     "cache timestamp",
+     "sellable inventory cache",
+     "channel stock snapshot"
+    ],
+    "method_aliases": [
+     "cache invalidation",
+     "stale data detection",
+     "eventual consistency check"
+    ]
+   },
+   {
+    "topic": "高损品安全库存校准",
+    "object_aliases": [
+     "shrink-prone items",
+     "safety stock level",
+     "loss-adjusted demand"
+    ],
+    "method_aliases": [
+     "safety stock recalibration",
+     "shrink factor modeling",
+     "service level tuning"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1107": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "零售替代效用",
+    "object_aliases": [
+     "original sku attributes",
+     "substitute inventory margin",
+     "customer substitution preference"
+    ],
+    "method_aliases": [
+     "substitution utility model",
+     "choice based conjoint",
+     "utility maximization"
+    ]
+   },
+   {
+    "topic": "检查效期库存",
+    "object_aliases": [
+     "expiry dated stock",
+     "sell by date inventory",
+     "short dated goods"
+    ],
+    "method_aliases": [
+     "shelf life verification",
+     "fefo rotation",
+     "first expire first out"
+    ]
+   },
+   {
+    "topic": "转退款而不强替",
+    "object_aliases": [
+     "refund transaction",
+     "order cancellation record",
+     "refund reason code"
+    ],
+    "method_aliases": [
+     "refund instead of substitute",
+     "forced substitution avoidance",
+     "out of stock refund flow"
+    ]
+   },
+   {
+    "topic": "过敏与限制属性",
+    "object_aliases": [
+     "allergen declaration",
+     "dietary restriction flag",
+     "product allergen profile"
+    ],
+    "method_aliases": [
+     "allergen risk assessment",
+     "restriction attribute check",
+     "cross contact control"
+    ]
+   },
+   {
+    "topic": "顾客明示同意",
+    "object_aliases": [
+     "customer consent record",
+     "opt in authorization",
+     "substitution approval log"
+    ],
+    "method_aliases": [
+     "explicit consent capture",
+     "informed consent process",
+     "affirmative opt in"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1108": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "波次拣选",
+    "object_aliases": [
+     "picking wave orders",
+     "zone walking time",
+     "handoff capacity"
+    ],
+    "method_aliases": [
+     "wave picking schedule",
+     "SKU slotting plan",
+     "checkout queue model"
+    ]
+   },
+   {
+    "topic": "计算拣货产能",
+    "object_aliases": [
+     "picker skill matrix",
+     "zone walking time",
+     "promise time window"
+    ],
+    "method_aliases": [
+     "picking throughput calculation",
+     "capacity utilization rate",
+     "labor productivity metric"
+    ]
+   },
+   {
+    "topic": "平衡线上线下",
+    "object_aliases": [
+     "online order queue",
+     "in-store checkout queue",
+     "shared labor pool"
+    ],
+    "method_aliases": [
+     "omnichannel load balancing",
+     "priority queue policy",
+     "resource reallocation rule"
+    ]
+   },
+   {
+    "topic": "多渠道排队",
+    "object_aliases": [
+     "multi-channel order queue",
+     "service time distribution",
+     "queue length threshold"
+    ],
+    "method_aliases": [
+     "queueing theory model",
+     "arrival rate estimation",
+     "waiting time forecast"
+    ]
+   },
+   {
+    "topic": "店内线上容量冲突",
+    "object_aliases": [
+     "store fulfillment capacity",
+     "online order backlog",
+     "checkout congestion level"
+    ],
+    "method_aliases": [
+     "capacity conflict detection",
+     "bottleneck identification",
+     "peak hour staffing plan"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1109": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "时变服务区",
+    "object_aliases": [
+     "delivery radius",
+     "weather restrictions",
+     "route distance"
+    ],
+    "method_aliases": [
+     "time-sliced zoning",
+     "dynamic service area",
+     "real-time coverage"
+    ]
+   },
+   {
+    "topic": "叠加骑手供给",
+    "object_aliases": [
+     "rider supply",
+     "dispatch tracks",
+     "store arrival logs"
+    ],
+    "method_aliases": [
+     "supply overlay",
+     "capacity stacking",
+     "rider allocation"
+    ]
+   },
+   {
+    "topic": "识别供给缺口",
+    "object_aliases": [
+     "coverage gaps",
+     "order volume",
+     "rider density"
+    ],
+    "method_aliases": [
+     "gap detection",
+     "shortage mapping",
+     "demand-supply mismatch"
+    ]
+   },
+   {
+    "topic": "末端楼宇耗时",
+    "object_aliases": [
+     "building dwell time",
+     "last-mile time",
+     "doorstep delay"
+    ],
+    "method_aliases": [
+     "elevator wait model",
+     "access time estimate",
+     "final-leg prediction"
+    ]
+   },
+   {
+    "topic": "温层品质时限",
+    "object_aliases": [
+     "cold chain items",
+     "quality window",
+     "temperature tiers"
+    ],
+    "method_aliases": [
+     "shelf-life tracking",
+     "temperature integrity",
+     "quality deadline check"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1110": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "多源事件关联",
+    "object_aliases": [
+     "alarm tickets",
+     "self-checkout gates",
+     "payment failures"
+    ],
+    "method_aliases": [
+     "event correlation",
+     "cross-source fusion",
+     "temporal alignment"
+    ]
+   },
+   {
+    "topic": "排除传感器误报",
+    "object_aliases": [
+     "sensor events",
+     "door openings",
+     "service tickets"
+    ],
+    "method_aliases": [
+     "false positive filtering",
+     "anomaly validation",
+     "noise reduction"
+    ]
+   },
+   {
+    "topic": "验证设备复开",
+    "object_aliases": [
+     "device restarts",
+     "locker doors",
+     "alarm logs"
+    ],
+    "method_aliases": [
+     "reopening checks",
+     "reboot verification",
+     "status confirmation"
+    ]
+   },
+   {
+    "topic": "告警风险分级",
+    "object_aliases": [
+     "risk levels",
+     "alert severities",
+     "incident types"
+    ],
+    "method_aliases": [
+     "risk scoring",
+     "priority ranking",
+     "severity grading"
+    ]
+   },
+   {
+    "topic": "无人场景故障隔离",
+    "object_aliases": [
+     "unmanned stores",
+     "fault events",
+     "sensor nodes"
+    ],
+    "method_aliases": [
+     "fault isolation",
+     "remote diagnosis",
+     "zone quarantine"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1111": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "增量营业时段经济学",
+    "object_aliases": [
+     "hourly gross margin",
+     "night shift labor",
+     "competitor store hours"
+    ],
+    "method_aliases": [
+     "marginal hour analysis",
+     "incremental revenue model",
+     "operating hour economics"
+    ]
+   },
+   {
+    "topic": "估计延时增量",
+    "object_aliases": [
+     "extended hours sales",
+     "hourly customer traffic",
+     "late night transactions"
+    ],
+    "method_aliases": [
+     "incremental sales estimate",
+     "difference in differences",
+     "time series forecast"
+    ]
+   },
+   {
+    "topic": "保护服务连续",
+    "object_aliases": [
+     "service continuity",
+     "operational resilience",
+     "night shift coverage"
+    ],
+    "method_aliases": [
+     "continuity planning",
+     "redundancy strategy",
+     "business impact analysis"
+    ]
+   },
+   {
+    "topic": "夜间风险成本",
+    "object_aliases": [
+     "night shift cost",
+     "security incident risk",
+     "hourly operating cost"
+    ],
+    "method_aliases": [
+     "risk cost assessment",
+     "cost benefit analysis",
+     "hazard exposure rating"
+    ]
+   },
+   {
+    "topic": "准实验营业时长评估",
+    "object_aliases": [
+     "store opening hours",
+     "control store group",
+     "treatment store group"
+    ],
+    "method_aliases": [
+     "quasi experimental design",
+     "regression discontinuity",
+     "matched pair comparison"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1112": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "独处作业风险",
+    "object_aliases": [
+     "panic button",
+     "night shift lone worker",
+     "cash handling task"
+    ],
+    "method_aliases": [
+     "lone worker risk assessment",
+     "situational awareness check",
+     "remote monitoring protocol"
+    ]
+   },
+   {
+    "topic": "测试求援链",
+    "object_aliases": [
+     "emergency notification flow",
+     "alarm escalation path",
+     "response drill log"
+    ],
+    "method_aliases": [
+     "test call cascade",
+     "duress alarm drill",
+     "notification tree verification"
+    ]
+   },
+   {
+    "topic": "验证紧急联络",
+    "object_aliases": [
+     "emergency contact list",
+     "on-call roster",
+     "escalation contact data"
+    ],
+    "method_aliases": [
+     "contact accuracy audit",
+     "call tree validation",
+     "emergency drill simulation"
+    ]
+   },
+   {
+    "topic": "高危任务双人规则",
+    "object_aliases": [
+     "cash counting task",
+     "inventory audit task",
+     "two-person task roster"
+    ],
+    "method_aliases": [
+     "buddy system protocol",
+     "dual custody procedure",
+     "paired task assignment"
+    ]
+   },
+   {
+    "topic": "紧急求援可靠性",
+    "object_aliases": [
+     "duress alarm system",
+     "backup communication device",
+     "response time metric"
+    ],
+    "method_aliases": [
+     "reliability benchmark test",
+     "fallback link check",
+     "response time verification"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1113": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "多技能覆盖排班",
+    "object_aliases": [
+     "skill matrix",
+     "shift coverage",
+     "labor demand"
+    ],
+    "method_aliases": [
+     "cross-training schedule",
+     "employee rostering",
+     "workforce optimization"
+    ]
+   },
+   {
+    "topic": "检测休息冲突",
+    "object_aliases": [
+     "rest break",
+     "shift overlap",
+     "work schedule"
+    ],
+    "method_aliases": [
+     "break compliance check",
+     "conflict detection",
+     "schedule audit"
+    ]
+   },
+   {
+    "topic": "控制加班",
+    "object_aliases": [
+     "overtime hours",
+     "labor cost",
+     "payroll data"
+    ],
+    "method_aliases": [
+     "overtime control",
+     "hours tracking",
+     "labor budgeting"
+    ]
+   },
+   {
+    "topic": "劳动时段约束",
+    "object_aliases": [
+     "work shift",
+     "labor law",
+     "time window"
+    ],
+    "method_aliases": [
+     "shift constraint",
+     "hours regulation",
+     "scheduling rule"
+    ]
+   },
+   {
+    "topic": "关键技能冗余",
+    "object_aliases": [
+     "critical skill",
+     "staff redundancy",
+     "backup coverage"
+    ],
+    "method_aliases": [
+     "skill redundancy planning",
+     "coverage analysis",
+     "risk mitigation"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1114": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "责任转移控制",
+    "object_aliases": [
+     "unresolved complaints",
+     "equipment alarms",
+     "cash variance"
+    ],
+    "method_aliases": [
+     "shift handoff",
+     "temperature logs",
+     "batch expiry checks"
+    ]
+   },
+   {
+    "topic": "验证接班查看",
+    "object_aliases": [
+     "unresolved complaints",
+     "equipment alarms",
+     "cash variance"
+    ],
+    "method_aliases": [
+     "shift handoff",
+     "temperature logs",
+     "batch expiry checks"
+    ]
+   },
+   {
+    "topic": "催办逾期事项",
+    "object_aliases": [
+     "unresolved complaints",
+     "equipment alarms",
+     "cash variance"
+    ],
+    "method_aliases": [
+     "shift handoff",
+     "temperature logs",
+     "batch expiry checks"
+    ]
+   },
+   {
+    "topic": "未结事项状态机",
+    "object_aliases": [
+     "unresolved complaints",
+     "equipment alarms",
+     "cash variance"
+    ],
+    "method_aliases": [
+     "shift handoff",
+     "temperature logs",
+     "batch expiry checks"
+    ]
+   },
+   {
+    "topic": "班次截止完整性",
+    "object_aliases": [
+     "unresolved complaints",
+     "equipment alarms",
+     "cash variance"
+    ],
+    "method_aliases": [
+     "shift handoff",
+     "temperature logs",
+     "batch expiry checks"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1115": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "暴力盗抢事件分级",
+    "object_aliases": [
+     "incident reports",
+     "panic button logs",
+     "store closure records"
+    ],
+    "method_aliases": [
+     "robbery severity matrix",
+     "incident classification scheme",
+     "loss impact assessment"
+    ]
+   },
+   {
+    "topic": "冻结原始影像",
+    "object_aliases": [
+     "cctv footage",
+     "video evidence",
+     "surveillance records"
+    ],
+    "method_aliases": [
+     "video preservation protocol",
+     "evidence lock procedure",
+     "chain of custody"
+    ]
+   },
+   {
+    "topic": "判断闭店恢复",
+    "object_aliases": [
+     "store reopening criteria",
+     "closure status",
+     "recovery checklist"
+    ],
+    "method_aliases": [
+     "reopening decision framework",
+     "damage assessment process",
+     "post-incident restoration plan"
+    ]
+   },
+   {
+    "topic": "人员优先应急",
+    "object_aliases": [
+     "employee safety",
+     "staff evacuation plan",
+     "injury reports"
+    ],
+    "method_aliases": [
+     "person-first response",
+     "emergency priority protocol",
+     "human safety assessment"
+    ]
+   },
+   {
+    "topic": "数字证据保全",
+    "object_aliases": [
+     "digital exhibits",
+     "access control logs",
+     "witness statements"
+    ],
+    "method_aliases": [
+     "evidence integrity process",
+     "digital forensics capture",
+     "data preservation standard"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1116": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "空间生产率",
+    "object_aliases": [
+     "sales per square foot",
+     "gross margin return on inventory",
+     "stockout rate"
+    ],
+    "method_aliases": [
+     "space elasticity analysis",
+     "planogram optimization",
+     "category role matrix"
+    ]
+   },
+   {
+    "topic": "识别缺货受限SKU",
+    "object_aliases": [
+     "out-of-stock sku",
+     "replenishment lead time",
+     "shelf capacity"
+    ],
+    "method_aliases": [
+     "stockout root cause analysis",
+     "sku rationalization",
+     "service level target"
+    ]
+   },
+   {
+    "topic": "提出试验图",
+    "object_aliases": [
+     "test store cluster",
+     "control store group",
+     "display duration"
+    ],
+    "method_aliases": [
+     "store level experiment design",
+     "a/b testing protocol",
+     "sales lift measurement"
+    ]
+   },
+   {
+    "topic": "面位弹性",
+    "object_aliases": [
+     "facing count",
+     "shelf position",
+     "display duration"
+    ],
+    "method_aliases": [
+     "facing elasticity model",
+     "assortment optimization",
+     "shelf space allocation"
+    ]
+   },
+   {
+    "topic": "品类角色约束",
+    "object_aliases": [
+     "category role",
+     "traffic driver",
+     "profit generator"
+    ],
+    "method_aliases": [
+     "category role assignment",
+     "planogram compliance check",
+     "merchandising hierarchy"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1117": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "陈列版本控制",
+    "object_aliases": [
+     "planogram versions",
+     "shelf photo audit",
+     "approval records"
+    ],
+    "method_aliases": [
+     "version control",
+     "change management",
+     "store rollout tracking"
+    ]
+   },
+   {
+    "topic": "核验临时替代",
+    "object_aliases": [
+     "out-of-stock substitutes",
+     "temporary displays",
+     "shelf photo audit"
+    ],
+    "method_aliases": [
+     "compliance check",
+     "photo verification",
+     "exception validation"
+    ]
+   },
+   {
+    "topic": "确认改版落地",
+    "object_aliases": [
+     "planogram versions",
+     "store execution",
+     "rollout status"
+    ],
+    "method_aliases": [
+     "store audit",
+     "implementation check",
+     "gap analysis"
+    ]
+   },
+   {
+    "topic": "例外审批",
+    "object_aliases": [
+     "exception requests",
+     "approval records",
+     "temporary displays"
+    ],
+    "method_aliases": [
+     "exception approval",
+     "escalation process",
+     "authorization workflow"
+    ]
+   },
+   {
+    "topic": "货架安全可视规则",
+    "object_aliases": [
+     "shelf safety rules",
+     "display visibility",
+     "planogram compliance"
+    ],
+    "method_aliases": [
+     "safety inspection",
+     "visual standards",
+     "compliance audit"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1118": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "可变对价确认",
+    "object_aliases": [
+     "rebate accrual",
+     "settlement receivable",
+     "purchase contract terms"
+    ],
+    "method_aliases": [
+     "variable consideration",
+     "expected value method",
+     "most likely amount"
+    ]
+   },
+   {
+    "topic": "计入退货质量",
+    "object_aliases": [
+     "returned goods",
+     "defective inventory",
+     "reverse logistics"
+    ],
+    "method_aliases": [
+     "return rate",
+     "quality inspection",
+     "salvage value"
+    ]
+   },
+   {
+    "topic": "追回应收",
+    "object_aliases": [
+     "accounts receivable",
+     "outstanding invoices",
+     "payment disputes"
+    ],
+    "method_aliases": [
+     "dunning process",
+     "collection escalation",
+     "aging report"
+    ]
+   },
+   {
+    "topic": "资金时间价值",
+    "object_aliases": [
+     "discount rate",
+     "net present value",
+     "cash flow timing"
+    ],
+    "method_aliases": [
+     "present value",
+     "time value of money",
+     "discounted cash flow"
+    ]
+   },
+   {
+    "topic": "单位净采购成本",
+    "object_aliases": [
+     "unit cost",
+     "net purchase price",
+     "landed cost"
+    ],
+    "method_aliases": [
+     "cost allocation",
+     "net cost calculation",
+     "procurement costing"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1119": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "加盟合同订货边界",
+    "object_aliases": [
+     "franchise order cap",
+     "inventory holding capacity",
+     "slow mover list"
+    ],
+    "method_aliases": [
+     "order boundary audit",
+     "sell through analysis",
+     "stock allocation rule"
+    ]
+   },
+   {
+    "topic": "压测仓容现金",
+    "object_aliases": [
+     "warehouse storage capacity",
+     "cash conversion cycle",
+     "safety stock level"
+    ],
+    "method_aliases": [
+     "capacity stress test",
+     "cash flow simulation",
+     "liquidity buffer test"
+    ]
+   },
+   {
+    "topic": "形成例外审批",
+    "object_aliases": [
+     "exception request",
+     "override approval",
+     "nonstandard order"
+    ],
+    "method_aliases": [
+     "escalation workflow",
+     "approval matrix",
+     "exception handling process"
+    ]
+   },
+   {
+    "topic": "本地需求适配",
+    "object_aliases": [
+     "local demand profile",
+     "store level forecast",
+     "regional assortment"
+    ],
+    "method_aliases": [
+     "demand sensing",
+     "assortment optimization",
+     "localization strategy"
+    ]
+   },
+   {
+    "topic": "强配滞销风险",
+    "object_aliases": [
+     "forced allocation",
+     "markdown inventory",
+     "dead stock ratio"
+    ],
+    "method_aliases": [
+     "sellout risk scoring",
+     "inventory aging analysis",
+     "clearance planning"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1120": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "风险型运营审核",
+    "object_aliases": [
+     "complaint logs",
+     "shrink incidents",
+     "inspection checklists"
+    ],
+    "method_aliases": [
+     "risk based audit",
+     "corrective action tracking",
+     "deviation review"
+    ]
+   },
+   {
+    "topic": "检查整改证据",
+    "object_aliases": [
+     "photo evidence",
+     "corrective deadlines",
+     "store audit items"
+    ],
+    "method_aliases": [
+     "evidence verification",
+     "closure verification",
+     "rework inspection"
+    ]
+   },
+   {
+    "topic": "升级重复问题",
+    "object_aliases": [
+     "repeat findings",
+     "escalation records",
+     "issue owners"
+    ],
+    "method_aliases": [
+     "escalation matrix",
+     "repeat offender flagging",
+     "tiered follow up"
+    ]
+   },
+   {
+    "topic": "重复偏差聚类",
+    "object_aliases": [
+     "deviation patterns",
+     "recurrence counts",
+     "store clusters"
+    ],
+    "method_aliases": [
+     "cluster analysis",
+     "deviation grouping",
+     "recurrence scoring"
+    ]
+   },
+   {
+    "topic": "纠正预防验证",
+    "object_aliases": [
+     "preventive actions",
+     "root causes",
+     "effectiveness checks"
+    ],
+    "method_aliases": [
+     "corrective action plan",
+     "effectiveness validation",
+     "cause analysis"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1121": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "任务型消费洞察",
+    "object_aliases": [
+     "poi footfall",
+     "substitution basket",
+     "anonymous orders"
+    ],
+    "method_aliases": [
+     "task-based segmentation",
+     "mission shopping analysis",
+     "occasion mapping"
+    ]
+   },
+   {
+    "topic": "校正缺货",
+    "object_aliases": [
+     "stockout records",
+     "substitute purchases",
+     "authorized surveys"
+    ],
+    "method_aliases": [
+     "out-of-stock correction",
+     "demand substitution adjust",
+     "fill-rate calibration"
+    ]
+   },
+   {
+    "topic": "提出验证方案",
+    "object_aliases": [
+     "poi demographics",
+     "basket channels",
+     "seasonal events"
+    ],
+    "method_aliases": [
+     "hypothesis testing design",
+     "controlled experiment plan",
+     "validation protocol"
+    ]
+   },
+   {
+    "topic": "篮子聚类",
+    "object_aliases": [
+     "order baskets",
+     "basket channels",
+     "time slots"
+    ],
+    "method_aliases": [
+     "basket clustering",
+     "affinity grouping",
+     "market basket analysis"
+    ]
+   },
+   {
+    "topic": "定量定性三角验证",
+    "object_aliases": [
+     "qualitative records",
+     "quantitative metrics",
+     "survey evidence"
+    ],
+    "method_aliases": [
+     "triangulation method",
+     "mixed-method validation",
+     "cross-verification"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1122": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "组合定价与互补性",
+    "object_aliases": [
+     "basket affinity",
+     "bundle margin",
+     "substitute goods"
+    ],
+    "method_aliases": [
+     "bundle pricing",
+     "complementarity analysis",
+     "markdown allocation"
+    ]
+   },
+   {
+    "topic": "控制缺货",
+    "object_aliases": [
+     "out of stock",
+     "shelf inventory",
+     "substitute goods"
+    ],
+    "method_aliases": [
+     "stockout control",
+     "replenishment trigger",
+     "safety stock"
+    ]
+   },
+   {
+    "topic": "给出停止点",
+    "object_aliases": [
+     "promotion exposure",
+     "sku lifecycle",
+     "trial store"
+    ],
+    "method_aliases": [
+     "stop loss rule",
+     "promotion cutoff",
+     "exposure cap"
+    ]
+   },
+   {
+    "topic": "促销因果实验",
+    "object_aliases": [
+     "trial store",
+     "redemption rate",
+     "sku basket"
+    ],
+    "method_aliases": [
+     "causal inference",
+     "controlled experiment",
+     "difference in differences"
+    ]
+   },
+   {
+    "topic": "时段需求弹性",
+    "object_aliases": [
+     "time slot demand",
+     "sku margin",
+     "basket size"
+    ],
+    "method_aliases": [
+     "demand elasticity",
+     "time series",
+     "price sensitivity"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1123": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "会员权益会计",
+    "object_aliases": [
+     "loyalty liability",
+     "contract version",
+     "redemption expiry balance"
+    ],
+    "method_aliases": [
+     "deferred revenue recognition",
+     "breakage accounting",
+     "IFRS 15"
+    ]
+   },
+   {
+    "topic": "匹配可兑付资源",
+    "object_aliases": [
+     "inventory capacity",
+     "coupon inventory",
+     "service availability"
+    ],
+    "method_aliases": [
+     "resource matching",
+     "availability check",
+     "yield management"
+    ]
+   },
+   {
+    "topic": "保护消费者权益",
+    "object_aliases": [
+     "consumer rights",
+     "dispute resolution",
+     "refund policy"
+    ],
+    "method_aliases": [
+     "consumer protection act",
+     "fair practice",
+     "complaint handling"
+    ]
+   },
+   {
+    "topic": "到期兑付压力",
+    "object_aliases": [
+     "expiry surge",
+     "redemption queue",
+     "service backlog"
+    ],
+    "method_aliases": [
+     "capacity planning",
+     "demand forecasting",
+     "peak load management"
+    ]
+   },
+   {
+    "topic": "过期退款争议",
+    "object_aliases": [
+     "expired voucher",
+     "refund claim",
+     "chargeback case"
+    ],
+    "method_aliases": [
+     "dispute adjudication",
+     "escalation procedure",
+     "chargeback resolution"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1124": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "零售试销设计",
+    "object_aliases": [
+     "sku margin",
+     "shelf facing",
+     "store sales"
+    ],
+    "method_aliases": [
+     "test market design",
+     "control store trial",
+     "repurchase tracking"
+    ]
+   },
+   {
+    "topic": "分解替代",
+    "object_aliases": [
+     "category substitute",
+     "sku margin",
+     "shelf space"
+    ],
+    "method_aliases": [
+     "cannibalization analysis",
+     "replacement modeling",
+     "margin decomposition"
+    ]
+   },
+   {
+    "topic": "决定扩大停止",
+    "object_aliases": [
+     "trial store",
+     "rollout decision",
+     "sales lift"
+    ],
+    "method_aliases": [
+     "go no-go criteria",
+     "scale stop rule",
+     "test readout"
+    ]
+   },
+   {
+    "topic": "私牌替代效应",
+    "object_aliases": [
+     "private label",
+     "brand substitute",
+     "category share"
+    ],
+    "method_aliases": [
+     "substitution effect",
+     "cannibalization rate",
+     "share shift"
+    ]
+   },
+   {
+    "topic": "供应质量联合评估",
+    "object_aliases": [
+     "supplier capability",
+     "product quality",
+     "cost position"
+    ],
+    "method_aliases": [
+     "joint assessment",
+     "supply scorecard",
+     "quality audit"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1125": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "服务流程设计",
+    "object_aliases": [
+     "service level agreement",
+     "wait time",
+     "revenue per transaction"
+    ],
+    "method_aliases": [
+     "queueing design",
+     "service blueprint",
+     "capacity planning"
+    ]
+   },
+   {
+    "topic": "压测峰值队列",
+    "object_aliases": [
+     "peak hour demand",
+     "queue length",
+     "checkout lane"
+    ],
+    "method_aliases": [
+     "stress testing",
+     "load simulation",
+     "peak load analysis"
+    ]
+   },
+   {
+    "topic": "规划试点",
+    "object_aliases": [
+     "pilot store",
+     "trial period",
+     "rollout plan"
+    ],
+    "method_aliases": [
+     "pilot testing",
+     "phased rollout",
+     "controlled experiment"
+    ]
+   },
+   {
+    "topic": "等待与主营冲突",
+    "object_aliases": [
+     "waiting time",
+     "core sales",
+     "service disruption"
+    ],
+    "method_aliases": [
+     "wait time impact",
+     "operations interference",
+     "priority scheduling"
+    ]
+   },
+   {
+    "topic": "单位工时经济性",
+    "object_aliases": [
+     "labor cost per hour",
+     "revenue per labor hour",
+     "productivity metric"
+    ],
+    "method_aliases": [
+     "labor productivity",
+     "cost efficiency analysis",
+     "unit labor cost"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1126": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "耗尽时间预测",
+    "object_aliases": [
+     "stockout timing",
+     "shelf capacity",
+     "backroom inventory"
+    ],
+    "method_aliases": [
+     "depletion forecast",
+     "runout prediction",
+     "replenishment lead time"
+    ]
+   },
+   {
+    "topic": "合并同区任务",
+    "object_aliases": [
+     "zone task",
+     "aisle cluster",
+     "restock route"
+    ],
+    "method_aliases": [
+     "task batching",
+     "zone consolidation",
+     "route merging"
+    ]
+   },
+   {
+    "topic": "量化工时产出",
+    "object_aliases": [
+     "labor hours",
+     "picking output",
+     "task duration"
+    ],
+    "method_aliases": [
+     "productivity metric",
+     "time study",
+     "efficiency ratio"
+    ]
+   },
+   {
+    "topic": "波次补货",
+    "object_aliases": [
+     "replenishment batch",
+     "case pack",
+     "pick wave"
+    ],
+    "method_aliases": [
+     "wave picking",
+     "batch replenishment",
+     "slotting optimization"
+    ]
+   },
+   {
+    "topic": "店内多作业拥堵",
+    "object_aliases": [
+     "aisle congestion",
+     "staff overlap",
+     "floor traffic"
+    ],
+    "method_aliases": [
+     "congestion analysis",
+     "crowding mitigation",
+     "workflow scheduling"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1127": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "温度时间暴露",
+    "object_aliases": [
+     "temperature excursion log",
+     "cold chain exposure window",
+     "sensor calibration record"
+    ],
+    "method_aliases": [
+     "time temperature indicator",
+     "cold chain risk assessment",
+     "thermal abuse evaluation"
+    ]
+   },
+   {
+    "topic": "映射受影响批次",
+    "object_aliases": [
+     "affected lot traceability",
+     "sku batch registry",
+     "temperature excursion lot"
+    ],
+    "method_aliases": [
+     "lot traceability mapping",
+     "impacted batch identification",
+     "recall scope determination"
+    ]
+   },
+   {
+    "topic": "确认复开",
+    "object_aliases": [
+     "reopening verification status",
+     "cold chain restart record",
+     "device restart confirmation"
+    ],
+    "method_aliases": [
+     "restart approval workflow",
+     "post repair validation",
+     "operational readiness check"
+    ]
+   },
+   {
+    "topic": "探头故障诊断",
+    "object_aliases": [
+     "probe failure log",
+     "sensor fault code",
+     "temperature probe reading"
+    ],
+    "method_aliases": [
+     "sensor fault isolation",
+     "probe calibration check",
+     "diagnostic troubleshooting procedure"
+    ]
+   },
+   {
+    "topic": "冷链复开验证",
+    "object_aliases": [
+     "cold chain restart certificate",
+     "reopening validation record",
+     "temperature compliance report"
+    ],
+    "method_aliases": [
+     "cold chain integrity verification",
+     "restart validation testing",
+     "post lockdown temperature audit"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1128": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "双向追溯",
+    "object_aliases": [
+     "pos transaction log",
+     "supplier invoice",
+     "inventory movement"
+    ],
+    "method_aliases": [
+     "two-way traceability",
+     "forward backward tracking",
+     "lot genealogy"
+    ]
+   },
+   {
+    "topic": "展开拆零",
+    "object_aliases": [
+     "case pack",
+     "sellable unit",
+     "stock keeping unit"
+    ],
+    "method_aliases": [
+     "case break",
+     "unitization process",
+     "piece level picking"
+    ]
+   },
+   {
+    "topic": "计时追溯",
+    "object_aliases": [
+     "timestamped event",
+     "goods receipt",
+     "dispatch record"
+    ],
+    "method_aliases": [
+     "time based traceability",
+     "event sequence analysis",
+     "chronological audit trail"
+    ]
+   },
+   {
+    "topic": "拆零身份保持",
+    "object_aliases": [
+     "split lot",
+     "unit identifier",
+     "pack integrity"
+    ],
+    "method_aliases": [
+     "identity preservation",
+     "sub lot tracking",
+     "unit level traceability"
+    ]
+   },
+   {
+    "topic": "批次守恒",
+    "object_aliases": [
+     "batch number",
+     "lot quantity",
+     "inventory balance"
+    ],
+    "method_aliases": [
+     "lot balance check",
+     "mass balance reconciliation",
+     "batch conservation"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1129": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "召回范围管理",
+    "object_aliases": [
+     "recall batch number",
+     "affected store list",
+     "inventory in transit"
+    ],
+    "method_aliases": [
+     "recall scope matrix",
+     "traceability lot mapping",
+     "defect containment plan"
+    ]
+   },
+   {
+    "topic": "同步线上下架",
+    "object_aliases": [
+     "ecommerce product listing",
+     "online storefront stock",
+     "channel availability status"
+    ],
+    "method_aliases": [
+     "real time delisting",
+     "omnichannel inventory sync",
+     "stock status refresh"
+    ]
+   },
+   {
+    "topic": "证明执行完成",
+    "object_aliases": [
+     "completion signature",
+     "recall execution record",
+     "disposal verification form"
+    ],
+    "method_aliases": [
+     "signoff audit trail",
+     "evidence of destruction",
+     "compliance proof workflow"
+    ]
+   },
+   {
+    "topic": "多渠道执行编排",
+    "object_aliases": [
+     "store warehouse inventory",
+     "member notification log",
+     "online sales order"
+    ],
+    "method_aliases": [
+     "omnichannel recall orchestration",
+     "cross channel coordination",
+     "execution sequence scheduling"
+    ]
+   },
+   {
+    "topic": "消费者触达证据",
+    "object_aliases": [
+     "consumer notification record",
+     "member contact history",
+     "notice delivery log"
+    ],
+    "method_aliases": [
+     "reach evidence capture",
+     "outreach proof mechanism",
+     "notification tracking audit"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1130": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "零售价版本生效",
+    "object_aliases": [
+     "price effective date",
+     "shelf label audit",
+     "pos receipt price"
+    ],
+    "method_aliases": [
+     "price activation workflow",
+     "versioning control",
+     "effective dating"
+    ]
+   },
+   {
+    "topic": "识别价签未换",
+    "object_aliases": [
+     "shelf tag mismatch",
+     "price label photo",
+     "item price master"
+    ],
+    "method_aliases": [
+     "label change detection",
+     "image comparison",
+     "price integrity check"
+    ]
+   },
+   {
+    "topic": "形成退差证据",
+    "object_aliases": [
+     "price difference record",
+     "customer refund claim",
+     "pos transaction log"
+    ],
+    "method_aliases": [
+     "evidence documentation",
+     "refund verification",
+     "discrepancy report"
+    ]
+   },
+   {
+    "topic": "促销叠加优先级",
+    "object_aliases": [
+     "promo stacking rule",
+     "discount hierarchy",
+     "member promo price"
+    ],
+    "method_aliases": [
+     "priority sequencing",
+     "promotion logic",
+     "tier calculation"
+    ]
+   },
+   {
+    "topic": "消费者价格一致性",
+    "object_aliases": [
+     "price consistency check",
+     "consumer price accuracy",
+     "displayed vs charged"
+    ],
+    "method_aliases": [
+     "pricing audit",
+     "charge accuracy",
+     "omni price alignment"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1131": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "现金状态流转",
+    "object_aliases": [
+     "cash drawer",
+     "bank deposit",
+     "cash variance"
+    ],
+    "method_aliases": [
+     "cash flow lifecycle",
+     "cash reconciliation",
+     "cash position tracking"
+    ]
+   },
+   {
+    "topic": "匹配缴存",
+    "object_aliases": [
+     "bank deposit slip",
+     "deposit variance",
+     "armored car pickup"
+    ],
+    "method_aliases": [
+     "deposit matching",
+     "deposit reconciliation",
+     "variance resolution"
+    ]
+   },
+   {
+    "topic": "锁定补证事项",
+    "object_aliases": [
+     "supporting document",
+     "audit evidence",
+     "exception item"
+    ],
+    "method_aliases": [
+     "evidence lock",
+     "documentation hold",
+     "exception tracking"
+    ]
+   },
+   {
+    "topic": "班次截止",
+    "object_aliases": [
+     "shift close",
+     "end of shift",
+     "cashier turnover"
+    ],
+    "method_aliases": [
+     "shift cutoff",
+     "shift settlement",
+     "z report"
+    ]
+   },
+   {
+    "topic": "短长款调查",
+    "object_aliases": [
+     "cash over short",
+     "till variance",
+     "register shortage"
+    ],
+    "method_aliases": [
+     "over short investigation",
+     "variance analysis",
+     "cash audit"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1132": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "库存差异统计",
+    "object_aliases": [
+     "sku shrinkage variance",
+     "cycle count logs",
+     "pos exception records"
+    ],
+    "method_aliases": [
+     "variance reconciliation",
+     "shrinkage analysis",
+     "loss prevention audit"
+    ]
+   },
+   {
+    "topic": "聚类时段动作",
+    "object_aliases": [
+     "transaction timestamps",
+     "staff shift schedules",
+     "camera event logs"
+    ],
+    "method_aliases": [
+     "time clustering",
+     "behavioral pattern mining",
+     "shift correlation analysis"
+    ]
+   },
+   {
+    "topic": "推动针对性盘点",
+    "object_aliases": [
+     "high risk sku",
+     "stocktake trigger flags",
+     "exception location list"
+    ],
+    "method_aliases": [
+     "targeted cycle count",
+     "risk based counting",
+     "exception driven stocktake"
+    ]
+   },
+   {
+    "topic": "异常模式检测",
+    "object_aliases": [
+     "pos anomaly records",
+     "inventory deviation flags",
+     "incident baseline data"
+    ],
+    "method_aliases": [
+     "outlier detection",
+     "deviation scoring",
+     "baseline comparison test"
+    ]
+   },
+   {
+    "topic": "非指控性调查",
+    "object_aliases": [
+     "incident review file",
+     "camera review footage",
+     "staff interview notes"
+    ],
+    "method_aliases": [
+     "non accusatory interview",
+     "fact finding review",
+     "neutral inquiry process"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1133": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "零售促销因果",
+    "object_aliases": [
+     "promotional uplift",
+     "substitution rate",
+     "coupon redemption"
+    ],
+    "method_aliases": [
+     "causal inference",
+     "A/B testing",
+     "difference-in-differences"
+    ]
+   },
+   {
+    "topic": "处理缺货",
+    "object_aliases": [
+     "stockout rate",
+     "shelf inventory",
+     "backorder level"
+    ],
+    "method_aliases": [
+     "safety stock",
+     "reorder point",
+     "inventory optimization"
+    ]
+   },
+   {
+    "topic": "给出预算去留",
+    "object_aliases": [
+     "marketing budget",
+     "campaign ROI",
+     "spend allocation"
+    ],
+    "method_aliases": [
+     "budget optimization",
+     "incremental sales",
+     "ROI analysis"
+    ]
+   },
+   {
+    "topic": "缺货干扰",
+    "object_aliases": [
+     "stockout impact",
+     "substitution demand",
+     "sales loss"
+    ],
+    "method_aliases": [
+     "lost sales estimation",
+     "demand modeling",
+     "out-of-stock analysis"
+    ]
+   },
+   {
+    "topic": "跨渠道蚕食",
+    "object_aliases": [
+     "channel cannibalization",
+     "omnichannel sales",
+     "channel overlap"
+    ],
+    "method_aliases": [
+     "cannibalization analysis",
+     "market mix modeling",
+     "channel attribution"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1134": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "专卖许可范围",
+    "object_aliases": [
+     "tobacco license scope",
+     "licensed sku list",
+     "compliance inspection log"
+    ],
+    "method_aliases": [
+     "license validity check",
+     "sku to license mapping",
+     "renewal audit process"
+    ]
+   },
+   {
+    "topic": "将柜台SKU映射到许可品项",
+    "object_aliases": [
+     "counter sku",
+     "licensed product list",
+     "license holder address"
+    ],
+    "method_aliases": [
+     "sku classification",
+     "permit item matching",
+     "license scope alignment"
+    ]
+   },
+   {
+    "topic": "生成停售边界",
+    "object_aliases": [
+     "sales halt boundary",
+     "restricted product range",
+     "inventory status flag"
+    ],
+    "method_aliases": [
+     "stop sale rule",
+     "sku restriction logic",
+     "compliance boundary set"
+    ]
+   },
+   {
+    "topic": "主体地址一致",
+    "object_aliases": [
+     "registered address",
+     "license address",
+     "store location"
+    ],
+    "method_aliases": [
+     "address match check",
+     "location verification",
+     "address consistency audit"
+    ]
+   },
+   {
+    "topic": "续证和迁址控制",
+    "object_aliases": [
+     "renewal deadline",
+     "relocation notice",
+     "license expiry date"
+    ],
+    "method_aliases": [
+     "renewal process control",
+     "relocation approval",
+     "license transfer check"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1135": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "年龄核验最小必要",
+    "object_aliases": [
+     "restricted sku",
+     "age check prompt",
+     "supervisor override"
+    ],
+    "method_aliases": [
+     "least privilege",
+     "data minimization",
+     "compliance sampling"
+    ]
+   },
+   {
+    "topic": "复核批量交易",
+    "object_aliases": [
+     "transaction log",
+     "bulk sale",
+     "cashier id"
+    ],
+    "method_aliases": [
+     "batch audit",
+     "exception review",
+     "sampling inspection"
+    ]
+   },
+   {
+    "topic": "避免过度留存",
+    "object_aliases": [
+     "retention policy",
+     "customer data",
+     "purchase record"
+    ],
+    "method_aliases": [
+     "data minimization",
+     "retention limit",
+     "pseudonymization"
+    ]
+   },
+   {
+    "topic": "拒售流程",
+    "object_aliases": [
+     "refusal notice",
+     "age verification",
+     "store policy"
+    ],
+    "method_aliases": [
+     "refusal workflow",
+     "escalation path",
+     "compliance check"
+    ]
+   },
+   {
+    "topic": "受限交易异常识别",
+    "object_aliases": [
+     "restricted transaction",
+     "exception flag",
+     "sales anomaly"
+    ],
+    "method_aliases": [
+     "rule based detection",
+     "outlier scoring",
+     "pattern matching"
+    ]
+   }
+  ]
+ },
+ "convenience-v4-1136": {
+  "industry_key": "convenience",
+  "topics": [
+   {
+    "topic": "现场制售卫生",
+    "object_aliases": [
+     "sanitation logs",
+     "food contact surfaces",
+     "staff health records"
+    ],
+    "method_aliases": [
+     "haccp verification",
+     "temperature danger zone",
+     "pest control program"
+    ]
+   },
+   {
+    "topic": "核对持有时间",
+    "object_aliases": [
+     "hot holding logs",
+     "cold holding logs",
+     "product temperature readings"
+    ],
+    "method_aliases": [
+     "time as a control",
+     "temperature monitoring",
+     "hold time verification"
+    ]
+   },
+   {
+    "topic": "验证恢复",
+    "object_aliases": [
+     "recovery procedures",
+     "equipment calibration",
+     "corrective action logs"
+    ],
+    "method_aliases": [
+     "equipment recovery check",
+     "reopen verification",
+     "sanitization validation"
+    ]
+   },
+   {
+    "topic": "热冷持有控制",
+    "object_aliases": [
+     "hot hold units",
+     "cold hold units",
+     "thermometer readings"
+    ],
+    "method_aliases": [
+     "haccp temperature control",
+     "critical limit monitoring",
+     "temperature abuse prevention"
+    ]
+   },
+   {
+    "topic": "洁污分流和留样",
+    "object_aliases": [
+     "clean zone",
+     "contaminated zone",
+     "product samples"
+    ],
+    "method_aliases": [
+     "cross contamination control",
+     "sample retention protocol",
+     "zone segregation procedure"
+    ]
+   }
+  ]
+ }
+}
