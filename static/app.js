@@ -1197,7 +1197,7 @@ async function dashboard(){
       const d = DEPTS.find(x=>x.key===CUR_DEPT) || allowedDepts[0];
       floor = !d ? `<div class="empty">您的账号还没有开通任何板块,请联系企业主账号</div>` : deptFloorHtml(d);
     }
-    floorSection = `<h2 style="margin:22px 0 0;letter-spacing:1px">🏢 集团楼层</h2>${deptTabs}${floor}
+    floorSection = `<h2 style="margin:22px 0 0;letter-spacing:1px">🏬 行业市场</h2>${deptTabs}${floor}
       ${CUR_DEPT==="content"?jobsCard:""}`;
   }else{
     // 租户视图:部门楼层默认折叠为标题行,点击展开;展开状态按租户+部门记忆
@@ -1206,17 +1206,18 @@ async function dashboard(){
       "选题→写稿→配图→审查,整条流水线出成品",
       ()=>`<div class="floor">${META.stations.map(roomCard).join("")}${gateRoom()}</div>`));
     allowedDepts.forEach(d=> sections.push(deptSection(d.key, d.emoji, d.name, d.employees.length+"人",
-      d.tagline||"行业专家,一人一岗随叫随到", ()=>deptFloorHtml(d))));
+      d.tagline||"行业精品员工,一人一岗随叫随到", ()=>deptFloorHtml(d))));
     const avatarRow = can("avatar")?`<div class="deptsec"><div class="depthead" onclick="location.hash='#/avatar'">
       <span class="dh-emoji">🎥</span><span class="dh-name">数字人摄影棚</span><span class="dh-count">新</span>
       <span class="dh-tag">照片开口说话 · 出条口播视频</span><span class="dh-caret">→</span></div></div>`:"";
-    floorSection = `<h2 style="margin:22px 0 4px;letter-spacing:1px">🏢 集团楼层 <span class="sub" style="font-weight:600;font-size:13px">点部门标题行展开/收起</span></h2>
+    floorSection = `<h2 style="margin:22px 0 4px;letter-spacing:1px">🏬 行业市场 <span class="sub" style="font-weight:600;font-size:13px">每个行业一支精品员工队伍,点行业标题展开/收起</span></h2>
       ${sections.join("")}${avatarRow}
       ${can("content")?jobsCard:""}`;
   }
   $("#main").innerHTML = tourBanner + heroCard
     + (isRoot?"":todoCards())
     + obCard()
+    + howtoCard()
     + trioCard()
     + notificationCard
     + inboxCard
@@ -1288,9 +1289,15 @@ function trioCard(){
   if(localStorage.getItem("trio_hide_"+(ME.tenant||""))) return "";
   const tr = STATE.trio||{};
   const steps = [
-    {done:tr.video, e:"🎬", t:"① 图文一键成片", d:"挑一篇交付的图文,自动配音+字幕出竖版视频", act:"trioGo('video')"},
-    {done:tr.censor, e:"🛡️", t:"② 审查官把关", d:"发前极速扫描广告法/违禁词,免费", act:"location.hash='#/censor'"},
-    {done:tr.publish, e:"📰", t:"③ 公众号排版发出去", d:"12套主题排版,一键复制或发草稿箱", act:"trioGo('mp')"},
+    {done:tr.video, e:"🎬", t:"① 图文一键成片", act:"trioGo('video')",
+      d:"把已交付的图文自动变成竖版口播视频,配音+字幕全包",
+      how:"怎么做:任务交付页→「一键成片」,选模板等几分钟即可;抖音/视频号直接用"},
+    {done:tr.censor, e:"🛡️", t:"② 审查官把关", act:"location.hash='#/censor'",
+      d:"发布前免费扫一遍广告法、违禁词和敏感表述",
+      how:"怎么做:审查页贴上正文→秒出风险报告和替换建议,发出去才踏实"},
+    {done:tr.publish, e:"📰", t:"③ 公众号排版发出去", act:"trioGo('mp')",
+      d:"12套主题排版,一键复制或直接发进公众号草稿箱",
+      how:"怎么做:交付页→「公众号排版」选主题;绑定公众号后可一键发草稿箱"},
   ];
   const undone = steps.filter(x=>!x.done).length;
   if(!undone) return "";
@@ -1298,10 +1305,32 @@ function trioCard(){
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       <h2 style="margin:0;flex:1;min-width:200px">🧰 发布三件套 · 一篇图文这样发出去(还差 ${undone} 步)</h2>
       <span class="sub" style="cursor:pointer;text-decoration:underline" onclick="localStorage.setItem('trio_hide_'+(ME.tenant||''),1);render()">不再提示</span></div>
-    <div class="grid3" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr));margin-top:10px">
+    <div class="grid3" style="grid-template-columns:repeat(auto-fill,minmax(250px,1fr));margin-top:10px">
       ${steps.map(x=>`<div class="topic" style="margin:0;cursor:pointer;${x.done?"opacity:.55":""}" onclick="${x.act}">
-        <b>${x.done?"✅":x.e} ${x.t}</b><div class="sub" style="margin-top:3px">${x.d}${x.done?"":" →"}</div></div>`).join("")}
-    </div></div>`;
+        <b>${x.done?"✅":x.e} ${x.t}</b><div class="sub" style="margin-top:3px">${x.d}${x.done?"":" →"}</div>
+        ${x.done?"":`<div class="sub" style="margin-top:4px;opacity:.85">${x.how}</div>`}</div>`).join("")}
+    </div>
+    <div class="sub" style="margin-top:8px">一条内容的完整出路:流水线写好 → 成片 → 审查 → 排版发出去;三步都在您已交付的工单上操作,不重复扣点</div></div>`;
+}
+/* 「数字员工怎么用」教程卡:常驻首页的用人指南,可不再提示,重看引导时恢复 */
+function howtoCard(){
+  if(!ME || !["owner","root"].includes(ME.role)) return "";
+  if(localStorage.getItem("howto_hide_"+(ME.tenant||""))) return "";
+  const steps = [
+    {e:"🧭", t:"① 挑人", d:"下面「行业市场」进您的行业,每个岗位一位专职员工;不知道找谁就用行业里的「找专家」搜索框,直接搜您遇到的事(比如\u201c顾客要退卡\u201d)"},
+    {e:"📋", t:"② 派活", d:"点员工→「派活」。一句话说清背景+想要什么结果,再把手头材料(数据/记录/照片)贴上;说得越具体,交付越准"},
+    {e:"📬", t:"③ 收活", d:"8-15分钟出交付:结论+依据+能直接执行的清单。不满意就在同一单里继续追问,免费改到您满意为止"},
+    {e:"📚", t:"④ 沉淀", d:"交付自动进资产库;好内容一键存成企业知识,之后全部员工开工都会带上,越用越懂您的企业"},
+  ];
+  return `<div class="card" style="background:linear-gradient(120deg,#fdf3e3,#fffaf0 70%)">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <h2 style="margin:0;flex:1;min-width:200px">📖 数字员工怎么用 · 四步用人法</h2>
+      <span class="sub" style="cursor:pointer;text-decoration:underline" onclick="localStorage.setItem('howto_hide_'+(ME.tenant||''),1);render()">不再提示</span></div>
+    <div class="grid3" style="grid-template-columns:repeat(auto-fill,minmax(250px,1fr));margin-top:10px">
+      ${steps.map(x=>`<div class="topic" style="margin:0"><b>${x.e} ${x.t}</b>
+        <div class="sub" style="margin-top:3px">${x.d}</div></div>`).join("")}
+    </div>
+    <div class="sub" style="margin-top:8px">进阶玩法:🪑 大事拿不准就开 <a href="#/meetings" style="text-decoration:underline;font-weight:700">AI会议室</a>,多位员工提案互验;勾选「Agent 团队协作执行」还能让他们接力干活、队长整合交付 · 🧰 <a href="#/tools" style="text-decoration:underline;font-weight:700">工具箱</a>处理一次性小活 · ⏰ 定时任务让内容天天自动来</div></div>`;
 }
 let MP_AUTO = null;   // trio 向导:进交付页后自动弹公众号排版(照 AV_OPEN_CLONE 的路子)
 function trioGo(step){
@@ -1315,6 +1344,7 @@ function trioGo(step){
 function guideReset(){
   localStorage.removeItem("ob_hide_"+((ME&&ME.tenant)||""));
   localStorage.removeItem("trio_hide_"+((ME&&ME.tenant)||""));
+  localStorage.removeItem("howto_hide_"+((ME&&ME.tenant)||""));
   // 四步都完成时引导卡默认不渲染;点了"重看"就强制展示一次完成态
   localStorage.setItem("ob_force_"+((ME&&ME.tenant)||""),"1");
   toast("新手引导已恢复,回到办公室即可重看");
@@ -1325,10 +1355,22 @@ function obCard(){
   if(localStorage.getItem("ob_hide_"+(ME.tenant||""))) return "";
   const su = STATE.setup||{};
   const steps = [
-    {done:su.profile, t:"① 建人设档案", d:"产出像您本人写的", h:"#/profiles"},
-    {done:su.first_job, t:"② 发出第一单", d:"看流水线全程直播", h:"#/new", pts:`${META?.job_points??18} 点`},
-    {done:su.wechat, t:"③ 打通微信", d:"通知/公众号草稿箱", h:"#/channels"},
-    {done:su.clone, t:"④ 克隆您的声音", d:"视频都用您的原声", h:"#/avatar", pts:`${META?.voice_clone_points??9} 点`},
+    {done:su.profile, t:"① 建人设档案", h:"#/profiles",
+      d:"把企业介绍、品牌调性和两三篇您写过的东西喂给AI",
+      why:"为什么:有了它,产出才像您本人写的,不是千篇一律的通稿",
+      how:"怎么做:点进去→粘贴企业介绍+往期文章→保存,约2分钟"},
+    {done:su.first_job, t:"② 发出第一单", h:"#/new", pts:`${META?.job_points??18} 点`,
+      d:"发一单真实内容,看10个工位流水线直播出稿",
+      why:"为什么:跑通一单您就知道整套团队怎么干活、交付长什么样",
+      how:"怎么做:选方向和模板→提交→8-15分钟收成品,全程可看"},
+    {done:su.wechat, t:"③ 打通微信", h:"#/channels",
+      d:"绑定公众号草稿箱或企业微信群机器人",
+      why:"为什么:交付完成微信里直接收通知,排版好的文章一键进草稿箱",
+      how:"怎么做:渠道页按提示扫码/填密钥,约1分钟"},
+    {done:su.clone, t:"④ 克隆您的声音", h:"#/avatar", pts:`${META?.voice_clone_points??9} 点`,
+      d:"录30秒话或传一段清晰人声",
+      why:"为什么:以后所有视频都用您的原声配音,不是机器人腔",
+      how:"怎么做:数字人摄影棚→声音克隆→跟着念一段文字即可"},
   ];
   const undone = steps.filter(x=>!x.done).length;
   const forced = localStorage.getItem("ob_force_"+(ME.tenant||""));
@@ -1343,9 +1385,12 @@ function obCard(){
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       <h2 style="margin:0;flex:1;min-width:200px">🚀 开工四步(还差 ${undone} 步)</h2>
       <span class="sub" style="cursor:pointer;text-decoration:underline" onclick="localStorage.setItem('ob_hide_'+(ME.tenant||''),1);render()">不再提示</span></div>
-    <div class="grid3" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr));margin-top:10px">
+    <div class="grid3" style="grid-template-columns:repeat(auto-fill,minmax(250px,1fr));margin-top:10px">
       ${steps.map(x=>`<a href="${x.h}" class="topic" style="margin:0;display:block;text-decoration:none;${x.done?"opacity:.55":""}">
-        <b>${x.done?"✅":"⬜"} ${x.t}</b>${x.pts?` <span class="sub">${esc(x.pts)}</span>`:""}<div class="sub" style="margin-top:3px">${x.d}${x.done?"":" →"}</div></a>`).join("")}
+        <b>${x.done?"✅":"⬜"} ${x.t}</b>${x.pts?` <span class="sub">${esc(x.pts)}</span>`:""}
+        <div class="sub" style="margin-top:3px">${x.d}${x.done?"":" →"}</div>
+        ${x.done?"":`<div class="sub" style="margin-top:4px;opacity:.85">${x.why}</div>
+        <div class="sub" style="margin-top:2px;opacity:.85">${x.how}</div>`}</a>`).join("")}
     </div>
     <div class="sub" style="margin-top:8px">试用额度有限?②必做,其余可开通后再补,不影响先跑通第一单</div></div>`;
 }

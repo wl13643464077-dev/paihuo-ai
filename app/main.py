@@ -1025,27 +1025,80 @@ def _public_station(
     return public
 
 
+_INDUSTRY_DEPT_DISPLAY = {
+    "auto": "汽车行业",
+    "beauty": "美容美业行业",
+    "convenience": "便利店行业",
+    "fitness": "健身瑜伽行业",
+    "grocery": "商超零售行业",
+    "hotel": "酒店住宿行业",
+    "pet": "宠物服务行业",
+    "pharmacy": "零售药房行业",
+    "restaurant": "餐饮行业",
+    "snack": "量贩零食行业",
+    "tea_coffee": "茶咖现制行业",
+}
+
+
+def _display_dept_name(dept_key, fallback="") -> str:
+    """行业板块的老板可读名，只改展示层。
+
+    目录文件、身份契约、任务快照与提示词继续使用原始部门名；这里只决定
+    界面上显示成「汽车行业」这类一眼懂的叫法，避免动到任何冻结哈希。
+    """
+    return _INDUSTRY_DEPT_DISPLAY.get(str(dept_key or ""), str(fallback or ""))
+
+
+def _boss_glance_intro(e: dict, *, internal: bool = False) -> str:
+    """员工介绍改成老板一眼懂：TA干什么、什么时候找TA、怎么用。
+
+    纯展示层文案：岗位手册、duty 合同原文与能力包一概不改动也不透出结构；
+    internal 视角只借 duty 里引号内的核心问题一句话，游客只看到公开话术。
+    """
+    dept_display = (
+        _display_dept_name(e.get("dept_key"), e.get("dept_name") or "")
+        or "行业团队"
+    )
+    topic = (e.get("name") or "相关业务").strip()
+    # 岗位名转成老板嘴里的「事」：日内客流需求官 -> 日内客流需求
+    plain = topic[:-1] if len(topic) > 2 and topic[-1] in "官员师手" else topic
+    core = ""
+    if internal:
+        duty = str(e.get("duty") or "").strip()
+        matched = re.search(r"[“\"]([^”\"]{6,150})[”\"]", duty)
+        if matched:
+            core = matched.group(1).strip().rstrip("。，,")
+        elif 0 < len(duty) <= 60:
+            core = duty.rstrip("。")
+    if core:
+        head = f"TA干的活：帮您把关「{core}」。"
+    else:
+        head = (
+            f"TA干的活：{dept_display}的专职数字员工，"
+            f"专门处理「{plain}」相关的经营问题。"
+        )
+    return (
+        f"{head}\n"
+        f"啥时候找TA：碰到「{plain}」相关的事拿不准主意、想要个有依据的结论时，直接丢给TA。\n"
+        "怎么用：把背景、目标和手头材料（数据/记录/照片）发给TA；"
+        "TA会回您明确结论、判断依据和能直接执行的清单，最终拍板永远在您。"
+    )
+
+
 def _public_expert(
     e: dict, *, include_task_guide: bool = False,
     config: dict | None = None,
     include_profile: bool = False,
+    internal: bool = False,
 ) -> dict:
-    """产业专家的对外名片：文字介绍优先，绝不透出岗位手册结构。"""
-    intro = (e.get("intro") or "").strip()
-    if not intro:
-        who = f"{e.get('person', '')}，" if e.get("person") else ""
-        dept_name = (e.get("dept_name") or "企业团队").strip()
-        role_name = (e.get("role") or e.get("name") or "行业专家").strip()
-        intro = (
-            f"{who}{dept_name}的{role_name}数字员工，"
-            "面向企业真实经营场景提供专业分析与决策支持。"
-        )
-    role = (e.get("role") or e.get("name") or "行业专家").strip()
-    topic = (e.get("name") or "相关业务").strip()
-    intro += (f" TA在团队中担任{role}，适合处理与“{topic}”相关的经营问题。"
-              "您只需说明当前背景、目标和已有材料，TA就能围绕实际业务给出清晰、专业、可落地的建议。")
-    public = {k: e.get(k) for k in ("idx", "name", "emoji", "color", "person", "dept_name")} | {
-        "intro": intro,
+    """产业专家的对外名片：老板一眼看懂，绝不透出岗位手册结构。"""
+    dept_display = (
+        _display_dept_name(e.get("dept_key"), e.get("dept_name") or "")
+        or (e.get("dept_name") or "企业团队")
+    )
+    public = {k: e.get(k) for k in ("idx", "name", "emoji", "color", "person")} | {
+        "dept_name": dept_display,
+        "intro": _boss_glance_intro(e, internal=internal),
         "catalog_version": e.get("catalog_version") or "v1",
     } | _employee_public_contract(
         e, config=config, include_profile=include_profile,
@@ -3388,7 +3441,7 @@ def depts_list():
             st = stats.get(_employee_task_signature(scoped_employee)) or {}
             enabled = bool(cfg.get("enabled", True))
             public = _public_expert(
-                scoped_employee, config=cfg,
+                scoped_employee, config=cfg, internal=internal,
             ) | {
                 "group": e["group"], "enabled": enabled,
                 "tasks_n": st.get("n", 0), "running_n": st.get("run", 0) or 0,
@@ -3403,7 +3456,9 @@ def depts_list():
         groups = d["groups"] if internal else [
             {k: g.get(k) for k in ("name", "emoji", "color")} for g in d["groups"]
         ]
-        out.append({"key": d["key"], "name": d["name"], "emoji": d["emoji"],
+        out.append({"key": d["key"],
+                    "name": _display_dept_name(d["key"], d["name"]),
+                    "emoji": d["emoji"],
                     "tagline": d.get("tagline", ""), "groups": groups, "employees": emps})
     return out
 
@@ -3440,6 +3495,7 @@ def dept_emp(idx: int):
         include_task_guide=not _is_tour(),
         config=cfg,
         include_profile=show_profile,
+        internal=show_profile,
     ) | {
         "tasks": tasks,
         "enabled": enabled,
@@ -4499,10 +4555,11 @@ def task_get(tid: int):
             ),
             None,
         )
-        t["dept_name"] = (
+        fallback_name = (
             str(frozen_dept.get("name") or dept_key)
             if frozen_dept else f"岗位部门 {dept_key}"
         )
+        t["dept_name"] = _display_dept_name(dept_key, fallback_name)
     # 发起人:是哪个账号派的活;查不到(历史任务/跨租户)为 None
     t["created_by_name"] = _tenant_username(t.get("created_by"))
     retries = int(t.get("retry_count") or 0)
@@ -6460,7 +6517,10 @@ def _learning_batch_v4_employees() -> list[dict]:
             employee = {
                 **raw,
                 "dept_key": str(raw.get("dept_key") or department.get("key") or ""),
-                "dept_name": str(raw.get("dept_name") or department.get("name") or ""),
+                "dept_name": _display_dept_name(
+                    raw.get("dept_key") or department.get("key"),
+                    str(raw.get("dept_name") or department.get("name") or ""),
+                ),
             }
             if (
                 str(employee.get("catalog_version") or "")
@@ -12688,7 +12748,9 @@ def _emp_name_dept(idx: int):
         if str(employee.get("dept_key") or "") == "content":
             return employee["name"], employee.get("dept") or "内容生产部"
         nm = f"{employee.get('person','')}·{employee['name']}".strip("·")
-        return nm, employee["dept_name"]
+        return nm, _display_dept_name(
+            employee.get("dept_key"), employee["dept_name"]
+        )
     return f"#{idx}", ""
 
 
@@ -12767,8 +12829,11 @@ def _production_identity(row: dict) -> tuple[tuple, dict]:
     return signature, {
         "idx": idx,
         "name": name,
-        "dept": str(employee.get("dept_name") or employee.get("dept") or
-                    _production_dept_name(frozen["employee_dept_key"])),
+        "dept": _display_dept_name(
+            frozen["employee_dept_key"],
+            str(employee.get("dept_name") or employee.get("dept") or
+                _production_dept_name(frozen["employee_dept_key"])),
+        ),
         "dept_key": frozen["employee_dept_key"],
         "catalog_version": frozen["employee_catalog_version"],
         "person_snapshot": frozen["person_snapshot"],

@@ -1415,7 +1415,7 @@ class TaskCenterDatabaseCase(unittest.TestCase):
             pharmacy_detail["emp_name"],
         )
         self.assertEqual(
-            "零售药房行业痛点数字员工",
+            "零售药房行业",
             pharmacy_detail["dept_name"],
         )
         self.assertEqual("legacy", pharmacy_detail["roster_status"])
