@@ -526,7 +526,12 @@ authoritative≥1 或 双可信独立域名；高风险保留 authoritative≥1 
 ## schema56：会议 Agent 团队协作执行 + 服务器体感优化
 
 更新时间：2026-08-20
-当前阶段：D-053 实现完成，本地会议/迁移/契约回归全绿，待全量测试与 schema56-r1 发版
+当前阶段：已上线。current → `20260820T093552Z-schema56-r24`（succeeded/complete），
+DB user_version 56，本机+paihuo.ai+www 三点 healthz 200，切流后备份 schema 56。
+线上 app.js 已带组队 UI；r24 生产树回放组队测试 7/7 全绿（严格 -B 零字节码残留）。
+本地全量 1621 项测试全绿（补装 playwright+chromium 后）。
+切流过程中发生 r23 rollback_failed 事故（见 D-054），已合同化恢复，无数据损失；
+schema56 隔离库保留于 failed-upgrades 目录备查。
 
 ### 本轮内容（D-053）
 - 会议室新增「🤝 Agent 团队协作执行」：建会勾选 `team_execute`（meeting 表新列，v56 迁移）。

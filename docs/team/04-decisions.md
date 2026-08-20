@@ -1,5 +1,17 @@
 # 决策日志
 
+- 2026-08-20 | D-054：schema56 切流事故复盘——r22 树字节码污染二次复发与合同化恢复。
+  r23 切流在 release_runtime_validation 失败、回滚 preflight 同因失败（rollback_failed、
+  服务停机约 10 分钟）。根因与 0816 事故完全同源：r22 切流后在 /srv/paihuo/current 直接
+  跑门禁回放测试没带 PYTHONDONTWRITEBYTECODE=1，往已认证的 r22 树写入 app/、app/skills/、
+  tests/ 三处 __pycache__。恢复按上次先例合同化执行：清除 payload 区污染 → release_digest
+  重算与 r22 原始认证值逐字节一致 → 原子修复回执（manual_repair 审计块、
+  status=in_progress/phase=rollback_validating）→ launcher 完成 recovered_rollback（服务回
+  r22、DB 55、schema56 隔离库保留）→ control_plane.py finish 收尾遗留 active wrapper 事务
+  → 失败 RID 不复用，新 RID r24 全链重走一次成功（succeeded/complete、DB 56、三点 200）。
+  固化规则：任何时候在生产发布树上跑 Python（含测试回放）必须 `PYTHONDONTWRITEBYTECODE=1
+  python -B`，跑完 find 校验零 __pycache__；失败过的 release id 一律不复用 | 服务短暂停机
+  由本次会话操作引入，已如实记录 | /var/lib/paihuo-upgrade 回执与 manual_repair 审计块。
 - 2026-08-20 | D-053：会议室新增「Agent 团队协作执行」（schema56）+ 服务器体感优化。
   ①组队执行：建会时勾选 `team_execute` 后，GO/NEED_INFO 的行动不再各自并行，而是按分工
   接力——每一棒任务的材料自动携带前面队友的已交付正文（每棒截 1600 字），全部成员收口后由
