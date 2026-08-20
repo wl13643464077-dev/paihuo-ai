@@ -37,7 +37,7 @@ _all_connections: set[sqlite3.Connection] = set()
 # schema lock to finish.
 _generation_lock = threading.RLock()
 _generation_switching = threading.Event()
-LATEST_SCHEMA_VERSION = 55
+LATEST_SCHEMA_VERSION = 56
 MIGRATION_LOCK_SUFFIX = ".migration.lock"
 
 SCHEMA = """
@@ -2882,6 +2882,7 @@ def _initialize_anchor_locked(path: str):
           validations_json TEXT NOT NULL DEFAULT '[]',
           execution_task_ids_json TEXT NOT NULL DEFAULT '[]',
           auto_execute INTEGER NOT NULL DEFAULT 1,
+          team_execute INTEGER NOT NULL DEFAULT 0,
           intervention_count INTEGER NOT NULL DEFAULT 0,
           intervention_state TEXT,
           intervention_op_key TEXT,
@@ -3170,6 +3171,7 @@ def _initialize_anchor_locked(path: str):
                 ("validations_json", "TEXT NOT NULL DEFAULT '[]'"),
                 ("execution_task_ids_json", "TEXT NOT NULL DEFAULT '[]'"),
                 ("auto_execute", "INTEGER NOT NULL DEFAULT 1"),
+                ("team_execute", "INTEGER NOT NULL DEFAULT 0"),
                 ("intervention_count", "INTEGER NOT NULL DEFAULT 0"),
                 ("intervention_state", "TEXT"),
                 ("intervention_op_key", "TEXT"),
@@ -4084,6 +4086,13 @@ def _initialize_anchor_locked(path: str):
         _conn.execute(
             "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
             "VALUES(55,'v4-person-role-bundles-learning-audit',?)",
+            (time.time(),),
+        )
+        # v56:会议 Agent 团队协作执行。GO/NEED_INFO 后按分工接力派活,
+        # 每个成员任务自动携带队友已交付内容,最后由队长整合最终交付包。
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(56,'meeting-agent-team-relay',?)",
             (time.time(),),
         )
         _conn.execute(f"PRAGMA user_version={LATEST_SCHEMA_VERSION}")

@@ -14576,6 +14576,7 @@ async def meeting_create(body: dict):
                     separators=(",", ":"),
                 ),
                 "auto_execute": 0 if body.get("auto_execute") is False else 1,
+                "team_execute": 1 if body.get("team_execute") else 0,
                 "phase": "queued",
                 "round_no": 0,
             },
@@ -14825,6 +14826,10 @@ async def meeting_execute(mid: int):
         }
     if not await db.arun(meeting.claim_execution, mid):
         raise HTTPException(409, "会议尚未形成可执行决定,或执行已经启动")
+    if meeting.team_enabled(m):
+        # 组队接力是长流程：后台编排，进度走会议消息流；启动即返回。
+        asyncio.create_task(meeting.execute_actions_team(mid, engine.broadcast))
+        return {"ok": True, "task_ids": [], "team": True}
     try:
         task_ids = await meeting.execute_actions(mid, engine.broadcast)
     except Exception:

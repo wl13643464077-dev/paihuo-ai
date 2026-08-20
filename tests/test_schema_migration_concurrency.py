@@ -15,8 +15,8 @@ from app import db
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_SCHEMA_VERSION = 55
-EXPECTED_SCHEMA_LEDGER_NAME = "v4-person-role-bundles-learning-audit"
+EXPECTED_SCHEMA_VERSION = 56
+EXPECTED_SCHEMA_LEDGER_NAME = "meeting-agent-team-relay"
 
 INITIALIZE_WORKER = textwrap.dedent(
     """

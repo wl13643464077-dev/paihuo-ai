@@ -1,5 +1,19 @@
 # 决策日志
 
+- 2026-08-20 | D-053：会议室新增「Agent 团队协作执行」（schema56）+ 服务器体感优化。
+  ①组队执行：建会时勾选 `team_execute` 后，GO/NEED_INFO 的行动不再各自并行，而是按分工
+  接力——每一棒任务的材料自动携带前面队友的已交付正文（每棒截 1600 字），全部成员收口后由
+  队长（第一行动负责人）执行固定文本的整合任务，输出一份最终交付包；整合行动以
+  `team_role=integrate` 追加进 actions_json，任务仍走 (meeting, action key) 唯一索引幂等，
+  重启由 resume_pending 按 team_execute 路由回团队编排器续跑，任务终态回写会议交付段不变。
+  编排器自身不抛异常：任务一旦启动，会议只能如实收口不能回滚退款；一棒未派出则退回
+  awaiting_execution 可手动重试。并行模式与旧会议行为完全不变（默认关闭）。
+  ②服务器"卡"排查结论：负载/内存/磁盘全闲、本机接口 <10ms，瓶颈是中国→美西链路上的
+  往返次数；已放行 UDP 443（HTTP/3/QUIC，Caddy 本就广告 h3 但防火墙只开了 TCP）、
+  给带 ?v= 内容哈希的 /static/* 加 Cache-Control: public,max-age=31536000,immutable
+  （repo deploy/Caddyfile 与线上同步改，API 响应不受影响）| 老板："会议模式里面加上
+  agent team 功能。还有就是优化下服务器，现在有点卡" | app/db.py(v56)、app/meeting.py、
+  app/main.py、static/app.js、tests/test_meeting_agent_team.py、deploy/Caddyfile、ufw。
 - 2026-08-17 | D-052：V4 全量切 claude-opus-4-8（老板"全范围"）+ 决策门禁人机契约校准
   （r17/r18）。实测证明 10/10 HOLD 封面不是模型能力问题（opus 同样被拦），是门禁机器摩擦：
   ①状态词带说明判非法；②审批边界/禁止动作要求逐字复现服务端常量；③任何 URL 即违规（与

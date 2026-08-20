@@ -44,7 +44,7 @@ class Schema55IdentityMigrationCase(unittest.TestCase):
         db._conn_path = None
 
     def test_schema55_catalog_has_real_v4_people_and_all_lineages(self):
-        self.assertEqual(55, db.LATEST_SCHEMA_VERSION)
+        self.assertEqual(56, db.LATEST_SCHEMA_VERSION)
         active = departments.specialists()
         current_v4 = [
             employee for employee in active.values()
@@ -86,7 +86,7 @@ class Schema55IdentityMigrationCase(unittest.TestCase):
 
     def test_schema55_tables_and_frozen_columns_exist(self):
         db.conn()
-        self.assertEqual(55, db.one("PRAGMA user_version")["user_version"])
+        self.assertEqual(56, db.one("PRAGMA user_version")["user_version"])
         tables = {
             row["name"] for row in db.q(
                 "SELECT name FROM sqlite_master WHERE type='table'"
@@ -173,7 +173,7 @@ class Schema55IdentityMigrationCase(unittest.TestCase):
         # exposes a downgrade helper in tests by removing only the v55 additions;
         # this assertion remains useful on both a fresh and upgraded database.
         db.conn()
-        self.assertEqual(55, db.one("PRAGMA user_version")["user_version"])
+        self.assertEqual(56, db.one("PRAGMA user_version")["user_version"])
         first = db.one(
             "SELECT COUNT(*) AS n FROM employee_role_config "
             "WHERE employee_catalog_version='2026.08.v3'"

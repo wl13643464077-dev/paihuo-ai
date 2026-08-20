@@ -6377,8 +6377,13 @@ async function meetingsView(mid){
       <input id="mt-auto" type="checkbox" checked style="width:auto;margin-top:3px">
       <span><b>决策后自动执行</b><span class="sub" style="display:block">GO 或 NEED INFO 后，自动启动最多 3 个真实员工任务；包含在本次会议中，不重复扣点。取消勾选则等您看完共识后再点执行。</span></span>
     </label>
+    <label style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;cursor:pointer">
+      <input id="mt-team" type="checkbox" style="width:auto;margin-top:3px">
+      <span><b>🤝 Agent 团队协作执行</b><span class="sub" style="display:block">不再各干各的：成员按分工接力开工，每一棒自动拿到前面队友的交付内容，最后由队长把全部交付整合成一份最终交付包。适合需要多人共创一个成果的议题；包含在本次会议中，不重复扣点。</span></span>
+    </label>
     <div class="actions"><button class="btn pri" onclick="mtStart(this)">🎯 开会并收敛(每人1点)</button></div></div>
   ${cur?`<div class="card" style="background:#fffaf0"><h2>会议 #${cur.id} ${{queued:"排队",running:"🗣 进行中…",done:"✅ 已收口",failed:"中断"}[cur.status]||cur.status}
+    ${cur.team_execute?`<span class="tag" style="background:#e7d9ff;font-weight:900">🤝 Agent 团队</span>`:""}
     ${cur.status==="done"?`<span style="float:right"><a class="btn sm" href="/api/meetings/${cur.id}/export.pdf">⬇️ PDF</a>
     <a class="btn sm" href="/api/meetings/${cur.id}/export.docx">⬇️ Word</a></span>`:""}</h2>
     <div class="sub" style="margin-bottom:6px">议题:${esc(cur.question)}</div>
@@ -6387,12 +6392,14 @@ async function meetingsView(mid){
     ${mtConsensus(cur)}
     ${mtStructured(cur)}
     ${mtBody(cur)}
-    ${(cur.actions||[]).length?`<div class="card" style="background:#fff;margin-top:12px"><h3 style="margin-top:0">📋 已锁定行动 · 责任到人</h3>
+    ${(cur.actions||[]).length?`<div class="card" style="background:#fff;margin-top:12px"><h3 style="margin-top:0">${cur.team_execute?"🤝 Agent 团队分工 · 接力执行":"📋 已锁定行动 · 责任到人"}</h3>
+      ${cur.team_execute?`<div class="sub" style="margin-bottom:6px">每一棒自动拿到前面队友的交付内容；最后一棒是队长整合，输出一份最终交付包。</div>`:""}
       ${cur.actions.map((a,i)=>`<div class="topic" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        ${cur.team_execute?`<span class="tag" style="background:${a.team_role==="integrate"?"#e7d9ff":"#ffe59a"};font-weight:900">${a.team_role==="integrate"?"🧩 队长整合":`第 ${i+1} 棒`}</span>`:""}
         <div style="flex:1;min-width:220px"><b>${esc(a.who)}</b>:${esc(a.task)}${a.acceptance?`<div class="sub">验收:${esc(a.acceptance)}</div>`:""}</div>
-        ${a.task_id?`<a class="tag" style="background:#a7ecc9" href="#/tasks/${a.task_id}">✅ 任务 #${a.task_id}</a>`:
+        ${a.task_id?mtTeamTaskPill(cur,a):
           !cur.decision?`<button class="btn sm pri" onclick="mtAssign(${cur.id},${i},this)">🚀 派给TA(1点)</button>`:""}</div>`).join("")}
-      ${cur.phase==="awaiting_execution"?`<button class="btn pri" style="margin-top:8px" onclick="mtExecute(${cur.id},this)">🚀 执行会议决定</button>`:
+      ${cur.phase==="awaiting_execution"?`<button class="btn pri" style="margin-top:8px" onclick="mtExecute(${cur.id},this)">${cur.team_execute?"🤝 组队执行会议决定":"🚀 执行会议决定"}</button>`:
         !cur.decision?`<button class="btn sm" style="margin-top:8px" onclick="mtAssignAll(${cur.id},this)">⚡ 全部派活</button>`:""}</div>`:""}
     ${(cur.execution_tasks||[]).length?`<div class="card" style="background:#e9f8ef;margin-top:12px"><h3 style="margin-top:0">🚀 已启动执行</h3>
       ${cur.execution_tasks.map(t=>`<div class="topic" style="display:flex;gap:9px;align-items:center;flex-wrap:wrap">
@@ -6451,6 +6458,14 @@ function mtToggle(el){
 function meetingActionEmployee(cur,action){
   return (cur?.members||[]).find(member=>Number(member.idx)===Number(action?.idx))||null;
 }
+function mtTeamTaskPill(cur,a){
+  const t=(cur.execution_tasks||[]).find(x=>Number(x.id)===Number(a.task_id));
+  const status=t?t.status:null;
+  const label={queued:"⏳ 排队",running:"🏃 接力中",done:"✅ 已交付",failed:"⚠️ 失败可重试"}[status];
+  if(!label) return `<a class="tag" style="background:#a7ecc9" href="#/tasks/${a.task_id}">✅ 任务 #${a.task_id}</a>`;
+  const bg=status==="done"?"#a7ecc9":status==="failed"?"#ffc3c3":"#ffe59a";
+  return `<a class="tag" style="background:${bg}" href="#/tasks/${a.task_id}">${label} · #${a.task_id}</a>`;
+}
 async function mtAssign(mid, i, btn){
   const cur = await api("/meetings/"+mid); const a = (cur.actions||[])[i]; if(!a) return;
   const employee=meetingActionEmployee(cur,a);
@@ -6495,7 +6510,7 @@ async function mtAssignAll(mid, btn){
 async function mtExecute(mid, btn){
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 正在启动任务…`;
   try{ const r=await api(`/meetings/${mid}/execute`,{method:"POST"});
-    toast(`已启动 ${r.task_ids.length} 个执行任务`); render();
+    toast(r.team?"🤝 Agent 团队已开工，接力进度看会议消息流":`已启动 ${r.task_ids.length} 个执行任务`); render();
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🚀 执行会议决定"; }
 }
 function mtOpenTask(tid){
@@ -6519,7 +6534,8 @@ async function mtStart(btn){
     const r = await api("/meetings",{method:"POST",body:{question:q, emp_idxs:[...MT_SEL],member_bindings,
       constraints:$("#mt-constraints")?.value.trim()||"",
       acceptance_criteria:$("#mt-acceptance")?.value.trim()||"",
-      auto_execute:$("#mt-auto")?.checked!==false}});
+      auto_execute:$("#mt-auto")?.checked!==false,
+      team_execute:$("#mt-team")?.checked===true}});
     MT_CUR = r.meeting_id; MT_SEL = new Set(); toast("结果型会议开始：提案 → 验证 → 执行");
     location.hash="#/meetings/"+r.meeting_id;
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🎯 开会并收敛(每人1点)"; }

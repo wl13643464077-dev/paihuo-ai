@@ -87,8 +87,8 @@ class Schema54DatabaseCase(unittest.TestCase):
             connection.close()
 
     def test_schema54_tables_and_frozen_columns_exist(self):
-        self.assertEqual(55, db.LATEST_SCHEMA_VERSION)
-        self.assertEqual(55, db.one("PRAGMA user_version")["user_version"])
+        self.assertEqual(56, db.LATEST_SCHEMA_VERSION)
+        self.assertEqual(56, db.one("PRAGMA user_version")["user_version"])
         tables = {
             row["name"] for row in db.q(
                 "SELECT name FROM sqlite_master WHERE type='table'"
@@ -152,7 +152,7 @@ class Schema54DatabaseCase(unittest.TestCase):
         self._downgrade_fixture_to_schema53()
         db.conn()
 
-        self.assertEqual(55, db.one("PRAGMA user_version")["user_version"])
+        self.assertEqual(56, db.one("PRAGMA user_version")["user_version"])
         for frozen, prompt, task_id in (
             (v1, "V1历史工作法", task_ids[0]),
             (v2, "V2历史工作法", task_ids[1]),
@@ -220,7 +220,7 @@ class Schema54DatabaseCase(unittest.TestCase):
             })
         self._downgrade_fixture_to_schema53()
         db.conn()
-        self.assertEqual(55, db.one("PRAGMA user_version")["user_version"])
+        self.assertEqual(56, db.one("PRAGMA user_version")["user_version"])
         self.assertEqual(420, db.one(
             "SELECT COUNT(*) AS n FROM task WHERE length(employee_identity_ref)=64 "
             "AND employee_config_revision=1 AND length(employee_config_sha256)=64"

@@ -522,3 +522,24 @@ authoritative≥1 或 双可信独立域名；高风险保留 authoritative≥1 
 - 本地 110+61 测试全绿；线上验证餐饮 109（5 技能卡原样+档案 7 组+详情 9 条）、内容
   trend/复盘官齐全、11/11 工位带档案、V4 1601 不受影响。
 - 生产：current → `20260817T023516Z-schema55-r10`，app/health 200。
+
+## schema56：会议 Agent 团队协作执行 + 服务器体感优化
+
+更新时间：2026-08-20
+当前阶段：D-053 实现完成，本地会议/迁移/契约回归全绿，待全量测试与 schema56-r1 发版
+
+### 本轮内容（D-053）
+- 会议室新增「🤝 Agent 团队协作执行」：建会勾选 `team_execute`（meeting 表新列，v56 迁移）。
+  GO/NEED_INFO 后行动按分工接力执行——每一棒任务材料自动携带前面队友已交付正文（每棒
+  截 1600 字），全部成员收口后队长（第一行动负责人）跑固定文本整合任务，产出最终交付包；
+  整合行动 `team_role=integrate` 追加进 actions_json，任务沿用 (meeting, action key) 唯一
+  索引幂等；重启由 resume_pending 按 team_execute 路由回 `execute_actions_team` 续跑。
+  编排器不抛异常：任务已启动只能如实收口；一棒未派出退回 awaiting_execution 可手动重试。
+  并行模式与全部旧会议行为不变（默认关闭）。前端：建会勾选项、团队分工面板（棒次/队长
+  整合徽章/任务状态 pill）、组队执行按钮。
+- 服务器"卡"结论：机器全闲（load 0.02、内存 942Mi/15Gi、磁盘 49%），瓶颈为中国→美西
+  RTT×往返次数。已上线：ufw 放行 443/udp（HTTP/3/QUIC 生效）；带 ?v= 内容哈希的
+  /static/* 加 `Cache-Control: public, max-age=31536000, immutable`（deploy/Caddyfile 与
+  线上同步）。API/HTML 缓存行为不变。
+- r22 门禁校准版已于本轮开头完成切流（current → 20260817T170328Z-schema55-r22，
+  succeeded/complete，healthz 三点 200，生产树回放 4 个门禁关键用例全绿）。
