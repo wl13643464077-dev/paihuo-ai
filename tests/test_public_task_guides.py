@@ -425,6 +425,8 @@ class PublicContentTaskGuideTests(unittest.TestCase):
                     },
                 ),
                 patch.object(main, "_need_module"),
+                # 板块放行的 fixture 同步放行员工级白名单（矩阵有专测覆盖）
+                patch.object(main.auth, "employee_allowed", return_value=True),
                 patch.object(main.departments, "get", return_value=sample),
                 patch.object(main.employees, "get_config", return_value=config),
                 patch.object(main.db, "q", side_effect=query_without_task_rows),

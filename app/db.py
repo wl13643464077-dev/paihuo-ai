@@ -37,7 +37,7 @@ _all_connections: set[sqlite3.Connection] = set()
 # schema lock to finish.
 _generation_lock = threading.RLock()
 _generation_switching = threading.Event()
-LATEST_SCHEMA_VERSION = 56
+LATEST_SCHEMA_VERSION = 57
 MIGRATION_LOCK_SUFFIX = ".migration.lock"
 
 SCHEMA = """
@@ -2834,6 +2834,8 @@ def _initialize_anchor_locked(path: str):
           password_hash TEXT NOT NULL,
           role TEXT NOT NULL DEFAULT 'member',   -- root/owner/member
           modules_json TEXT NOT NULL DEFAULT '[]',
+          job_title TEXT NOT NULL DEFAULT 'staff',  -- member职级:director/manager/staff
+          allowed_emp_idxs_json TEXT,           -- NULL=行业内全部;JSON数组=数字员工白名单
           enabled INTEGER NOT NULL DEFAULT 1,
           must_change_password INTEGER NOT NULL DEFAULT 0,
           created_at REAL, updated_at REAL
@@ -4093,6 +4095,18 @@ def _initialize_anchor_locked(path: str):
         _conn.execute(
             "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
             "VALUES(56,'meeting-agent-team-relay',?)",
+            (time.time(),),
+        )
+        # v57:副账号职级体系(总监/经理/员工)与数字员工级白名单分配。
+        # 老板全权;总监/经理只能在自己行业内给下级分配数字员工。
+        for col, typ in (
+                ("job_title", "TEXT NOT NULL DEFAULT 'staff'"),
+                ("allowed_emp_idxs_json", "TEXT"),
+        ):
+            _add_column(_conn, "users", col, typ)
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(57,'member-hierarchy-employee-allocation',?)",
             (time.time(),),
         )
         _conn.execute(f"PRAGMA user_version={LATEST_SCHEMA_VERSION}")

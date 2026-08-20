@@ -15,8 +15,8 @@ from app import db
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_SCHEMA_VERSION = 56
-EXPECTED_SCHEMA_LEDGER_NAME = "meeting-agent-team-relay"
+EXPECTED_SCHEMA_VERSION = 57
+EXPECTED_SCHEMA_LEDGER_NAME = "member-hierarchy-employee-allocation"
 
 INITIALIZE_WORKER = textwrap.dedent(
     """

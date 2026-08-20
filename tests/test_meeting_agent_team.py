@@ -74,7 +74,8 @@ class MeetingTeamCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual("meeting-agent-team-relay", (row or {}).get("name"))
         self.assertEqual(
-            56, db.one("PRAGMA user_version")["user_version"]
+            db.LATEST_SCHEMA_VERSION,
+            db.one("PRAGMA user_version")["user_version"],
         )
 
     async def test_team_relay_passes_prior_deliveries_and_lead_integrates(self):

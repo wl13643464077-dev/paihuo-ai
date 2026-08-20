@@ -181,6 +181,11 @@ def get_user(uid: int):
     )
     if u:
         u["modules"] = db.jloads(u.pop("modules_json"), [])
+        raw_allowed = db.jloads(u.pop("allowed_emp_idxs_json", None), None)
+        u["allowed_emp_idxs"] = (
+            sorted({int(v) for v in raw_allowed if str(v).lstrip("-").isdigit()})
+            if isinstance(raw_allowed, list) else None
+        )
     return u
 
 
@@ -205,6 +210,52 @@ def is_admin() -> bool:
 def is_root() -> bool:
     u = current()
     return bool(u) and u["role"] == "root"
+
+
+# 副账号职级：老板(owner)全权;总监/经理可在自己行业内给下级分配数字员工。
+JOB_TITLES = ("director", "manager", "staff")
+JOB_TITLE_RANK = {"director": 2, "manager": 1, "staff": 0}
+
+
+def job_title() -> str:
+    """member 的职级；owner/root/游客返回空串（不参与职级体系）。"""
+    u = current()
+    if not u or u.get("role") != "member":
+        return ""
+    title = str(u.get("job_title") or "staff")
+    return title if title in JOB_TITLES else "staff"
+
+
+def can_allocate_members() -> bool:
+    """能否给团队成员分配数字员工：老板/root，或总监/经理。"""
+    u = current()
+    if not u:
+        return False
+    if u["role"] in ("root", "owner"):
+        return True
+    return job_title() in ("director", "manager")
+
+
+def employee_allowed(emp_idx: int, dept_key: str) -> bool:
+    """行业数字员工的使用权：板块授权之上再过白名单。
+
+    owner/root 全通；member 必须行业板块在授权内，且（未设白名单=行业内
+    全部可用，设了白名单=只有名单内的数字员工可见可派）。内容部流水线
+    是整体板块，不做员工级白名单；tour 等非成员角色维持板块级语义。
+    """
+    u = current()
+    if not u:
+        return False
+    if u["role"] in ("root", "owner"):
+        return True
+    if dept_key == "content" or u["role"] != "member":
+        return allowed(dept_key)
+    if not allowed(dept_key):
+        return False
+    whitelist = u.get("allowed_emp_idxs")
+    if whitelist is None:
+        return True
+    return int(emp_idx) in whitelist
 
 
 BASE_MODULES = ("content", "avatar", "library")

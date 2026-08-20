@@ -530,7 +530,8 @@ function nav(){
   if(isAdmin()) more.push(["trash","🗑 回收站"]);
   if(ME && ME.role!=="tour") more.push(["notifications","🔔 通知记录"]);
   more.push(["billing","💎 套餐"]);
-  if(ME && (ME.role==="owner"||ME.role==="root")) more.push(["team","👥 权限管理"]);
+  if(ME && (ME.role==="owner"||ME.role==="root")) more.push(["team","👥 团队与权限"]);
+  else if(ME && ME.can_allocate) more.push(["team","👥 团队分配"]);
   if(ME && ME.role==="root") more.push(["admin","🛠 后台"]);
   // 引导卡(开工四步/发布三件套)只对 owner/root 展示,重看入口同样只给他们
   if(ME && (ME.role==="owner"||ME.role==="root")) more.push(["guide","🧭 重看新手引导"]);
@@ -5646,11 +5647,69 @@ async function saveSupportContact(btn){
     if(META) META.support_contact=r.contact; toast('已保存,立即生效');
   }catch(e){ toast(e.message); } btn.disabled=false;
 }
+const TM_TITLE_TAG = {director:["🎖 总监","#e7d9ff"],manager:["📋 经理","#c9e2ff"],staff:["👤 员工","#efe7d4"]};
+function tmTitleTag(u){
+  if(u.role==="root") return `<span class="tag">👑 平台管理员</span>`;
+  if(u.role==="owner") return `<span class="tag" style="background:#ffe59a">⭐ 老板(主账号)</span>`;
+  const [label,bg]=TM_TITLE_TAG[u.job_title||"staff"]||TM_TITLE_TAG.staff;
+  return `<span class="tag" style="background:${bg}">${label}</span>`;
+}
+function tmAllocSummary(u,t){
+  if(u.role!=="member") return "";
+  const industries=(u.modules||[]).map(k=>esc((t.all_modules.find(m=>m.key===k)||{}).label||k)).join(" · ")||"(未开通行业,啥也用不了)";
+  const emp = u.allowed_emp_idxs===null||u.allowed_emp_idxs===undefined
+    ? "行业内全部数字员工可用"
+    : `指定 ${u.allowed_emp_idxs.length} 名数字员工可用`;
+  return `<div class="sub" style="margin-top:4px">行业/板块:${industries}</div>
+    <div class="sub" style="margin-top:2px">数字员工:${emp}</div>`;
+}
+function tmMemberRow(u,t){
+  const isSelf = ME && Number(ME.id)===Number(u.id);
+  const btns = [];
+  if(t.is_admin && u.role==="member"){
+    btns.push(`<button class="btn sm" onclick="tmEditMods(${u.id},${cp(u.username)},${cp(u.modules)})">🧩 行业/板块</button>`);
+    btns.push(`<button class="btn sm" onclick="tmEditTitle(${u.id},${cp(u.username)},${cp(u.job_title||"staff")})">🎖 职级</button>`);
+    btns.push(`<button class="btn sm" onclick="tmAllocForm(${u.id},${cp(u.username)})">🤝 分配数字员工</button>`);
+    btns.push(`<button class="btn sm" onclick="tmResetPw(${u.id})">🔑 改密</button>`);
+    btns.push(`<button class="btn sm" onclick="tmToggle(${u.id},${u.enabled?0:1})">${u.enabled?"⏸ 停用":"▶️ 启用"}</button>`);
+    btns.push(`<button class="btn sm bad" onclick="tmDel(${u.id},${cp(u.username)})">🗑</button>`);
+  }else if(!t.is_admin && u.role==="member" && !isSelf){
+    btns.push(`<button class="btn sm pri" onclick="tmAllocForm(${u.id},${cp(u.username)})">🤝 分配数字员工</button>`);
+  }
+  return `<div class="topic">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <b>${esc(u.username)}</b>${isSelf?`<span class="sub">(我)</span>`:""}
+      ${tmTitleTag(u)}
+      ${u.enabled?"":`<span class="tag" style="background:#ffb3b5">已停用</span>`}
+      <span style="flex:1"></span>
+      ${btns.join("\n")}
+    </div>
+    ${tmAllocSummary(u,t)}
+  </div>`;
+}
 async function teamView(){
   const t = await api("/team");
   const modChips = (sel)=>t.all_modules.map(m=>`<span class="chip mod-chip${(sel||[]).includes(m.key)?" on":""}" data-k="${m.key}" onclick="this.classList.toggle('on')">${esc(m.label)}</span>`).join("");
+  window.__modChips = modChips;
+  window.__TEAM = t;
+  if(!t.is_admin){
+    // 总监/经理受限视图:只做一件事——给自己团队里职级更低的成员分配数字员工
+    const mine = t.users.filter(u=>ME&&Number(u.id)===Number(ME.id));
+    const managed = t.users.filter(u=>!(ME&&Number(u.id)===Number(ME.id)));
+    $("#main").innerHTML = `
+    <div class="notice" style="margin-top:0">👥 <b>团队分配</b>:您是${esc({director:"总监",manager:"经理"}[t.my_job_title]||"管理者")},可以把<b>您自己行业里、您可用的数字员工</b>分配给职级低于您的成员。开通行业、调整职级、建号改密停用都归老板(主账号)管。</div>
+    ${mine.length?`<div class="card"><h2>🪪 我的权限</h2>${mine.map(u=>tmMemberRow(u,t)).join("")}</div>`:""}
+    <div class="card"><h2>🤝 我管理的成员(${managed.length}人)</h2>
+      ${managed.length?managed.map(u=>tmMemberRow(u,t)).join(""):`<div class="empty">暂时没有职级低于您的成员;请老板先创建员工级副账号。</div>`}
+      <div id="tm-allocbox"></div></div>
+    <div class="card"><h2>🔑 改我自己的密码</h2>
+      <div class="row"><div><label>旧密码</label><input id="tm-old" type="password"></div>
+        <div><label>新密码(≥12位，至少两类字符)</label><input id="tm-new" type="password"></div></div>
+      <div class="actions"><button class="btn pri" onclick="tmMyPw()">💾 修改</button></div></div>`;
+    return;
+  }
   $("#main").innerHTML = `
-  <div class="notice" style="margin-top:0">👥 <b>权限管理</b>:企业信息、副账号与板块权限${ME.role==="root"?"、租户(客户企业)管理、平台后台":""}。副账号只能看到被分配的板块,数据按企业完全隔离。</div>
+  <div class="notice" style="margin-top:0">👥 <b>团队与权限</b>:老板全权掌控——副账号的职级(总监/经理/员工)、可见行业、可用的数字员工、密码与启停都在这里定;每个数字员工用什么模型在员工面板里调。总监/经理登录后也能在自己行业内给下级分配数字员工。${ME.role==="root"?"另含租户(客户企业)管理、平台后台。":""}数据按企业完全隔离。</div>
   <div class="card"><h2>🏢 我的企业</h2>
     <div class="row" style="align-items:flex-end">
       <div style="flex:1"><label>企业名称</label><input id="tm-name" value="${esc(t.tenant.name)}"></div>
@@ -5659,22 +5718,11 @@ async function teamView(){
       <span>点数余额 ${(t.tenant.balance||0).toFixed(0)} 点</span>
       ${t.tenant.plan?`<span>套餐:${esc(t.tenant.plan)}</span>`:""}</div></div>
   <div class="card"><h2>👤 成员与副账号</h2>
+    <div class="sub" style="margin-bottom:6px">职级说明:🎖 <b>总监</b>可给经理和员工分配数字员工;📋 <b>经理</b>可给员工分配;👤 <b>员工</b>只用被分配的。行业(板块)决定TA能看到哪个行业,数字员工名单决定TA在行业里能用谁——不设名单=行业内全部可用。</div>
     <div class="actions"><button class="btn pri" onclick="tmUserForm()">➕ 创建副账号</button></div>
     <div id="tm-uform"></div>
-    ${t.users.map(u=>`<div class="topic">
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <b>${esc(u.username)}</b>
-        <span class="tag">${{root:"👑 平台管理员",owner:"⭐ 主账号",member:"副账号"}[u.role]}</span>
-        ${u.enabled?"":`<span class="tag" style="background:#ffb3b5">已停用</span>`}
-        <span style="flex:1"></span>
-        ${u.role==="member"?`<button class="btn sm" onclick="tmEditMods(${u.id},${cp(u.username)},${cp(u.modules)})">🧩 板块</button>
-        <button class="btn sm" onclick="tmResetPw(${u.id})">🔑 改密</button>
-        <button class="btn sm" onclick="tmToggle(${u.id},${u.enabled?0:1})">${u.enabled?"⏸ 停用":"▶️ 启用"}</button>
-        <button class="btn sm bad" onclick="tmDel(${u.id},${cp(u.username)})">🗑</button>`:""}
-      </div>
-      ${u.role==="member"?`<div class="sub" style="margin-top:4px">板块:${(u.modules||[]).map(k=>esc((t.all_modules.find(m=>m.key===k)||{}).label||k)).join(" · ")||"(未分配,啥也用不了)"}</div>`:""}
-    </div>`).join("")}
-    <div id="tm-modbox"></div></div>
+    ${t.users.map(u=>tmMemberRow(u,t)).join("")}
+    <div id="tm-modbox"></div><div id="tm-allocbox"></div></div>
   <div class="card"><h2>🔑 改我自己的密码</h2>
     <div class="row"><div><label>旧密码</label><input id="tm-old" type="password"></div>
       <div><label>新密码(≥12位，至少两类字符)</label><input id="tm-new" type="password"></div></div>
@@ -5730,23 +5778,82 @@ async function teamView(){
 }
 async function tmRename(){ try{ await api("/team/tenant",{method:"PUT",body:{name:$("#tm-name").value.trim()}}); toast("已保存"); ME=null; render(); }catch(e){ toast(e.message); } }
 function tmUserForm(){
+  const titles=(window.__TEAM?.job_titles)||[{key:"director",label:"总监"},{key:"manager",label:"经理"},{key:"staff",label:"员工"}];
+  const titleDesc={director:"可给经理和员工分配数字员工",manager:"可给员工分配数字员工",staff:"只用被分配的数字员工"};
   $("#tm-uform").innerHTML = `<div class="card" style="background:#fff6dc">
     <div class="row"><div><label>用户名</label><input id="tm-u"></div><div><label>密码(≥12位，至少两类字符)</label><input id="tm-p" type="password"></div></div>
-    <label>开通板块(多选)</label><div class="chips" id="tm-mods">${window.__modChips([])}</div>
+    <label>职级</label><div class="chips" id="tm-title">${titles.map((x,i)=>`<span class="chip${x.key==="staff"?" on":""}" data-k="${x.key}" onclick="document.querySelectorAll('#tm-title .chip').forEach(c=>c.classList.remove('on'));this.classList.add('on')">${{director:"🎖",manager:"📋",staff:"👤"}[x.key]||""} ${esc(x.label)}<span class="sub" style="margin-left:4px">${titleDesc[x.key]||""}</span></span>`).join("")}</div>
+    <label>开通行业/板块(多选)</label><div class="chips" id="tm-mods">${window.__modChips([])}</div>
+    <div class="sub" style="margin-top:4px">建好后可点成员行的「🤝 分配数字员工」进一步限定TA能用行业里的哪些人;不限定=行业内全部可用。</div>
     <div class="actions"><button class="btn pri" onclick="tmUserCreate()">💾 创建</button>
       <button class="btn" onclick="$('#tm-uform').innerHTML=''">取消</button></div></div>`;
 }
 async function tmUserCreate(){
   const mods = [...document.querySelectorAll("#tm-mods .on")].map(e=>e.dataset.k);
+  const jobTitle = document.querySelector("#tm-title .on")?.dataset.k || "staff";
   const password=$("#tm-p").value, passwordError=passwordPolicyError(password);
   if(passwordError) return toast(passwordError);
   if(!mods.length && !await uiConfirm(
-    "还没勾选任何板块:员工登录后会是一片空白、啥也用不了。\n确定先建空账号,回头再分配?",
+    "还没勾选任何行业/板块:成员登录后会是一片空白、啥也用不了。\n确定先建空账号,回头再分配?",
     {title:"未分配板块",confirmText:"先建空账号"})) return;
   try{ await api("/team/users",{method:"POST",body:{username:$("#tm-u").value.trim(),
-    password, modules:mods}});
+    password, modules:mods, job_title:jobTitle}});
     toast(mods.length?"副账号已创建,把用户名密码发给TA即可"
-      :"副账号已创建(未分配板块):记得点「板块」分配,TA 才能用"); render(); }catch(e){ toast(e.message); }
+      :"副账号已创建(未分配板块):记得点「行业/板块」分配,TA 才能用"); render(); }catch(e){ toast(e.message); }
+}
+function tmEditTitle(uid, name, cur){
+  const titles=(window.__TEAM?.job_titles)||[];
+  $("#tm-modbox").innerHTML = `<div class="card" style="background:#fff6dc">
+    <b>调整「${esc(name)}」的职级</b>
+    <div class="chips" id="tm-title2" style="margin-top:8px">${titles.map(x=>`<span class="chip${x.key===cur?" on":""}" data-k="${x.key}" onclick="document.querySelectorAll('#tm-title2 .chip').forEach(c=>c.classList.remove('on'));this.classList.add('on')">${{director:"🎖",manager:"📋",staff:"👤"}[x.key]||""} ${esc(x.label)}</span>`).join("")}</div>
+    <div class="sub" style="margin-top:6px">总监可给经理/员工分配数字员工;经理可给员工分配;员工不管理任何人。</div>
+    <div class="actions"><button class="btn pri" onclick="tmSaveTitle(${uid})">💾 保存</button>
+      <button class="btn" onclick="$('#tm-modbox').innerHTML=''">取消</button></div></div>`;
+  $("#tm-modbox").scrollIntoView({behavior:"smooth"});
+}
+async function tmSaveTitle(uid){
+  const title = document.querySelector("#tm-title2 .on")?.dataset.k || "staff";
+  try{ await api(`/team/users/${uid}`,{method:"PUT",body:{job_title:title}}); toast("职级已更新"); render(); }catch(e){ toast(e.message); }
+}
+function tmAllocForm(uid, name){
+  const t = window.__TEAM||{};
+  const target = (t.users||[]).find(x=>Number(x.id)===Number(uid))||{};
+  const targetMods = new Set(target.modules||[]);
+  const groups = (t.industry_employees||[]).filter(g=>targetMods.has(g.key));
+  const sel = new Set(target.allowed_emp_idxs||[]);
+  const unrestricted = target.allowed_emp_idxs===null||target.allowed_emp_idxs===undefined;
+  const box = $("#tm-allocbox")||$("#tm-modbox");
+  if(!groups.length){
+    box.innerHTML = `<div class="card" style="background:#fff6dc"><b>给「${esc(name)}」分配数字员工</b>
+      <div class="sub" style="margin-top:6px">TA 还没开通任何行业${t.is_admin?"(先点「🧩 行业/板块」开通行业)":"(请老板先开通行业)"};或您没有与TA重合的行业可分配。</div>
+      <div class="actions" style="margin-top:8px"><button class="btn" onclick="this.closest('.card').remove()">关闭</button></div></div>`;
+    box.scrollIntoView({behavior:"smooth"});
+    return;
+  }
+  box.innerHTML = `<div class="card" style="background:#fff6dc">
+    <b>给「${esc(name)}」分配数字员工</b>
+    <label class="check" style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;cursor:pointer">
+      <input id="tm-alloc-all" type="checkbox" ${unrestricted?"checked":""} style="width:auto;margin-top:3px" onchange="$('#tm-alloc-groups').style.display=this.checked?'none':'block'">
+      <span><b>不限定:TA 开通行业内的全部数字员工都可用</b><span class="sub" style="display:block">取消勾选则只有下面勾中的数字员工对TA可见、可派活、可拉进会议。</span></span>
+    </label>
+    <div id="tm-alloc-groups" style="display:${unrestricted?"none":"block"};margin-top:8px">
+      ${groups.map(g=>`<div class="grouphead" style="margin-top:8px"><span>${g.emoji||"🏬"}</span>${esc(g.name)}<span class="sub">(${g.employees.length}人)</span>
+        <span class="sub" style="margin-left:8px;cursor:pointer;text-decoration:underline" onclick="document.querySelectorAll('[data-alloc-g=&quot;${g.key}&quot;]').forEach(c=>c.classList.add('on'))">全选</span>
+        <span class="sub" style="cursor:pointer;text-decoration:underline" onclick="document.querySelectorAll('[data-alloc-g=&quot;${g.key}&quot;]').forEach(c=>c.classList.remove('on'))">清空</span></div>
+      <div class="chips">${g.employees.map(e=>`<span class="chip tm-alloc-chip${sel.has(Number(e.idx))?" on":""}" data-i="${e.idx}" data-alloc-g="${g.key}" onclick="this.classList.toggle('on')">${e.emoji||"🧑‍💼"} ${esc(e.person?e.person+"·":"")}${esc(e.name)}</span>`).join("")}</div>`).join("")}
+    </div>
+    <div class="actions" style="margin-top:10px"><button class="btn pri" onclick="tmSaveAlloc(${uid})">💾 保存分配</button>
+      <button class="btn" onclick="this.closest('.card').remove()">取消</button></div></div>`;
+  box.scrollIntoView({behavior:"smooth"});
+}
+async function tmSaveAlloc(uid){
+  const unrestricted = $("#tm-alloc-all")?.checked;
+  const idxs = unrestricted?null:[...document.querySelectorAll(".tm-alloc-chip.on")].map(e=>Number(e.dataset.i));
+  if(!unrestricted && !idxs.length && !await uiConfirm(
+    "一个数字员工都没勾:TA 将在行业里看不到任何可用员工。\n确定这样保存?",
+    {title:"空名单",confirmText:"确定保存"})) return;
+  try{ await api(`/team/users/${uid}`,{method:"PUT",body:{allowed_emp_idxs:idxs}});
+    toast(unrestricted?"已放开:行业内全部数字员工可用":`已分配 ${idxs.length} 名数字员工`); render(); }catch(e){ toast(e.message); }
 }
 function tmEditMods(uid, name, mods){
   $("#tm-modbox").innerHTML = `<div class="card" style="background:#fff6dc">

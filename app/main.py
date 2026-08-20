@@ -2069,6 +2069,8 @@ def auth_me():
     return {"id": u["id"], "username": u["username"], "role": u["role"],
             "tenant": (t or {}).get("name", ""), "modules": mods,
             "all_modules": auth.all_modules(),
+            "job_title": auth.job_title(),
+            "can_allocate": auth.can_allocate_members(),
             "must_change_password": bool(u.get("must_change_password"))}
 
 
@@ -2091,15 +2093,89 @@ def auth_password(body: dict):
 
 
 # ---------------- V8:权限管理(成员/企业/租户) ----------------
+JOB_TITLE_LABELS = {"director": "总监", "manager": "经理", "staff": "员工"}
+
+
+def _need_team_view():
+    """团队页权限：owner/root 全量管理；总监/经理进入受限分配视图。"""
+    if auth.is_admin() or auth.can_allocate_members():
+        return
+    raise HTTPException(403, "需要企业主账号或总监/经理权限")
+
+
+def _member_job_rank(user_row: dict) -> int:
+    title = str(user_row.get("job_title") or "staff")
+    return auth.JOB_TITLE_RANK.get(title, 0)
+
+
 @app.get("/api/team")
 def team_get():
-    _need_admin()
-    users = db.q("SELECT id, username, role, modules_json, enabled, created_at FROM users "
+    _need_team_view()
+    actor = auth.current() or {}
+    admin_view = auth.is_admin()
+    users = db.q("SELECT id, username, role, modules_json, job_title, "
+                 "allowed_emp_idxs_json, enabled, created_at FROM users "
                  "WHERE tenant_id=? ORDER BY id", (TEN(),))
     for x in users:
         x["modules"] = db.jloads(x.pop("modules_json"), [])
-    t = db.one("SELECT * FROM tenants WHERE id=?", (TEN(),))
-    out = {"tenant": t, "users": users, "all_modules": auth.all_modules()}
+        raw_allowed = db.jloads(x.pop("allowed_emp_idxs_json"), None)
+        x["allowed_emp_idxs"] = (
+            sorted({int(v) for v in raw_allowed if str(v).lstrip("-").isdigit()})
+            if isinstance(raw_allowed, list) else None
+        )
+        if x["role"] != "member":
+            x["job_title"] = ""
+    if not admin_view:
+        # 总监/经理：只看到自己 + 职级低于自己的同租户成员（分配对象）。
+        my_rank = auth.JOB_TITLE_RANK.get(auth.job_title(), 0)
+        users = [
+            x for x in users
+            if x["id"] == actor.get("id")
+            or (
+                x["role"] == "member"
+                and auth.JOB_TITLE_RANK.get(
+                    str(x.get("job_title") or "staff"), 0
+                ) < my_rank
+            )
+        ]
+    # 数字员工分配器：按操作者自己的可用范围给出行业员工名录。
+    allocator = []
+    for d in departments.list_depts():
+        if not auth.dept_visible(d["key"]):
+            continue
+        if not admin_view and not auth.allowed(d["key"]):
+            continue
+        allocator_emps = [
+            {
+                "idx": e["idx"],
+                "name": e["name"],
+                "person": e.get("person") or "",
+                "emoji": e.get("emoji") or "",
+            }
+            for e in d["employees"]
+            if admin_view or auth.employee_allowed(e["idx"], d["key"])
+        ]
+        if allocator_emps:
+            allocator.append({
+                "key": d["key"],
+                "name": _display_dept_name(d["key"], d["name"]),
+                "emoji": d["emoji"],
+                "employees": allocator_emps,
+            })
+    if admin_view:
+        t = db.one("SELECT * FROM tenants WHERE id=?", (TEN(),))
+    else:
+        row = db.one("SELECT name FROM tenants WHERE id=?", (TEN(),)) or {}
+        t = {"name": row.get("name") or ""}
+    out = {"tenant": t, "users": users, "all_modules": auth.all_modules(),
+           "industry_employees": allocator,
+           "job_titles": [
+               {"key": key, "label": JOB_TITLE_LABELS[key]}
+               for key in auth.JOB_TITLES
+           ],
+           "my_job_title": auth.job_title(),
+           "is_admin": admin_view,
+           "can_allocate": auth.can_allocate_members()}
     if auth.is_root():
         tenants = db.q("SELECT t.*, (SELECT COUNT(*) FROM users u WHERE u.tenant_id=t.id) n_users "
                        "FROM tenants t ORDER BY t.id")
@@ -2218,21 +2294,62 @@ def team_user_create(body: dict):
     if auth.is_root() and body.get("tenant_id"):
         tid = int(body["tenant_id"])
     role = "owner" if (auth.is_root() and body.get("role") == "owner") else "member"
+    job_title = str(body.get("job_title") or "staff")
+    if job_title not in auth.JOB_TITLES:
+        raise HTTPException(400, "职级只能是总监、经理或员工")
     uid = db.insert("users", {"tenant_id": tid, "username": name,
                               "password_hash": auth.hash_pw(pw), "role": role,
                               "modules_json": json.dumps(body.get("modules") or []),
+                              "job_title": job_title,
                               "enabled": 1, "must_change_password": 1})
     return {"id": uid}
 
 
+def _clean_emp_whitelist(raw) -> str | None:
+    """白名单输入规整：None=不限定；数组=去重排序的行业员工 idx 名单。"""
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise HTTPException(400, "数字员工名单格式无效")
+    idxs = sorted({
+        int(v) for v in raw
+        if isinstance(v, (int, str)) and str(v).lstrip("-").isdigit()
+    })
+    if len(idxs) > 500:
+        raise HTTPException(400, "数字员工名单过长")
+    for emp_idx in idxs:
+        emp = departments.get_active(emp_idx)
+        if not emp:
+            raise HTTPException(400, f"名单包含不存在的数字员工 #{emp_idx}")
+    return json.dumps(idxs)
+
+
 @app.put("/api/team/users/{uid}")
 def team_user_update(uid: int, body: dict):
-    _need_admin()
+    actor = auth.current() or {}
+    actor_is_admin = auth.is_admin()
+    if not actor_is_admin:
+        # 总监/经理只有一项权力：给职级低于自己的成员分配数字员工。
+        if not auth.can_allocate_members():
+            raise HTTPException(403, "需要企业主账号权限")
+        if set(body) - {"allowed_emp_idxs"}:
+            raise HTTPException(403, "板块、职级、密码与启停只能由企业主账号管理")
+        if "allowed_emp_idxs" not in body:
+            raise HTTPException(400, "缺少要分配的数字员工名单")
     actor_is_root = auth.is_root()
     actor_tenant_id = TEN()
     data = {}
     if "modules" in body:
         data["modules_json"] = json.dumps(body["modules"] or [])
+    if "job_title" in body:
+        title = str(body["job_title"] or "staff")
+        if title not in auth.JOB_TITLES:
+            raise HTTPException(400, "职级只能是总监、经理或员工")
+        data["job_title"] = title
+    if "allowed_emp_idxs" in body:
+        data["allowed_emp_idxs_json"] = _clean_emp_whitelist(
+            body["allowed_emp_idxs"]
+        )
     if "enabled" in body:
         data["enabled"] = 1 if body["enabled"] else 0
     if body.get("password"):
@@ -2252,6 +2369,54 @@ def team_user_update(uid: int, body: dict):
             raise HTTPException(404)
         if u["role"] == "root" and not actor_is_root:
             raise HTTPException(403)
+        if (
+            u["role"] != "member"
+            and ("job_title" in data or "allowed_emp_idxs_json" in data)
+        ):
+            raise HTTPException(400, "职级与数字员工分配只适用于副账号成员")
+        if "allowed_emp_idxs_json" in data:
+            target_modules = set(db.jloads(u.get("modules_json"), []))
+            target_list = (
+                json.loads(data["allowed_emp_idxs_json"])
+                if data["allowed_emp_idxs_json"] is not None else None
+            )
+            if target_list is not None:
+                for emp_idx in target_list:
+                    emp = departments.get_active(emp_idx)
+                    dept_key = str((emp or {}).get("dept_key") or "")
+                    if dept_key not in target_modules:
+                        raise HTTPException(
+                            400,
+                            f"数字员工 #{emp_idx} 所在行业未对该成员开通，"
+                            "请先在板块里开通对应行业",
+                        )
+            if not actor_is_admin:
+                # 经理/总监的分配边界：目标职级低于自己、行业和员工都在
+                # 自己的可用范围内；自己被限定名单时不得放开为“全部”。
+                if u["id"] == actor.get("id"):
+                    raise HTTPException(403, "不能给自己调整数字员工名单")
+                actor_rank = auth.JOB_TITLE_RANK.get(auth.job_title(), 0)
+                if _member_job_rank(u) >= actor_rank:
+                    raise HTTPException(403, "只能给职级低于自己的成员分配数字员工")
+                if target_list is None:
+                    if (actor.get("allowed_emp_idxs") is not None):
+                        raise HTTPException(
+                            403, "您自己是受限名单，只能分配名单内的数字员工"
+                        )
+                    for dept_key in target_modules:
+                        if dept_key not in auth.BASE_MODULES and not auth.allowed(dept_key):
+                            raise HTTPException(
+                                403, "成员开通的行业超出您的权限范围，无法放开为全部"
+                            )
+                else:
+                    for emp_idx in target_list:
+                        emp = departments.get_active(emp_idx)
+                        dept_key = str((emp or {}).get("dept_key") or "")
+                        if not auth.employee_allowed(emp_idx, dept_key):
+                            raise HTTPException(
+                                403,
+                                f"数字员工 #{emp_idx} 不在您的可分配范围内",
+                            )
         if data:
             connection.execute(
                 "UPDATE users SET "
@@ -3431,9 +3596,20 @@ def depts_list():
     cfgs = employees.get_configs([e["idx"] for d in visible for e in d["employees"]])
     out = []
     internal = _is_boss()
+    viewer = auth.current() or {}
+    member_whitelist = (
+        viewer.get("allowed_emp_idxs")
+        if viewer.get("role") == "member" else None
+    )
     for d in visible:
         emps = []
         for e in d["employees"]:
+            if (
+                member_whitelist is not None
+                and int(e["idx"]) not in member_whitelist
+            ):
+                # 白名单成员只看到被分配的数字员工；楼层可见性即使用权。
+                continue
             cfg = cfgs.get(e["idx"]) or employees.get_config(e["idx"])
             scoped_employee = {
                 **e, "dept_key": d["key"], "dept_name": d["name"],
@@ -3471,6 +3647,11 @@ def dept_emp(idx: int):
     show_profile = (auth.current() or {}).get("role") != "tour"
     if show_profile:
         _need_module(e["dept_key"])
+        if (
+            (auth.current() or {}).get("role") == "member"
+            and not auth.employee_allowed(idx, e["dept_key"])
+        ):
+            raise HTTPException(403, "该数字员工未分配给您，请联系企业主或您的经理开通")
     cfg = employees.get_config(idx)
     identity_where, identity_args = _employee_task_where(e)
     tasks = db.q(
@@ -3838,6 +4019,11 @@ async def task_create(body: dict):
     expert = departments.get_active(idx)
     if expert:
         await db.arun(_need_module, expert["dept_key"])
+        # 员工级白名单：板块之上，成员只能派被分配的数字员工。
+        if not await db.arun(
+            auth.employee_allowed, idx, expert["dept_key"]
+        ):
+            raise HTTPException(403, "该数字员工未分配给您，请联系企业主或您的经理开通")
     else:
         await db.arun(_need_module, "content")
     if not await db.arun(employees.is_enabled, idx):
@@ -14613,6 +14799,8 @@ async def meeting_create(body: dict):
                 raise HTTPException(409, "会议成员当前不可用")
             dept_key = str(binding["employee"].get("dept_key") or "content")
             _need_module(dept_key)
+            if not auth.employee_allowed(idx, dept_key):
+                raise HTTPException(403, "会议成员里有未分配给您的数字员工，请联系企业主或您的经理开通")
             idxs.append(idx)
             member_views.append(_meeting_member_view(idx, binding=binding))
         return idxs, member_views, bindings
@@ -14702,6 +14890,7 @@ async def meeting_suggest(body: dict):
                     "duty": employee["duty"],
                 }
                 for employee in department["employees"]
+                if auth.employee_allowed(employee["idx"], department["key"])
             )
         configs = employees.get_configs(item["idx"] for item in candidates)
         return [
