@@ -2640,8 +2640,8 @@ async function expFind(deptKey, btn){
     const box = $("#ef-result-"+deptKey);
     const team = r.team;
     const picks = r.picks||[];
-    EXP_LAST_TEAM = team || null;
     if(team && (team.members||[]).length){
+      agentTeamSave(team, text);   // 固化到常驻浮窗:换页、派活后仍可随时找回
       box.innerHTML = agentTeamsBoard(team, text);
     }else if(picks.length){
       box.innerHTML = `<div class="sub" style="margin:10px 0 2px">AI 推荐这几位,点「派给TA」直接进 TA 的派活台(会带上你这句话):</div>`
@@ -2718,20 +2718,22 @@ function agentTeamTopo(members){
   members.forEach(m => visit(m, new Set()));
   return out;
 }
-async function agentTeamAutoDispatch(btn){
-  const board = $("#agent-teams-board");
-  if(!board || !EXP_LAST_TEAM) return;
-  const members = agentTeamTopo(EXP_LAST_TEAM.members||[]);
+async function agentTeamAutoDispatch(btn, logId="at-auto-log"){
+  const st = agentTeamState();
+  const team = (st && st.team) || EXP_LAST_TEAM;
+  if(!team) return toast("先用「帮我选」组一支小队");
+  const members = agentTeamTopo(team.members||[]);
   if(!members.length) return toast("小队成员为空");
-  const query = board.dataset.query || EXP_LAST_QUERY || "";
-  const teamName = EXP_LAST_TEAM.teamName || "经营协同小队";
+  const query = (st && st.query) || EXP_LAST_QUERY || "";
+  const teamName = team.teamName || "经营协同小队";
   btn.disabled = true; const old = btn.innerHTML;
   btn.innerHTML = `<span class="spin"></span> 正在按分工派给全队…`;
-  const log = $("#at-auto-log");
-  log.innerHTML = members.map(m => `<div class="topic" style="margin:6px 0" id="at-auto-${m.idx}">⏳ <b>${esc(m.name||m.role)}</b>（${esc(m.roleInTeam||"")}）等待派单…</div>`).join("");
+  const log = document.getElementById(logId);
+  if(!log){ btn.disabled=false; btn.innerHTML=old; return; }
+  log.innerHTML = members.map(m => `<div class="topic" style="margin:6px 0" id="${logId}-${m.idx}">⏳ <b>${esc(m.name||m.role)}</b>（${esc(m.roleInTeam||"")}）等待派单…</div>`).join("");
   let ok = 0, stopped = false;
   for(const m of members){
-    const row = $("#at-auto-"+m.idx);
+    const row = document.getElementById(`${logId}-${m.idx}`);
     if(stopped){ if(row) row.innerHTML = `⏸ <b>${esc(m.name||m.role)}</b>：已跳过（点数不足中止）`; continue; }
     if(row) row.innerHTML = `<span class="spin"></span> <b>${esc(m.name||m.role)}</b>（${esc(m.roleInTeam||"")}）派单中…`;
     try{
@@ -2755,6 +2757,81 @@ async function agentTeamAutoDispatch(btn){
   log.insertAdjacentHTML("beforeend",
     `<div class="actions" style="margin-top:8px"><a class="btn pri" href="#/tasks">📋 去任务中心验收（成功 ${ok}/${members.length}）</a></div>`);
   if(ok) toast(`已自动派给 ${ok} 位数字员工,完成后到任务中心统一验收`);
+}
+
+/* ---------- 协同小队常驻浮窗:挂在 body 上不随路由重绘消失,localStorage 固化,只有用户点关闭才清除 ---------- */
+const AGENT_TEAM_STORE = "paihuo.agentTeam.v1";
+const AGENT_TEAM_TTL_MS = 24*60*60*1000;
+function agentTeamState(){
+  try{
+    const saved = JSON.parse(localStorage.getItem(AGENT_TEAM_STORE)||"null");
+    if(!saved || !saved.team || !(saved.team.members||[]).length) return null;
+    if(!Number.isFinite(Number(saved.at)) || Date.now()-Number(saved.at) > AGENT_TEAM_TTL_MS){
+      localStorage.removeItem(AGENT_TEAM_STORE);
+      return null;
+    }
+    return saved;
+  }catch(_){ return null; }
+}
+function agentTeamSave(team, query){
+  EXP_LAST_TEAM = team;
+  if(query) EXP_LAST_QUERY = query;
+  try{
+    localStorage.setItem(AGENT_TEAM_STORE, JSON.stringify({team, query:query||EXP_LAST_QUERY||"", at:Date.now(), collapsed:false}));
+  }catch(_){ /* 隐私模式只影响持久化,当前会话浮窗照常 */ }
+  agentTeamFloatRender(true);
+}
+function agentTeamSetCollapsed(collapsed){
+  try{
+    const saved = JSON.parse(localStorage.getItem(AGENT_TEAM_STORE)||"null");
+    if(saved){ saved.collapsed = !!collapsed; localStorage.setItem(AGENT_TEAM_STORE, JSON.stringify(saved)); }
+  }catch(_){}
+}
+function agentTeamFloatRestore(){
+  const st = agentTeamState();
+  if(!st) return;
+  EXP_LAST_TEAM = st.team;
+  if(st.query) EXP_LAST_QUERY = st.query;
+  agentTeamFloatRender(!st.collapsed);
+}
+function agentTeamFloatRender(expanded){
+  const st = agentTeamState();
+  const team = (st && st.team) || EXP_LAST_TEAM;
+  if(!team) return;
+  const members = team.members||[];
+  if(!members.length) return;
+  const query = (st && st.query) || EXP_LAST_QUERY || "";
+  let el = document.getElementById("agent-team-float");
+  if(!el){ el = document.createElement("div"); el.id = "agent-team-float"; document.body.appendChild(el); }
+  if(!expanded){
+    el.innerHTML = `<button type="button" class="atf-badge" onclick="agentTeamSetCollapsed(false);agentTeamFloatRender(true)" title="打开协同小队面板">🤝 <b>${members.length}</b></button>`;
+    return;
+  }
+  el.innerHTML = `<div class="atf-panel">
+    <div class="atf-head">
+      <b>🤝 ${esc(team.teamName||"经营协同小队")}</b><span class="sub">${members.length} 人协同</span>
+      <span style="flex:1"></span>
+      <button type="button" class="atf-icon" onclick="agentTeamSetCollapsed(true);agentTeamFloatRender(false)" title="收起为角标">—</button>
+      <button type="button" class="atf-icon" onclick="agentTeamFloatClose()" title="关闭并清除小队">×</button>
+    </div>
+    ${query?`<div class="sub atf-query">原话：${esc(String(query).slice(0,64))}</div>`:""}
+    <div class="atf-members">${members.map(m=>`
+      <div class="atf-member">
+        <span class="atf-avatar">${charSVG(m.color||"#3a3128", m.emoji||"🧑‍💼", "work", 30)}</span>
+        <span class="atf-m-name"><b>${esc(m.name||m.role||"")}</b><i>${esc(m.roleInTeam||"")}${(m.task||m.why)?` · ${esc(String(m.task||m.why).slice(0,14))}`:""}</i></span>
+        <button type="button" class="btn sm pri" onclick="pickExpert(${m.idx})">派给TA</button>
+      </div>`).join("")}</div>
+    <div class="actions" style="margin-top:8px">
+      <button type="button" class="btn sm pri" onclick="agentTeamAutoDispatch(this,'atf-auto-log')">🚀 自动派给全队（${members.length}点）</button>
+      <a class="btn sm" href="#/tasks">📋 任务中心</a>
+    </div>
+    <div id="atf-auto-log"></div>
+  </div>`;
+}
+async function agentTeamFloatClose(){
+  if(!await uiConfirm("关闭并清除当前协同小队面板？之后需要重新「帮我选」组队。",{title:"关闭小队面板",confirmText:"关闭"})) return;
+  try{ localStorage.removeItem(AGENT_TEAM_STORE); }catch(_){}
+  document.getElementById("agent-team-float")?.remove();
 }
 function agentTeamsDag(members){
   if(!members.length) return "";
@@ -8041,4 +8118,4 @@ async function tvDel(id){
   render();
 }
 
-sse(); render();
+sse(); render(); agentTeamFloatRestore();

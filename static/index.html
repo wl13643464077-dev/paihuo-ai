@@ -478,7 +478,24 @@ html,body{max-width:100%;overflow-x:hidden}
 .at-node b{font-size:12px}
 .at-node i{font-style:normal;font-size:11px;color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .at-focus{margin-top:10px;display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap}
-.at-actions{display:flex;justify-content:flex-end;margin-top:8px}
+.at-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:8px;flex-wrap:wrap}
+/* 协同小队常驻浮窗:路由切换不消失,折叠成角标 */
+#agent-team-float{position:fixed;right:16px;bottom:16px;z-index:1200;max-width:min(92vw,380px)}
+.atf-badge{display:inline-flex;align-items:center;gap:6px;padding:10px 16px;border:2.5px solid var(--ink);border-radius:999px;background:#ffd166;font:inherit;font-size:15px;font-weight:900;cursor:pointer;box-shadow:4px 4px 0 rgba(51,41,31,.25)}
+.atf-badge:hover{transform:translate(1px,1px);box-shadow:3px 3px 0 rgba(51,41,31,.25)}
+.atf-panel{display:flex;flex-direction:column;gap:8px;padding:12px;border:2.5px solid var(--ink);border-radius:16px;background:#fffaf0;box-shadow:5px 5px 0 rgba(51,41,31,.22);max-height:min(72vh,560px);overflow:auto}
+.atf-head{display:flex;align-items:center;gap:8px;min-width:0}
+.atf-head b{font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.atf-icon{flex:none;width:26px;height:26px;border:2px solid var(--ink);border-radius:8px;background:#fff;font:inherit;font-weight:900;cursor:pointer;line-height:1}
+.atf-icon:hover{background:#ffe9ad}
+.atf-query{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.atf-members{display:flex;flex-direction:column;gap:6px}
+.atf-member{display:flex;align-items:center;gap:8px;padding:5px 8px;border:2px solid var(--ink);border-radius:12px;background:#fff}
+.atf-avatar{flex:none;display:flex}
+.atf-m-name{display:flex;flex:1;min-width:0;flex-direction:column;line-height:1.25}
+.atf-m-name b{font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.atf-m-name i{font-style:normal;font-size:11px;color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media (max-width:640px){#agent-team-float{right:8px;bottom:74px}}
 </style>
 </head>
 <body>
