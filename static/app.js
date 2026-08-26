@@ -1124,7 +1124,7 @@ function specRoomCard(e){
     </div></div>`;
 }
 function deptFloorHtml(d){
-  return `<div class="notice" style="margin-top:0">${d.emoji} <b>${esc(d.name)}</b> — ${esc(d.tagline||"")}。${ME&&ME.role==="tour"?"点任何员工查看公开文字介绍。":"点任何专家即可查看介绍或直接派活；产出自动进资产库。"}</div>`
+  return `<div class="notice" style="margin-top:0">${d.emoji} <b>${esc(d.name)}</b> — ${esc(deptTagline(d))}。${ME&&ME.role==="tour"?"点任何员工查看公开文字介绍。":"点任何专家即可查看介绍或直接派活；产出自动进资产库。"}</div>`
     + (ME&&ME.role==="tour"?"":expFinderCard(d.key))
     + d.groups.map(g=>{
       const members = d.employees.filter(e=>e.group===g.name && (e.enabled!==false || isBoss()));
@@ -1207,7 +1207,7 @@ async function dashboard(){
       "选题→写稿→配图→审查,整条流水线出成品",
       ()=>`<div class="floor">${META.stations.map(roomCard).join("")}${gateRoom()}</div>`));
     allowedDepts.forEach(d=> sections.push(deptSection(d.key, d.emoji, d.name, d.employees.length+"人",
-      d.tagline||"行业精品员工,一人一岗随叫随到", ()=>deptFloorHtml(d))));
+      deptTagline(d)||"行业精品员工,一人一岗随叫随到", ()=>deptFloorHtml(d))));
     const avatarRow = can("avatar")?`<div class="deptsec"><div class="depthead" onclick="location.hash='#/avatar'">
       <span class="dh-emoji">🎥</span><span class="dh-name">数字人摄影棚</span><span class="dh-count">新</span>
       <span class="dh-tag">照片开口说话 · 出条口播视频</span><span class="dh-caret">→</span></div></div>`:"";
@@ -2663,6 +2663,13 @@ function expCard(p){
     <button class="btn sm pri" onclick="pickExpert(${p.idx})">派给TA →</button></div>`;
 }
 /* ---------- AgentTeams 风格:协同小队可视化(队长/成员/任务依赖,复用卡通员工形象) ---------- */
+// 部门 tagline 里的「N 位」人数动态跟随实际花名册,配置文案不再与真实人数漂移。
+function deptTagline(d){
+  const tagline = String(d?.tagline||"");
+  const count = (d?.employees||[]).length;
+  if(!count) return tagline;
+  return tagline.replace(/^\d+\s*位/, `${count} 位`);
+}
 function agentTeamsBoard(team, query){
   const members = team.members || [];
   const lead = members.find(m => m.roleInTeam === "队长") || members[0];
@@ -2689,8 +2696,65 @@ function agentTeamsBoard(team, query){
     <div class="at-dag-label">任务依赖</div>
     <div class="at-dag">${dag}</div>
     <div id="at-focus">${focusHtml}</div>
-    ${lead ? `<div class="at-actions"><button class="btn" onclick="pickExpert(${lead.idx})">先派给队长统筹</button></div>` : ""}
+    <div class="at-actions">
+      <button class="btn pri" onclick="agentTeamAutoDispatch(this)">🚀 自动派给全队（${members.length}人 · ${members.length}点）</button>
+      ${lead ? `<button class="btn" onclick="pickExpert(${lead.idx})">只派给队长统筹</button>` : ""}
+    </div>
+    <div class="sub" style="margin-top:4px">自动模式：按分工一次派给全队，各岗位并行开工；跑完到任务中心统一验收即可。</div>
+    <div id="at-auto-log"></div>
   </div>`;
+}
+// 自动化完成模式:按依赖先队长后成员的顺序,把活一次派给整个小队;老板只需到任务中心验收。
+function agentTeamTopo(members){
+  const byIdx = Object.fromEntries(members.map(m => [m.idx, m]));
+  const seen = new Set(), out = [];
+  const visit = (m, stack) => {
+    if(seen.has(m.idx) || stack.has(m.idx)) return;
+    stack.add(m.idx);
+    (m.dependsOn||[]).forEach(id => { const dep = byIdx[id]; if(dep) visit(dep, stack); });
+    stack.delete(m.idx);
+    if(!seen.has(m.idx)){ seen.add(m.idx); out.push(m); }
+  };
+  members.forEach(m => visit(m, new Set()));
+  return out;
+}
+async function agentTeamAutoDispatch(btn){
+  const board = $("#agent-teams-board");
+  if(!board || !EXP_LAST_TEAM) return;
+  const members = agentTeamTopo(EXP_LAST_TEAM.members||[]);
+  if(!members.length) return toast("小队成员为空");
+  const query = board.dataset.query || EXP_LAST_QUERY || "";
+  const teamName = EXP_LAST_TEAM.teamName || "经营协同小队";
+  btn.disabled = true; const old = btn.innerHTML;
+  btn.innerHTML = `<span class="spin"></span> 正在按分工派给全队…`;
+  const log = $("#at-auto-log");
+  log.innerHTML = members.map(m => `<div class="topic" style="margin:6px 0" id="at-auto-${m.idx}">⏳ <b>${esc(m.name||m.role)}</b>（${esc(m.roleInTeam||"")}）等待派单…</div>`).join("");
+  let ok = 0, stopped = false;
+  for(const m of members){
+    const row = $("#at-auto-"+m.idx);
+    if(stopped){ if(row) row.innerHTML = `⏸ <b>${esc(m.name||m.role)}</b>：已跳过（点数不足中止）`; continue; }
+    if(row) row.innerHTML = `<span class="spin"></span> <b>${esc(m.name||m.role)}</b>（${esc(m.roleInTeam||"")}）派单中…`;
+    try{
+      const e = await api("/depts/emp/"+m.idx);
+      const direction = `【协同小队·${teamName}】老板原话：${query}\n本岗位分工（${m.roleInTeam||"执行"}）：${m.task||m.why||m.role||""}\n协同说明：小队共${members.length}人按各自分工产出，请聚焦本岗位、交付可直接使用的结果。`;
+      const brief = {direction, industry:"", material:"", length:"std"};
+      const binding = employeeIdentityMutationFields(e);
+      const requestKey = persistentMutationRequestKey("teamtask", String(m.idx), {emp_idx:m.idx, brief, ...binding});
+      const r = await api("/tasks",{method:"POST", body:{emp_idx:m.idx, brief, force:true, request_key:requestKey, ...binding}, timeout:20000});
+      const tid = Number(r.task_id||0);
+      if(!Number.isInteger(tid) || tid < 1) throw new Error("任务已接收但编号异常，请到任务中心核对");
+      clearPersistentMutationRequestKey("teamtask", String(m.idx), requestKey);
+      ok++;
+      if(row) row.innerHTML = `✅ <b>${esc(m.name||m.role)}</b>（${esc(m.roleInTeam||"")}）已开工 → <a href="#/tasks/${tid}" style="text-decoration:underline">任务 #${tid}</a>`;
+    }catch(err){
+      if(row) row.innerHTML = `❌ <b>${esc(m.name||m.role)}</b>：${esc(err.message||"派单失败")}`;
+      if(String(err.message||"").includes("点数")) stopped = true;
+    }
+  }
+  btn.disabled = false; btn.innerHTML = old;
+  log.insertAdjacentHTML("beforeend",
+    `<div class="actions" style="margin-top:8px"><a class="btn pri" href="#/tasks">📋 去任务中心验收（成功 ${ok}/${members.length}）</a></div>`);
+  if(ok) toast(`已自动派给 ${ok} 位数字员工,完成后到任务中心统一验收`);
 }
 function agentTeamsDag(members){
   if(!members.length) return "";
