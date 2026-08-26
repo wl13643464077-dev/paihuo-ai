@@ -2620,7 +2620,7 @@ async function specRedo(tid){
 /* ---------- V27:智能派活路由(大白话找专家 + 派单预检引导) ---------- */
 function expFinderCard(deptKey){
   return `<div class="card" style="background:linear-gradient(120deg,#eef6ff,#fffaf0);margin-top:10px">
-    <b>🎯 不知道找谁?</b> <span class="sub">一句话描述你要办的活,AI 帮你从本部门专家里挑最对口的。</span>
+    <b>🎯 不知道找谁?</b> <span class="sub">一句话描述你要办的活,AI 帮你从本部门专家里挑最对口的,并按协同小队展示。</span>
     <div style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;flex-wrap:wrap">
       <textarea id="ef-text-${deptKey}" style="flex:1;min-width:min(100%,240px);min-height:46px"
         placeholder="例:我想给门店做一场周年庆活动,怎么策划引流"></textarea>
@@ -2629,6 +2629,7 @@ function expFinderCard(deptKey){
     <div id="ef-result-${deptKey}"></div></div>`;
 }
 let EXP_LAST_QUERY = "";   // 最近一次「帮我选」的那句话,「派给TA」时带进派活框
+let EXP_LAST_TEAM = null;  // 最近一次匹配到的协同小队(含形象字段)
 async function expFind(deptKey, btn){
   const text = $("#ef-text-"+deptKey).value.trim();
   if(!text) return toast("先用一句话说说要办什么活");
@@ -2636,22 +2637,109 @@ async function expFind(deptKey, btn){
   btn.disabled=true; const old=btn.innerHTML; btn.innerHTML=`<span class="spin"></span> AI 读花名册挑人中,约十几秒…`;
   try{
     const r = await api("/experts/match",{method:"POST",body:{text, dept_key:deptKey}, timeout:35000});
-    const box = $("#ef-result-"+deptKey); const picks = r.picks||[];
-    box.innerHTML = picks.length
-      ? `<div class="sub" style="margin:10px 0 2px">AI 推荐这几位,点「派给TA」直接进 TA 的派活台(会带上你这句话):</div>`
-        + picks.map(expCard).join("")
-      : `<div class="sub" style="margin-top:10px">${esc(r.msg||"没匹配到特别对口的,换个说法再试试,或直接点下面的专家卡片。")}</div>`;
+    const box = $("#ef-result-"+deptKey);
+    const team = r.team;
+    const picks = r.picks||[];
+    EXP_LAST_TEAM = team || null;
+    if(team && (team.members||[]).length){
+      box.innerHTML = agentTeamsBoard(team, text);
+    }else if(picks.length){
+      box.innerHTML = `<div class="sub" style="margin:10px 0 2px">AI 推荐这几位,点「派给TA」直接进 TA 的派活台(会带上你这句话):</div>`
+        + picks.map(expCard).join("");
+    }else{
+      box.innerHTML = `<div class="sub" style="margin-top:10px">${esc(r.msg||"没匹配到特别对口的,换个说法再试试,或直接点下面的专家卡片。")}</div>`;
+    }
   }catch(e){ toast(e.message); }
   finally{ btn.disabled=false; btn.innerHTML=old; }
 }
 function expCard(p){
+  const color = p.color || "#3a3128";
   return `<div class="topic" style="margin:8px 0;display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap">
-    <span style="font-size:22px">${esc(p.emoji||"🧑‍💼")}</span>
+    <div style="flex:none">${charSVG(color, p.emoji||"🧑‍💼", "idle", 56)}</div>
     <div style="flex:1;min-width:0">
       <div><b>${esc(p.name||"")}</b> <span class="sub">${esc(p.role||"")}${p.dept?" · "+esc(p.dept):""}</span></div>
       <div class="sub" style="margin-top:3px">💡 ${esc(p.why||"")}</div>
     </div>
     <button class="btn sm pri" onclick="pickExpert(${p.idx})">派给TA →</button></div>`;
+}
+/* ---------- AgentTeams 风格:协同小队可视化(队长/成员/任务依赖,复用卡通员工形象) ---------- */
+function agentTeamsBoard(team, query){
+  const members = team.members || [];
+  const lead = members.find(m => m.roleInTeam === "队长") || members[0];
+  const chips = members.map(m => {
+    const color = m.color || "#3a3128";
+    const leadCls = m.roleInTeam === "队长" ? " lead" : "";
+    return `<button type="button" class="at-chip${leadCls}" onclick="agentTeamFocus(${m.idx})" title="${esc(m.name)} · ${esc(m.role)}">
+      ${charSVG(color, m.emoji||"🧑‍💼", "work", 36)}
+      <span><b>${esc(m.name||m.role||"")}</b><i>${esc(m.roleInTeam||"")}</i></span>
+    </button>`;
+  }).join("");
+  const dag = agentTeamsDag(members);
+  const focus = lead || members[0];
+  const focusHtml = focus ? agentTeamFocusCard(focus, query) : "";
+  return `<div class="agent-teams" id="agent-teams-board" data-query="${esc(query)}">
+    <div class="at-head">
+      ${lead ? charSVG(lead.color||"#3a3128", lead.emoji||"🧑‍💼", "work", 42) : ""}
+      <div class="at-title"><b>${esc(team.teamName||"经营协同小队")}</b>
+        <span class="sub">${members.length} 名成员协同</span></div>
+      ${team.degraded ? `<em class="at-badge">规则降级</em>` : ""}
+    </div>
+    ${team.summary ? `<div class="sub" style="margin:2px 0 6px">${esc(team.summary)}</div>` : ""}
+    <div class="at-members">${chips}</div>
+    <div class="at-dag-label">任务依赖</div>
+    <div class="at-dag">${dag}</div>
+    <div id="at-focus">${focusHtml}</div>
+    ${lead ? `<div class="at-actions"><button class="btn" onclick="pickExpert(${lead.idx})">先派给队长统筹</button></div>` : ""}
+  </div>`;
+}
+function agentTeamsDag(members){
+  if(!members.length) return "";
+  const byIdx = Object.fromEntries(members.map(m => [m.idx, m]));
+  const depthOf = (m, seen=new Set()) => {
+    if(seen.has(m.idx)) return 0;
+    seen.add(m.idx);
+    const deps = (m.dependsOn||[]).map(id => byIdx[id]).filter(Boolean);
+    if(!deps.length) return 0;
+    return 1 + Math.max(...deps.map(d => depthOf(d, seen)));
+  };
+  const stages = {};
+  members.forEach(m => {
+    const d = depthOf(m);
+    (stages[d] ||= []).push(m);
+  });
+  const cols = Object.keys(stages).map(Number).sort((a,b)=>a-b);
+  return `<div class="at-dag-flow">${cols.map((d, ci) => {
+    const cells = stages[d].map(m => {
+      const color = m.color || "#3a3128";
+      return `<button type="button" class="at-node" onclick="agentTeamFocus(${m.idx})">
+        ${charSVG(color, m.emoji||"🧑‍💼", "work", 40)}
+        <span><b>${esc(m.roleInTeam||"")}</b><i>${esc(m.task||m.why||m.role||"")}</i></span>
+      </button>`;
+    }).join("");
+    const arrow = ci < cols.length - 1 ? `<div class="at-arrow" aria-hidden="true">→</div>` : "";
+    return `<div class="at-col">${cells}</div>${arrow}`;
+  }).join("")}</div>`;
+}
+function agentTeamFocusCard(m, query){
+  const color = m.color || "#3a3128";
+  return `<div class="at-focus topic">
+    <div style="flex:none">${charSVG(color, m.emoji||"🧑‍💼", "await", 72)}</div>
+    <div style="flex:1;min-width:0">
+      <div><b style="font-size:16px">${esc(m.name||"")}</b>
+        <span class="sub">${esc(m.role||"")} · ${esc(m.dept||"")} · ${esc(m.roleInTeam||"")}</span></div>
+      <div class="sub" style="margin-top:4px">💡 ${esc(m.why||m.task||"")}</div>
+      <div style="margin-top:6px;font-size:13px">将带上你的原话：${esc(query||EXP_LAST_QUERY||"")}</div>
+    </div>
+    <button class="btn sm pri" onclick="pickExpert(${m.idx})">派给TA →</button>
+  </div>`;
+}
+function agentTeamFocus(idx){
+  const board = $("#agent-teams-board");
+  if(!board || !EXP_LAST_TEAM) return;
+  const m = (EXP_LAST_TEAM.members||[]).find(x => Number(x.idx)===Number(idx));
+  if(!m) return;
+  const focus = $("#at-focus");
+  if(focus) focus.innerHTML = agentTeamFocusCard(m, board.dataset.query || EXP_LAST_QUERY);
 }
 // 记住那句话,openSpec 后由 specTaskTab 一次性回填到派活框。
 // 帮我选:取部门找人框;改派:取当前派活框里老板刚写的任务。
@@ -2662,7 +2750,7 @@ function specShowMismatch(idx, r){
   const box = $("#spec-fit"); if(!box) return;
   const sugg = (r.suggestions||[]).map(s=>`
     <div class="topic" style="margin:8px 0;display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap">
-      <span style="font-size:20px">🧑‍💼</span>
+      <div style="flex:none">${charSVG(s.color||"#3a3128", s.emoji||"🧑‍💼", "idle", 48)}</div>
       <div style="flex:1;min-width:0"><div><b>${esc(s.name||"")}</b> <span class="sub">${esc(s.role||"")}</span></div>
         <div class="sub" style="margin-top:3px">💡 ${esc(s.why||"")}</div></div>
       <button class="btn sm pri" onclick="reassignExpert(${s.idx})">改派给TA →</button></div>`).join("");
@@ -5414,9 +5502,10 @@ async function adminView(){
       </tbody></table></div>
     </details>
   </div>
-  <div class="card"><h2>☁️ 供应商 · 云雾API</h2>
+  <div class="card"><h2>☁️ 供应商 · OpenAI 兼容网关</h2>
+    <div class="sub" style="margin-bottom:8px">可填云雾或 <a href="https://doc.openlux.ai/" target="_blank" rel="noreferrer">OpenLux</a> 等兼容地址（不含 /v1）。</div>
     <div class="row">
-      <div><label>接口地址</label><input id="adm-base" value="${esc(ADM.provider.yunwu_base)}"></div>
+      <div><label>接口地址</label><input id="adm-base" value="${esc(ADM.provider.yunwu_base)}" placeholder="https://api.openlux.ai"></div>
       <div><label>API Key ${ADM.provider.yunwu_key?`<span class="tag">当前:${esc(ADM.provider.yunwu_key)}</span>`:`<span class="tag">未配置</span>`}</label>
         <input id="adm-key" type="password" placeholder="sk-…(留空不改)"></div>
     </div>

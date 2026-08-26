@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
 import time
 import unicodedata
@@ -392,8 +393,18 @@ async def _controlled_webfetch_evidence(
 
 
 def yunwu_conf():
-    return (db.get_setting("yunwu_base") or "https://yunwu.ai").rstrip("/"), \
-        secureconfig.get_secret("yunwu_key")
+    """返回 (base, key)。
+
+    显式环境变量优先于库内配置，便于运维切换 OpenAI 兼容网关
+    （如 OpenLux，文档 https://doc.openlux.ai/ ，地址 https://api.openlux.ai）
+    而不改业务调用链；未设置环境变量时仍读管理后台保存的 yunwu_base / yunwu_key。
+    Base 不含 /v1，调用方自行拼 ``{base}/v1/chat/completions``。
+    """
+    env_base = (os.environ.get("YUNWU_BASE") or os.environ.get("PAIHUO_YUNWU_BASE") or "").strip()
+    env_key = (os.environ.get("YUNWU_KEY") or os.environ.get("PAIHUO_YUNWU_KEY") or "").strip()
+    base = env_base or (db.get_setting("yunwu_base") or "https://yunwu.ai")
+    key = env_key or secureconfig.get_secret("yunwu_key")
+    return base.rstrip("/"), key
 
 
 def is_yunwu(model: str) -> bool:

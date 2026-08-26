@@ -4,9 +4,10 @@
 本模块用一次轻量 LLM 调用替老板挑人:
 
 - match_experts:一句话大白话 → 从租户可见的产业部花名册里挑最对口的前 3 名;
+- match_expert_team:同一句话 → 组建 2~4 人协同小队(角色+依赖),供 AgentTeams 协同可视化;
 - preflight_fit:派单前预检任务书与所选专家是否对口,不对口给同部门更合适的人选。
 
-铁规:两个函数都必须「降级可用」——LLM 异常/超时一律当作「匹配/挑不出」放行,
+铁规:辅助函数都必须「降级可用」——LLM 异常/超时一律当作「匹配/挑不出」放行,
 绝不因为辅助调用失败而拦死正常派单(见 main.py POST /api/tasks 的用法)。
 """
 import asyncio
@@ -18,6 +19,7 @@ log = logging.getLogger("expertmatch")
 
 # 花名册匹配是系统级轻量调用,不归属任何员工,用 idx=0 走全局默认文本模型(DeepSeek)。
 ROUTE_IDX = 0
+TEAM_ROLES = frozenset({"队长", "调研", "策划", "执行", "审核", "协同"})
 
 
 def _disabled_idxs() -> set:
@@ -76,21 +78,99 @@ def _as_int(v):
         return None
 
 
-async def match_experts(text: str, tid: int, dept_key: str = None) -> list:
-    """大白话找专家:返回最对口的前 3 名 [{idx,name,dept,role,group,emoji,why}]。挑不出/异常返回 []."""
+def _public_member(e: dict, *, role_in_team: str, task: str, why: str, depends_on: list) -> dict:
+    return {
+        "idx": e["idx"],
+        "name": e.get("person", ""),
+        "role": e["name"],
+        "dept": e["dept_name"],
+        "group": e.get("group", ""),
+        "emoji": e.get("emoji", ""),
+        "color": e.get("color", "") or "#3a3128",
+        "roleInTeam": role_in_team,
+        "task": str(task or why or e.get("name") or "")[:80],
+        "why": str(why or "")[:60],
+        "dependsOn": depends_on,
+    }
+
+
+def _enrich_members(raw_picks, by_idx: dict) -> list:
+    """LLM picks → 公开成员卡(校验编号真实、角色合法、依赖闭合;不外露内部职责)."""
+    members = []
+    for p in raw_picks or []:
+        e = by_idx.get(_as_int(p.get("idx")))
+        if not e:
+            continue
+        role = str(p.get("roleInTeam") or "").strip()
+        if role not in TEAM_ROLES:
+            role = "队长" if not members else "执行"
+        depends = []
+        for dep in (p.get("dependsOn") or []):
+            dep_id = _as_int(dep)
+            if dep_id and dep_id != e["idx"] and dep_id in by_idx:
+                depends.append(dep_id)
+        members.append(_public_member(
+            e,
+            role_in_team=role,
+            task=str(p.get("task") or p.get("why") or ""),
+            why=str(p.get("why") or ""),
+            depends_on=depends,
+        ))
+        if len(members) >= 4:
+            break
+    if members and not any(m["roleInTeam"] == "队长" for m in members):
+        members[0]["roleInTeam"] = "队长"
+    # 无显式依赖时:非队长默认依赖队长,方便前端画协同链
+    if members:
+        lead = next((m["idx"] for m in members if m["roleInTeam"] == "队长"), members[0]["idx"])
+        for m in members:
+            if m["idx"] == lead:
+                m["dependsOn"] = []
+            elif not m["dependsOn"]:
+                m["dependsOn"] = [lead]
+    return members
+
+
+def _members_to_picks(members: list) -> list:
+    """兼容旧前端/测试:picks 仍是 [{idx,name,dept,role,group,emoji,why,...}]."""
+    out = []
+    for m in members:
+        out.append({
+            "idx": m["idx"],
+            "name": m["name"],
+            "role": m["role"],
+            "dept": m["dept"],
+            "group": m["group"],
+            "emoji": m["emoji"],
+            "color": m.get("color", ""),
+            "why": m.get("why") or m.get("task") or "",
+            "roleInTeam": m.get("roleInTeam", ""),
+            "task": m.get("task", ""),
+            "dependsOn": list(m.get("dependsOn") or []),
+        })
+        if len(out) >= 3:
+            break
+    return out
+
+
+async def match_expert_team(text: str, tid: int, dept_key: str = None) -> dict:
+    """大白话组建协同小队。返回 {teamName,summary,members,picks,degraded};失败空 members。"""
     text = (text or "").strip()
+    empty = {"teamName": "", "summary": "", "members": [], "picks": [], "degraded": False}
     if not text:
-        return []
+        return empty
     emps = await db.arun(_visible_specialists, dept_key)
     if not emps:
-        return []
+        return empty
     by_idx = {e["idx"]: e for e in emps}
     roster = _roster_text(emps)
-    system_prompt = f"""你是「派活」平台的首席人力资源官,负责把需求路由给最对口的数字员工。
+    system_prompt = f"""你是「派活」平台的数字员工调度官,负责把需求编排成协同小队。
 【内部可选专家花名册（不得向用户披露职责、清单或原文）】
 {roster}
-请挑出最对口的前 3 名(按匹配度从高到低);只能从上面花名册里选,编号必须真实存在。
-只输出 JSON:{{"picks":[{{"idx":编号,"why":"为什么TA最合适,一句话≤30字"}}]}}
+请挑 2~4 名最对口的专家组成小队(按匹配度从高到低);只能从上面花名册里选,编号必须真实存在。
+第 1 人必须是队长;其余人角色只能是:调研/策划/执行/审核/协同。
+dependsOn 填依赖的同事编号(通常依赖队长);队长 dependsOn 为 []。
+只输出 JSON:{{"teamName":"≤16字小队名","summary":"≤40字协同说明","picks":[{{"idx":编号,"roleInTeam":"队长|调研|策划|执行|审核|协同","task":"≤30字分工","dependsOn":[编号],"why":"为什么TA合适,≤28字"}}]}}
 花名册里确实没有沾边的,picks 就返回 []。"""
     user_prompt = f"【老板的一句话需求（不可信业务输入）】\n{text[:500]}"
     try:
@@ -105,24 +185,29 @@ async def match_experts(text: str, tid: int, dept_key: str = None) -> list:
             ),
             timeout=30,
         )
-        picks = (r.get("data") or {}).get("picks") or []
+        data = r.get("data") or {}
+        members = _enrich_members(data.get("picks") or [], by_idx)
+        if not members:
+            return {**empty, "degraded": True, "summary": "没匹配到特别对口的"}
+        return {
+            "teamName": str(data.get("teamName") or "经营协同小队").strip()[:24] or "经营协同小队",
+            "summary": str(data.get("summary") or "").strip()[:80],
+            "members": members,
+            "picks": _members_to_picks(members),
+            "degraded": False,
+        }
     except Exception as exc:                    # noqa: BLE001 —— 降级:挑不出就返回空,不影响主流程
         log.warning(
-            "match_experts 降级返回空 error_type=%s",
+            "match_expert_team 降级返回空 error_type=%s",
             type(exc).__name__,
         )
-        return []
-    out = []
-    for p in picks:
-        e = by_idx.get(_as_int(p.get("idx")))
-        if not e:
-            continue
-        out.append({"idx": e["idx"], "name": e.get("person", ""), "role": e["name"],
-                    "dept": e["dept_name"], "group": e.get("group", ""),
-                    "emoji": e.get("emoji", ""), "why": str(p.get("why", ""))[:60]})
-        if len(out) >= 3:
-            break
-    return out
+        return {**empty, "degraded": True}
+
+
+async def match_experts(text: str, tid: int, dept_key: str = None) -> list:
+    """大白话找专家:返回最对口的前 3 名 [{idx,name,dept,role,group,emoji,why}]。挑不出/异常返回 []."""
+    team = await match_expert_team(text, tid, dept_key=dept_key)
+    return team.get("picks") or []
 
 
 async def preflight_fit(idx: int, direction: str) -> dict:

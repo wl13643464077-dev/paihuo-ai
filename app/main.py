@@ -4112,23 +4112,38 @@ def _match_over_limit(tid: int) -> bool:
 
 @app.post("/api/experts/match")
 async def experts_match(body: dict):
-    """大白话找专家:一句话描述任务,AI 从租户可见的产业部专家里挑最对口的前 3 名。
-    登录即可用、免费不扣点(按租户日限防刷);可选 dept_key 限定只在某部门内匹配。"""
+    """大白话找专家:一句话描述任务,AI 从租户可见的产业部专家里组建协同小队。
+    登录即可用、免费不扣点(按租户日限防刷);可选 dept_key 限定只在某部门内匹配。
+    返回 picks(兼容旧前端) + team(AgentTeams 协同可视化)。"""
     if not auth.current():
         raise HTTPException(401)
     text = (body.get("text") or "").strip()
     if not text:
         raise HTTPException(400, "先用一句话说说要办什么活")
     if _match_over_limit(TEN()):
-        return {"picks": [], "msg": "今天的 AI 选人次数用完了,明天再来;您也可以直接点下面的专家卡片派活"}
+        return {"picks": [], "team": None,
+                "msg": "今天的 AI 选人次数用完了,明天再来;您也可以直接点下面的专家卡片派活"}
     dept_key = (body.get("dept_key") or "").strip() or None
     if dept_key and not auth.dept_visible(dept_key):
         dept_key = None
     async with _free_ai_slot("expert-match"):
-        picks = await expertmatch.match_experts(
+        team = await expertmatch.match_expert_team(
             text, TEN(), dept_key=dept_key
         )
-    return {"picks": picks}
+    members = team.get("members") or []
+    picks = team.get("picks") or []
+    if not members:
+        return {"picks": [], "team": None,
+                "msg": team.get("summary") or "没匹配到特别对口的,换个说法再试试,或直接点下面的专家卡片。"}
+    return {
+        "picks": picks,
+        "team": {
+            "teamName": team.get("teamName") or "经营协同小队",
+            "summary": team.get("summary") or "",
+            "degraded": bool(team.get("degraded")),
+            "members": members,
+        },
+    }
 
 
 @app.get("/api/task-center")

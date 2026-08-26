@@ -456,6 +456,29 @@ html,body{max-width:100%;overflow-x:hidden}
   .jobrow .t{min-width:70%}
   .jobrow>.sub{white-space:nowrap}
 }
+/* AgentTeams 风格：老板一句话匹配后的协同小队可视化 */
+.agent-teams{margin-top:12px;padding:12px;border:2px solid var(--ink);border-radius:16px;background:#fffaf0;box-shadow:3px 3px 0 rgba(51,41,31,.12)}
+.at-head{display:flex;align-items:center;gap:10px;min-width:0}
+.at-title{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+.at-title b{font-size:15px}
+.at-badge{flex:none;padding:2px 8px;border:2px solid var(--ink);border-radius:999px;background:#ffe9ad;font-size:11px;font-style:normal;font-weight:800}
+.at-members{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
+.at-chip{display:inline-flex;align-items:center;gap:6px;max-width:200px;padding:3px 10px 3px 3px;border:2px solid var(--ink);border-radius:999px;background:#fff;cursor:pointer;font:inherit;text-align:left}
+.at-chip.lead,.at-chip:hover{background:#fff6dc;box-shadow:2px 2px 0 rgba(51,41,31,.16)}
+.at-chip span{display:flex;flex-direction:column;min-width:0;line-height:1.2}
+.at-chip b{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:110px}
+.at-chip i{font-style:normal;font-size:11px;color:var(--ink2)}
+.at-dag-label{font-size:12px;font-weight:800;color:var(--ink2);margin:4px 0}
+.at-dag{overflow:auto;padding:8px;border:2px dashed var(--line);border-radius:12px;background:#fff}
+.at-dag-flow{display:flex;align-items:stretch;gap:8px;min-width:min-content}
+.at-col{display:flex;flex-direction:column;gap:8px}
+.at-arrow{display:flex;align-items:center;font-size:18px;font-weight:900;color:var(--ink2);padding:0 2px}
+.at-node{display:flex;align-items:center;gap:8px;width:168px;padding:6px 8px;border:2px solid var(--ink);border-radius:12px;background:#eef6ff;cursor:pointer;font:inherit;text-align:left}
+.at-node span{display:flex;flex-direction:column;gap:2px;min-width:0}
+.at-node b{font-size:12px}
+.at-node i{font-style:normal;font-size:11px;color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.at-focus{margin-top:10px;display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap}
+.at-actions{display:flex;justify-content:flex-end;margin-top:8px}
 </style>
 </head>
 <body>
