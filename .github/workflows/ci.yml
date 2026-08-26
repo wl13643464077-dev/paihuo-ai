@@ -16,7 +16,8 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 全量套件已增长到 20 分钟装不下（schema55→57 新增大量用例），放宽到 40 分钟
+    timeout-minutes: 40
 
     steps:
       - name: Checkout
