@@ -2,13 +2,15 @@
 import asyncio
 import json
 import os
+import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 
-from app import db, taskcenter
+from app import db, departments, employeeidentity, employees, taskcenter
 from app.engine import Engine
 
 
@@ -32,10 +34,69 @@ class TaskCenterDatabaseCase(unittest.TestCase):
         self.tmp.cleanup()
 
     def _task(self, direction, status="done", tenant=1, at=100, **extra):
+        # Schema54 requires every executable task fixture to bind the exact
+        # immutable role-config revision.  Individual fail-closed tests below
+        # deliberately overwrite parts of this valid core binding.
+        frozen = employeeidentity.task_fields(
+            employeeidentity.active_employee(0)
+        )
+        frozen.update(extra)
         return db.insert("task", {"tenant_id": tenant, "emp_idx": 0,
                                    "brief_json": json.dumps({"direction": direction}),
                                    "status": status, "created_at": at, "updated_at": at,
-                                   **extra})
+                                   **frozen})
+
+    @staticmethod
+    def _member_snapshot(idx, dept="content", name=None, employee=None):
+        employee = employee or employeeidentity.active_employee(idx)
+        if employee and employee.get("dept_key") == dept:
+            frozen = employeeidentity.snapshot(employee)
+            if name is not None:
+                frozen["name"] = name
+            config = employees.ensure_role_config(employee)
+            bundle = db.get_employee_role_bundle(
+                config["identity_ref"], config["config_revision"],
+                config["config_sha256"],
+            )
+            if not bundle:
+                raise RuntimeError("测试员工 role bundle 缺失")
+            return {
+                **frozen,
+                "identity_ref": employeeidentity.identity_ref(frozen),
+                "config_revision": config["config_revision"],
+                "config_sha256": config["config_sha256"],
+                "person_snapshot": bundle.get("person_snapshot", ""),
+                "identity_scheme": bundle.get("identity_scheme", "legacy-six"),
+                "bundle_sha256": bundle["bundle_sha256"],
+            }
+        return {
+            "idx": int(idx),
+            "key": f"legacy.idx.{int(idx)}",
+            "name": name or f"历史员工#{int(idx)}",
+            "dept_key": dept,
+            "catalog_version": "legacy-unknown",
+            "spec_sha256": "legacy-unknown",
+        }
+
+    def _meeting(
+        self, question, indices, *, tenant=1, depts=None,
+        member_snapshots=None, **extra,
+    ):
+        depts = list(depts or ["content"] * len(indices))
+        payload = {
+            "tenant_id": tenant,
+            "question": question,
+            "emp_idxs_json": json.dumps(indices),
+            "member_snapshot_json": json.dumps(
+                member_snapshots or [
+                    self._member_snapshot(idx, dept)
+                    for idx, dept in zip(indices, depts)
+                ],
+                ensure_ascii=False,
+            ),
+        }
+        payload.update(extra)
+        return db.insert("meeting", payload)
 
     @staticmethod
     def _discard_coro(coro):
@@ -59,9 +120,10 @@ class TaskCenterDatabaseCase(unittest.TestCase):
         self.assertIn("idx_tool_job_one_active", tool_indexes)
 
     def test_sources_are_traceable_compact_and_tenant_scoped(self):
-        mid = db.insert("meeting", {"tenant_id": 1, "question": "新品要不要上线",
-                                    "emp_idxs_json": "[0]", "status": "done",
-                                    "phase": "completed", "created_at": 20, "updated_at": 20})
+        mid = self._meeting(
+            "新品要不要上线", [0], status="done", phase="completed",
+            created_at=20, updated_at=20,
+        )
         direct = self._task("直接任务", at=30)
         from_meeting = self._task("会议执行任务", at=40, source_meeting_id=mid,
                                   source_action_key="action-a")
@@ -76,6 +138,117 @@ class TaskCenterDatabaseCase(unittest.TestCase):
         self.assertEqual(rows[redo]["source_route"], f"#/tasks/{direct}")
         forbidden = {"brief_json", "output_md", "steps_json", "tenant_id", "source_action_key"}
         self.assertFalse(forbidden & set(rows[direct]))
+
+    def test_task_thread_lists_only_current_revision_with_round_label(self):
+        first = self._task("初版工作", at=30)
+        second = self._task(
+            "第二轮改稿", at=40, source_task_id=first,
+            revision_no=2, phase="revision",
+        )
+        now = 50
+        thread_id = db.insert("task_thread", {
+            "tenant_id": 1,
+            "emp_idx": 0,
+            "root_task_id": first,
+            "current_task_id": second,
+            "status": "active",
+            "revision_count": 2,
+            "created_at": now,
+            "updated_at": now,
+        })
+        db.execute(
+            "UPDATE task SET thread_id=?,revision_no=1 WHERE id=?",
+            (thread_id, first),
+        )
+        db.execute(
+            "UPDATE task SET thread_id=? WHERE id=?",
+            (thread_id, second),
+        )
+
+        result = taskcenter.list_items(1, {"content"})
+        rows = [x for x in result["items"] if x["kind"] == "expert"]
+        self.assertEqual([second], [row["record_id"] for row in rows])
+        self.assertEqual(1, result["kind_counts"]["expert"])
+        self.assertEqual(2, rows[0]["revision_no"])
+        self.assertEqual(thread_id, rows[0]["thread_id"])
+        self.assertEqual("持续协作 · 第2轮", rows[0]["source_label"])
+
+    def test_inspection_employee_task_routes_to_inspection_record(self):
+        branch_id = db.insert("store_branch", {
+            "tenant_id": 1,
+            "industry_key": "restaurant",
+            "name": "东城店",
+            "region": "华东",
+            "active": 1,
+        })
+        task_id = db.insert("task", {
+            "tenant_id": 1,
+            "emp_idx": 10,
+            "brief_json": json.dumps({"direction": "巡店·东城店"}),
+            "status": "done",
+            "billing_status": "included",
+            "created_at": 30,
+            "updated_at": 40,
+        })
+        visit_id = db.insert("inspection_visit", {
+            "tenant_id": 1,
+            "industry_key": "restaurant",
+            "branch_id": branch_id,
+            "employee_idx": 10,
+            "task_id": task_id,
+            "request_key": "task-center-inspection-1",
+            "status": "completed",
+            "created_at": 30,
+            "updated_at": 40,
+        })
+
+        result = taskcenter.list_items(1, {"content", "restaurant"})
+        row = next(item for item in result["items"] if item["record_id"] == task_id)
+        self.assertEqual("inspection", row["subkind"])
+        self.assertEqual(
+            f"#/inspections/{visit_id}/restaurant", row["target_route"]
+        )
+        self.assertEqual("巡店工作台 · 到店检查", row["source_label"])
+        self.assertEqual("#/inspections/0/restaurant", row["source_route"])
+
+    def test_inspection_task_is_filtered_by_visit_industry_not_shared_employee_idx(self):
+        def add_visit(industry_key: str, direction: str, request_key: str) -> int:
+            branch_id = db.insert("store_branch", {
+                "tenant_id": 1,
+                "industry_key": industry_key,
+                "name": f"{industry_key}-store",
+                "active": 1,
+            })
+            task_id = db.insert("task", {
+                "tenant_id": 1,
+                "emp_idx": 10,
+                "brief_json": json.dumps({"direction": direction}),
+                "status": "done",
+            })
+            db.insert("inspection_visit", {
+                "tenant_id": 1,
+                "industry_key": industry_key,
+                "branch_id": branch_id,
+                "employee_idx": 10,
+                "task_id": task_id,
+                "request_key": request_key,
+                "status": "completed",
+            })
+            return task_id
+
+        restaurant_task = add_visit(
+            "restaurant", "RESTAURANT_VISIBLE", "inspection-restaurant"
+        )
+        auto_task = add_visit("auto", "AUTO_ONLY_SENTINEL", "inspection-auto")
+
+        page = taskcenter.list_items(1, {"content", "restaurant"})
+        ids = {item["record_id"] for item in page["items"]}
+        self.assertIn(restaurant_task, ids)
+        self.assertNotIn(auto_task, ids)
+        self.assertNotIn(
+            "AUTO_ONLY_SENTINEL",
+            json.dumps(page, ensure_ascii=False),
+        )
 
     def test_open_work_is_never_pushed_out_by_new_done_rows(self):
         running = self._task("很早开始但还没收口", status="running", at=1)
@@ -141,14 +314,10 @@ class TaskCenterDatabaseCase(unittest.TestCase):
     def test_global_search_survives_corrupt_json_in_every_json_backed_branch(self):
         """一条历史坏载荷不能让老板的整张任务总账报 malformed JSON。"""
         corrupt_rows = {
-            "expert": db.insert("task", {
-                "tenant_id": 1,
-                "emp_idx": 0,
-                "brief_json": "损坏专家检索片段{",
-                "status": "done",
-                "created_at": 11,
-                "updated_at": 11,
-            }),
+            "expert": self._task(
+                "损坏专家检索片段", brief_json="损坏专家检索片段{",
+                status="done", at=11,
+            ),
             "content": db.insert("job", {
                 "tenant_id": 1,
                 "brief_json": "损坏内容检索片段{",
@@ -631,15 +800,27 @@ class TaskCenterDatabaseCase(unittest.TestCase):
                 row = db.one(
                     "SELECT * FROM pub_task WHERE id=?", (publish_id,)
                 )
+                # Playwright is an optional production dependency.  Keep this
+                # deterministic browser fixture self-contained instead of
+                # requiring the package merely to patch its import path.
+                fake_playwright_pkg = types.ModuleType("playwright")
+                fake_playwright_pkg.__path__ = []
+                fake_playwright_api = types.ModuleType("playwright.async_api")
+                fake_playwright_api.async_playwright = (
+                    lambda: FakePlaywrightContext(page)
+                )
                 with patch.object(
                     matrixpub, "accounts", return_value=[account]
                 ), patch.object(
                     matrixpub,
                     "_probe_login",
                     new=AsyncMock(return_value=(True, "测试账号")),
-                ), patch(
-                    "playwright.async_api.async_playwright",
-                    return_value=FakePlaywrightContext(page),
+                ), patch.dict(
+                    sys.modules,
+                    {
+                        "playwright": fake_playwright_pkg,
+                        "playwright.async_api": fake_playwright_api,
+                    },
                 ), patch.object(matrixpub.notify, "push"):
                     asyncio.run(matrixpub._run_task_inner(publish_id, row))
 
@@ -678,10 +859,13 @@ class TaskCenterDatabaseCase(unittest.TestCase):
             "name": "行业会议企业",
             "industries_json": json.dumps(["auto"]),
         })
-        visible_meeting = db.insert("meeting", {
-            "tenant_id": 2,
-            "question": "汽车门店增长计划",
-            "emp_idxs_json": "[1601]",
+        db.execute(
+            "INSERT INTO tenant_industry(tenant_id,industry_key,is_primary,created_at) "
+            "VALUES(2,'auto',1,0)"
+        )
+        visible_meeting = self._meeting(
+            "汽车门店增长计划", [1601], tenant=2, depts=["auto"],
+            **{
             "messages_json": "[]",
             "status": "failed",
             "phase": "failed",
@@ -727,10 +911,9 @@ class TaskCenterDatabaseCase(unittest.TestCase):
             ),
         )
 
-        hidden_meeting = db.insert("meeting", {
-            "tenant_id": 2,
-            "question": "汽车渠道预算",
-            "emp_idxs_json": "[1602]",
+        hidden_meeting = self._meeting(
+            "汽车渠道预算", [1602], tenant=2, depts=["auto"],
+            **{
             "messages_json": "[]",
             "status": "failed",
             "phase": "failed",
@@ -851,10 +1034,9 @@ class TaskCenterDatabaseCase(unittest.TestCase):
             "result_json": json.dumps({"stale": True}),
             "error": "联网失败",
         })
-        meeting_id = db.insert("meeting", {
-            "tenant_id": 2,
-            "question": "是否上线新品",
-            "emp_idxs_json": "[0,1]",
+        meeting_id = self._meeting(
+            "是否上线新品", [0, 1], tenant=2,
+            **{
             "messages_json": json.dumps([{"who": "系统", "text": "中断"}]),
             "status": "failed",
             "phase": "failed",
@@ -1088,8 +1270,7 @@ class TaskCenterDatabaseCase(unittest.TestCase):
         self.assertFalse(any(x["kind"] in {"content", "expert", "meeting"} for x in avatar))
 
     def test_orphan_or_cross_tenant_meeting_source_does_not_leak_question(self):
-        foreign_mid = db.insert("meeting", {"tenant_id": 2, "question": "别家商业机密",
-                                            "emp_idxs_json": "[0]"})
+        foreign_mid = self._meeting("别家商业机密", [0], tenant=2)
         tid = self._task("来源异常任务", source_meeting_id=foreign_mid)
         row = next(x for x in taskcenter.list_items(1, {"content"})["items"]
                    if x["kind"] == "expert" and x["record_id"] == tid)
@@ -1174,6 +1355,342 @@ class TaskCenterDatabaseCase(unittest.TestCase):
         self.assertEqual(detail["id"], tid)
         self.assertEqual(detail["source"]["type"], "direct")
 
+    def test_frozen_task_scope_never_falls_back_to_live_or_content(self):
+        from app import auth, main
+
+        legacy = departments.legacy_specialists()[1401]
+        pharmacy_id = self._task(
+            "历史药房审计",
+            emp_idx=legacy["idx"],
+            **employeeidentity.task_fields(legacy),
+        )
+        unknown_id = self._task(
+            "未知历史员工任务",
+            emp_idx=99998,
+            employee_key="legacy.unknown",
+            employee_catalog_version="legacy-unknown",
+            employee_name_snapshot="未知历史员工",
+            employee_dept_key="unknown",
+            employee_spec_sha256="b" * 64,
+        )
+
+        content_rows = taskcenter.list_items(1, {"content"})["items"]
+        self.assertFalse(any(
+            row["key"] in {f"expert:{pharmacy_id}", f"expert:{unknown_id}"}
+            for row in content_rows
+        ))
+        pharmacy_rows = taskcenter.list_items(1, {"pharmacy"})["items"]
+        frozen = next(
+            row for row in pharmacy_rows
+            if row["key"] == f"expert:{pharmacy_id}"
+        )
+        self.assertEqual(
+            f"{legacy.get('person', '')}·{legacy['name']}".strip("·"),
+            frozen["assignee"],
+        )
+        self.assertEqual("pharmacy", frozen["module"])
+        self.assertEqual("legacy", frozen["roster_status"])
+        self.assertFalse(frozen["can_assign"])
+        self.assertFalse(any(
+            row["key"] == f"expert:{unknown_id}" for row in pharmacy_rows
+        ))
+
+        auth.set_current({
+            "id": 8, "tenant_id": 1, "role": "member", "modules": ["content"],
+        })
+        with self.assertRaises(HTTPException) as wrong_scope:
+            main._task_row_or_404(pharmacy_id)
+        self.assertEqual(404, wrong_scope.exception.status_code)
+        with self.assertRaises(HTTPException) as unknown:
+            main._task_row_or_404(unknown_id)
+        self.assertEqual(404, unknown.exception.status_code)
+
+        auth.set_current({
+            "id": 8, "tenant_id": 1, "role": "member", "modules": ["pharmacy"],
+        })
+        self.assertEqual(pharmacy_id, main._task_row_or_404(pharmacy_id)["id"])
+        pharmacy_detail = main.task_get(pharmacy_id)
+        self.assertEqual(
+            f"{legacy.get('person', '')}·{legacy['name']}".strip("·"),
+            pharmacy_detail["emp_name"],
+        )
+        self.assertEqual(
+            "零售药房行业",
+            pharmacy_detail["dept_name"],
+        )
+        self.assertEqual("legacy", pharmacy_detail["roster_status"])
+        self.assertFalse(pharmacy_detail["can_assign"])
+
+    def test_forged_or_padded_known_department_identity_fails_closed(self):
+        from app import auth, main
+
+        forged = self._task(
+            "伪装成汽车岗位",
+            emp_idx=0,
+            employee_key="legacy.idx.0",
+            employee_catalog_version="legacy-unknown",
+            employee_name_snapshot="趋势官",
+            employee_dept_key="auto",
+            employee_spec_sha256="broken",
+        )
+        bad_core = self._task(
+            "伪造内容部旧身份",
+            emp_idx=0,
+            employee_key="legacy.idx.0",
+            employee_catalog_version="legacy-unknown",
+            employee_name_snapshot="趋势官",
+            employee_dept_key="content",
+            employee_spec_sha256="broken",
+        )
+        active = departments.get_active(1601)
+        padded_fields = employeeidentity.task_fields(active)
+        padded_fields["employee_key"] += " "
+        padded = self._task(
+            "带空格的冻结身份", emp_idx=active["idx"], **padded_fields
+        )
+        exact = self._task(
+            "真实现役汽车岗位",
+            emp_idx=active["idx"],
+            **employeeidentity.task_fields(active),
+        )
+
+        rows = taskcenter.list_items(1, {"auto"})
+        keys = {row["key"] for row in rows["items"]}
+        self.assertIn(f"expert:{exact}", keys)
+        self.assertNotIn(f"expert:{forged}", keys)
+        self.assertNotIn(f"expert:{padded}", keys)
+        self.assertEqual(1, rows["counts"]["all"])
+        current = next(row for row in rows["items"] if row["record_id"] == exact)
+        self.assertEqual("active", current["roster_status"])
+        self.assertTrue(current["can_assign"])
+
+        auth.set_current({
+            "id": 8, "tenant_id": 1, "role": "member", "modules": ["auto"],
+        })
+        self.assertEqual(exact, main.task_get(exact)["id"])
+        for task_id in (forged, padded):
+            with self.subTest(task_id=task_id), self.assertRaises(HTTPException) as denied:
+                main.task_get(task_id)
+            self.assertEqual(404, denied.exception.status_code)
+        auth.set_current({
+            "id": 8, "tenant_id": 1, "role": "member", "modules": ["content"],
+        })
+        content_keys = {
+            row["key"] for row in taskcenter.list_items(1, {"content"})["items"]
+        }
+        self.assertNotIn(f"expert:{bad_core}", content_keys)
+        with self.assertRaises(HTTPException) as denied_core:
+            main.task_get(bad_core)
+        self.assertEqual(404, denied_core.exception.status_code)
+
+    def test_department_employee_uses_exact_identity_and_disabled_state(self):
+        from app import auth, main
+
+        active = departments.get_active(1601)
+        pharmacy = departments.get_active(1401)
+        good = self._task(
+            "本岗位任务", emp_idx=active["idx"],
+            **employeeidentity.task_fields(active),
+        )
+        wrong_fields = employeeidentity.task_fields(pharmacy)
+        leaked = self._task(
+            "同编号伪药房任务", emp_idx=active["idx"], **wrong_fields
+        )
+        employees.set_enabled(
+            active["idx"], False,
+            expected_row_version=employees.slot_state(active["idx"])[
+                "row_version"
+            ],
+        )
+        auth.set_current({
+            "id": 1, "tenant_id": 1, "role": "root", "username": "boss",
+            "modules": [],
+        })
+
+        dept = next(row for row in main.depts_list() if row["key"] == "auto")
+        card = next(row for row in dept["employees"] if row["idx"] == active["idx"])
+        self.assertEqual(1, card["tasks_n"])
+        self.assertFalse(card["enabled"])
+        self.assertFalse(card["can_assign"])
+        self.assertFalse(card["can_learn"])
+
+        detail = main.dept_emp(active["idx"])
+        self.assertEqual([good], [row["id"] for row in detail["tasks"]])
+        self.assertNotIn(leaked, [row["id"] for row in detail["tasks"]])
+        self.assertEqual(1, detail["stats"]["runs"])
+        self.assertFalse(detail["can_assign"])
+        self.assertFalse(detail["can_learn"])
+        task_card = next(
+            row for row in taskcenter.list_items(1, {"auto"})["items"]
+            if row["record_id"] == good
+        )
+        self.assertFalse(task_card["can_assign"])
+        self.assertFalse(main.task_get(good)["can_assign"])
+
+    def test_trash_task_requires_complete_frozen_identity(self):
+        from app import auth, main
+
+        good = self._task(
+            "可恢复内容任务", deleted_at=10, delete_reason="用户移入回收站",
+        )
+        forged = self._task(
+            "伪造冻结身份的回收站任务",
+            emp_idx=0,
+            employee_key="legacy.idx.0",
+            employee_catalog_version="legacy-unknown",
+            employee_name_snapshot="趋势官",
+            employee_dept_key="auto",
+            employee_spec_sha256="broken",
+            deleted_at=11,
+            delete_reason="用户移入回收站",
+        )
+        auth.set_current({
+            "id": 1, "tenant_id": 1, "role": "owner", "modules": [],
+        })
+        keys = {(row["kind"], row["id"]) for row in main.trash_list()["items"]}
+        self.assertIn(("task", good), keys)
+        self.assertNotIn(("task", forged), keys)
+        with self.assertRaises(HTTPException) as denied:
+            main.trash_restore("task", forged)
+        self.assertEqual(404, denied.exception.status_code)
+
+    def test_meeting_visibility_uses_complete_frozen_roster_contract(self):
+        historical_auto = next(
+            employee for employee in departments.identity_versions(1601)
+            if employee["catalog_version"] == "v1"
+        )
+        frozen_mid = self._meeting(
+            "历史汽车会议", [1601], depts=["auto"], status="done",
+            phase="completed", member_snapshots=[
+                self._member_snapshot(
+                    1601, "auto", employee=historical_auto,
+                )
+            ],
+        )
+        malformed_mid = db.insert("meeting", {
+            "tenant_id": 1,
+            "question": "成员编号与快照被调换",
+            "emp_idxs_json": "[0]",
+            "member_snapshot_json": json.dumps([
+                self._member_snapshot(1, "content")
+            ]),
+            "status": "done",
+            "phase": "completed",
+        })
+        duplicate_mid = db.insert("meeting", {
+            "tenant_id": 1,
+            "question": "重复成员编号不得进入任务中心",
+            "emp_idxs_json": "[0,0]",
+            "member_snapshot_json": json.dumps([
+                self._member_snapshot(0, "content"),
+                self._member_snapshot(0, "content"),
+            ]),
+            "status": "done",
+            "phase": "completed",
+        })
+
+        self.assertFalse(any(
+            row["key"] == f"meeting:{frozen_mid}"
+            for row in taskcenter.list_items(1, {"content"})["items"]
+        ))
+        auto_rows = taskcenter.list_items(1, {"auto"})["items"]
+        self.assertTrue(any(
+            row["key"] == f"meeting:{frozen_mid}" for row in auto_rows
+        ))
+        self.assertFalse(any(
+            row["key"] == f"meeting:{malformed_mid}" for row in auto_rows
+        ))
+        self.assertFalse(any(
+            row["key"] == f"meeting:{duplicate_mid}"
+            for row in taskcenter.list_items(1, {"content"})["items"]
+        ))
+
+        from app import auth, main
+        auth.set_current({
+            "id": 1, "tenant_id": 1, "role": "owner", "modules": [],
+        })
+        member = main.meeting_get(frozen_mid)["members"][0]
+        self.assertEqual("legacy", member["roster_status"])
+        self.assertFalse(member["can_assign"])
+
+    def test_pseudo_industry_meeting_legacy_marker_is_hidden(self):
+        from app import auth, main
+
+        mid = db.insert("meeting", {
+            "tenant_id": 1,
+            "question": "伪装汽车员工会议",
+            "emp_idxs_json": "[0]",
+            "member_snapshot_json": json.dumps([{
+                "idx": 0,
+                "key": "legacy.idx.0",
+                "name": "趋势官",
+                "dept_key": "auto",
+                "catalog_version": "legacy-unknown",
+                "spec_sha256": "broken",
+            }], ensure_ascii=False),
+            "status": "done",
+            "phase": "completed",
+        })
+        self.assertFalse(any(
+            row["record_id"] == mid and row["kind"] == "meeting"
+            for row in taskcenter.list_items(1, {"auto"})["items"]
+        ))
+        auth.set_current({
+            "id": 1, "tenant_id": 1, "role": "owner", "modules": [],
+        })
+        self.assertFalse(any(row["id"] == mid for row in main.meetings_list()))
+        with self.assertRaises(HTTPException) as denied:
+            main.meeting_get(mid)
+        self.assertEqual(404, denied.exception.status_code)
+
+    def test_disabled_active_meeting_member_keeps_active_roster_label(self):
+        from app import auth, main
+
+        active = departments.get_active(1601)
+        mid = self._meeting(
+            "已停用员工的历史会议",
+            [active["idx"]],
+            depts=["auto"],
+            status="done",
+            phase="completed",
+        )
+        employees.set_enabled(
+            active["idx"], False,
+            expected_row_version=employees.slot_state(active["idx"])[
+                "row_version"
+            ],
+        )
+        auth.set_current({
+            "id": 1, "tenant_id": 1, "role": "owner", "modules": [],
+        })
+        member = main.meeting_get(mid)["members"][0]
+        self.assertEqual("active", member["roster_status"])
+        self.assertFalse(member["enabled"])
+        self.assertFalse(member["can_assign"])
+
+    def test_non_integer_meeting_member_index_fails_closed(self):
+        from app import auth, main
+
+        frozen = self._member_snapshot(1601, "auto")
+        mid = db.insert("meeting", {
+            "tenant_id": 1,
+            "question": "字符串成员编号",
+            "emp_idxs_json": json.dumps([str(frozen["idx"])]),
+            "member_snapshot_json": json.dumps([frozen], ensure_ascii=False),
+            "status": "done",
+            "phase": "completed",
+        })
+        self.assertFalse(any(
+            row["record_id"] == mid and row["kind"] == "meeting"
+            for row in taskcenter.list_items(1, {"auto"})["items"]
+        ))
+        auth.set_current({
+            "id": 1, "tenant_id": 1, "role": "owner", "modules": [],
+        })
+        with self.assertRaises(HTTPException) as denied:
+            main.meeting_get(mid)
+        self.assertEqual(404, denied.exception.status_code)
+
     def test_tools_jobs_preserves_traceable_lead_urls(self):
         from app import auth, main
         url = "https://www.zhihu.com/question/123"
@@ -1235,26 +1752,16 @@ class TaskCenterDatabaseCase(unittest.TestCase):
         self.assertEqual(result["counts"]["open"], 1)
 
     def test_mixed_module_meeting_requires_every_participant_module(self):
-        from app import auth, departments, main
+        from app import auth, main
 
-        industry_idx = 9001
-        industry_expert = {
-            "idx": industry_idx, "dept_key": "restaurant", "dept_name": "餐饮产业部",
-            "name": "经营顾问", "person": "", "duty": "经营诊断", "md": "岗位手册",
-            "color": "#123456", "emoji": "🍜", "intro": "帮助门店诊断经营问题。",
-        }
-        mid = db.insert("meeting", {
-            "tenant_id": 1, "question": "联合内容和餐饮团队上新",
-            "emp_idxs_json": json.dumps([0, industry_idx]), "status": "running",
-            "phase": "brainstorm", "created_at": 10, "updated_at": 10,
-        })
+        industry_idx = 101
+        mid = self._meeting(
+            "联合内容和餐饮团队上新", [0, industry_idx],
+            depts=["content", "restaurant"], status="running",
+            phase="brainstorm", created_at=10, updated_at=10,
+        )
         sourced_task = self._task("只执行内容部行动", source_meeting_id=mid)
-        real_get = departments.get
-
-        def expert_get(idx):
-            return industry_expert if idx == industry_idx else real_get(idx)
-
-        with patch.object(departments, "get", side_effect=expert_get):
+        with patch.object(main, "_start_meeting_worker"):
             auth.set_current({"id": 8, "tenant_id": 1, "role": "member",
                               "modules": ["content"]})
             rows = taskcenter.list_items(1, {"content"})["items"]
@@ -1404,9 +1911,23 @@ class TaskCenterDatabaseCase(unittest.TestCase):
         auth.set_current({"id": 8, "tenant_id": 1, "role": "member",
                           "modules": ["content"]})
 
+        with patch.object(
+            employeeidentity.departments, "get_active", return_value=None,
+        ):
+            config = employees.get_config(0)
+        bundle = db.get_employee_role_bundle(
+            config["identity_ref"], config["config_revision"],
+            config["config_sha256"],
+        )
+        self.assertIsNotNone(bundle)
         body = {
             "emp_idx": 0,
+            "identity_ref": config["identity_ref"],
+            "config_revision": config["config_revision"],
+            "config_sha256": config["config_sha256"],
+            "bundle_sha256": bundle["bundle_sha256"],
             "brief": {"direction": "客户端正常活"},
+            "request_key": "manual-task-source-forgery-0001",
             "source_meeting_id": 88881,
             "source_action_key": "forged-action",
             "source_task_id": 88882,

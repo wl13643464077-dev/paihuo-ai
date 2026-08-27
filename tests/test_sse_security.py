@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app import db, meeting
+from app import db, departments, employeeidentity, meeting
 from app.engine import Engine
 
 
@@ -24,6 +24,18 @@ class MeetingSseAuthorizationTests(unittest.IsolatedAsyncioTestCase):
         db._conn_path = None
         db.DB_PATH = os.path.join(self.tmp.name, "meeting-sse.db")
         db.conn()
+        self.expert = next(
+            employee
+            for employee in departments.specialists().values()
+            if employee["dept_key"] == "auto"
+        )
+        self.member_indices = [0, int(self.expert["idx"])]
+        self.member_snapshots = employeeidentity.member_snapshots(
+            self.member_indices, active_only=True,
+        )
+        self.required_modules = frozenset(
+            {"content", str(self.expert["dept_key"])}
+        )
 
     def tearDown(self):
         db._shutdown_async_pool(wait=True)
@@ -39,7 +51,12 @@ class MeetingSseAuthorizationTests(unittest.IsolatedAsyncioTestCase):
             {
                 "tenant_id": 2,
                 "question": "新品计划",
-                "emp_idxs_json": json.dumps([0, 101]),
+                "emp_idxs_json": json.dumps(self.member_indices),
+                "member_snapshot_json": json.dumps(
+                    self.member_snapshots,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
             },
         )
         engine = Engine()
@@ -54,7 +71,7 @@ class MeetingSseAuthorizationTests(unittest.IsolatedAsyncioTestCase):
             queues["authorized"]: (
                 2,
                 False,
-                frozenset({"content", "curtain"}),
+                self.required_modules,
                 "member",
             ),
             queues["partial"]: (2, False, frozenset({"content"}), "member"),
@@ -63,16 +80,12 @@ class MeetingSseAuthorizationTests(unittest.IsolatedAsyncioTestCase):
             queues["foreign"]: (3, False, None, "owner"),
         }
 
-        def expert(idx):
-            return {"dept_key": "curtain"} if idx == 101 else None
-
-        with patch.object(meeting.departments, "get", side_effect=expert):
-            await meeting._push(
-                meeting_id,
-                engine.broadcast,
-                "趋势官",
-                "未公开新品定价与投放计划",
-            )
+        await meeting._push(
+            meeting_id,
+            engine.broadcast,
+            "趋势官",
+            "未公开新品定价与投放计划",
+        )
 
         for key in ("authorized", "owner", "root"):
             event = queues[key].get_nowait()
@@ -119,21 +132,22 @@ class MeetingSseAuthorizationTests(unittest.IsolatedAsyncioTestCase):
         owner = asyncio.Queue()
         foreign = asyncio.Queue()
         engine.subscribers = {
-            authorized: (2, False, frozenset({"content", "curtain"}), "member"),
+            authorized: (2, False, self.required_modules, "member"),
             partial: (2, False, frozenset({"content"}), "member"),
             owner: (2, False, None, "owner"),
             foreign: (3, False, None, "owner"),
         }
         row = {
             "tenant_id": 2,
-            "emp_idxs_json": json.dumps([0, 101]),
+            "emp_idxs_json": json.dumps(self.member_indices),
+            "member_snapshot_json": json.dumps(
+                self.member_snapshots,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
         }
 
-        def expert(idx):
-            return {"dept_key": "curtain"} if idx == 101 else None
-
-        with patch.object(meeting.departments, "get", side_effect=expert):
-            meeting._emit_meeting_update(engine.broadcast, 9, row)
+        meeting._emit_meeting_update(engine.broadcast, 9, row)
 
         for queue in (authorized, owner):
             event = queue.get_nowait()

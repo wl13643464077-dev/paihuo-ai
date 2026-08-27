@@ -2,7 +2,9 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
@@ -150,6 +152,7 @@ class AuthEntrySecurityCase(unittest.TestCase):
         self.assertTrue(auth.check_pw(secret, root["password_hash"]))
         self.assertEqual(0, root["must_change_password"])
         self.assertIsNone(db.get_setting("bootstrap_pw"))
+
         self.assertNotIn(secret, "\n".join(captured.output))
 
         with patch.dict(
@@ -179,6 +182,102 @@ class AuthEntrySecurityCase(unittest.TestCase):
         db.set_setting("bootstrap_pw", "legacy-plaintext")
         self.assertEqual({}, auth.bootstrap())
         self.assertIsNone(db.get_setting("bootstrap_pw"))
+
+    def test_disabling_tenant_revokes_existing_sessions_and_they_do_not_revive(self):
+        from app import main
+
+        tenant_id = db.insert("tenants", {"name": "待停用企业", "enabled": 1})
+        user_id = db.insert("users", {
+            "tenant_id": tenant_id,
+            "username": "tenant-owner-disable-test",
+            "password_hash": auth.hash_pw("tenant-owner-password-2026"),
+            "role": "owner",
+            "modules_json": "[]",
+            "enabled": 1,
+        })
+        auth.set_current({
+            "id": 1,
+            "tenant_id": 1,
+            "username": "boss",
+            "role": "root",
+            "modules": [],
+            "enabled": 1,
+        })
+        with patch.dict(
+            os.environ,
+            {"CONTENTCREW_SESSION_SECRET": TEST_SESSION_SECRET_A},
+            clear=False,
+        ):
+            old_token = auth.make_session(user_id)
+            self.assertEqual(user_id, auth.parse_session(old_token))
+            self.assertIsNotNone(auth.get_user(user_id))
+
+            main.team_tenant_toggle(tenant_id, {"enabled": False})
+            self.assertIsNone(auth.parse_session(old_token))
+            self.assertIsNone(auth.get_user(user_id))
+            with self.assertRaises(ValueError):
+                auth.make_session(user_id)
+
+            main.team_tenant_toggle(tenant_id, {"enabled": True})
+            self.assertIsNone(auth.parse_session(old_token))
+            renewed = auth.make_session(user_id)
+            self.assertEqual(user_id, auth.parse_session(renewed))
+
+    def test_disabling_user_revokes_existing_session_after_reenable(self):
+        from app import main
+
+        tenant_id = db.insert("tenants", {"name": "成员停用测试", "enabled": 1})
+        user_id = db.insert("users", {
+            "tenant_id": tenant_id,
+            "username": "member-disable-test",
+            "password_hash": auth.hash_pw("member-disable-password-2026"),
+            "role": "member",
+            "modules_json": "[]",
+            "enabled": 1,
+        })
+        auth.set_current({
+            "id": 1,
+            "tenant_id": 1,
+            "username": "boss",
+            "role": "root",
+            "modules": [],
+            "enabled": 1,
+        })
+        with patch.dict(
+            os.environ,
+            {"CONTENTCREW_SESSION_SECRET": TEST_SESSION_SECRET_A},
+            clear=False,
+        ):
+            old_token = auth.make_session(user_id)
+            main.team_user_update(user_id, {"enabled": False})
+            self.assertIsNone(auth.parse_session(old_token))
+            main.team_user_update(user_id, {"enabled": True})
+            self.assertIsNone(auth.parse_session(old_token))
+            self.assertEqual(user_id, auth.parse_session(auth.make_session(user_id)))
+
+    def test_concurrent_session_revocations_increment_without_lost_update(self):
+        tenant_id = db.insert("tenants", {"name": "并发撤销企业", "enabled": 1})
+        user_id = db.insert("users", {
+            "tenant_id": tenant_id,
+            "username": "concurrent-revoke-user",
+            "password_hash": auth.hash_pw("concurrent-revoke-password-2026"),
+            "role": "member",
+            "modules_json": "[]",
+            "enabled": 1,
+        })
+        workers = 12
+        barrier = threading.Barrier(workers)
+
+        def revoke_once():
+            barrier.wait(timeout=5)
+            auth.revoke_sessions(user_id)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(lambda _index: revoke_once(), range(workers)))
+        self.assertEqual(
+            workers,
+            int(db.get_setting(f"session_epoch:{user_id}") or 0),
+        )
 
     def test_empty_database_requires_explicit_bootstrap_secret(self):
         with patch.dict(os.environ, {}, clear=False):
@@ -498,6 +597,41 @@ class AuthEntrySecurityCase(unittest.TestCase):
         self.assertEqual(
             before,
             db.one("SELECT COUNT(*) n FROM tenants")["n"],
+        )
+
+    def test_tenant_create_writes_normalized_industry_scope_atomically(self):
+        from app import main
+
+        root_tenant = db.insert("tenants", {"name": "平台"})
+        root_id = db.insert("users", {
+            "tenant_id": root_tenant,
+            "username": "boss",
+            "password_hash": auth.hash_pw("root-password-2026"),
+            "role": "root",
+            "modules_json": "[]",
+            "enabled": 1,
+        })
+        auth.set_current({
+            "id": root_id,
+            "tenant_id": root_tenant,
+            "username": "boss",
+            "role": "root",
+            "modules": [],
+        })
+        created = main.team_tenant_create({
+            "name": "华东餐饮",
+            "owner": "east-food-owner",
+            "password": "industry-owner-2026",
+            "industries": ["restaurant", "restaurant", "hotel"],
+        })
+        rows = db.q(
+            "SELECT industry_key,is_primary FROM tenant_industry "
+            "WHERE tenant_id=? ORDER BY is_primary DESC,industry_key",
+            (created["tenant_id"],),
+        )
+        self.assertEqual(
+            [("restaurant", 1), ("hotel", 0)],
+            [(row["industry_key"], row["is_primary"]) for row in rows],
         )
 
     def test_deprecated_plaintext_pin_interface_is_removed(self):

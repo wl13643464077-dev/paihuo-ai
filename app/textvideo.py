@@ -135,12 +135,45 @@ def _plain(md: str) -> str:
     return re.sub(r"[ \t]+", " ", t).strip()
 
 
+def _textvideo_employee_bundle(idx: int, user_prompt: str):
+    """视频工具也复用工具箱员工的私有工作上下文边界。"""
+    # 延迟导入避免扩大模块初始化依赖；growth 不依赖 textvideo。
+    from .growth import _toolbox_employee_bundle
+    return _toolbox_employee_bundle(idx, user_prompt)
+
+
+async def _call_textvideo_employee(idx: int, user_prompt: str, **kwargs) -> dict:
+    bundle = _textvideo_employee_bundle(idx, user_prompt)
+    return await providers.call_text(
+        idx,
+        bundle.user,
+        system_prompt=bundle.system,
+        sensitive_texts=bundle.sensitive,
+        **kwargs,
+    )
+
+
+async def _call_textvideo_employee_vision(
+        idx: int, user_prompt: str, images: list, **kwargs,
+) -> dict:
+    bundle = _textvideo_employee_bundle(idx, user_prompt)
+    result = await providers.call_vision(
+        idx,
+        bundle.user,
+        images,
+        system_prompt=bundle.system,
+        **kwargs,
+    )
+    providers.assert_no_private_leak(result.get("text") or "", bundle.sensitive)
+    return result
+
+
 async def make_script(title: str, body: str) -> str:
     """正文过长时压成 60-90 秒口播稿;短文直接用."""
     plain = _plain(body)
     if len(plain) <= 320:
         return plain
-    r = await providers.call_text(
+    r = await _call_textvideo_employee(
         3,
         f"把下面这篇《{title}》压缩成一段 60-90 秒的短视频口播稿(200-280字):"
         f"口语化、保留最抓人的钩子和核心信息、结尾一句号召;只输出口播稿正文,"
@@ -685,7 +718,7 @@ async def _describe_clips(clips: list, progress) -> list:
                         ))
         if not images:
             return descs
-        result = await providers.call_vision(
+        result = await _call_textvideo_employee_vision(
             5,
             f"这是 {len(images)} 个视频片段各自的截图,按顺序用一句中文(15字内)"
             '描述每张拍了什么。只输出 JSON:{"descs":["描述1","描述2",...]},'
@@ -716,7 +749,7 @@ async def _assign_clips(sents: list, descs: list) -> list:
     if not any(descs):
         return fallback
     try:
-        r = await providers.call_text(
+        r = await _call_textvideo_employee(
             5,
             "口播稿逐句列表:\n" + "\n".join(f"{i}: {s}" for i, s in enumerate(sents))
             + "\n\n可用画面片段:\n" + "\n".join(f"{i}: {d or '(未知画面)'}" for i, d in enumerate(descs))
@@ -1652,7 +1685,7 @@ async def _run_job_inner(tvid: int, row: dict, p: dict, tid: int, broadcast):
         progress("开工:整理口播稿…")
         await checkpoint()
         if p.get("topic") and not p.get("script"):
-            r = await providers.call_text(
+            r = await _call_textvideo_employee(
                 3,
                 f"围绕主题「{p['topic']}」写一段 60-90 秒的短视频口播稿(200-280字):"
                 f"口语化、开头有钩子、结尾一句号召;只输出口播稿正文。",

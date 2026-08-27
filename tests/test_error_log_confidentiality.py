@@ -1,6 +1,7 @@
 """Provider diagnostics must not cross exception, HTTP, or journal boundaries."""
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import re
@@ -12,6 +13,7 @@ from fastapi import HTTPException
 
 from app import (
     db,
+    employeeidentity,
     expertmatch,
     feishu,
     mailer,
@@ -131,7 +133,9 @@ class ProviderLogBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "desc": "经营诊断",
         }
         with (
-            patch.object(expertmatch.departments, "get", return_value=employee),
+            patch.object(
+                expertmatch.departments, "get_active", return_value=employee
+            ),
             patch.object(expertmatch, "_dept_peers", return_value=[]),
             patch.object(
                 expertmatch.providers,
@@ -244,6 +248,11 @@ class MeetingLogBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "tenant_id": 1,
             "question": "是否发布新品",
             "emp_idxs_json": "[0,1]",
+            "member_snapshot_json": json.dumps(
+                employeeidentity.member_snapshots([0, 1], active_only=True),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
             "status": "queued",
             "auto_execute": 0,
             "billing_status": "included",
@@ -284,7 +293,11 @@ class MeetingLogBoundaryTests(unittest.IsolatedAsyncioTestCase):
             raise AssertionError(token)
 
         with (
-            patch.object(meeting, "emp_brief", side_effect=members.get),
+            patch.object(
+                meeting,
+                "emp_brief",
+                side_effect=lambda idx, **_kwargs: dict(members[idx]),
+            ),
             patch.object(meeting.registry, "company_block", return_value=""),
             patch.object(
                 meeting.providers,

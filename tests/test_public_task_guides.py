@@ -14,6 +14,8 @@ GUIDE_KEYS = {
     "input_tips",
     "output_hint",
 }
+DECISION_GUIDE_KEYS = GUIDE_KEYS | {"evidence_requirements"}
+EVIDENCE_REQUIREMENT_KEYS = {"input_id", "label"}
 FORBIDDEN_PUBLIC_FIELDS = {
     "capabilities",
     "workflow",
@@ -34,15 +36,30 @@ def _guide_text(guide: dict) -> str:
 
 
 class PublicExpertTaskGuideTests(unittest.TestCase):
-    def test_public_role_catalog_exactly_covers_all_97_published_roles(self):
+    def test_active_public_guides_exactly_cover_all_420_published_roles(self):
+        specialists = departments.specialists()
         published_names = {
             employee["name"]
-            for employee in departments.specialists().values()
+            for employee in specialists.values()
         }
-        configured_names = set(departments._PUBLIC_ROLE_GUIDES)
-        self.assertEqual(97, len(published_names))
-        self.assertEqual(published_names, configured_names)
-        for name, role in departments._PUBLIC_ROLE_GUIDES.items():
+        self.assertEqual(420, len(specialists))
+        self.assertEqual(420, len(published_names))
+
+        for idx, employee in specialists.items():
+            name = employee["name"]
+            guide = departments.public_task_guide(employee)
+            is_decision = departments.is_decision_employee(employee)
+            self.assertEqual(
+                DECISION_GUIDE_KEYS if is_decision else GUIDE_KEYS,
+                set(guide),
+                idx,
+            )
+            role = (
+                employee.get("public_guide")
+                if is_decision
+                else departments._PUBLIC_ROLE_GUIDES.get(name)
+            )
+            self.assertIsInstance(role, dict, name)
             self.assertEqual(
                 {"focus", "materials", "input_tips", "output_hint"},
                 set(role),
@@ -56,6 +73,87 @@ class PublicExpertTaskGuideTests(unittest.TestCase):
                 )
             )
             self.assertTrue(all(role["input_tips"]))
+
+            if is_decision:
+                requirements = guide["evidence_requirements"]
+                self.assertEqual(
+                    departments.decision_evidence_requirements(employee),
+                    requirements,
+                    name,
+                )
+                self.assertEqual(
+                    [f"RI-{number:02d}" for number in range(1, len(requirements) + 1)],
+                    [row["input_id"] for row in requirements],
+                    name,
+                )
+                for requirement in requirements:
+                    self.assertEqual(
+                        EVIDENCE_REQUIREMENT_KEYS,
+                        set(requirement),
+                        name,
+                    )
+                    self.assertTrue(requirement["label"], name)
+
+    def test_schema55_current_people_and_historical_role_versions_are_separate(self):
+        active = departments.specialists()
+        historical = departments.historical_specialists()
+        active_by_dept = {}
+        historical_by_dept = {}
+        for employee in active.values():
+            active_by_dept.setdefault(employee["dept_key"], []).append(employee)
+        for employee in historical:
+            historical_by_dept.setdefault(employee["dept_key"], []).append(employee)
+
+        non_restaurant = set(active_by_dept) - {"restaurant"}
+        self.assertEqual(10, len(non_restaurant))
+        self.assertEqual(60, len(active_by_dept["restaurant"]))
+        self.assertTrue(
+            all(
+                not departments.is_decision_employee(employee)
+                for employee in active_by_dept["restaurant"]
+            )
+        )
+        for dept_key in non_restaurant:
+            self.assertEqual(36, len(active_by_dept[dept_key]), dept_key)
+            self.assertTrue(
+                all(
+                    departments.is_decision_employee(employee)
+                    for employee in active_by_dept[dept_key]
+                ),
+                dept_key,
+            )
+
+        self.assertEqual(780, len(historical))
+        self.assertNotIn("restaurant", historical_by_dept)
+        self.assertEqual(non_restaurant, set(historical_by_dept))
+        for dept_key in non_restaurant:
+            dept_history = historical_by_dept[dept_key]
+            self.assertEqual(78, len(dept_history), dept_key)
+            version_counts = {
+                version: sum(
+                    row["catalog_version"] == version for row in dept_history
+                )
+                for version in (
+                    "v1",
+                    departments.HISTORICAL_DECISION_CATALOG_VERSION,
+                    departments.DECISION_CATALOG_VERSION,
+                )
+            }
+            self.assertEqual(
+                {
+                    "v1": 36,
+                    departments.HISTORICAL_DECISION_CATALOG_VERSION: 6,
+                    departments.DECISION_CATALOG_VERSION: 36,
+                },
+                version_counts,
+                dept_key,
+            )
+            current_ids = {row["idx"] for row in active_by_dept[dept_key]}
+            v1_ids = {
+                row["idx"] for row in dept_history
+                if row["catalog_version"] == "v1"
+            }
+            self.assertEqual(current_ids, v1_ids)
 
     def test_unknown_role_is_rejected_instead_of_using_generic_fallback(self):
         with self.assertRaisesRegex(
@@ -71,11 +169,17 @@ class PublicExpertTaskGuideTests(unittest.TestCase):
 
     def test_all_specialists_have_unique_industry_and_role_guides(self):
         specialists = departments.specialists()
-        self.assertGreaterEqual(len(specialists), 400)
+        self.assertEqual(420, len(specialists))
         rendered = {}
         for idx, employee in specialists.items():
             guide = departments.public_task_guide(employee)
-            self.assertEqual(GUIDE_KEYS, set(guide), idx)
+            expected_keys = (
+                DECISION_GUIDE_KEYS
+                if departments.is_decision_employee(employee)
+                else GUIDE_KEYS
+            )
+            self.assertEqual(expected_keys, set(guide), idx)
+            self.assertTrue(FORBIDDEN_PUBLIC_FIELDS.isdisjoint(guide), idx)
             self.assertGreaterEqual(len(guide["input_tips"]), 3, idx)
             self.assertIn(employee["name"], guide["task_placeholder"], idx)
             self.assertTrue(guide["industry_placeholder"].startswith("例如："), idx)
@@ -89,7 +193,7 @@ class PublicExpertTaskGuideTests(unittest.TestCase):
             )
             rendered[text] = idx
 
-    def test_36_standard_roles_remain_substantively_distinct_without_role_name(self):
+    def test_36_active_auto_roles_remain_substantively_distinct_without_role_name(self):
         specialists = list(departments.specialists().values())
         one_industry = {
             employee["name"]: employee
@@ -97,6 +201,9 @@ class PublicExpertTaskGuideTests(unittest.TestCase):
             if employee["dept_key"] == "auto"
         }
         self.assertEqual(36, len(one_industry))
+        self.assertTrue(
+            all(departments.is_decision_employee(row) for row in one_industry.values())
+        )
 
         without_role_name = {}
         for name, employee in one_industry.items():
@@ -142,16 +249,23 @@ class PublicExpertTaskGuideTests(unittest.TestCase):
             self.assertNotIn(wrong, crm)
 
     def test_non_restaurant_guides_never_contain_restaurant_template_words(self):
-        bad_words = ("菜单", "菜品", "餐饮")
+        # “菜单”是茶饮/咖啡真实的菜单工程术语，不能把行业词本身当成
+        # 餐饮模板泄漏；这里拦截的是明确属于餐厅菜品模板的词。
+        bad_words = ("餐厅", "菜品")
         offenders = []
+        tea_menu_guide = None
         for idx, employee in departments.specialists().items():
             if employee.get("dept_key") == "restaurant":
                 continue
             text = _guide_text(departments.public_task_guide(employee))
+            if employee.get("name") == "菜单蚕食评估官":
+                tea_menu_guide = text
             hit = [word for word in bad_words if word in text]
             if hit:
                 offenders.append((idx, employee.get("dept_key"), hit))
         self.assertEqual([], offenders)
+        self.assertIsNotNone(tea_menu_guide)
+        self.assertIn("菜单", tea_menu_guide)
 
     def test_guide_does_not_copy_internal_profile_fields(self):
         secrets = {
@@ -162,12 +276,11 @@ class PublicExpertTaskGuideTests(unittest.TestCase):
             "capabilities": ["INTERNAL_CAPABILITY_SENTINEL"],
             "default_template": "INTERNAL_TEMPLATE_SENTINEL",
         }
+        # Use a real frozen current identity.  Schema 55 intentionally rejects
+        # invented employees before rendering, so a fake idx is no longer a
+        # valid way to test the public/private projection boundary.
         employee = {
-            "idx": 999999,
-            "name": "市场容量与趋势雷达",
-            "dept_key": "auto",
-            "dept_name": "汽车后市场产业部",
-            "intro": "公开介绍",
+            **departments.get_active(1601),
             **secrets,
         }
         public = main._public_expert(employee, include_task_guide=True)
@@ -176,7 +289,7 @@ class PublicExpertTaskGuideTests(unittest.TestCase):
             for secret in values if isinstance(values, list) else [values]:
                 self.assertNotIn(secret, text)
         self.assertTrue(FORBIDDEN_PUBLIC_FIELDS.isdisjoint(public))
-        self.assertEqual(GUIDE_KEYS, set(public["task_guide"]))
+        self.assertEqual(DECISION_GUIDE_KEYS, set(public["task_guide"]))
 
     def test_each_industry_uses_its_own_business_context(self):
         expected = {
@@ -241,55 +354,57 @@ class PublicContentTaskGuideTests(unittest.TestCase):
         )
 
     def test_tour_gets_intro_only_but_member_gets_task_guide(self):
-        config = {
-            "prompt_template": "",
-            "skills": [],
-            "learned_at": None,
-            "settings": {},
-            "caps_off": [],
-            "enabled": True,
-        }
-        with patch.object(main.employees, "get_config", return_value=config):
-            with patch.object(
-                main.auth, "current", return_value={"role": "tour"}
-            ):
-                tour_rows = main.employees_list()
-            with patch.object(
-                main.auth, "current", return_value={"role": "member"}
-            ):
-                member_rows = main.employees_list()
+        # Let the API consume the canonical per-identity configs; a shared
+        # anonymous config would correctly fail the schema-55 identity check.
+        with patch.object(
+            main.auth, "current", return_value={"role": "tour"}
+        ):
+            tour_rows = main.employees_list()
+        with patch.object(
+            main.auth, "current", return_value={"role": "member"}
+        ):
+            member_rows = main.employees_list()
         self.assertTrue(tour_rows)
         self.assertTrue(member_rows)
         self.assertTrue(all("task_guide" not in row for row in tour_rows))
         self.assertTrue(all("task_guide" in row for row in member_rows))
 
     def test_expert_list_omits_bulk_guides_and_detail_follows_tour_boundary(self):
-        config = {
-            "prompt_template": "",
-            "skills": [],
-            "learned_at": None,
-            "settings": {},
-            "caps_off": [],
-            "enabled": True,
-        }
         depts = departments.list_depts()
         sample = {
             **depts[0]["employees"][0],
             "dept_key": depts[0]["key"],
             "dept_name": depts[0]["name"],
         }
-        cfgs = {
-            e["idx"]: config
-            for dept in depts
-            for e in dept["employees"]
-        }
+        cfgs = main.employees.get_configs(
+            [e["idx"] for dept in depts for e in dept["employees"]]
+        )
+        config = cfgs[sample["idx"]]
+        self.assertTrue(
+            all(
+                cfg.get("identity_ref")
+                and cfg.get("config_sha256")
+                and cfg.get("bundle_sha256")
+                and cfg.get("role_bundle")
+                for cfg in cfgs.values()
+            )
+        )
+        real_q = main.db.q
+
+        def query_without_task_rows(sql, args=()):
+            # Keep real bundle/config/slot reads intact.  The former blanket
+            # db.q=[] mock also erased the role bundle queried by
+            # identity_view(), turning a valid config into None.
+            if "FROM task" in sql:
+                return []
+            return real_q(sql, args)
 
         def list_for(role):
             with (
                 patch.object(main.auth, "current", return_value={"role": role}),
                 patch.object(main.auth, "tenant_id", return_value=-1 if role == "tour" else 2),
                 patch.object(main.auth, "dept_visible", return_value=True),
-                patch.object(main.db, "q", return_value=[]),
+                patch.object(main.db, "q", side_effect=query_without_task_rows),
                 patch.object(main.employees, "get_configs", return_value=cfgs),
             ):
                 return main.depts_list()
@@ -310,10 +425,11 @@ class PublicContentTaskGuideTests(unittest.TestCase):
                     },
                 ),
                 patch.object(main, "_need_module"),
+                # 板块放行的 fixture 同步放行员工级白名单（矩阵有专测覆盖）
+                patch.object(main.auth, "employee_allowed", return_value=True),
                 patch.object(main.departments, "get", return_value=sample),
                 patch.object(main.employees, "get_config", return_value=config),
-                patch.object(main.db, "q", return_value=[]),
-                patch.object(main.db, "one", return_value={}),
+                patch.object(main.db, "q", side_effect=query_without_task_rows),
             ):
                 return main.dept_emp(sample["idx"])
 

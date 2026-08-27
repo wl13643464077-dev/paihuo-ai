@@ -5,18 +5,29 @@ import os
 import tempfile
 import unittest
 
-from app import auth, db, main, meeting
+from app import auth, db, departments, employeeidentity, main, meeting
 
 
 class MeetingApiIsolationCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.old_path = db.DB_PATH
-        if db._conn is not None:
-            db._conn.close()
+        db._shutdown_async_pool(wait=True)
+        db._close_all_connections()
         db._conn = None
+        db._conn_path = None
         db.DB_PATH = os.path.join(self.tmp.name, "fresh.db")
         db.conn()
+        self.member_snapshot_json = json.dumps(
+            employeeidentity.member_snapshots([0, 1], active_only=True),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        self.auto_employee = next(
+            employee
+            for employee in departments.specialists().values()
+            if employee["dept_key"] == "auto"
+        )
         auth.set_current({
             "id": 1,
             "tenant_id": 1,
@@ -27,11 +38,19 @@ class MeetingApiIsolationCase(unittest.TestCase):
 
     def tearDown(self):
         auth.set_current(None)
-        if db._conn is not None:
-            db._conn.close()
+        db._shutdown_async_pool(wait=True)
+        db._close_all_connections()
         db._conn = None
+        db._conn_path = None
         db.DB_PATH = self.old_path
         self.tmp.cleanup()
+
+    @staticmethod
+    def _task_identity(idx: int) -> dict:
+        employee = employeeidentity.active_employee(idx)
+        if not employee:
+            raise AssertionError(f"测试员工 {idx} 不可用")
+        return employeeidentity.task_fields(employee)
 
     @staticmethod
     def _action():
@@ -49,6 +68,7 @@ class MeetingApiIsolationCase(unittest.TestCase):
             "tenant_id": 1,
             "question": "是否执行趋势报告",
             "emp_idxs_json": "[0,1]",
+            "member_snapshot_json": self.member_snapshot_json,
             "status": "done",
             "phase": "completed",
             "decision": "GO",
@@ -62,6 +82,7 @@ class MeetingApiIsolationCase(unittest.TestCase):
         foreign_id = db.insert("task", {
             "tenant_id": 2,
             "emp_idx": 0,
+            **self._task_identity(0),
             "brief_json": "{}",
             "status": "done",
             "source_meeting_id": mid,
@@ -93,6 +114,7 @@ class MeetingApiIsolationCase(unittest.TestCase):
         local_id = db.insert("task", {
             "tenant_id": 1,
             "emp_idx": 0,
+            **self._task_identity(0),
             "brief_json": "{}",
             "status": "done",
             "source_meeting_id": mid,
@@ -126,9 +148,11 @@ class MeetingApiIsolationCase(unittest.TestCase):
             "modules": ["content"],
         })
         secret = "AUTO_MODULE_SECRET_13c4a15f"
+        unrelated_idx = self.auto_employee["idx"]
         unrelated_id = db.insert("task", {
             "tenant_id": 1,
-            "emp_idx": 9001,
+            "emp_idx": unrelated_idx,
+            **self._task_identity(unrelated_idx),
             "brief_json": json.dumps({"direction": secret}),
             "status": "done",
             "billing_status": "included",
@@ -138,6 +162,7 @@ class MeetingApiIsolationCase(unittest.TestCase):
             "tenant_id": 1,
             "question": "内容部门会议",
             "emp_idxs_json": "[0,1]",
+            "member_snapshot_json": self.member_snapshot_json,
             "status": "done",
             "phase": "completed",
             "decision": "GO",
@@ -157,6 +182,7 @@ class MeetingApiIsolationCase(unittest.TestCase):
         spoofed_id = db.insert("task", {
             "tenant_id": 1,
             "emp_idx": 0,
+            **self._task_identity(0),
             "brief_json": json.dumps({
                 "direction": "与会议行动完全无关的任务",
             }, ensure_ascii=False),

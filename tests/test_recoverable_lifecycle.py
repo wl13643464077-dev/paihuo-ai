@@ -11,7 +11,10 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 
-from app import auth, avatar, billing, db, main, notify, taskcenter, taskrunner
+from app import (
+    auth, avatar, billing, db, employeeidentity, main, notify, taskcenter,
+    taskrunner,
+)
 
 
 class RecoverableLifecycleCase(unittest.TestCase):
@@ -26,6 +29,10 @@ class RecoverableLifecycleCase(unittest.TestCase):
         db.insert(
             "tenants",
             {"id": 2, "name": "测试企业", "balance": 20, "enabled": 1},
+        )
+        db.execute(
+            "INSERT INTO tenant_industry(tenant_id,industry_key,is_primary,created_at) "
+            "VALUES(2,'auto',1,0)"
         )
         auth.set_current(
             {
@@ -46,16 +53,21 @@ class RecoverableLifecycleCase(unittest.TestCase):
         self.tmp.cleanup()
 
     def _failed_task(self, **extra):
+        employee_idx = int(extra.get("emp_idx", 0))
+        employee = employeeidentity.any_employee(employee_idx)
+        self.assertIsNotNone(employee)
+        frozen = employeeidentity.task_fields(employee)
+        frozen.update(extra)
         return db.insert(
             "task",
             {
                 "tenant_id": 2,
-                "emp_idx": 0,
+                "emp_idx": employee_idx,
                 "brief_json": json.dumps({"direction": "失败任务"}),
                 "status": "failed",
                 "billing_status": "refunded",
                 "billing_points": 1,
-                **extra,
+                **frozen,
             },
         )
 
@@ -114,6 +126,9 @@ class RecoverableLifecycleCase(unittest.TestCase):
             {
                 "tenant_id": 2,
                 "emp_idx": 1601,
+                **employeeidentity.task_fields(
+                    employeeidentity.any_employee(1601)
+                ),
                 "brief_json": json.dumps({"direction": "恢复行业任务"}),
                 "status": "done",
                 "billing_status": "included",
@@ -158,6 +173,9 @@ class RecoverableLifecycleCase(unittest.TestCase):
             {
                 "tenant_id": 2,
                 "emp_idx": 0,
+                **employeeidentity.task_fields(
+                    employeeidentity.active_employee(0)
+                ),
                 "brief_json": json.dumps({"direction": "尚未扣费"}),
                 "status": "pending_charge",
                 "billing_status": "pending",

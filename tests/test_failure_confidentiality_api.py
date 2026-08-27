@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from app import auth, db, llm, main, providers
+from app import auth, db, employeeidentity, llm, main, providers
 from app.engine import engine
 
 
@@ -152,6 +152,11 @@ class FailureConfidentialityApiTests(unittest.IsolatedAsyncioTestCase):
             "tenant_id": tenant_id,
             "question": "如何完成本周产品发布",
             "emp_idxs_json": "[0,1]",
+            "member_snapshot_json": json.dumps(
+                employeeidentity.member_snapshots([0, 1], active_only=True),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
             "messages_json": json.dumps([
                 {
                     "who": "系统",

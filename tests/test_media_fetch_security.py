@@ -303,6 +303,15 @@ class MediaFetchSecurityCase(unittest.TestCase):
                 "https://gateway.example", "secret"
             )),
             patch.object(
+                growth.providers,
+                "call_vision",
+                AsyncMock(return_value={
+                    "text": '{"edit_prompt":"安全产品图编辑"}',
+                    "cost_usd": 0,
+                    "tokens": 1,
+                }),
+            ),
+            patch.object(
                 growth.httpx,
                 "AsyncClient",
                 return_value=_ProviderClient(payload),

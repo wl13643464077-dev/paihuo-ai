@@ -1,4 +1,4 @@
-# 派活 AI schema48-r7 生产发布与恢复
+# 派活 AI schema51-r7 生产发布与恢复
 
 本文只描述 r7 的正式发布路径。核心边界是：root 只运行服务器上预先固定并验明
 身份的控制工具，不运行候选 release 中的脚本、Python 模块、virtualenv、pip 或
@@ -65,7 +65,7 @@ sudo -u paihuo-build test ! -r /var/lib/paihuo-upgrade
 
 ```bash
 set -euo pipefail
-release_id=<从未使用过的UTC时间-schema48-r7>
+release_id=<从未使用过的UTC时间-schema51-r7>
 source_date_epoch=<冻结时UTC-epoch>
 output=/private/tmp/paihuo-release-build
 venv/bin/python -m deploy.build_release \
@@ -158,7 +158,7 @@ sudo /usr/bin/env -i \
 receipt。不要直接解包，也不要让 root 执行 archive 内的任何文件：
 
 ```bash
-release_id=<从未使用过的UTC时间-schema48-r7>
+release_id=<从未使用过的UTC时间-schema51-r7>
 incoming="/var/lib/paihuo-upgrade/incoming/$release_id"
 release="/srv/paihuo/releases/$release_id"
 wheelhouse="/var/cache/paihuo-wheelhouse/$release_id"
@@ -255,7 +255,13 @@ wheelhouse="/var/cache/paihuo-wheelhouse/$release_id"
 umask 0022
 sudo install -d -o paihuo-build -g paihuo-build -m 0755 "$release/venv"
 
-sudo -u paihuo-build /usr/bin/env -i \
+# 部分 sudo 策略会把调用者的 0022 重置为 0002，因此必须在
+# paihuo-build 子进程内再次固定 umask。`exec "$@"` 只执行已分隔的参数，
+# 不把 release id 或路径拼成可解析的 shell 文本。
+sudo -u paihuo-build /bin/sh -c '
+  umask 0022
+  exec "$@"
+' sh /usr/bin/env -i \
   PATH=/usr/bin:/bin HOME=/nonexistent \
   PYTHONDONTWRITEBYTECODE=1 \
   /usr/bin/python3 -m venv --copies "$release/venv"
@@ -269,7 +275,10 @@ if test -L "$release/venv/lib64"; then
 fi
 test ! -e "$release/venv/lib64"
 
-sudo -u paihuo-build /usr/bin/env -i \
+sudo -u paihuo-build /bin/sh -c '
+  umask 0022
+  exec "$@"
+' sh /usr/bin/env -i \
   PATH="$release/venv/bin:/usr/bin:/bin" HOME=/nonexistent \
   PIP_CONFIG_FILE=/dev/null PIP_DISABLE_PIP_VERSION_CHECK=1 \
   PIP_NO_INPUT=1 PYTHONDONTWRITEBYTECODE=1 \
@@ -300,7 +309,10 @@ sudo /usr/bin/env -i \
   --adopt-venv \
   --release-id "$release_id"
 
-sudo rmdir "$release/data/public" "$release/data"
+# 当前 allowlist 制品不包含 data 路径。同时检查 `-e` 与 `-L`，
+# 避免把断链符号链接当成“不存在”后覆盖。
+sudo test ! -e "$release/data"
+sudo test ! -L "$release/data"
 sudo ln -s /var/lib/paihuo/data "$release/data"
 sudo chown -h root:root "$release/data"
 sudo test "$(readlink -f "$release/data")" = "/var/lib/paihuo/data"
@@ -494,7 +506,7 @@ sudo journalctl -u contentcrew.service --since '-15 minutes' --no-pager
 sudo ss -ltnp
 ```
 
-应用只能监听 `127.0.0.1:8899`，公网只开放 Caddy 80/443。schema48-r7 还必须
+应用只能监听 `127.0.0.1:8899`，公网只开放 Caddy 80/443。schema51-r7 还必须
 证明数据库 schema ledger/user_version、历史 JSON 凭据已完成密文迁移、配置
 密文、环境密钥副本和新备份一致；
 只输出聚合，不输出业务正文、密钥、Cookie、配置值或供应商响应。

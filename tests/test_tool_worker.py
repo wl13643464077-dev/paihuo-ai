@@ -83,6 +83,28 @@ class ToolWorkerReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(db.one("SELECT balance FROM tenants WHERE id=2")["balance"], 10)
         self.assertEqual(db.one("SELECT COUNT(*) n FROM billing_log")["n"], 0)
 
+    async def test_verified_leads_degraded_analysis_still_finishes_done(self):
+        """分析降级不应丢掉已核验原帖或误触发退款。"""
+        jid = self._job()
+        result = {
+            "analysis_status": "degraded",
+            "leads": [{
+                "source_id": "S1",
+                "source_url": "https://www.zhihu.com/question/123",
+                "intent": "低",
+            }],
+        }
+        with patch.object(main, "_run_tool", AsyncMock(return_value=result)), \
+                patch.object(main.notify, "push"), \
+                patch.object(main.engine, "broadcast"):
+            await main._tool_worker(jid)
+
+        row = db.one("SELECT * FROM tool_job WHERE id=?", (jid,))
+        self.assertEqual(row["status"], "done")
+        self.assertEqual(row["billing_status"], "succeeded")
+        self.assertEqual(json.loads(row["result_json"])["analysis_status"], "degraded")
+        self.assertEqual(db.one("SELECT balance FROM tenants WHERE id=2")["balance"], 10)
+
     async def test_timeout_cancels_work_and_finishes_as_failed(self):
         jid = self._job()
         cancelled = asyncio.Event()

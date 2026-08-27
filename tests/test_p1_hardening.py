@@ -6,10 +6,11 @@
 - providers：流式调用要有墙钟总时限、正文体积上限、429/5xx 退避与 max_tokens
 """
 import asyncio
+import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from app import censor, providers
 
@@ -267,6 +268,193 @@ class ChatResilienceTests(unittest.TestCase):
         result = asyncio.run(scenario())
         self.assertEqual("ok", result["text"])
         self.assertEqual(2, calls["n"])
+
+    @staticmethod
+    def _response(lines, *, status_code=200):
+        class Response:
+            headers = {}
+
+            def __init__(self):
+                self.status_code = status_code
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def aiter_lines(self):
+                for line in lines:
+                    yield line
+
+            async def aread(self):
+                return b""
+
+        return Response()
+
+    def _run_chat_responses(self, responses):
+        calls = {"n": 0}
+        self._chat_response_calls = calls
+
+        class Client:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            def stream(self, *_args, **_kwargs):
+                response = responses[calls["n"]]
+                calls["n"] += 1
+                return response
+
+        sleep = AsyncMock()
+
+        async def scenario():
+            with (
+                patch.object(
+                    providers,
+                    "yunwu_conf",
+                    return_value=("https://proxy.example", "key"),
+                ),
+                patch.object(providers.httpx, "AsyncClient", Client),
+                patch.object(providers.asyncio, "sleep", sleep),
+            ):
+                return await providers.chat("hi", model="gpt-5.5")
+
+        return asyncio.run(scenario()), calls["n"], sleep.await_count
+
+    def test_sse_empty_response_retries_and_aggregates_usage(self):
+        empty = self._response([
+            "data: " + json.dumps({
+                "choices": [{"delta": {"content": ""}}],
+                "usage": {
+                    "prompt_tokens": 4,
+                    "completion_tokens": 0,
+                    "cost_usd": 0.02,
+                },
+            }),
+            "data: [DONE]",
+        ])
+        success = self._response([
+            "data: " + json.dumps({
+                "choices": [{"delta": {"content": "交付"}}],
+                "usage": {
+                    "prompt_tokens": 5,
+                    "completion_tokens": 6,
+                    "cost_usd": 0.03,
+                },
+            }),
+            "data: " + json.dumps({
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 5,
+                    "completion_tokens": 6,
+                    "cost_usd": 0.03,
+                },
+            }),
+            "data: [DONE]",
+        ])
+
+        result, calls, sleeps = self._run_chat_responses([empty, success])
+
+        self.assertEqual("交付", result["text"])
+        self.assertEqual(15, result["tokens"])
+        self.assertAlmostEqual(0.05, result["cost_usd"])
+        self.assertEqual(2, calls)
+        self.assertEqual(1, sleeps)
+
+    def test_non_stream_empty_response_retries_and_aggregates_usage(self):
+        empty = self._response([json.dumps({
+            "choices": [{"message": {"content": ""}}],
+            "usage": {"total_tokens": 3, "cost_usd": 0.01},
+        })])
+        success = self._response([json.dumps({
+            "choices": [{"message": {"content": "普通 JSON 交付"}}],
+            "usage": {"total_tokens": 9, "cost_usd": 0.04},
+        })])
+
+        result, calls, sleeps = self._run_chat_responses([empty, success])
+
+        self.assertEqual("普通 JSON 交付", result["text"])
+        self.assertEqual(12, result["tokens"])
+        self.assertAlmostEqual(0.05, result["cost_usd"])
+        self.assertEqual(2, calls)
+        self.assertEqual(1, sleeps)
+
+    def test_repeated_empty_responses_stop_at_retry_limit(self):
+        empty_responses = [
+            self._response(["data: [DONE]"])
+            for _ in range(providers.MAX_CHAT_ATTEMPTS)
+        ]
+
+        with self.assertRaisesRegex(providers.ProviderError, r"^云雾返回为空$"):
+            self._run_chat_responses(empty_responses)
+        self.assertEqual(
+            providers.MAX_CHAT_ATTEMPTS,
+            self._chat_response_calls["n"],
+        )
+
+    def test_cancellation_is_not_retried(self):
+        request = AsyncMock(side_effect=asyncio.CancelledError())
+
+        async def scenario():
+            with (
+                patch.object(providers, "_chat_once", request),
+                patch.object(
+                    providers,
+                    "yunwu_conf",
+                    return_value=("https://proxy.example", "key"),
+                ),
+            ):
+                await providers.chat("hi", model="gpt-5.5")
+
+        with self.assertRaises(asyncio.CancelledError):
+            asyncio.run(scenario())
+        self.assertEqual(1, request.await_count)
+
+    def test_retries_share_one_total_wall_clock_timeout(self):
+        calls = {"n": 0}
+
+        async def empty(**kwargs):
+            calls["n"] += 1
+            raise providers._RetryableProviderError("云雾返回为空", 0.05)
+
+        async def scenario():
+            with (
+                patch.object(providers, "_chat_once", empty),
+                patch.object(
+                    providers,
+                    "yunwu_conf",
+                    return_value=("https://proxy.example", "key"),
+                ),
+            ):
+                await providers.chat("hi", model="gpt-5.5", timeout=0.01)
+
+        with self.assertRaisesRegex(providers.ProviderError, "响应超时"):
+            asyncio.run(scenario())
+        self.assertEqual(1, calls["n"])
+
+    def test_non_retryable_provider_error_is_not_retried(self):
+        request = AsyncMock(side_effect=providers.ProviderError("请求参数错误"))
+
+        async def scenario():
+            with (
+                patch.object(providers, "_chat_once", request),
+                patch.object(
+                    providers,
+                    "yunwu_conf",
+                    return_value=("https://proxy.example", "key"),
+                ),
+            ):
+                await providers.chat("hi", model="gpt-5.5")
+
+        with self.assertRaisesRegex(providers.ProviderError, r"^请求参数错误$"):
+            asyncio.run(scenario())
+        self.assertEqual(1, request.await_count)
 
 
 if __name__ == "__main__":

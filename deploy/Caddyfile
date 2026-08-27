@@ -5,6 +5,14 @@ paihuo.ai, www.paihuo.ai {
 
 	encode zstd gzip
 
+	# 带内容哈希版本号(?v=)的静态资源一年内直接用本地缓存；
+	# 发版会改 URL 版本号，自动拿到新文件，跨洋访问省一次革验证往返。
+	@versioned_static {
+		path /static/*
+		query v=*
+	}
+	header @versioned_static Cache-Control "public, max-age=31536000, immutable"
+
 	header {
 		-Server
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"

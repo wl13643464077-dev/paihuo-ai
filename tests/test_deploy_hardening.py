@@ -1,5 +1,8 @@
 import os
+import hashlib
 import json
+import re
+import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -8,17 +11,105 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from deploy import backup_health, failure_alert, preflight, start_guard
+from deploy import (
+    backup_health, build_release, failure_alert, preflight, start_guard,
+    verify_release,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class DeploymentHardeningContractCase(unittest.TestCase):
+    @staticmethod
+    def _write_fixture_manifest(root: Path, *, schema_version: int = 52):
+        entries = []
+        pending = [root]
+        while pending:
+            directory = pending.pop()
+            with os.scandir(directory) as iterator:
+                children = sorted(iterator, key=lambda item: item.name)
+            for child in children:
+                path = Path(child.path)
+                relative = path.relative_to(root).as_posix()
+                if relative in {"data", "venv", "RELEASE-MANIFEST.json"}:
+                    continue
+                metadata = child.stat(follow_symlinks=False)
+                if child.is_dir(follow_symlinks=False):
+                    path.chmod(0o755)
+                    entries.append({
+                        "mode": "0755", "path": relative, "type": "dir",
+                    })
+                    pending.append(path)
+                else:
+                    mode = 0o755 if relative == "run.sh" else 0o644
+                    path.chmod(mode)
+                    body = path.read_bytes()
+                    entries.append({
+                        "mode": f"{mode:04o}",
+                        "path": relative,
+                        "sha256": hashlib.sha256(body).hexdigest(),
+                        "size": len(body),
+                        "type": "file",
+                    })
+        entries.sort(key=lambda entry: entry["path"])
+        canonical_entries = verify_release._canonical_json(entries)
+        manifest = {
+            "created_at": verify_release._created_at(0),
+            "entries": entries,
+            "format": verify_release.MANIFEST_FORMAT,
+            "payload_file_count": sum(
+                entry["type"] == "file" for entry in entries
+            ),
+            "payload_member_count": len(entries),
+            "payload_tree_sha256": hashlib.sha256(
+                canonical_entries
+            ).hexdigest(),
+            "release_id": f"fixture-schema{schema_version}",
+            "schema_source": "app/db.py:LATEST_SCHEMA_VERSION",
+            "schema_version": schema_version,
+            "source_date_epoch": 0,
+            "source_tree_sha256": "0" * 64,
+        }
+        manifest_path = root / "RELEASE-MANIFEST.json"
+        manifest_path.write_bytes(verify_release._canonical_json(manifest))
+        manifest_path.chmod(0o644)
+        return manifest
+
+    @staticmethod
+    def _valid_api_tool_runner_command():
+        return [
+            "claude",
+            "-p",
+            "--safe-mode",
+            "--setting-sources",
+            "",
+            "--strict-mcp-config",
+            "--disable-slash-commands",
+            "--no-session-persistence",
+            "--no-chrome",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+            "--model",
+            "preflight-model",
+            "--system-prompt-file",
+            "/private/preflight-system-prompt",
+            "--tools",
+            "WebSearch",
+            "--allowedTools",
+            "WebSearch",
+            "--permission-mode",
+            "dontAsk",
+            "--max-budget-usd",
+            "5",
+        ]
+
     def _preflight_fixture(self, base: Path, *, legacy: bool = False):
         root = base / "current"
         state = base / "state"
-        venv = base / "venv"
+        venv = root / "venv"
         (root / "app").mkdir(parents=True)
         (root / "static").mkdir()
         (root / "config" / "departments").mkdir(parents=True)
@@ -30,9 +121,6 @@ class DeploymentHardeningContractCase(unittest.TestCase):
         (venv / "bin").mkdir(parents=True)
         (root / "app" / "main.py").write_text("# fixture")
         (root / "static" / "index.html").write_text("fixture")
-        (root / "RELEASE-MANIFEST.json").write_text(
-            '{"format":"paihuo-release-manifest/v1"}'
-        )
         (root / "config" / "departments" / "content.json").write_text(
             '{"key":"content","employees":[]}'
         )
@@ -86,6 +174,24 @@ class DeploymentHardeningContractCase(unittest.TestCase):
                 "INSERT INTO schema_version VALUES(1,'fixture',0);"
             )
         connection.close()
+        self._write_fixture_manifest(root)
+        return root, state, venv
+
+    def _schema53_preflight_fixture(self, base: Path):
+        root, state, venv = self._preflight_fixture(base)
+        config = root / "config"
+        for name in ("departments", "industry_knowledge"):
+            shutil.rmtree(config / name)
+            shutil.copytree(ROOT / "data" / name, config / name)
+        shutil.copytree(
+            ROOT / "data" / "industry_decisions",
+            config / "industry_decisions",
+        )
+        shutil.copy2(
+            ROOT / "data" / "gate_rules.json",
+            config / "gate_rules.default.json",
+        )
+        self._write_fixture_manifest(root, schema_version=53)
         return root, state, venv
 
     def _check_fixture(self, root: Path, state: Path, venv: Path):
@@ -499,6 +605,7 @@ class DeploymentHardeningContractCase(unittest.TestCase):
             "--adopt-venv",
             'paihuo-build -g paihuo-build -m 0755 "$release/venv"',
             "umask 0022",
+            "sudo -u paihuo-build /bin/sh -c",
             "venv 根必须是 `root:root 0755`",
             "`paihuo` 服务账号可只读",
             "/var/cache/paihuo-wheelhouse/$release_id",
@@ -535,6 +642,9 @@ class DeploymentHardeningContractCase(unittest.TestCase):
         self.assertNotIn(
             "mktemp -d /var/tmp/paihuo-release", guide
         )
+        self.assertNotIn('rmdir "$release/data/public"', guide)
+        self.assertIn('test ! -e "$release/data"', guide)
+        self.assertIn('test ! -L "$release/data"', guide)
 
     def test_recovery_guide_uses_root_owned_fixed_backup_contract(self):
         guide = (ROOT / "deploy" / "BACKUP_RECOVERY.md").read_text()
@@ -623,6 +733,162 @@ class DeploymentHardeningContractCase(unittest.TestCase):
             self.assertEqual(1, report["department_files"])
             self.assertEqual(1, report["industry_knowledge_files"])
 
+    def test_schema53_candidate_signed_payload_and_decisions_pass_preflight(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, state, venv = self._schema53_preflight_fixture(Path(tmp))
+            report = self._check_fixture(root, state, venv)
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(10, report["industry_decision_files"])
+        self.assertEqual(60, report["industry_decision_employees"])
+
+    def test_schema55_preflight_requires_the_learning_evidence_sidecar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "learning_evidence_gate_v1.json"
+            with self.assertRaisesRegex(
+                preflight.PreflightError,
+                "learning evidence sidecar missing",
+            ):
+                preflight._validate_learning_evidence_gate(
+                    missing,
+                    ROOT / "data" / "industry_decisions_v4",
+                )
+
+    def test_schema55_release_builder_calls_the_learning_evidence_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source"
+            (source / "app").mkdir(parents=True)
+            (source / "data" / "industry_decisions_v4").mkdir(parents=True)
+            (source / "app" / "db.py").write_text(
+                "LATEST_SCHEMA_VERSION = 55\n",
+                encoding="utf-8",
+            )
+            (source / "app" / "main.py").write_text(
+                "# fixture\n",
+                encoding="utf-8",
+            )
+            (source / "run.sh").write_text(
+                "#!/bin/sh\nexit 0\n",
+                encoding="utf-8",
+            )
+            (source / "run.sh").chmod(0o755)
+            with patch.object(
+                build_release.release_preflight,
+                "_validate_learning_evidence_gate",
+                side_effect=preflight.PreflightError("fixture sidecar rejected"),
+            ) as gate, self.assertRaisesRegex(
+                build_release.ReleaseBuildError,
+                "learning evidence sidecar release gate failed",
+            ):
+                build_release.build_release(
+                    source=source,
+                    output_dir=Path(tmp) / "output",
+                    release_id="fixture-schema55-sidecar",
+                    source_date_epoch=0,
+                    root_files=("run.sh",),
+                    root_dirs=("app",),
+                    data_files=(),
+                    empty_dirs=(),
+                )
+            gate.assert_called_once()
+            sidecar_arg, catalog_arg = gate.call_args.args
+            self.assertEqual("learning_evidence_gate_v1.json", sidecar_arg.name)
+            self.assertEqual(
+                ("payload", "app", "learning_evidence_gate_v1.json"),
+                sidecar_arg.parts[-3:],
+            )
+            self.assertEqual(
+                ("payload", "config", "industry_decisions_v4"),
+                catalog_arg.parts[-3:],
+            )
+
+    def test_preflight_rejects_post_extract_decision_config_tampering(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, state, venv = self._schema53_preflight_fixture(Path(tmp))
+            decision = root / "config" / "industry_decisions" / "auto.json"
+            catalog = json.loads(decision.read_text(encoding="utf-8"))
+            catalog["employees"][0]["name"] += "被篡改"
+            decision.write_text(
+                json.dumps(catalog, ensure_ascii=False, sort_keys=True),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                preflight.PreflightError,
+                "content does not match manifest",
+            ):
+                self._check_fixture(root, state, venv)
+
+    def test_preflight_rejects_manifest_entry_hash_and_tree_forgery(self):
+        cases = ("unsafe_path", "coherent_bad_hash", "bad_tree")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root, state, venv = self._preflight_fixture(Path(tmp))
+                manifest_path = root / "RELEASE-MANIFEST.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if case == "unsafe_path":
+                    manifest["entries"][0]["path"] = "../escape"
+                elif case == "coherent_bad_hash":
+                    target = next(
+                        entry for entry in manifest["entries"]
+                        if entry["type"] == "file"
+                    )
+                    target["sha256"] = "f" * 64
+                    manifest["payload_tree_sha256"] = hashlib.sha256(
+                        verify_release._canonical_json(manifest["entries"])
+                    ).hexdigest()
+                else:
+                    manifest["payload_tree_sha256"] = "f" * 64
+                manifest_path.write_bytes(
+                    verify_release._canonical_json(manifest)
+                )
+                manifest_path.chmod(0o644)
+
+                with self.assertRaisesRegex(
+                    preflight.PreflightError,
+                    "manifest|payload|unsafe|content does not match",
+                ):
+                    self._check_fixture(root, state, venv)
+
+    def test_decision_prose_cannot_override_human_approval_or_missing_data_hold(self):
+        cases = (
+            (
+                "approval_boundary",
+                "系统自动放行并执行，无需人工审批。",
+                "approval boundary permits automatic execution",
+            ),
+            (
+                "fallback",
+                "关键数据缺失时仍返回GO并继续执行。",
+                "fallback permits GO with missing data",
+            ),
+        )
+        for field, dangerous, expected in cases:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                root, state, venv = self._schema53_preflight_fixture(Path(tmp))
+                decision = (
+                    root / "config" / "industry_decisions" / "auto.json"
+                )
+                catalog = json.loads(decision.read_text(encoding="utf-8"))
+                catalog["employees"][0]["decision_contract"][field] = dangerous
+                decision.write_text(
+                    json.dumps(
+                        catalog,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    encoding="utf-8",
+                )
+                # Re-sign the fixture so this test reaches semantic preflight;
+                # stale-manifest mutation is covered independently above.
+                self._write_fixture_manifest(root, schema_version=53)
+
+                with self.assertRaisesRegex(
+                    preflight.PreflightError, expected,
+                ):
+                    self._check_fixture(root, state, venv)
+
     def test_preflight_requires_immutable_seeds_but_allows_gate_state_init(self):
         with tempfile.TemporaryDirectory() as tmp:
             root, state, venv = self._preflight_fixture(Path(tmp))
@@ -631,6 +897,7 @@ class DeploymentHardeningContractCase(unittest.TestCase):
             self.assertTrue(report["ok"])
 
             (root / "config" / "gate_rules.default.json").unlink()
+            self._write_fixture_manifest(root)
             with self.assertRaisesRegex(
                 preflight.PreflightError,
                 "immutable gate seed",
@@ -644,6 +911,7 @@ class DeploymentHardeningContractCase(unittest.TestCase):
                 root / "config" / "industry_knowledge" / "content.json"
             )
             knowledge.unlink()
+            self._write_fixture_manifest(root)
             with self.assertRaisesRegex(
                 preflight.PreflightError,
                 "industry knowledge is empty",
@@ -655,6 +923,7 @@ class DeploymentHardeningContractCase(unittest.TestCase):
                 '"metrics":[],"benchmarks":[],"glossary":[],'
                 '"practices":[],"compliance":[],"pitfalls":[]}'
             )
+            self._write_fixture_manifest(root)
             with self.assertRaisesRegex(
                 preflight.PreflightError,
                 "keys do not match",
@@ -691,7 +960,8 @@ class DeploymentHardeningContractCase(unittest.TestCase):
             root, state, venv = self._preflight_fixture(Path(tmp))
             (root / "run.sh").chmod(0o644)
             with self.assertRaisesRegex(
-                preflight.PreflightError, "entrypoint is not executable"
+                preflight.PreflightError,
+                "materialized release metadata is invalid|entrypoint is not executable",
             ):
                 self._check_fixture(root, state, venv)
 
@@ -766,11 +1036,13 @@ class DeploymentHardeningContractCase(unittest.TestCase):
             "--disable-slash-commands",
             "--no-session-persistence",
             "--no-chrome",
+            "--allowedTools",
+            "--permission-mode",
             "--output-format",
             "--verbose",
             "--include-partial-messages",
             "--model",
-            "--system-prompt",
+            "--system-prompt-file",
             "--tools",
             "--max-budget-usd",
         ))
@@ -807,7 +1079,7 @@ class DeploymentHardeningContractCase(unittest.TestCase):
             set(help_text.splitlines()),
             set(report["validated_flags"]),
         )
-        self.assertEqual(13, len(report["validated_flags"]))
+        self.assertEqual(15, len(report["validated_flags"]))
         self.assertIn("--max-budget-usd", report["validated_flags"])
         self.assertEqual(
             [
@@ -820,10 +1092,52 @@ class DeploymentHardeningContractCase(unittest.TestCase):
             "/opt/claude",
             model="claude-opus-4-8",
             web=True,
-            system_prompt="fixture",
+            system_prompt_file="/private/fixture-system-prompt",
         )
         for flag in preflight.API_TOOL_RUNNER_REQUIRED_ISOLATION_FLAGS:
             self.assertIn(flag, command)
+
+    def test_api_tool_runner_accepts_compact_bracketed_prompt_file_alias(self):
+        """Claude 2.1.220 prints --system-prompt[-file] in its help text."""
+        help_text = "\n".join((
+            "--safe-mode",
+            "--setting-sources",
+            "--strict-mcp-config",
+            "--disable-slash-commands",
+            "--no-session-persistence",
+            "--no-chrome",
+            "--allowedTools",
+            "--permission-mode",
+            "--output-format",
+            "--verbose",
+            "--include-partial-messages",
+            "--model",
+            "Use system prompts via: --system-prompt[-file]",
+            "--tools",
+            "--max-budget-usd",
+        ))
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "claude"
+            executable.write_text("#!/bin/sh\n")
+            executable.chmod(0o755)
+            with patch.object(
+                preflight.subprocess,
+                "run",
+                side_effect=(
+                    preflight.subprocess.CompletedProcess(
+                        [str(executable), "--version"], 0,
+                        stdout="2.1.220\n", stderr="",
+                    ),
+                    preflight.subprocess.CompletedProcess(
+                        [str(executable), "--help"], 0,
+                        stdout=help_text, stderr="",
+                    ),
+                ),
+            ):
+                report = preflight._check_api_tool_runner(executable)
+
+        self.assertTrue(report["ok"])
+        self.assertIn("--system-prompt-file", report["validated_flags"])
 
     def test_api_tool_runner_preflight_rejects_legacy_cli_missing_safe_mode(self):
         help_text = "\n".join((
@@ -832,11 +1146,13 @@ class DeploymentHardeningContractCase(unittest.TestCase):
             "--disable-slash-commands",
             "--no-session-persistence",
             "--no-chrome",
+            "--allowedTools",
+            "--permission-mode",
             "--output-format",
             "--verbose",
             "--include-partial-messages",
             "--model",
-            "--system-prompt",
+            "--system-prompt-file",
             "--tools",
             "--max-budget-usd",
         ))
@@ -896,6 +1212,146 @@ class DeploymentHardeningContractCase(unittest.TestCase):
                     r"API tool runner --help failed",
                 ):
                     preflight._check_api_tool_runner(executable)
+
+    def test_api_tool_runner_preflight_rejects_legacy_cli_missing_security_flags(self):
+        help_flags = (
+            "--safe-mode",
+            "--setting-sources",
+            "--strict-mcp-config",
+            "--disable-slash-commands",
+            "--no-session-persistence",
+            "--no-chrome",
+            "--allowedTools",
+            "--permission-mode",
+            "--output-format",
+            "--verbose",
+            "--include-partial-messages",
+            "--model",
+            "--system-prompt-file",
+            "--tools",
+            "--max-budget-usd",
+        )
+        for missing_flag in (
+            "--allowedTools",
+            "--permission-mode",
+            "--system-prompt-file",
+        ):
+            with self.subTest(missing_flag=missing_flag):
+                help_text = "\n".join(
+                    flag for flag in help_flags if flag != missing_flag
+                )
+                with tempfile.TemporaryDirectory() as tmp:
+                    executable = Path(tmp) / "claude"
+                    executable.write_text("#!/bin/sh\n")
+                    executable.chmod(0o755)
+                    with patch.object(
+                        preflight.subprocess,
+                        "run",
+                        side_effect=(
+                            preflight.subprocess.CompletedProcess(
+                                [str(executable), "--version"],
+                                0,
+                                stdout="1.0.0\n",
+                                stderr="",
+                            ),
+                            preflight.subprocess.CompletedProcess(
+                                [str(executable), "--help"],
+                                0,
+                                stdout=help_text,
+                                stderr="",
+                            ),
+                        ),
+                    ):
+                        with self.assertRaisesRegex(
+                            preflight.PreflightError,
+                            rf"missing required capabilities: {re.escape(missing_flag)}",
+                        ):
+                            preflight._check_api_tool_runner(executable)
+
+    def test_api_tool_runner_contract_requires_exact_web_permission_values(self):
+        from app import llm
+
+        valid = self._valid_api_tool_runner_command()
+        cases = (
+            ("--tools", "Read", r"--tools must be WebSearch"),
+            ("--allowedTools", "Read", r"--allowedTools must be WebSearch"),
+            (
+                "--permission-mode",
+                "acceptEdits",
+                r"--permission-mode must be dontAsk",
+            ),
+            (
+                "--setting-sources",
+                "user",
+                r"--setting-sources must be an empty string",
+            ),
+        )
+        for flag, bad_value, expected in cases:
+            with self.subTest(flag=flag, bad_value=bad_value):
+                command = list(valid)
+                command[command.index(flag) + 1] = bad_value
+                with patch.object(llm, "_runner_command", return_value=command):
+                    with self.assertRaisesRegex(
+                        preflight.PreflightError, expected
+                    ):
+                        preflight._api_tool_runner_required_flags()
+
+    def test_api_tool_runner_contract_rejects_dangerous_permission_tokens(self):
+        from app import llm
+
+        for token in (
+            "bypassPermissions",
+            "--dangerously-skip-permissions",
+            "--dangerously-skip-permissions=true",
+        ):
+            with self.subTest(token=token):
+                command = self._valid_api_tool_runner_command() + [token]
+                with patch.object(llm, "_runner_command", return_value=command):
+                    with self.assertRaisesRegex(
+                        preflight.PreflightError,
+                        r"dangerous permission token",
+                    ):
+                        preflight._api_tool_runner_required_flags()
+
+    def test_api_tool_runner_contract_requires_bounded_numeric_budget(self):
+        from app import llm
+
+        for bad_budget in ("0", "-1", "nan", "inf", "10.01", "unlimited"):
+            with self.subTest(bad_budget=bad_budget):
+                command = self._valid_api_tool_runner_command()
+                command[command.index("--max-budget-usd") + 1] = bad_budget
+                with patch.object(llm, "_runner_command", return_value=command):
+                    with self.assertRaisesRegex(
+                        preflight.PreflightError,
+                        r"--max-budget-usd must be a finite number greater than 0 and at most 10",
+                    ):
+                        preflight._api_tool_runner_required_flags()
+
+    def test_api_tool_runner_contract_requires_prompt_file_not_prompt_argv(self):
+        from app import llm
+
+        command = self._valid_api_tool_runner_command()
+        command[command.index("--system-prompt-file")] = "--system-prompt"
+        with patch.object(llm, "_runner_command", return_value=command):
+            with self.assertRaisesRegex(
+                preflight.PreflightError,
+                r"missing mandatory isolation flags: --system-prompt-file",
+            ):
+                preflight._api_tool_runner_required_flags()
+
+    def test_api_tool_runner_contract_rejects_duplicate_critical_options(self):
+        from app import llm
+
+        command = self._valid_api_tool_runner_command() + [
+            "--permission-mode",
+            "dontAsk",
+        ]
+        with patch.object(llm, "_runner_command", return_value=command):
+            with self.assertRaisesRegex(
+                preflight.PreflightError,
+                r"--permission-mode must appear exactly once",
+            ):
+                preflight._api_tool_runner_required_flags()
 
     def test_failure_alert_rejects_unapproved_webhook_without_network(self):
         with patch.dict(

@@ -2,10 +2,13 @@
 let META = null, STATE = null, EMP = null, CUR_JOB = null, SEL_IDX = null, EDIT_MODE = false;
 let MODAL_IDX = null, MODAL_TAB = "skills";
 let DEPTS = null, CUR_DEPT = "content", SPEC = null, SPEC_TAB = "task", SPEC_TASK = null;
+let EMPLOYEE_LEARNING_BATCH={preview:null,batches:[],scope:"all_v4",maxConcurrency:2,requestKey:"",loading:false,error:""};
+let EMPLOYEE_LEARNING_BATCH_TIMER=null;
+let EMPLOYEE_LEARNING_BATCH_PREVIEW_SEQ=0;
+let EMPLOYEE_LEARNING_BATCH_EXECUTE_SEQ=0;
 let EXP_PREFILL = "";   // V27 智能派活:「帮我选/改派」时带给下一位专家派活台的一句话
 const LEARN_LOGS = {};   // idx -> [{k,l,ts}]
 const LIVE_LINE = {};    // idx -> 最近一条实时动作文本
-
 const $ = s => document.querySelector(s);
 const rmb = u => "¥" + ((u||0)*7.2).toFixed(2);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -169,6 +172,37 @@ function clientErrorFingerprint(value){
   }
   return (hash>>>0).toString(16).padStart(8,"0");
 }
+/* 可重放写请求的持久幂等号。只保存输入指纹，不把用户正文落到浏览器存储。
+   同一输入在响应超时后会复用原号；任一输入变化都会生成新号。 */
+function persistentMutationStorageKey(kind,scope){
+  const safeKind=String(kind||"mutation").replace(/[^A-Za-z0-9_.:-]/g,"-").slice(0,40);
+  const safeScope=String(scope||"global").replace(/[^A-Za-z0-9_.:-]/g,"-").slice(0,80);
+  return `paihuo:pending:${safeKind}:user:${ME?.id??"none"}:${safeScope}`;
+}
+function persistentMutationRequestKey(kind,scope,payload){
+  let serialized="";
+  try{ serialized=JSON.stringify(payload??null); }catch(_){ serialized="[unserializable]"; }
+  const fingerprint=clientErrorFingerprint(serialized)+clientErrorFingerprint(`v51:${serialized.length}:${serialized}`),storageKey=persistentMutationStorageKey(kind,scope);
+  try{
+    const saved=JSON.parse(localStorage.getItem(storageKey)||"null");
+    const fresh=Number.isFinite(Number(saved?.created_at))&&Date.now()-Number(saved.created_at)<=24*60*60*1000;
+    if(fresh&&saved?.fingerprint===fingerprint&&/^[A-Za-z0-9][A-Za-z0-9._:-]{11,127}$/.test(saved.request_key||"")){
+      return saved.request_key;
+    }
+  }catch(_){}
+  const random=globalThis.crypto?.randomUUID?.()
+    ||`${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
+  const requestKey=`${String(kind||"request").replace(/[^A-Za-z0-9]/g,"").slice(0,18)||"request"}-${fingerprint}-${random}`.slice(0,128);
+  try{ localStorage.setItem(storageKey,JSON.stringify({fingerprint,request_key:requestKey,created_at:Date.now()})); }catch(_){}
+  return requestKey;
+}
+function clearPersistentMutationRequestKey(kind,scope,requestKey){
+  const storageKey=persistentMutationStorageKey(kind,scope);
+  try{
+    const saved=JSON.parse(localStorage.getItem(storageKey)||"null");
+    if(!requestKey||saved?.request_key===requestKey) localStorage.removeItem(storageKey);
+  }catch(_){ try{localStorage.removeItem(storageKey);}catch(_ignored){} }
+}
 function reportClientError(kind, err, extra={}){
   if(err?.name==="NavigationAbort") return;
   const errorName=String(err?.name||"Error").replace(/[^A-Za-z0-9_.:-]/g,"").slice(0,40)||"Error";
@@ -242,14 +276,15 @@ async function apiRequest(path, opts={}){
     if(parentSignal) parentSignal.removeEventListener("abort", onParentAbort);
     busy(false);
   }
+  const responseCode=String(r.headers.get("X-Paihuo-Error-Code")||"").trim()||null;
   if(r.status===401){
     location.href="/login";
-    const err=new Error("请先登录"); err.status=401; throw err;
+    const err=new Error("请先登录"); err.status=401;err.code=responseCode;throw err;
   }
   if(r.status===402){ const e = await r.json().catch(()=>({detail:"点数不足"})); pay402(e.detail);
-    const err=new Error(e.detail||"点数不足"); err.status=402; throw err; }
+    const err=new Error(e.detail||"点数不足"); err.status=402;err.code=responseCode;throw err; }
   if(!r.ok){ const e = await r.json().catch(()=>({detail:r.statusText}));
-    const err=new Error(e.detail||"请求失败"); err.status=r.status; throw err; }
+    const err=new Error(e.detail||"请求失败"); err.status=r.status;err.code=responseCode;throw err; }
   return r.json();
 }
 function mutationRequestKey(path,opts={}){
@@ -342,7 +377,10 @@ function openUiDialog({title="请确认",message="",field=null,confirmText="确�
       ?`<textarea id="ui-dialog-field" aria-label="${esc(field.label||title)}" placeholder="${esc(field.placeholder||"")}" style="min-height:130px">${esc(field.value||"")}</textarea>`
       :`<input id="ui-dialog-field" type="${esc(field.type||"text")}" aria-label="${esc(field.label||title)}"
           value="${esc(field.value||"")}" placeholder="${esc(field.placeholder||"")}" ${field.min!==undefined?`min="${Number(field.min)}"`:""}>`;
-  document.body.insertAdjacentHTML("beforeend",`<div class="overlay ui-dialog-overlay" id="ui-dialog" role="presentation">
+  // Batch/detail overlays can be redrawn while a confirmation is open.  Give
+  // the confirmation its own stacking level so a later redraw cannot cover
+  // the controls or steal the apparent modal surface.
+  document.body.insertAdjacentHTML("beforeend",`<div class="overlay ui-dialog-overlay" id="ui-dialog" role="presentation" style="z-index:1000">
     <div class="panel ui-dialog-panel" role="dialog" aria-modal="true" aria-labelledby="ui-dialog-title">
       <div class="phead"><h2 id="ui-dialog-title" style="margin:0;flex:1">${esc(title)}</h2></div>
       <div class="pbody"><div class="ui-dialog-message">${esc(message).replace(/\n/g,"<br>")}</div>
@@ -466,7 +504,8 @@ function charSVG(color, emoji, state, size=100){
 const routes = {"":dashboard,"new":newBrief,"job":jobView,"profiles":profilesView,"assets":assetsView,
   "delivery":deliveryView,"knowledge":knowledgeView,"schedules":schedulesView,"settings":settingsView,
   "avatar":avatarView,"admin":adminView,"team":teamView,"billing":billingView,"meetings":meetingsView,
-  "tasks":tasksView,"company":companyView,"production":productionView,"censor":censorView,
+  "tasks":tasksView,"company":companyView,"production":productionView,"boss":bossDashboardView,
+  "inspections":inspectionView,"censor":censorView,
   "channels":channelsView,"tools":toolsView,"trash":trashView,"guide":guideReset,
   "notifications":notificationsView};
 function nav(){
@@ -475,6 +514,8 @@ function nav(){
   // 主导航(常用) + 更多(次要,收进下拉)
   const primary = [["","🏢 办公室"]];
   if(ME && ME.role!=="tour") primary.push(["tasks","📋 任务中心"]);
+  if(ME && ME.role!=="tour") primary.push(["inspections","🏪 巡店"]);
+  if(ME && (ME.role==="owner"||ME.role==="root")) primary.push(["boss","📈 老板看板"]);
   if(canWork("content")) primary.push(["new","➕ 下达任务"]);
   if(canWork("avatar")) primary.push(["avatar","🎥 数字人"]);
   primary.push(["meetings","🪑 会议室"]);
@@ -489,7 +530,8 @@ function nav(){
   if(isAdmin()) more.push(["trash","🗑 回收站"]);
   if(ME && ME.role!=="tour") more.push(["notifications","🔔 通知记录"]);
   more.push(["billing","💎 套餐"]);
-  if(ME && (ME.role==="owner"||ME.role==="root")) more.push(["team","👥 权限管理"]);
+  if(ME && (ME.role==="owner"||ME.role==="root")) more.push(["team","👥 团队与权限"]);
+  else if(ME && ME.can_allocate) more.push(["team","👥 团队分配"]);
   if(ME && ME.role==="root") more.push(["admin","🛠 后台"]);
   // 引导卡(开工四步/发布三件套)只对 owner/root 展示,重看入口同样只给他们
   if(ME && (ME.role==="owner"||ME.role==="root")) more.push(["guide","🧭 重看新手引导"]);
@@ -549,7 +591,8 @@ async function forcedPasswordChange(){
 function routeLoading(page){
   const labels={tasks:"任务中心",new:"下达任务",avatar:"数字人摄影棚",meetings:"AI会议室",
     tools:"营销工具箱",channels:"发布渠道",schedules:"定时任务",profiles:"人设档案",
-    assets:"资产库",knowledge:"沉淀库",production:"员工产出",company:"企业档案",
+    assets:"资产库",knowledge:"沉淀库",production:"员工产出",boss:"老板看板",
+    inspections:"巡店工作台",company:"企业档案",
     billing:"套餐",team:"权限管理",admin:"后台",job:"工单详情",delivery:"交付中心",
     trash:"回收站",notifications:"通知记录"};
   const box=$("#main"); if(!box) return;
@@ -574,7 +617,7 @@ async function render(reuseShell=false){
   ROUTE_CONTROLLER = routeController;
   ACTIVE_ROUTE_SIGNAL = routeController.signal;
   const targetHash=location.hash;
-  const [page,arg] = targetHash.replace("#/","").split("/");
+  const [page,arg,scopeArg] = targetHash.replace("#/","").split("/");
   if(reuseShell){
     if(ME&&STATE) nav();
     routeLoading(page);
@@ -604,7 +647,7 @@ async function render(reuseShell=false){
     }
     if(renderSeq!==NAV_SEQ||location.hash!==targetHash) return;
     nav();
-    await (routes[page]||dashboard)(arg);
+    await (routes[page]||dashboard)(arg,scopeArg);
     if(renderSeq!==NAV_SEQ||location.hash!==targetHash) return;
     trackPageView(page||"office");
     if(MODAL_IDX!==null) drawModal();
@@ -688,6 +731,9 @@ function restoreFormState(snapshot){
   details.forEach((el,index)=>{
     const saved=savedDetails.get(detailsStateKey(el,index));
     if(saved) el.open=!!saved.open;
+  });
+  document.querySelectorAll("[data-decision-evidence-panel]").forEach(panel=>{
+    if(panel.id) decisionEvidenceCountUpdate(panel.id);
   });
   if(!snapshot.activeKey) return;
   const target=fields.find((el,index)=>formFieldKey(el,index)===snapshot.activeKey);
@@ -1060,21 +1106,25 @@ function todoCards(){
 }
 function specRoomCard(e){
   const st = e.running_n?"work":e.learning?"learn":"idle";
+  const canAssign=employeeCanAssignNew(e), assignmentState=employeeAssignmentState(e);
+  const profile=e.role_profile_summary||{};
+  const identity=employeeDisplayIdentity(e);
   return `<div class="room ${st==="work"?"working":""}" data-room="${e.idx}" onclick="openSpec(${e.idx})" style="${e.enabled===false?"opacity:.45;filter:grayscale(.8)":""}">
-    <div class="roof" style="background:${e.color}"><span class="lamp"></span>${esc(e.person||e.name).slice(0,10)}<span style="flex:1"></span>${e.emoji}</div>
+    <div class="roof" style="background:${e.color}"><span class="lamp"></span>${esc(identity.person).slice(0,10)}<span style="flex:1"></span>${e.emoji}</div>
     <div class="scene">${charSVG(e.color, e.emoji, st, 108)}</div>
     <div class="meta">
-      <div class="nm"><span>${e.enabled===false?"⛔":""}${esc(e.person||"")} <span class="sub" style="font-size:11px">${esc(e.name).slice(0,12)}</span>${isBoss()&&e.skills_n?` <span class="sub" style="font-weight:700" title="进修技能">⚡${e.skills_n}</span>`:""}</span>
+      <div class="nm"><span>${e.enabled===false?"⛔":""}${esc(identity.person)} <span class="sub" style="font-size:11px">${esc(identity.job).slice(0,12)}</span>${isBoss()&&e.skills_n?` <span class="sub" style="font-weight:700" title="已审批进修技能">⚡${e.skills_n}</span>`:""}</span>
         <span class="stpill ${PILL_CLS[st]}">${{work:"干活中",learn:"进修中",idle:"待命中"}[st]}</span></div>
-      <div class="live">${esc(isBoss()?e.duty:e.intro).slice(0,38)}</div>
+      <div class="live">${assignmentState?`<b>${esc(assignmentState)}</b>`:esc(isBoss()?e.duty:e.intro).slice(0,38)}</div>
+      ${profile.has_profile?`<div class="sub" style="margin-top:4px">专业能力 ${Number(profile.capability_count)||0} · 技能树 ${Number(profile.skill_count)||0}</div>`:""}
       <div class="actions" style="margin-top:8px;gap:6px">
         <button class="btn sm" onclick="event.stopPropagation();openSpec(${e.idx},${isBoss()?"undefined":cp("intro")})">🪪 ${isBoss()?"面板":"介绍"}</button>
-        ${ME&&ME.role!=="tour"?`<button class="btn sm pri" onclick="event.stopPropagation();openSpec(${e.idx},'task')">📋 派活</button>`:""}
+        ${ME&&ME.role!=="tour"&&canAssign?`<button class="btn sm pri" onclick="event.stopPropagation();openSpec(${e.idx},'task')">📋 派活</button>`:""}
       </div>
     </div></div>`;
 }
 function deptFloorHtml(d){
-  return `<div class="notice" style="margin-top:0">${d.emoji} <b>${esc(d.name)}</b> — ${esc(d.tagline||"")}。${ME&&ME.role==="tour"?"点任何员工查看公开文字介绍。":"点任何专家即可查看介绍或直接派活；产出自动进资产库。"}</div>`
+  return `<div class="notice" style="margin-top:0">${d.emoji} <b>${esc(d.name)}</b> — ${esc(deptTagline(d))}。${ME&&ME.role==="tour"?"点任何员工查看公开文字介绍。":"点任何专家即可查看介绍或直接派活；产出自动进资产库。"}</div>`
     + (ME&&ME.role==="tour"?"":expFinderCard(d.key))
     + d.groups.map(g=>{
       const members = d.employees.filter(e=>e.group===g.name && (e.enabled!==false || isBoss()));
@@ -1114,6 +1164,7 @@ async function dashboard(){
       </div>
       ${ME.role!=="tour"?`<a class="btn blue" href="#/tasks" style="font-size:15px">📋 我的任务在哪</a>`:""}
       ${canWork("content")?`<a class="btn pri" href="#/new" style="font-size:15px">➕ 下达新任务</a>`:""}
+      ${isBoss()?`<button class="btn" onclick="openEmployeeLearningBatchManager()">🏭 修理厂</button>`:""}
     </div>
     <div class="kv" style="margin-top:12px">${ME.role!=="root"?`<span><a href="#/billing" style="font-weight:800;text-decoration:underline">💎 余额 ${Math.round(STATE.balance||0)} 点${STATE.plan?` · ${esc(STATE.plan)}`:""}</a></span>`:""}<span>内容工单进行中 ${active} 单</span><span>内容工单累计 ${jobsContract.total??jobs.length} 单</span>
       <span>数字员工 ${11+specN} 人</span>
@@ -1147,7 +1198,7 @@ async function dashboard(){
       const d = DEPTS.find(x=>x.key===CUR_DEPT) || allowedDepts[0];
       floor = !d ? `<div class="empty">您的账号还没有开通任何板块,请联系企业主账号</div>` : deptFloorHtml(d);
     }
-    floorSection = `<h2 style="margin:22px 0 0;letter-spacing:1px">🏢 集团楼层</h2>${deptTabs}${floor}
+    floorSection = `<h2 style="margin:22px 0 0;letter-spacing:1px">🏬 行业市场</h2>${deptTabs}${floor}
       ${CUR_DEPT==="content"?jobsCard:""}`;
   }else{
     // 租户视图:部门楼层默认折叠为标题行,点击展开;展开状态按租户+部门记忆
@@ -1156,17 +1207,18 @@ async function dashboard(){
       "选题→写稿→配图→审查,整条流水线出成品",
       ()=>`<div class="floor">${META.stations.map(roomCard).join("")}${gateRoom()}</div>`));
     allowedDepts.forEach(d=> sections.push(deptSection(d.key, d.emoji, d.name, d.employees.length+"人",
-      d.tagline||"行业专家,一人一岗随叫随到", ()=>deptFloorHtml(d))));
+      deptTagline(d)||"行业精品员工,一人一岗随叫随到", ()=>deptFloorHtml(d))));
     const avatarRow = can("avatar")?`<div class="deptsec"><div class="depthead" onclick="location.hash='#/avatar'">
       <span class="dh-emoji">🎥</span><span class="dh-name">数字人摄影棚</span><span class="dh-count">新</span>
       <span class="dh-tag">照片开口说话 · 出条口播视频</span><span class="dh-caret">→</span></div></div>`:"";
-    floorSection = `<h2 style="margin:22px 0 4px;letter-spacing:1px">🏢 集团楼层 <span class="sub" style="font-weight:600;font-size:13px">点部门标题行展开/收起</span></h2>
+    floorSection = `<h2 style="margin:22px 0 4px;letter-spacing:1px">🏬 行业市场 <span class="sub" style="font-weight:600;font-size:13px">每个行业一支精品员工队伍,点行业标题展开/收起</span></h2>
       ${sections.join("")}${avatarRow}
       ${can("content")?jobsCard:""}`;
   }
   $("#main").innerHTML = tourBanner + heroCard
     + (isRoot?"":todoCards())
     + obCard()
+    + howtoCard()
     + trioCard()
     + notificationCard
     + inboxCard
@@ -1238,9 +1290,15 @@ function trioCard(){
   if(localStorage.getItem("trio_hide_"+(ME.tenant||""))) return "";
   const tr = STATE.trio||{};
   const steps = [
-    {done:tr.video, e:"🎬", t:"① 图文一键成片", d:"挑一篇交付的图文,自动配音+字幕出竖版视频", act:"trioGo('video')"},
-    {done:tr.censor, e:"🛡️", t:"② 审查官把关", d:"发前极速扫描广告法/违禁词,免费", act:"location.hash='#/censor'"},
-    {done:tr.publish, e:"📰", t:"③ 公众号排版发出去", d:"12套主题排版,一键复制或发草稿箱", act:"trioGo('mp')"},
+    {done:tr.video, e:"🎬", t:"① 图文一键成片", act:"trioGo('video')",
+      d:"把已交付的图文自动变成竖版口播视频,配音+字幕全包",
+      how:"怎么做:任务交付页→「一键成片」,选模板等几分钟即可;抖音/视频号直接用"},
+    {done:tr.censor, e:"🛡️", t:"② 审查官把关", act:"location.hash='#/censor'",
+      d:"发布前免费扫一遍广告法、违禁词和敏感表述",
+      how:"怎么做:审查页贴上正文→秒出风险报告和替换建议,发出去才踏实"},
+    {done:tr.publish, e:"📰", t:"③ 公众号排版发出去", act:"trioGo('mp')",
+      d:"12套主题排版,一键复制或直接发进公众号草稿箱",
+      how:"怎么做:交付页→「公众号排版」选主题;绑定公众号后可一键发草稿箱"},
   ];
   const undone = steps.filter(x=>!x.done).length;
   if(!undone) return "";
@@ -1248,10 +1306,32 @@ function trioCard(){
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       <h2 style="margin:0;flex:1;min-width:200px">🧰 发布三件套 · 一篇图文这样发出去(还差 ${undone} 步)</h2>
       <span class="sub" style="cursor:pointer;text-decoration:underline" onclick="localStorage.setItem('trio_hide_'+(ME.tenant||''),1);render()">不再提示</span></div>
-    <div class="grid3" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr));margin-top:10px">
+    <div class="grid3" style="grid-template-columns:repeat(auto-fill,minmax(250px,1fr));margin-top:10px">
       ${steps.map(x=>`<div class="topic" style="margin:0;cursor:pointer;${x.done?"opacity:.55":""}" onclick="${x.act}">
-        <b>${x.done?"✅":x.e} ${x.t}</b><div class="sub" style="margin-top:3px">${x.d}${x.done?"":" →"}</div></div>`).join("")}
-    </div></div>`;
+        <b>${x.done?"✅":x.e} ${x.t}</b><div class="sub" style="margin-top:3px">${x.d}${x.done?"":" →"}</div>
+        ${x.done?"":`<div class="sub" style="margin-top:4px;opacity:.85">${x.how}</div>`}</div>`).join("")}
+    </div>
+    <div class="sub" style="margin-top:8px">一条内容的完整出路:流水线写好 → 成片 → 审查 → 排版发出去;三步都在您已交付的工单上操作,不重复扣点</div></div>`;
+}
+/* 「数字员工怎么用」教程卡:常驻首页的用人指南,可不再提示,重看引导时恢复 */
+function howtoCard(){
+  if(!ME || !["owner","root"].includes(ME.role)) return "";
+  if(localStorage.getItem("howto_hide_"+(ME.tenant||""))) return "";
+  const steps = [
+    {e:"🧭", t:"① 挑人", d:"下面「行业市场」进您的行业,每个岗位一位专职员工;不知道找谁就用行业里的「找专家」搜索框,直接搜您遇到的事(比如\u201c顾客要退卡\u201d)"},
+    {e:"📋", t:"② 派活", d:"点员工→「派活」。一句话说清背景+想要什么结果,再把手头材料(数据/记录/照片)贴上;说得越具体,交付越准"},
+    {e:"📬", t:"③ 收活", d:"8-15分钟出交付:结论+依据+能直接执行的清单。不满意就在同一单里继续追问,免费改到您满意为止"},
+    {e:"📚", t:"④ 沉淀", d:"交付自动进资产库;好内容一键存成企业知识,之后全部员工开工都会带上,越用越懂您的企业"},
+  ];
+  return `<div class="card" style="background:linear-gradient(120deg,#fdf3e3,#fffaf0 70%)">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <h2 style="margin:0;flex:1;min-width:200px">📖 数字员工怎么用 · 四步用人法</h2>
+      <span class="sub" style="cursor:pointer;text-decoration:underline" onclick="localStorage.setItem('howto_hide_'+(ME.tenant||''),1);render()">不再提示</span></div>
+    <div class="grid3" style="grid-template-columns:repeat(auto-fill,minmax(250px,1fr));margin-top:10px">
+      ${steps.map(x=>`<div class="topic" style="margin:0"><b>${x.e} ${x.t}</b>
+        <div class="sub" style="margin-top:3px">${x.d}</div></div>`).join("")}
+    </div>
+    <div class="sub" style="margin-top:8px">进阶玩法:🪑 大事拿不准就开 <a href="#/meetings" style="text-decoration:underline;font-weight:700">AI会议室</a>,多位员工提案互验;勾选「Agent 团队协作执行」还能让他们接力干活、队长整合交付 · 🧰 <a href="#/tools" style="text-decoration:underline;font-weight:700">工具箱</a>处理一次性小活 · ⏰ 定时任务让内容天天自动来</div></div>`;
 }
 let MP_AUTO = null;   // trio 向导:进交付页后自动弹公众号排版(照 AV_OPEN_CLONE 的路子)
 function trioGo(step){
@@ -1265,6 +1345,7 @@ function trioGo(step){
 function guideReset(){
   localStorage.removeItem("ob_hide_"+((ME&&ME.tenant)||""));
   localStorage.removeItem("trio_hide_"+((ME&&ME.tenant)||""));
+  localStorage.removeItem("howto_hide_"+((ME&&ME.tenant)||""));
   // 四步都完成时引导卡默认不渲染;点了"重看"就强制展示一次完成态
   localStorage.setItem("ob_force_"+((ME&&ME.tenant)||""),"1");
   toast("新手引导已恢复,回到办公室即可重看");
@@ -1275,10 +1356,22 @@ function obCard(){
   if(localStorage.getItem("ob_hide_"+(ME.tenant||""))) return "";
   const su = STATE.setup||{};
   const steps = [
-    {done:su.profile, t:"① 建人设档案", d:"产出像您本人写的", h:"#/profiles"},
-    {done:su.first_job, t:"② 发出第一单", d:"看流水线全程直播", h:"#/new", pts:`${META?.job_points??18} 点`},
-    {done:su.wechat, t:"③ 打通微信", d:"通知/公众号草稿箱", h:"#/channels"},
-    {done:su.clone, t:"④ 克隆您的声音", d:"视频都用您的原声", h:"#/avatar", pts:`${META?.voice_clone_points??9} 点`},
+    {done:su.profile, t:"① 建人设档案", h:"#/profiles",
+      d:"把企业介绍、品牌调性和两三篇您写过的东西喂给AI",
+      why:"为什么:有了它,产出才像您本人写的,不是千篇一律的通稿",
+      how:"怎么做:点进去→粘贴企业介绍+往期文章→保存,约2分钟"},
+    {done:su.first_job, t:"② 发出第一单", h:"#/new", pts:`${META?.job_points??18} 点`,
+      d:"发一单真实内容,看10个工位流水线直播出稿",
+      why:"为什么:跑通一单您就知道整套团队怎么干活、交付长什么样",
+      how:"怎么做:选方向和模板→提交→8-15分钟收成品,全程可看"},
+    {done:su.wechat, t:"③ 打通微信", h:"#/channels",
+      d:"绑定公众号草稿箱或企业微信群机器人",
+      why:"为什么:交付完成微信里直接收通知,排版好的文章一键进草稿箱",
+      how:"怎么做:渠道页按提示扫码/填密钥,约1分钟"},
+    {done:su.clone, t:"④ 克隆您的声音", h:"#/avatar", pts:`${META?.voice_clone_points??9} 点`,
+      d:"录30秒话或传一段清晰人声",
+      why:"为什么:以后所有视频都用您的原声配音,不是机器人腔",
+      how:"怎么做:数字人摄影棚→声音克隆→跟着念一段文字即可"},
   ];
   const undone = steps.filter(x=>!x.done).length;
   const forced = localStorage.getItem("ob_force_"+(ME.tenant||""));
@@ -1293,9 +1386,12 @@ function obCard(){
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       <h2 style="margin:0;flex:1;min-width:200px">🚀 开工四步(还差 ${undone} 步)</h2>
       <span class="sub" style="cursor:pointer;text-decoration:underline" onclick="localStorage.setItem('ob_hide_'+(ME.tenant||''),1);render()">不再提示</span></div>
-    <div class="grid3" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr));margin-top:10px">
+    <div class="grid3" style="grid-template-columns:repeat(auto-fill,minmax(250px,1fr));margin-top:10px">
       ${steps.map(x=>`<a href="${x.h}" class="topic" style="margin:0;display:block;text-decoration:none;${x.done?"opacity:.55":""}">
-        <b>${x.done?"✅":"⬜"} ${x.t}</b>${x.pts?` <span class="sub">${esc(x.pts)}</span>`:""}<div class="sub" style="margin-top:3px">${x.d}${x.done?"":" →"}</div></a>`).join("")}
+        <b>${x.done?"✅":"⬜"} ${x.t}</b>${x.pts?` <span class="sub">${esc(x.pts)}</span>`:""}
+        <div class="sub" style="margin-top:3px">${x.d}${x.done?"":" →"}</div>
+        ${x.done?"":`<div class="sub" style="margin-top:4px;opacity:.85">${x.why}</div>
+        <div class="sub" style="margin-top:2px;opacity:.85">${x.how}</div>`}</a>`).join("")}
     </div>
     <div class="sub" style="margin-top:8px">试用额度有限?②必做,其余可开通后再补,不影响先跑通第一单</div></div>`;
 }
@@ -1520,13 +1616,14 @@ function taskCenterDraw(){
   </div>`;
 }
 function tcRow(x){
+  const assignmentState=employeeAssignmentState(x);
   return `<div class="topic" style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;margin-bottom:10px">
     <div style="width:42px;height:42px;border:2px solid var(--ink);border-radius:12px;background:#fff6dc;display:flex;align-items:center;justify-content:center;font-size:21px;flex:none">${x.emoji}</div>
     <div style="flex:1;min-width:180px">
       <div style="display:flex;gap:7px;align-items:center;flex-wrap:wrap"><span class="tag">${esc(x.kind_label)}</span>
         <span class="pill ${tcPill(x.status_group)}">${esc(x.status_label)}</span>
         <b style="font-size:15px">#${x.record_id} · ${esc(x.title)}</b></div>
-      <div class="sub" style="margin-top:6px">👤 ${esc(x.assignee||"待分配")}${x.creator?`　·　✍️ 发起:${esc(x.creator)}`:""}　·　🕒 ${tcFmt(x.created_at)}</div>
+      <div class="sub" style="margin-top:6px">👤 ${esc(x.assignee||"待分配")}${assignmentState?` <span class="tag">${esc(assignmentState)}</span>`:""}${x.creator?`　·　✍️ 发起:${esc(x.creator)}`:""}　·　🕒 ${tcFmt(x.created_at)}</div>
       <div style="margin-top:5px"><span class="tag" style="background:#ece3ff">↳ 来源：${esc(x.source_label)}</span>
         ${x.source_detail?`<span class="sub">${esc(x.source_detail)}</span>`:""}</div>
       ${x.retry_block_reason?`<div class="sub" style="margin-top:6px;color:#9b3b35">⚠️ ${esc(x.retry_block_reason)}</div>`:""}</div>
@@ -1628,6 +1725,7 @@ async function taskDetailView(tid){
   const group=["queued","running"].includes(t.status)?"active":t.status==="done"?"done":"failed";
   const statusLabel={queued:"排队中",running:"进行中",done:"已交付",failed:"失败"}[t.status]||t.status;
   const sourceRoute=safeRouteUrl(t.source?.route);
+  const assignmentState=employeeAssignmentState(t);
   $("#main").innerHTML=`<div class="actions" style="margin:0 0 14px"><a class="btn sm" href="#/tasks">← 返回任务中心</a>
     ${sourceRoute?`<a class="btn sm blue" href="${esc(sourceRoute)}">↳ 查看生成来源</a>`:""}</div>
   <div class="card" style="background:#fffaf0">
@@ -1637,16 +1735,18 @@ async function taskDetailView(tid){
     <div class="kv"><span>👤 ${esc(t.emp_name||"数字员工")}</span><span>🏢 ${esc(t.dept_name||"")}</span>
       <span>发起人:${esc(t.created_by_name||"—")}</span>
       <span>🕒 ${tcFmt(t.created_at)}</span>${t.cost_usd?`<span>模型成本 ${rmb(t.cost_usd)}</span>`:""}</div>
+    ${assignmentState?`<div class="notice" style="margin-top:10px"><b>${esc(assignmentState)}</b><div class="sub">本任务继续使用创建时冻结的员工姓名与岗位归属。</div></div>`:""}
+    ${Object.keys(t.professional_profile||{}).length?employeeProfessionalProfile(t,{readonly:true,compact:true}):""}
     <div class="notice violet" style="margin-top:12px"><b>↳ 生成来源：${esc(t.source?.label||"直接派活")}</b>
       ${t.source?.detail?`<div class="sub" style="margin-top:3px">${esc(t.source.detail)}</div>`:""}</div>
     ${["queued","running"].includes(t.status)?`<h3>实时进度</h3><div class="steps" data-tasksteps="${t.id}">${(t.steps||[]).map((s,i)=>stepRow(s,i+1)).join("")||`<div class="step"><span class="ic">⏳</span><span class="lb">员工正在上线…</span></div>`}</div>`:""}
     ${t.status==="done"?`<div class="actions"><button class="btn sm" onclick="copyText(${cp(t.output_md||"")})">📋 复制</button>
       <a class="btn sm" href="/api/tasks/${t.id}/export.pdf">⬇️ PDF</a><a class="btn sm" href="/api/tasks/${t.id}/export.docx">⬇️ Word</a>
-      <button class="btn sm" onclick="taskToKnow(${t.id})">📚 存入沉淀库</button></div>${taskBody(t)}`:""}
+      <button class="btn sm" onclick="taskToKnow(${t.id})">📚 存入沉淀库</button></div>${taskBody(t)}${taskRevisionPanel(t,"page")}`:""}
     ${t.status==="failed"?`<div class="notice red">${esc(t.output_md||"任务执行失败")}
       <div class="actions">${t.retryable?`<button class="btn sm pri" onclick="retryExpertTask(${t.id},this)">🔁 免费重试</button>
         <span class="sub">沿用原任务，不会再次扣点 · 还可重试 ${t.free_retries_remaining} 次</span>`
-        :`<span class="sub">免费重试次数已用完，请重新派一个任务</span>`}</div></div>`:""}
+        :`<span class="sub">${t.thread?.can_continue?"免费重试已用完，可从上一个已交付版本继续。":"免费重试次数已用完，请重新派一个任务"}</span>`}</div></div>${taskRevisionPanel(t,"page")}`:""}
   </div>`;
 }
 async function taskCenterRecordView(ref){
@@ -1722,7 +1822,12 @@ async function retryAvatarJob(id,btn){
 }
 
 /* ---------- 员工面板(模态) ---------- */
-function openEmp(idx){ MODAL_IDX = idx; MODAL_TAB = isBoss()?"caps":"intro"; drawModal(); }
+function openEmp(idx){
+  MODAL_IDX=idx;
+  const station=(META.stations||[])[idx];
+  MODAL_TAB=station?.key==="inspection"?"inspection":(isBoss()?"caps":"intro");
+  drawModal();
+}
 function closeModal(){ stopSoloWatch(); MODAL_IDX = null; $("#modal").innerHTML = ""; }
 function drawModal(){
   const idx = MODAL_IDX; if(idx===null) return;
@@ -1731,12 +1836,14 @@ function drawModal(){
   const {st,label} = empState(idx);
   const stats = e.stats||{};
   const hasCfg = isBoss() && ["trend","research","benchmark"].includes(s.key);
+  const isInspection=s.key==="inspection";
   const tabs = isBoss()
-    ? [["solo","📋 单独派活"],["caps","🧰 能力"],["method","🔬 工作方式"],["skills","⚡ 技能库"],
+    ? [...(isInspection?[["inspection","🏪 巡店工作台"]]:[["solo","📋 单独派活"]]),["caps","🧰 能力"],["method","🔬 工作方式"],["skills","⚡ 技能库"],
        ...(hasCfg?[["config","⚙️ 工作配置"]]:[]),["info","🪪 岗位档案"]]
-    : [...(ME&&ME.role!=="tour"?[["solo","📋 单独派活"]]:[]),["intro","🪪 员工介绍"]];
+    : [...(ME&&ME.role!=="tour"?(isInspection?[["inspection","🏪 巡店工作台"]]:[["solo","📋 单独派活"]]):[]),["intro","🪪 员工介绍"]];
   let body = "";
-  if(MODAL_TAB==="solo") body = soloTab(s,e);
+  if(MODAL_TAB==="inspection") body = inspectionEmployeeTab(s,e);
+  else if(MODAL_TAB==="solo") body = soloTab(s,e);
   else if(MODAL_TAB==="caps") body = capsTab(s,e);
   else if(MODAL_TAB==="method") body = methodTab(s,e);
   else if(MODAL_TAB==="skills") body = skillsTab(s,e);
@@ -1765,6 +1872,14 @@ function drawModal(){
       </div>
     </div></div>`;
   const box = $(`#learnlog-${idx}`); if(box) box.scrollTop = box.scrollHeight;
+}
+function inspectionEmployeeTab(s,e){
+  return `<div class="card" style="background:linear-gradient(120deg,#e8f6ef,#fffaf0);margin-top:0">
+    <h2 style="margin-top:0">🏪 用照片开始一次真正的巡店</h2>
+    <p>选择行业和门店，上传1～8张现场照片。${esc(s.name)}会标出可见问题与照片证据，形成整改负责人、期限和复查记录，最后汇总到老板看板。</p>
+    <div class="notice">巡店不能用普通文字派活代替：必须有当次门店照片，问题才会和真实证据绑定。</div>
+    <div class="actions"><button class="btn pri" onclick="closeModal();location.hash='#/inspections'">📷 打开巡店工作台</button></div>
+  </div>`;
 }
 function employeeIntroTab(s,e){
   return `<div class="card" style="background:linear-gradient(120deg,#fff6dc,#fffaf0);margin-top:0">
@@ -1852,7 +1967,8 @@ function taskGuideFor(e, fallback={}){
     industry_placeholder:String(raw.industry_placeholder||fallback.industry_placeholder||"如：汽车后市场 / 美容美业 / 企业服务"),
     material_placeholder:String(raw.material_placeholder||fallback.material_placeholder||"粘贴与本任务有关的数据、现状、约束或链接；也可直接传文件"),
     input_tips:tips,
-    output_hint:String(raw.output_hint||fallback.output_hint||"一份围绕当前问题、可直接执行的专业交付")
+    output_hint:String(raw.output_hint||fallback.output_hint||"一份围绕当前问题、可直接执行的专业交付"),
+    evidence_requirements:normalizeDecisionEvidenceRequirements(raw.evidence_requirements)
   };
 }
 function taskGuideCard(g){
@@ -1862,6 +1978,100 @@ function taskGuideCard(g){
       <div class="chips" style="margin-top:7px">${g.input_tips.map(x=>`<span class="tag">${esc(x)}</span>`).join("")}</div>`:""}
     <div class="sub" style="margin-top:8px"><b>您将拿到：</b>${esc(g.output_hint)}</div>
   </div>`;
+}
+function normalizeDecisionEvidenceRequirements(raw){
+  if(!Array.isArray(raw)) return [];
+  const seen=new Set(),result=[];
+  for(const item of raw){
+    if(!item||typeof item!=="object"||typeof item.input_id!=="string"||typeof item.label!=="string") continue;
+    const input_id=item.input_id.trim(),label=item.label.trim();
+    if(!/^RI-[0-9]{2}$/.test(input_id)||!label||seen.has(input_id)) continue;
+    seen.add(input_id);result.push({input_id,label:label.slice(0,240)});
+    if(result.length===8) break;
+  }
+  return result;
+}
+const DECISION_EVIDENCE_ITEM_MAX_CHARS=4000;
+const DECISION_EVIDENCE_TOTAL_MAX_CHARS=20000;
+function canonicalDecisionEvidenceItems(brief,requirements){
+  const allowed=new Set((requirements||[]).map(item=>item.input_id));
+  const raw=brief&&typeof brief==="object"&&brief.decision_evidence&&typeof brief.decision_evidence==="object"
+    ?brief.decision_evidence.items:[];
+  const byId=new Map();
+  if(Array.isArray(raw)) for(const item of raw){
+    if(!item||typeof item!=="object"||typeof item.input_id!=="string") continue;
+    const input_id=item.input_id.trim();
+    if(!allowed.has(input_id)||byId.has(input_id)) continue;
+    const source_name=typeof item.source_name==="string"?item.source_name.trim().slice(0,160):"";
+    byId.set(input_id,{input_id,source_name});
+  }
+  return byId;
+}
+function decisionEvidenceChecklist(requirements,{panelId,brief=null}={}){
+  requirements=normalizeDecisionEvidenceRequirements(requirements);
+  if(!requirements.length||!panelId) return "";
+  const existing=canonicalDecisionEvidenceItems(brief,requirements),provided=existing.size;
+  const policyId=`${panelId}-policy`,countId=`${panelId}-count`;
+  return `<details id="${esc(panelId)}" class="notice violet" open style="margin-top:10px" data-decision-evidence-panel onkeydown="decisionEvidencePanelKeydown(event,this)">
+    <summary style="cursor:pointer;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><b style="flex:1">决策证据清单</b><span id="${esc(countId)}" class="tag" role="status" aria-live="polite">已提供 ${provided}/${requirements.length}</span></summary>
+    <div id="${esc(policyId)}" class="sub" style="margin:8px 0">缺项也可以派活，但结果只能是 HOLD，不会编造数据。每项最多 ${DECISION_EVIDENCE_ITEM_MAX_CHARS} 字，合计最多 ${DECISION_EVIDENCE_TOTAL_MAX_CHARS} 字（含来源名称）。</div>
+    <div style="max-height:min(42vh,330px);overflow:auto;padding-right:3px">
+      ${requirements.map((requirement,index)=>{
+        const frozen=existing.get(requirement.input_id),fieldId=`${panelId}-item-${index}`,statusId=`${fieldId}-status`;
+        return `<div class="topic" style="margin:7px 0;padding:9px 10px">
+          <label for="${esc(fieldId)}" style="margin:0 0 5px;display:flex;gap:6px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap">
+            <span><b>${esc(requirement.input_id)}</b> ${esc(requirement.label)}</span>
+            <span id="${esc(statusId)}" class="sub">${frozen?`已冻结${frozen.source_name?` · 来源：${esc(frozen.source_name)}`:""}，本轮可更新`:"待补"}</span>
+          </label>
+          <textarea id="${esc(fieldId)}" rows="2" maxlength="${DECISION_EVIDENCE_ITEM_MAX_CHARS}" data-evidence-input-id="${esc(requirement.input_id)}" data-evidence-covered="${frozen?"1":"0"}" data-evidence-source-name="${esc(frozen?.source_name||"")}"
+            aria-describedby="${esc(statusId)} ${esc(policyId)}" oninput="decisionEvidenceCountUpdate(${cp(panelId)})"
+            placeholder="${frozen?"留空即沿用已冻结证据；需要更新时填写新的可核验事实或来源":"填写可核验事实、数据口径或来源"}" style="min-height:58px;margin:0"></textarea>
+        </div>`;
+      }).join("")}
+    </div>
+  </details>`;
+}
+function decisionEvidenceCountUpdate(panelId){
+  const panel=document.getElementById(panelId);if(!panel) return;
+  const fields=[...panel.querySelectorAll("textarea[data-evidence-input-id]")];
+  fields.forEach(field=>{
+    const covered=field.dataset.evidenceCovered==="1",filled=!!field.value.trim();
+    const source=String(field.dataset.evidenceSourceName||"");
+    const nextStatus=filled?(covered?"本轮已更新":"本轮已填写")
+      :(covered?`已冻结${source?` · 来源：${source}`:""}，本轮可更新`:"待补");
+    const status=document.getElementById(`${field.id}-status`);
+    if(status&&status.textContent!==nextStatus) status.textContent=nextStatus;
+  });
+  const provided=fields.filter(field=>field.dataset.evidenceCovered==="1"||field.value.trim()).length;
+  const count=document.getElementById(`${panelId}-count`);
+  const nextCount=`已提供 ${provided}/${fields.length}`;
+  if(count&&count.textContent!==nextCount) count.textContent=nextCount;
+}
+function collectDecisionEvidenceItems(panelId){
+  const panel=document.getElementById(panelId);if(!panel) return [];
+  const seen=new Set(),items=[];
+  for(const field of panel.querySelectorAll("textarea[data-evidence-input-id]")){
+    const input_id=String(field.dataset.evidenceInputId||"").trim(),content=field.value.trim();
+    if(!content||seen.has(input_id)||!/^RI-[0-9]{2}$/.test(input_id)) continue;
+    seen.add(input_id);items.push({input_id,content});
+  }
+  return items;
+}
+function decisionEvidenceItemsTooLong(items){
+  let total=0;
+  for(const item of Array.isArray(items)?items:[]){
+    const content=String(item?.content||"");
+    const source_name=String(item?.source_name||"");
+    if(content.length>DECISION_EVIDENCE_ITEM_MAX_CHARS) return true;
+    total+=content.length+source_name.length;
+    if(total>DECISION_EVIDENCE_TOTAL_MAX_CHARS) return true;
+  }
+  return false;
+}
+function decisionEvidencePanelKeydown(event,panel){
+  if(event.key!=="Escape"||!panel?.open) return;
+  event.preventDefault();event.stopPropagation();panel.open=false;
+  panel.querySelector("summary")?.focus();
 }
 const TASK_DATA_PRIVACY_NOTE = "仅上传您有权使用的资料；会员、患者、员工等信息请先删除姓名、手机号、证件号等个人标识。";
 const TB_STATE = {};  // task_id -> 用户手动展开/收起
@@ -1885,6 +2095,92 @@ function tbToggle(id,btn){
   setBoundedState(TB_STATE,id,open);
 }
 
+/* ---------- V51:数字员工连续多轮协作 ---------- */
+function taskRevisionPanel(t, mode="page"){
+  if(!t||!["done","failed"].includes(t.status)) return "";
+  const thread=t.thread||{}, revisions=thread.revisions||[];
+  const revision=Number(thread.revision_count||t.revision_no||1);
+  const timeline=revisions.length?`<div class="chips" style="margin:10px 0">${revisions.map(r=>{
+    const rid=Number(r.task_id||r.id), active=rid===Number(t.id), label=`第 ${r.revision_no||1} 轮`;
+    return mode==="page"
+      ?`<a class="chip${active?" on":""}" href="#/tasks/${rid}">${label} · ${{queued:"排队",running:"进行中",done:"已交付",failed:"失败"}[r.status]||r.status}</a>`
+      :`<span class="chip${active?" on":""}" onclick="taskOpenRevision(${rid},${cp(mode)})">${label}</span>`;
+  }).join("")}</div>`:"";
+  if(thread.status==="satisfied") return `<div class="card" style="background:#e7f6ec;margin-top:12px">
+    <b>✅ 已确认满意 · 共 ${revision} 轮</b>${timeline}<div class="sub">每一轮版本都已保留，可随时回看、复制或导出。</div></div>`;
+  const current=Number(thread.current_task_id||t.id)===Number(t.id);
+  if(!current) return `<div class="card" style="background:#f5f1e8;margin-top:12px"><b>版本时间线</b>${timeline}
+    <div class="sub">这是历史版本。请打开最新一轮继续沟通，避免同时产生两份互相冲突的版本。</div></div>`;
+  const resumeTaskId=Number(thread.resume_task_id||t.id),failedLeaf=Number(thread.failed_current_task_id||0)===Number(t.id);
+  const resumeRevision=Number((revisions.find(r=>Number(r.task_id||r.id)===resumeTaskId)||{}).revision_no||Math.max(1,revision-1));
+  const blockedText={employee_disabled:"该员工已停用，仍可确认现有交付；重新启用后可继续修改。",free_retry_available:"这一轮还有免费重试次数，请先使用免费重试。",refund_pending:"这一轮退点尚未安全收口，请稍后刷新。",no_delivered_revision:"这个会话还没有可恢复的已交付版本。"};
+  const canContinue=thread.can_continue===true&&employeeCanContinue(t);
+  if(!canContinue&&!thread.can_accept) return `<div class="card" style="background:#fff6dc;margin-top:12px"><b>${failedLeaf?`第 ${revision} 轮生成未成功`:`第 ${revision} 轮已交付`}</b>${timeline}
+    <div class="sub">${blockedText[thread.continue_blocked_by]||"当前任务状态更新中，稍后刷新即可继续。"}</div></div>`;
+  const acceptButton=thread.can_accept?`<button class="btn sm" onclick="taskAccept(${thread.thread_id||t.id},${resumeTaskId},${cp(mode)},this)">✅ 满意，结束</button>`:"";
+  const evidenceRequirements=normalizeDecisionEvidenceRequirements(t.task_guide?.evidence_requirements);
+  const evidencePanel=decisionEvidenceChecklist(evidenceRequirements,{panelId:`follow-evidence-${Number(t.id)}`,brief:t.brief});
+  const continueForm=canContinue?`${timeline}<label>这一轮希望怎么调整 *</label>
+    <textarea id="follow-feedback-${t.id}" placeholder="例：保留第2部分，把预算改为20万；再补充本商圈的对标，并给出负责人和截止时间"></textarea>
+    <label>补充材料（选填）</label><textarea id="follow-material-${t.id}" style="min-height:58px" placeholder="粘贴新数据、约束或参考材料"></textarea>
+    ${evidencePanel}
+    <div class="actions"><button class="btn pri" onclick="taskFollowup(${t.id},${cp(mode)},this,${cp(t.identity_ref||"")},${Number(t.config_revision)||0},${cp(t.config_sha256||"")},${cp(t.bundle_sha256||"")})">💬 生成第 ${revision+1} 轮（1点）</button>
+      <span class="sub">${failedLeaf?`将从第 ${resumeRevision} 轮可用交付继续，失败记录仍保留。`:`上一版与您的反馈会一起交给同一位员工。`}新一轮单独计 1 点，失败自动退回。</span></div>`:`<div class="sub" style="margin-top:8px">${blockedText[thread.continue_blocked_by]||"当前不能再开新一轮。"}</div>`;
+  return `<div class="card" style="background:linear-gradient(120deg,#fff3d6,#fffaf0);margin-top:12px">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><b style="flex:1">${failedLeaf?`第 ${revision} 轮失败 · 回到第 ${resumeRevision} 轮继续`:`继续和 TA 沟通 · 当前第 ${revision} 轮`}</b>${acceptButton}</div>${continueForm}</div>`;
+}
+async function taskOpenRevision(tid,mode){
+  if(mode==="spec") return specOpenTask(tid,true);
+  if(mode==="solo") { SOLO_TASK=await api(`/tasks/${tid}`,{routeScoped:false}); drawModal(); return; }
+  location.hash=`#/tasks/${tid}`;
+}
+async function taskFollowup(tid,mode,btn,identityRef="",configRevision=0,configSha256="",bundleSha256=""){
+  const feedback=$(`#follow-feedback-${tid}`)?.value.trim()||"";
+  const material=$(`#follow-material-${tid}`)?.value.trim()||"";
+  if(!feedback) return toast("先写下这一轮要调整的意见");
+  const evidence_items=collectDecisionEvidenceItems(`follow-evidence-${Number(tid)}`);
+  if(decisionEvidenceItemsTooLong(evidence_items)) return toast("决策证据每项最多 4000 字、合计最多 20000 字（含来源名称），请精简后再继续");
+  const binding={
+    identity_ref:String(identityRef||""),
+    config_revision:Number(configRevision),
+    config_sha256:String(configSha256||""),
+    bundle_sha256:String(bundleSha256||"")
+  };
+  if(!/^[0-9a-f]{64}$/.test(binding.identity_ref)
+      ||!Number.isInteger(binding.config_revision)||binding.config_revision<1
+      ||!/^[0-9a-f]{64}$/.test(binding.config_sha256)
+      ||!/^[0-9a-f]{64}$/.test(binding.bundle_sha256)){
+    return toast("岗位版本信息不完整，请刷新任务后再继续");
+  }
+  const requestInput={feedback,material,...binding};
+  if(evidence_items.length) requestInput.evidence_items=evidence_items;
+  const requestKey=persistentMutationRequestKey("followup",String(tid),requestInput);
+  if(btn){btn.disabled=true;btn.innerHTML='<span class="spin"></span> 正在下发…';}
+  try{
+    const body={feedback,material,request_key:requestKey,...binding};
+    if(evidence_items.length) body.evidence_items=evidence_items;
+    const r=await api(`/tasks/${tid}/followups`,{method:"POST",timeout:90000,longRunning:true,
+      body});
+    clearPersistentMutationRequestKey("followup",String(tid),requestKey);
+    toast(`第 ${r.thread?.revision_count||"下一"} 轮已开始`); SHELL_DIRTY=true;
+    if(mode==="spec") await specOpenTask(r.task_id);
+    else if(mode==="solo") soloWatch(r.task_id);
+    else location.hash=`#/tasks/${r.task_id}`;
+  }catch(e){
+    toast(e.uncertain?"响应超时，本次请求号已保留；点击重试不会重复扣点":e.message);
+    if(btn){btn.disabled=false;btn.textContent="💬 继续沟通（1点）";}
+  }
+}
+async function taskAccept(threadId,tid,mode,btn){
+  if(!threadId) return toast("任务版本信息正在刷新，请稍后再试");
+  if(btn){btn.disabled=true;btn.innerHTML='<span class="spin"></span> 确认中…';}
+  try{
+    await api(`/task-threads/${threadId}/accept`,{method:"POST",body:{task_id:tid}});
+    toast("已确认满意，完整版本记录已保留"); SHELL_DIRTY=true;
+    if(mode==="page") await render(); else await taskOpenRevision(tid,mode);
+  }catch(e){toast(e.message);if(btn){btn.disabled=false;btn.textContent="✅ 满意，结束";}}
+}
+
 /* ---------- V7:内容部员工单独派活 ---------- */
 let SOLO_TASK = null, SOLO_TIMER = null, SOLO_WATCH_SEQ = 0;
 function stopSoloWatch(){
@@ -1901,17 +2197,17 @@ function soloTab(s,e){
     cur = `<div class="card" style="background:#fffaf0;margin-top:12px">
       <div style="display:flex;gap:8px;align-items:center"><b style="flex:1">单人任务 #${t.id} ${stL}</b>
         ${t.status==="done"?`<button class="btn sm" onclick="copyText(${cp(t.output_md||"")})">📋 复制</button>
-          <button class="btn sm" onclick="taskEdit(${t.id})">✏️ 编辑</button>
+          ${t.thread?.status==="standalone"?`<button class="btn sm" onclick="taskEdit(${t.id})">✏️ 编辑</button>`:""}
           <a class="btn sm" href="/api/tasks/${t.id}/export.pdf">⬇️ PDF</a>
           <a class="btn sm" href="/api/tasks/${t.id}/export.docx">⬇️ Word</a>
           <button class="btn sm" onclick="taskToKnow(${t.id})">📚 存沉淀</button>`:""}
         <button class="btn sm" onclick="stopSoloWatch();SOLO_TASK=null;drawModal()">收起</button></div>
       ${["queued","running"].includes(t.status)?`<div class="steps" data-tasksteps="${t.id}" style="margin-top:8px">${(t.steps||[]).map((x,i)=>stepRow(x,i+1)).join("")||`<div class="step"><span class="ic">⏳</span><span class="lb">员工上线中…</span></div>`}</div>`:""}
-      ${t.status==="done"?taskBody(t):""}
+      ${t.status==="done"?taskBody(t)+taskRevisionPanel(t,"solo"):""}
       ${t.status==="failed"?`<div class="notice red">${esc(t.output_md||"失败")}
         <div class="actions">${t.retryable?`<button class="btn sm pri" onclick="retryExpertTask(${t.id},this)">🔁 免费重试</button>
           <span class="sub">不再次扣点 · 还可重试 ${t.free_retries_remaining} 次</span>`
-          :`<span class="sub">免费重试次数已用完</span>`}</div></div>`:""}</div>`;
+          :`<span class="sub">免费重试次数已用完</span>`}</div></div>${taskRevisionPanel(t,"solo")}`:""}</div>`;
   }
   return `<div class="notice" style="margin-top:0">📋 <b>不走流水线,单独用 ${esc(s.name)}</b>:一句话派活,TA 独立交付(自动进资产库)。适合只需要 ${esc(s.name)} 完成一个明确环节的任务。</div>
   ${taskGuideCard(guide)}
@@ -1931,13 +2227,17 @@ function soloTab(s,e){
 async function soloSubmit(idx, btn){
   const dir = $("#solo-dir").value.trim();
   if(!dir) return toast("任务内容必填");
+  const brief={direction:dir,industry:$("#solo-ind").value.trim(),material:$("#solo-mat").value.trim(),length:lenVal("solo-len")};
+  const employee=EMP?.[idx]||META?.stations?.find(item=>Number(item.idx)===Number(idx))||{};
+  const binding=employeeIdentityMutationFields(employee);
+  const requestKey=persistentMutationRequestKey("initialtask",String(idx),{emp_idx:idx,brief,...binding});
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 下发中…`;
   try{
-    const r = await api("/tasks",{method:"POST",body:{emp_idx:idx, brief:{direction:dir,
-      industry:$("#solo-ind").value.trim(), material:$("#solo-mat").value.trim(), length:lenVal("solo-len")}}});
+    const r = await api("/tasks",{method:"POST",body:{emp_idx:idx,brief,request_key:requestKey,...binding}});
+    clearPersistentMutationRequestKey("initialtask",String(idx),requestKey);
     toast("已派活");
     soloWatch(r.task_id);
-  }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🚀 派活"; }
+  }catch(e){ toast(e.uncertain?"响应超时，本次请求号已保留；点击重试不会重复扣点":e.message); btn.disabled=false; btn.textContent="🚀 派活"; }
 }
 function soloWatch(tid){
   stopSoloWatch();
@@ -1980,7 +2280,7 @@ async function toggleCap(idx,i){
   const caps = [...(EMP[idx].capabilities||[])];
   caps[i] = {...caps[i], enabled: !caps[i].enabled};
   const off = caps.filter(c=>!c.enabled).map(c=>c.name);
-  try{ await api(`/employees/${idx}/capabilities`,{method:"PUT",body:{caps_off:off}}); await render(); }
+  try{ await api(`/employees/${idx}/capabilities`,{method:"PUT",body:{caps_off:off,...employeeIdentityMutationFields(EMP[idx])}}); await render(); }
   catch(e){ toast(e.message); }
 }
 
@@ -2019,7 +2319,7 @@ function skillsTab(s,e){
   return `
   <div class="notice violet" style="margin-top:0">📚 <b>全网进修</b>:员工联网检索本岗位最新方法论、平台规则、爆款技巧,学成技能卡。启用中的技能会自动用于 TA 之后的每一次工作。</div>
   <div class="actions" style="margin-top:10px">
-    ${ME.role!=="root"?"":`<button class="btn pri" id="learnBtn" ${e.learning?"disabled":""} onclick="startLearn(${s.idx})">${e.learning?`<span class="spin"></span> 进修中…`:"🎓 送去全网进修(3点)"}</button>`}
+    ${ME.role!=="root"?"":`<button class="btn pri" id="learnBtn" ${e.learning||!employeeCanLearn(e)?"disabled":""} onclick="startLearn(${s.idx})">${e.learning?`<span class="spin"></span> 进修中…`:"🎓 送去全网进修(3点)"}</button>`}
     <span class="sub">${e.learned_at?`上次进修:${new Date(e.learned_at*1000).toLocaleString("zh-CN")}`:"还没进修过"}</span></div>
   ${(e.learning||logs.length)?`<div class="steps" id="learnlog-${s.idx}" style="margin-top:10px">${logs.map(x=>stepRow(x)).join("")}</div>`:""}
   <h3>已掌握技能(${skills.length})</h3>
@@ -2072,13 +2372,13 @@ async function saveConfig(idx, kind){
       dimensions:[...document.querySelectorAll("#cfg-dims .on")].map(e=>e.textContent)};
     if(!settings.dimensions.length) return toast("至少保留一个拆解维度");
   }
-  try{ await api(`/employees/${idx}/settings`,{method:"PUT",body:{settings}});
+  try{ await api(`/employees/${idx}/settings`,{method:"PUT",body:{settings,...employeeIdentityMutationFields(EMP[idx])}});
     toast("工作配置已保存,下次开工生效"); await render();
   }catch(e){ toast(e.message); }
 }
 async function resetConfig(idx){
   if(!await uiConfirm("恢复出厂默认配置?",{title:"恢复配置",confirmText:"恢复默认"})) return;
-  try{ await api(`/employees/${idx}/settings`,{method:"PUT",body:{settings:{}}});
+  try{ await api(`/employees/${idx}/settings`,{method:"PUT",body:{settings:{},...employeeIdentityMutationFields(EMP[idx])}});
     toast("已恢复默认"); await render(); }catch(e){ toast(e.message); }
 }
 
@@ -2114,6 +2414,7 @@ async function savePrompt(idx){
     const v = $("#prompt-ta").value;
     const e = EMP[idx];
     const body = (v.trim()===e.default_template.trim()) ? {template:""} : {template:v};
+    Object.assign(body,employeeIdentityMutationFields(e));
     await api(`/employees/${idx}/prompt`,{method:"PUT",body});
     toast("提示词已保存,下次开工生效"); await render();
   }catch(e){ toast(e.message); }
@@ -2122,13 +2423,13 @@ async function resetPrompt(idx){
   if(!await uiConfirm("恢复出厂默认提示词?您的修改会丢失。",{
     title:"恢复提示词",confirmText:"恢复默认"
   })) return;
-  try{ await api(`/employees/${idx}/prompt`,{method:"PUT",body:{template:""}}); toast("已恢复默认"); await render(); }
+  try{ await api(`/employees/${idx}/prompt`,{method:"PUT",body:{template:"",...employeeIdentityMutationFields(EMP[idx])}}); toast("已恢复默认"); await render(); }
   catch(e){ toast(e.message); }
 }
 async function toggleSkill(idx,i){
   const skills = [...(EMP[idx].skills||[])];
   skills[i] = {...skills[i], enabled: skills[i].enabled===false};
-  try{ await api(`/employees/${idx}/skills`,{method:"PUT",body:{skills}}); await render(); }
+  try{ await api(`/employees/${idx}/skills`,{method:"PUT",body:{skills,...employeeIdentityMutationFields(EMP[idx])}}); await render(); }
   catch(e){ toast(e.message); }
 }
 async function delSkill(idx,i){
@@ -2136,22 +2437,26 @@ async function delSkill(idx,i){
     title:"删除技能",confirmText:"删除"
   })) return;
   const skills = EMP[idx].skills.filter((_,n)=>n!==i);
-  try{ await api(`/employees/${idx}/skills`,{method:"PUT",body:{skills}}); toast("已删除"); await render(); }
+  try{ await api(`/employees/${idx}/skills`,{method:"PUT",body:{skills,...employeeIdentityMutationFields(EMP[idx])}}); toast("已删除"); await render(); }
   catch(e){ toast(e.message); }
 }
 async function startLearn(idx){
   try{
     setBoundedState(LEARN_LOGS,idx,[]);
-    await api(`/employees/${idx}/learn`,{method:"POST"});
+    await api(`/employees/${idx}/learn`,{method:"POST",body:employeeIdentityMutationFields(EMP[idx])});
     toast("已送去进修,全程可在这里围观"); await render();
   }catch(e){ toast(e.message); }
 }
 
 /* ---------- V5:行业专家面板(派活/能力/技能/提示词) ---------- */
 async function openSpec(idx,initialTab){
-  SPEC = await api("/depts/emp/"+idx);
-  SPEC_TAB = isBoss() ? (initialTab==="intro"?"info":"task") :
-    (ME&&ME.role==="tour" ? "intro" : (initialTab==="task"?"task":"intro"));
+  const detail=await api("/depts/emp/"+idx);
+  const directoryEmployee=(DEPTS||[]).flatMap(d=>d.employees||[]).find(e=>Number(e.idx)===Number(idx));
+  SPEC={...(directoryEmployee||{}),...detail};
+  if(detail.enabled===undefined&&directoryEmployee) SPEC.enabled=directoryEmployee.enabled;
+  const canAssign=employeeCanAssignNew(SPEC);
+  SPEC_TAB = isBoss() ? (initialTab==="skills"?"skills":(initialTab==="intro"||!canAssign?"info":"task")) :
+    (ME&&ME.role==="tour"||!canAssign ? "intro" : (initialTab==="task"?"task":"intro"));
   SPEC_TASK = null;
   drawSpec();
 }
@@ -2159,17 +2464,21 @@ function closeSpec(){ SPEC = null; SPEC_TASK = null; $("#modal").innerHTML = "";
 function drawSpec(){
   if(!SPEC) return;
   const e = SPEC;
+  const canAssign=employeeCanAssignNew(e), assignmentState=employeeAssignmentState(e);
   const tabs = isBoss()
-    ? [["task","📋 派活"],["caps","🧰 能力"],["method","🔬 工作方式"],
-       ["skills","⚡ 技能库"],["info","🪪 岗位档案"]]
-    : [...(ME&&ME.role!=="tour"?[["task","📋 派活"]]:[]),["intro","🪪 员工介绍"]];
+    ? [...(canAssign?[["task","📋 派活"]]:[]),["caps","🧰 能力"],["method","🔬 工作方式"],
+       ["skills","⚡ 技能库"],...(canAssign?[["prompt","📝 自定义配置"]]:[]),["info","🪪 岗位档案"]]
+    : [...(ME&&ME.role!=="tour"&&canAssign?[["task","📋 派活"]]:[]),["intro","🪪 员工介绍"],
+       ...(ME&&ME.role!=="tour"?[["info","🪪 岗位档案"]]:[])];
   const st = e.learning?"learn":(e.tasks||[]).some(t=>["queued","running"].includes(t.status))?"work":"idle";
+  const displayIdentity=employeeDisplayIdentity(e);
   let body = "";
-  if(SPEC_TAB==="task") body = specTaskTab(e);
+  if(SPEC_TAB==="task"&&canAssign) body = specTaskTab(e);
   else if(SPEC_TAB==="caps") body = specCapsTab(e);
   else if(SPEC_TAB==="method") body = specMethodTab(e);
   else if(SPEC_TAB==="skills") body = specSkillsTab(e);
-  else if(SPEC_TAB==="info"&&isBoss()) body = specInfoTab(e);
+  else if(SPEC_TAB==="prompt"&&canAssign) body = specPromptTab(e);
+  else if(SPEC_TAB==="info"&&ME&&ME.role!=="tour") body = specInfoTab(e);
   else body = specIntroTab(e);
   $("#modal").innerHTML = `<div class="overlay" onclick="if(event.target===this)closeSpec()">
     <div class="panel">
@@ -2177,10 +2486,12 @@ function drawSpec(){
         ${charSVG(e.color, e.emoji, st, 88)}
         <div style="flex:1">
           <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-            <b style="font-size:19px">${esc(e.person||"")} · ${esc(e.name)}</b>
+            <b style="font-size:19px">${esc(displayIdentity.person)} · ${esc(displayIdentity.job)}</b>
             <span class="tag">${esc(e.dept_name)}${isBoss()&&e.group?" · "+esc(e.group):""}</span>
             <span class="stpill ${PILL_CLS[st]}">${{work:"干活中",learn:"进修中",idle:"待命"}[st]}</span></div>
           <div class="sub" style="margin-top:5px">${esc(isBoss()?e.duty:e.intro)}</div>
+          ${assignmentState?`<div class="sub" style="margin-top:5px;color:#8a5a1f"><b>${esc(assignmentState)}</b></div>`:""}
+          <div class="sub" style="margin-top:5px">${esc(employeeIdentityLabel(e))}${Number(e.config_revision)>0?` · 配置 r${Number(e.config_revision)}`:""}</div>
           ${isBoss()?`<div class="kv" style="margin-top:6px"><span>交付 ${e.stats.runs} 单</span>
             <span title="累计成本,不是点击收费">历史成本 ${rmb(e.stats.cost_usd)}</span>
             <span>技能 ${(e.skills||[]).length} 条</span></div>`:""}
@@ -2216,21 +2527,18 @@ function specTaskTab(e){
     curHtml = `<div class="card" style="background:#fffaf0;margin-top:12px">
       <div style="display:flex;gap:8px;align-items:center"><b style="flex:1">任务 #${cur.id} ${stLabel}</b>
         ${cur.status==="done"?`<button class="btn sm" onclick="copyText(${cp(cur.output_md||"")})">📋 复制</button>
-          <button class="btn sm" onclick="taskEdit(${cur.id})">✏️ 编辑</button>
+          ${cur.thread?.status==="standalone"?`<button class="btn sm" onclick="taskEdit(${cur.id})">✏️ 编辑</button>`:""}
           <a class="btn sm" href="/api/tasks/${cur.id}/export.pdf">⬇️ PDF</a>
           <a class="btn sm" href="/api/tasks/${cur.id}/export.docx">⬇️ Word</a>
           <button class="btn sm" onclick="taskToKnow(${cur.id})">📚 存入沉淀库</button>`:""}
         <button class="btn sm" onclick="SPEC_TASK=null;drawSpec()">收起</button></div>
       <div class="sub">任务书:${esc(cur.brief?.direction||"")}</div>
       ${["queued","running"].includes(cur.status)?`<div class="steps" id="spec-steps" style="margin-top:8px">${(cur.steps||[]).map((s,i)=>stepRow(s,i+1)).join("")||`<div class="step"><span class="ic">⏳</span><span class="lb">专家上线中…</span></div>`}</div>`:""}
-      ${cur.status==="done"?`${taskBody(cur)}
-        <div class="card" style="background:#fff6dc;margin-top:10px"><b>不满意?给意见让 TA 重做</b>
-        <textarea id="spec-feedback" placeholder="比如:预算按20万重新算;竞品只看本商圈的"></textarea>
-        <div class="actions"><button class="btn pri sm" onclick="specRedo(${cur.id})">🔁 按意见重做</button></div></div>`:""}
+      ${cur.status==="done"?`${taskBody(cur)}${taskRevisionPanel(cur,"spec")}`:""}
       ${cur.status==="failed"?`<div class="notice red">${esc(cur.output_md||"执行失败")}
         <div class="actions">${cur.retryable?`<button class="btn sm pri" onclick="retryExpertTask(${cur.id},this)">🔁 免费重试</button>
           <span class="sub">沿用原任务，不再次扣点 · 还可重试 ${cur.free_retries_remaining} 次</span>`
-          :`<span class="sub">免费重试次数已用完，请重新派活</span>`}</div></div>`:""}
+          :`<span class="sub">免费重试次数已用完</span>`}</div></div>${taskRevisionPanel(cur,"spec")}`:""}
     </div>`;
   }
   const prefill = EXP_PREFILL; EXP_PREFILL = "";   // 从「帮我选/改派」带过来的一句话,一次性回填
@@ -2246,6 +2554,7 @@ function specTaskTab(e){
       <textarea id="spec-material" style="min-height:60px" placeholder="${esc(guide.material_placeholder)}"></textarea>
       <div class="sub" style="margin-top:5px;color:#795548">🔒 ${esc(TASK_DATA_PRIVACY_NOTE)}</div></div>
   </div>
+  ${decisionEvidenceChecklist(guide.evidence_requirements,{panelId:`spec-evidence-${Number(e.idx)}`})}
   ${lenOpts("spec-len")}
   <div class="actions"><button class="btn pri" onclick="specSubmit(${e.idx},this)">🚀 派活(1点)</button>
     <span class="sub">缺失的信息可以先不填，TA 会明确标注假设与待补数据</span></div>
@@ -2262,15 +2571,34 @@ async function specSubmit(idx, btn, force){
   const dir = $("#spec-dir").value.trim();
   if(!dir) return toast("任务内容必填");
   const industry = $("#spec-industry")?.value.trim()||"", material = $("#spec-material")?.value.trim()||"";
+  const brief={direction:dir,industry,material,length:lenVal("spec-len")};
+  const evidence_items=collectDecisionEvidenceItems(`spec-evidence-${Number(idx)}`);
+  if(decisionEvidenceItemsTooLong(evidence_items)) return toast("决策证据每项最多 4000 字、合计最多 20000 字（含来源名称），请精简后再派活");
+  if(evidence_items.length) brief.evidence_items=evidence_items;
+  const binding=employeeIdentityMutationFields(SPEC);
+  const requestKey=persistentMutationRequestKey("initialtask",String(idx),{emp_idx:idx,brief,...binding});
   btn.disabled = true; btn.innerHTML = `<span class="spin"></span> ${force?"仍派给TA…":"AI 核对岗位是否对口,随后下发…"}`;
+  let createdTaskId=0;
   try{
-    const body = {emp_idx:idx, brief:{direction:dir, industry, material, length:lenVal("spec-len")}};
+    const body = {emp_idx:idx,brief,request_key:requestKey,...binding};
     if(force) body.force = true;
     const r = await api("/tasks",{method:"POST",body, timeout:20000});
     if(r.mismatch){ btn.disabled=false; btn.innerHTML="🚀 派活(1点)"; return specShowMismatch(idx, r); }
+    createdTaskId=Number(r.task_id||0);
+    if(!Number.isInteger(createdTaskId)||createdTaskId<1) throw new Error("任务已接收，但返回编号异常；请到任务中心核对");
+    clearPersistentMutationRequestKey("initialtask",String(idx),requestKey);
     toast("已派活,专家马上开工");
-    await specOpenTask(r.task_id);
-  }catch(e){ toast(e.message); btn.disabled=false; btn.innerHTML="🚀 派活(1点)"; }
+    try{
+      await specOpenTask(createdTaskId);
+    }catch(openError){
+      toast(`任务已创建（#${createdTaskId}），详情暂时未加载；正在打开原任务`);
+      location.hash=`#/tasks/${createdTaskId}`;
+    }
+  }catch(e){
+    if(createdTaskId) return;
+    toast(e.uncertain?"响应超时，本次请求号已保留；点击重试不会重复扣点":e.message);
+    btn.disabled=false; btn.innerHTML="🚀 派活(1点)";
+  }
 }
 async function specOpenTask(tid,preserveDraft=false){
   const expectedIdx=SPEC?.idx;
@@ -2285,17 +2613,14 @@ async function specOpenTask(tid,preserveDraft=false){
   if(snapshot) restoreFormState(snapshot);
 }
 async function specRedo(tid){
-  const fb = $("#spec-feedback")?.value.trim();
-  if(!fb) return toast("先写点意见");
-  try{ const r = await api(`/tasks/${tid}/redo`,{method:"POST",body:{feedback:fb}});
-    toast("已让 TA 重做"); await specOpenTask(r.task_id);
-  }catch(e){ toast(e.message); }
+  const task=SPEC_TASK&&Number(SPEC_TASK.id)===Number(tid)?SPEC_TASK:{};
+  return taskFollowup(tid,"spec",null,task.identity_ref||"",task.config_revision||0,task.config_sha256||"",task.bundle_sha256||"");
 }
 
 /* ---------- V27:智能派活路由(大白话找专家 + 派单预检引导) ---------- */
 function expFinderCard(deptKey){
   return `<div class="card" style="background:linear-gradient(120deg,#eef6ff,#fffaf0);margin-top:10px">
-    <b>🎯 不知道找谁?</b> <span class="sub">一句话描述你要办的活,AI 帮你从本部门专家里挑最对口的。</span>
+    <b>🎯 不知道找谁?</b> <span class="sub">一句话描述你要办的活,AI 帮你从本部门专家里挑最对口的,并按协同小队展示。</span>
     <div style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;flex-wrap:wrap">
       <textarea id="ef-text-${deptKey}" style="flex:1;min-width:min(100%,240px);min-height:46px"
         placeholder="例:我想给门店做一场周年庆活动,怎么策划引流"></textarea>
@@ -2304,6 +2629,7 @@ function expFinderCard(deptKey){
     <div id="ef-result-${deptKey}"></div></div>`;
 }
 let EXP_LAST_QUERY = "";   // 最近一次「帮我选」的那句话,「派给TA」时带进派活框
+let EXP_LAST_TEAM = null;  // 最近一次匹配到的协同小队(含形象字段)
 async function expFind(deptKey, btn){
   const text = $("#ef-text-"+deptKey).value.trim();
   if(!text) return toast("先用一句话说说要办什么活");
@@ -2311,22 +2637,250 @@ async function expFind(deptKey, btn){
   btn.disabled=true; const old=btn.innerHTML; btn.innerHTML=`<span class="spin"></span> AI 读花名册挑人中,约十几秒…`;
   try{
     const r = await api("/experts/match",{method:"POST",body:{text, dept_key:deptKey}, timeout:35000});
-    const box = $("#ef-result-"+deptKey); const picks = r.picks||[];
-    box.innerHTML = picks.length
-      ? `<div class="sub" style="margin:10px 0 2px">AI 推荐这几位,点「派给TA」直接进 TA 的派活台(会带上你这句话):</div>`
-        + picks.map(expCard).join("")
-      : `<div class="sub" style="margin-top:10px">${esc(r.msg||"没匹配到特别对口的,换个说法再试试,或直接点下面的专家卡片。")}</div>`;
+    const box = $("#ef-result-"+deptKey);
+    const team = r.team;
+    const picks = r.picks||[];
+    if(team && (team.members||[]).length){
+      agentTeamSave(team, text);   // 固化到常驻浮窗:换页、派活后仍可随时找回
+      box.innerHTML = agentTeamsBoard(team, text);
+    }else if(picks.length){
+      box.innerHTML = `<div class="sub" style="margin:10px 0 2px">AI 推荐这几位,点「派给TA」直接进 TA 的派活台(会带上你这句话):</div>`
+        + picks.map(expCard).join("");
+    }else{
+      box.innerHTML = `<div class="sub" style="margin-top:10px">${esc(r.msg||"没匹配到特别对口的,换个说法再试试,或直接点下面的专家卡片。")}</div>`;
+    }
   }catch(e){ toast(e.message); }
   finally{ btn.disabled=false; btn.innerHTML=old; }
 }
 function expCard(p){
+  const color = p.color || "#3a3128";
   return `<div class="topic" style="margin:8px 0;display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap">
-    <span style="font-size:22px">${esc(p.emoji||"🧑‍💼")}</span>
+    <div style="flex:none">${charSVG(color, p.emoji||"🧑‍💼", "idle", 56)}</div>
     <div style="flex:1;min-width:0">
       <div><b>${esc(p.name||"")}</b> <span class="sub">${esc(p.role||"")}${p.dept?" · "+esc(p.dept):""}</span></div>
       <div class="sub" style="margin-top:3px">💡 ${esc(p.why||"")}</div>
     </div>
     <button class="btn sm pri" onclick="pickExpert(${p.idx})">派给TA →</button></div>`;
+}
+/* ---------- AgentTeams 风格:协同小队可视化(队长/成员/任务依赖,复用卡通员工形象) ---------- */
+// 部门 tagline 里的「N 位」人数动态跟随实际花名册,配置文案不再与真实人数漂移。
+function deptTagline(d){
+  const tagline = String(d?.tagline||"");
+  const count = (d?.employees||[]).length;
+  if(!count) return tagline;
+  return tagline.replace(/^\d+\s*位/, `${count} 位`);
+}
+function agentTeamsBoard(team, query){
+  const members = team.members || [];
+  const lead = members.find(m => m.roleInTeam === "队长") || members[0];
+  const chips = members.map(m => {
+    const color = m.color || "#3a3128";
+    const leadCls = m.roleInTeam === "队长" ? " lead" : "";
+    return `<button type="button" class="at-chip${leadCls}" onclick="agentTeamFocus(${m.idx})" title="${esc(m.name)} · ${esc(m.role)}">
+      ${charSVG(color, m.emoji||"🧑‍💼", "work", 36)}
+      <span><b>${esc(m.name||m.role||"")}</b><i>${esc(m.roleInTeam||"")}</i></span>
+    </button>`;
+  }).join("");
+  const dag = agentTeamsDag(members);
+  const focus = lead || members[0];
+  const focusHtml = focus ? agentTeamFocusCard(focus, query) : "";
+  return `<div class="agent-teams" id="agent-teams-board" data-query="${esc(query)}">
+    <div class="at-head">
+      ${lead ? charSVG(lead.color||"#3a3128", lead.emoji||"🧑‍💼", "work", 42) : ""}
+      <div class="at-title"><b>${esc(team.teamName||"经营协同小队")}</b>
+        <span class="sub">${members.length} 名成员协同</span></div>
+      ${team.degraded ? `<em class="at-badge">规则降级</em>` : ""}
+    </div>
+    ${team.summary ? `<div class="sub" style="margin:2px 0 6px">${esc(team.summary)}</div>` : ""}
+    <div class="at-members">${chips}</div>
+    <div class="at-dag-label">任务依赖</div>
+    <div class="at-dag">${dag}</div>
+    <div id="at-focus">${focusHtml}</div>
+    <div class="at-actions">
+      <button class="btn pri" onclick="agentTeamAutoDispatch(this)">🚀 自动派给全队（${members.length}人 · ${members.length}点）</button>
+      ${lead ? `<button class="btn" onclick="pickExpert(${lead.idx})">只派给队长统筹</button>` : ""}
+    </div>
+    <div class="sub" style="margin-top:4px">自动模式：按分工一次派给全队，各岗位并行开工；跑完到任务中心统一验收即可。</div>
+    <div id="at-auto-log"></div>
+  </div>`;
+}
+// 自动化完成模式:按依赖先队长后成员的顺序,把活一次派给整个小队;老板只需到任务中心验收。
+function agentTeamTopo(members){
+  const byIdx = Object.fromEntries(members.map(m => [m.idx, m]));
+  const seen = new Set(), out = [];
+  const visit = (m, stack) => {
+    if(seen.has(m.idx) || stack.has(m.idx)) return;
+    stack.add(m.idx);
+    (m.dependsOn||[]).forEach(id => { const dep = byIdx[id]; if(dep) visit(dep, stack); });
+    stack.delete(m.idx);
+    if(!seen.has(m.idx)){ seen.add(m.idx); out.push(m); }
+  };
+  members.forEach(m => visit(m, new Set()));
+  return out;
+}
+async function agentTeamAutoDispatch(btn, logId="at-auto-log"){
+  const st = agentTeamState();
+  const team = (st && st.team) || EXP_LAST_TEAM;
+  if(!team) return toast("先用「帮我选」组一支小队");
+  const members = agentTeamTopo(team.members||[]);
+  if(!members.length) return toast("小队成员为空");
+  const query = (st && st.query) || EXP_LAST_QUERY || "";
+  const teamName = team.teamName || "经营协同小队";
+  btn.disabled = true; const old = btn.innerHTML;
+  btn.innerHTML = `<span class="spin"></span> 正在按分工派给全队…`;
+  const log = document.getElementById(logId);
+  if(!log){ btn.disabled=false; btn.innerHTML=old; return; }
+  log.innerHTML = members.map(m => `<div class="topic" style="margin:6px 0" id="${logId}-${m.idx}">⏳ <b>${esc(m.name||m.role)}</b>（${esc(m.roleInTeam||"")}）等待派单…</div>`).join("");
+  let ok = 0, stopped = false;
+  for(const m of members){
+    const row = document.getElementById(`${logId}-${m.idx}`);
+    if(stopped){ if(row) row.innerHTML = `⏸ <b>${esc(m.name||m.role)}</b>：已跳过（点数不足中止）`; continue; }
+    if(row) row.innerHTML = `<span class="spin"></span> <b>${esc(m.name||m.role)}</b>（${esc(m.roleInTeam||"")}）派单中…`;
+    try{
+      const e = await api("/depts/emp/"+m.idx);
+      const direction = `【协同小队·${teamName}】老板原话：${query}\n本岗位分工（${m.roleInTeam||"执行"}）：${m.task||m.why||m.role||""}\n协同说明：小队共${members.length}人按各自分工产出，请聚焦本岗位、交付可直接使用的结果。`;
+      const brief = {direction, industry:"", material:"", length:"std"};
+      const binding = employeeIdentityMutationFields(e);
+      const requestKey = persistentMutationRequestKey("teamtask", String(m.idx), {emp_idx:m.idx, brief, ...binding});
+      const r = await api("/tasks",{method:"POST", body:{emp_idx:m.idx, brief, force:true, request_key:requestKey, ...binding}, timeout:20000});
+      const tid = Number(r.task_id||0);
+      if(!Number.isInteger(tid) || tid < 1) throw new Error("任务已接收但编号异常，请到任务中心核对");
+      clearPersistentMutationRequestKey("teamtask", String(m.idx), requestKey);
+      ok++;
+      if(row) row.innerHTML = `✅ <b>${esc(m.name||m.role)}</b>（${esc(m.roleInTeam||"")}）已开工 → <a href="#/tasks/${tid}" style="text-decoration:underline">任务 #${tid}</a>`;
+    }catch(err){
+      if(row) row.innerHTML = `❌ <b>${esc(m.name||m.role)}</b>：${esc(err.message||"派单失败")}`;
+      if(String(err.message||"").includes("点数")) stopped = true;
+    }
+  }
+  btn.disabled = false; btn.innerHTML = old;
+  log.insertAdjacentHTML("beforeend",
+    `<div class="actions" style="margin-top:8px"><a class="btn pri" href="#/tasks">📋 去任务中心验收（成功 ${ok}/${members.length}）</a></div>`);
+  if(ok) toast(`已自动派给 ${ok} 位数字员工,完成后到任务中心统一验收`);
+}
+
+/* ---------- 协同小队常驻浮窗:挂在 body 上不随路由重绘消失,localStorage 固化,只有用户点关闭才清除 ---------- */
+const AGENT_TEAM_STORE = "paihuo.agentTeam.v1";
+const AGENT_TEAM_TTL_MS = 24*60*60*1000;
+function agentTeamState(){
+  try{
+    const saved = JSON.parse(localStorage.getItem(AGENT_TEAM_STORE)||"null");
+    if(!saved || !saved.team || !(saved.team.members||[]).length) return null;
+    if(!Number.isFinite(Number(saved.at)) || Date.now()-Number(saved.at) > AGENT_TEAM_TTL_MS){
+      localStorage.removeItem(AGENT_TEAM_STORE);
+      return null;
+    }
+    return saved;
+  }catch(_){ return null; }
+}
+function agentTeamSave(team, query){
+  EXP_LAST_TEAM = team;
+  if(query) EXP_LAST_QUERY = query;
+  try{
+    localStorage.setItem(AGENT_TEAM_STORE, JSON.stringify({team, query:query||EXP_LAST_QUERY||"", at:Date.now(), collapsed:false}));
+  }catch(_){ /* 隐私模式只影响持久化,当前会话浮窗照常 */ }
+  agentTeamFloatRender(true);
+}
+function agentTeamSetCollapsed(collapsed){
+  try{
+    const saved = JSON.parse(localStorage.getItem(AGENT_TEAM_STORE)||"null");
+    if(saved){ saved.collapsed = !!collapsed; localStorage.setItem(AGENT_TEAM_STORE, JSON.stringify(saved)); }
+  }catch(_){}
+}
+function agentTeamFloatRestore(){
+  const st = agentTeamState();
+  if(!st) return;
+  EXP_LAST_TEAM = st.team;
+  if(st.query) EXP_LAST_QUERY = st.query;
+  agentTeamFloatRender(!st.collapsed);
+}
+function agentTeamFloatRender(expanded){
+  const st = agentTeamState();
+  const team = (st && st.team) || EXP_LAST_TEAM;
+  if(!team) return;
+  const members = team.members||[];
+  if(!members.length) return;
+  const query = (st && st.query) || EXP_LAST_QUERY || "";
+  let el = document.getElementById("agent-team-float");
+  if(!el){ el = document.createElement("div"); el.id = "agent-team-float"; document.body.appendChild(el); }
+  if(!expanded){
+    el.innerHTML = `<button type="button" class="atf-badge" onclick="agentTeamSetCollapsed(false);agentTeamFloatRender(true)" title="打开协同小队面板">🤝 <b>${members.length}</b></button>`;
+    return;
+  }
+  el.innerHTML = `<div class="atf-panel">
+    <div class="atf-head">
+      <b>🤝 ${esc(team.teamName||"经营协同小队")}</b><span class="sub">${members.length} 人协同</span>
+      <span style="flex:1"></span>
+      <button type="button" class="atf-icon" onclick="agentTeamSetCollapsed(true);agentTeamFloatRender(false)" title="收起为角标">—</button>
+      <button type="button" class="atf-icon" onclick="agentTeamFloatClose()" title="关闭并清除小队">×</button>
+    </div>
+    ${query?`<div class="sub atf-query">原话：${esc(String(query).slice(0,64))}</div>`:""}
+    <div class="atf-members">${members.map(m=>`
+      <div class="atf-member">
+        <span class="atf-avatar">${charSVG(m.color||"#3a3128", m.emoji||"🧑‍💼", "work", 30)}</span>
+        <span class="atf-m-name"><b>${esc(m.name||m.role||"")}</b><i>${esc(m.roleInTeam||"")}${(m.task||m.why)?` · ${esc(String(m.task||m.why).slice(0,14))}`:""}</i></span>
+        <button type="button" class="btn sm pri" onclick="pickExpert(${m.idx})">派给TA</button>
+      </div>`).join("")}</div>
+    <div class="actions" style="margin-top:8px">
+      <button type="button" class="btn sm pri" onclick="agentTeamAutoDispatch(this,'atf-auto-log')">🚀 自动派给全队（${members.length}点）</button>
+      <a class="btn sm" href="#/tasks">📋 任务中心</a>
+    </div>
+    <div id="atf-auto-log"></div>
+  </div>`;
+}
+async function agentTeamFloatClose(){
+  if(!await uiConfirm("关闭并清除当前协同小队面板？之后需要重新「帮我选」组队。",{title:"关闭小队面板",confirmText:"关闭"})) return;
+  try{ localStorage.removeItem(AGENT_TEAM_STORE); }catch(_){}
+  document.getElementById("agent-team-float")?.remove();
+}
+function agentTeamsDag(members){
+  if(!members.length) return "";
+  const byIdx = Object.fromEntries(members.map(m => [m.idx, m]));
+  const depthOf = (m, seen=new Set()) => {
+    if(seen.has(m.idx)) return 0;
+    seen.add(m.idx);
+    const deps = (m.dependsOn||[]).map(id => byIdx[id]).filter(Boolean);
+    if(!deps.length) return 0;
+    return 1 + Math.max(...deps.map(d => depthOf(d, seen)));
+  };
+  const stages = {};
+  members.forEach(m => {
+    const d = depthOf(m);
+    (stages[d] ||= []).push(m);
+  });
+  const cols = Object.keys(stages).map(Number).sort((a,b)=>a-b);
+  return `<div class="at-dag-flow">${cols.map((d, ci) => {
+    const cells = stages[d].map(m => {
+      const color = m.color || "#3a3128";
+      return `<button type="button" class="at-node" onclick="agentTeamFocus(${m.idx})">
+        ${charSVG(color, m.emoji||"🧑‍💼", "work", 40)}
+        <span><b>${esc(m.roleInTeam||"")}</b><i>${esc(m.task||m.why||m.role||"")}</i></span>
+      </button>`;
+    }).join("");
+    const arrow = ci < cols.length - 1 ? `<div class="at-arrow" aria-hidden="true">→</div>` : "";
+    return `<div class="at-col">${cells}</div>${arrow}`;
+  }).join("")}</div>`;
+}
+function agentTeamFocusCard(m, query){
+  const color = m.color || "#3a3128";
+  return `<div class="at-focus topic">
+    <div style="flex:none">${charSVG(color, m.emoji||"🧑‍💼", "await", 72)}</div>
+    <div style="flex:1;min-width:0">
+      <div><b style="font-size:16px">${esc(m.name||"")}</b>
+        <span class="sub">${esc(m.role||"")} · ${esc(m.dept||"")} · ${esc(m.roleInTeam||"")}</span></div>
+      <div class="sub" style="margin-top:4px">💡 ${esc(m.why||m.task||"")}</div>
+      <div style="margin-top:6px;font-size:13px">将带上你的原话：${esc(query||EXP_LAST_QUERY||"")}</div>
+    </div>
+    <button class="btn sm pri" onclick="pickExpert(${m.idx})">派给TA →</button>
+  </div>`;
+}
+function agentTeamFocus(idx){
+  const board = $("#agent-teams-board");
+  if(!board || !EXP_LAST_TEAM) return;
+  const m = (EXP_LAST_TEAM.members||[]).find(x => Number(x.idx)===Number(idx));
+  if(!m) return;
+  const focus = $("#at-focus");
+  if(focus) focus.innerHTML = agentTeamFocusCard(m, board.dataset.query || EXP_LAST_QUERY);
 }
 // 记住那句话,openSpec 后由 specTaskTab 一次性回填到派活框。
 // 帮我选:取部门找人框;改派:取当前派活框里老板刚写的任务。
@@ -2337,7 +2891,7 @@ function specShowMismatch(idx, r){
   const box = $("#spec-fit"); if(!box) return;
   const sugg = (r.suggestions||[]).map(s=>`
     <div class="topic" style="margin:8px 0;display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap">
-      <span style="font-size:20px">🧑‍💼</span>
+      <div style="flex:none">${charSVG(s.color||"#3a3128", s.emoji||"🧑‍💼", "idle", 48)}</div>
       <div style="flex:1;min-width:0"><div><b>${esc(s.name||"")}</b> <span class="sub">${esc(s.role||"")}</span></div>
         <div class="sub" style="margin-top:3px">💡 ${esc(s.why||"")}</div></div>
       <button class="btn sm pri" onclick="reassignExpert(${s.idx})">改派给TA →</button></div>`).join("");
@@ -2352,17 +2906,22 @@ function specShowMismatch(idx, r){
 }
 function specCapsTab(e){
   const caps = e.capabilities||[];
-  return `<div class="notice" style="margin-top:0">🧰 <b>工作流能力</b>:来自 TA 的岗位手册,派活时逐项执行。不需要的步骤可以关。</div>
-  ${caps.map((c,i)=>`<div class="skillcard ${c.enabled?"":"off"}">
-    <span class="switch ${c.enabled?"on":""}" onclick="specToggleCap(${i})"></span>
-    <div style="flex:1"><div class="t">${esc(c.name)}</div><div class="sub">${esc(c.desc)}</div></div></div>`).join("")}`;
+  const readonly=!employeeCanAssignNew(e);
+  return `<div class="notice" style="margin-top:0">🧰 <b>工作流能力</b>:${readonly?"历史配置只读展示，不能再修改。":"来自 TA 的岗位手册,派活时逐项执行。不需要的步骤可以关。"}</div>
+  ${caps.map((c,i)=>{
+    const sub=c.detail||(c.desc&&c.desc!==c.name?c.desc:"");
+    return `<div class="skillcard ${c.enabled?"":"off"}">
+    ${readonly?`<span class="tag readonly">${c.enabled?"已启用":"未启用"}</span>`:
+      `<span class="switch ${c.enabled?"on":""}" role="button" tabindex="0" onclick="specToggleCap(${i})"></span>`}
+    <div style="flex:1"><div class="t">${esc(c.name)}</div>${sub?`<div class="sub">${esc(sub)}</div>`:""}</div></div>`;
+  }).join("")}`;
 }
 async function specToggleCap(i){
   const caps = [...SPEC.capabilities];
   caps[i] = {...caps[i], enabled:!caps[i].enabled};
   const off = caps.filter(c=>!c.enabled).map(c=>c.name);
-  try{ const r = await api(`/employees/${SPEC.idx}/capabilities`,{method:"PUT",body:{caps_off:off}});
-    SPEC.capabilities = r.capabilities; drawSpec();
+  try{ const r = await api(`/employees/${SPEC.idx}/capabilities`,{method:"PUT",body:{caps_off:off,...employeeIdentityMutationFields(SPEC)}});
+    SPEC={...SPEC,...r,capabilities:r.capabilities}; drawSpec();
   }catch(e){ toast(e.message); }
 }
 function specMethodTab(e){
@@ -2378,37 +2937,40 @@ function specMethodTab(e){
   </div>`;
 }
 function specSkillsTab(e){
-  const logs = LEARN_LOGS[e.idx]||[];
-  return `<div class="notice violet" style="margin-top:0">📚 <b>全网进修</b>:让 TA 联网学本岗位最新方法论与行业新规,学成技能卡自动用于之后的工作。</div>
-  <div class="actions" style="margin-top:10px">
-    <button class="btn pri" ${e.learning?"disabled":""} onclick="specLearn(${e.idx})">${e.learning?`<span class="spin"></span> 进修中…`:"🎓 送去全网进修(3点)"}</button>
-    <span class="sub">${e.learned_at?`上次进修:${new Date(e.learned_at*1000).toLocaleString("zh-CN")}`:"还没进修过"}</span></div>
-  ${(e.learning||logs.length)?`<div class="steps" id="learnlog-${e.idx}" style="margin-top:10px">${logs.map(x=>stepRow(x)).join("")}</div>`:""}
-  <h3>已掌握技能(${(e.skills||[]).length})</h3>
-  ${(e.skills||[]).length? e.skills.map((k,i)=>`<div class="skillcard ${k.enabled===false?"off":""}">
-    <span class="switch ${k.enabled!==false?"on":""}" onclick="specToggleSkill(${i})"></span>
-    <div style="flex:1"><div class="t">${esc(k.title)}</div><div class="sub">${esc(k.detail)}</div>
-      ${k.source?`<div class="src">来源:${esc(k.source)}</div>`:""}</div>
-    <button class="btn sm bad" onclick="specDelSkill(${i})">🗑</button>
-  </div>`).join("") : `<div class="empty">还没有技能,点上面送 TA 进修</div>`}`;
+  const readonly=!employeeCanAssignNew(e);
+  const skills=Array.isArray(e.skills)?e.skills:[];
+  const profile=(e.professional_profile&&typeof e.professional_profile==="object"&&!Array.isArray(e.professional_profile))?e.professional_profile:{};
+  let head="";
+  if(skills.length){
+    head+=`<h3>已掌握技能(${skills.length})</h3>
+    ${skills.map((k,i)=>`<div class="skillcard ${k.enabled===false?"off":""}">
+      ${readonly?"":`<span class="switch ${k.enabled!==false?"on":""}" title="启用/停用" onclick="specToggleSkill(${i})"></span>`}
+      <div style="flex:1"><div class="t">${esc(k.title)}</div><div class="sub">${esc(k.detail)}</div>
+        ${(k.source||k.learned_at)?`<div class="src">${k.source?`来源:${esc(k.source)}`:""}${k.source&&k.learned_at?" · ":""}${k.learned_at?new Date(k.learned_at*1000).toLocaleDateString("zh-CN"):""}</div>`:""}</div>
+      ${readonly?"":`<button class="btn sm bad" onclick="specDelSkill(${i})">🗑</button>`}
+    </div>`).join("")}`;
+  }
+  if(Object.keys(profile).length){
+    head+=`<div class="notice" style="margin-top:0">🧰 <b>岗位出厂能力</b>：以下技能树、核心能力、专业知识域、数据对象与工作方式，是该岗位的出厂能力基线；上方「已掌握技能」是进修学到的技能卡。点开技能树与核心能力条目可查看详细介绍。</div>
+    ${employeeProfessionalProfile(e,{readonly})}`;
+  }
+  return head||`<div class="empty">该岗位暂无技能档案</div>`;
 }
 async function specLearn(idx){
-  try{ setBoundedState(LEARN_LOGS,idx,[]); await api(`/employees/${idx}/learn`,{method:"POST"});
-    toast("已送去进修"); SPEC = await api("/depts/emp/"+idx); drawSpec();
-  }catch(e){ toast(e.message); }
+  return employeeStartLearning(idx,SPEC);
 }
 async function specToggleSkill(i){
   const skills=[...SPEC.skills]; skills[i]={...skills[i],enabled:skills[i].enabled===false};
-  try{ await api(`/employees/${SPEC.idx}/skills`,{method:"PUT",body:{skills}});
-    SPEC.skills=skills; drawSpec(); }catch(e){ toast(e.message); }
+  try{ const r=await api(`/employees/${SPEC.idx}/skills`,{method:"PUT",body:{skills,...employeeIdentityMutationFields(SPEC)}});
+    SPEC={...SPEC,...r,skills}; drawSpec(); }catch(e){ toast(e.message); }
 }
 async function specDelSkill(i){
   if(!await uiConfirm(`删除技能「${SPEC.skills[i].title}」?`,{
     title:"删除技能",confirmText:"删除"
   })) return;
   const skills=SPEC.skills.filter((_,n)=>n!==i);
-  try{ await api(`/employees/${SPEC.idx}/skills`,{method:"PUT",body:{skills}});
-    SPEC.skills=skills; drawSpec(); }catch(e){ toast(e.message); }
+  try{ const r=await api(`/employees/${SPEC.idx}/skills`,{method:"PUT",body:{skills,...employeeIdentityMutationFields(SPEC)}});
+    SPEC={...SPEC,...r,skills}; drawSpec(); }catch(e){ toast(e.message); }
 }
 function specPromptTab(e){
   return `<div class="notice" style="margin-top:0">📝 默认提示词由「岗位手册+老板任务书+技能库+知识沉淀」自动拼装,一般不用改。想完全接管就在下面写自定义模板(支持 {direction} {industry} {material} 占位符)。</div>
@@ -2419,17 +2981,71 @@ function specPromptTab(e){
   </div>`;
 }
 async function specSavePrompt(){
-  try{ await api(`/employees/${SPEC.idx}/prompt`,{method:"PUT",body:{template:$("#spec-prompt").value}});
+  try{ await api(`/employees/${SPEC.idx}/prompt`,{method:"PUT",body:{template:$("#spec-prompt").value,...employeeIdentityMutationFields(SPEC)}});
     toast("已保存"); SPEC = await api("/depts/emp/"+SPEC.idx); drawSpec(); }catch(e){ toast(e.message); }
 }
 async function specResetPrompt(){
-  try{ await api(`/employees/${SPEC.idx}/prompt`,{method:"PUT",body:{template:""}});
+  try{ await api(`/employees/${SPEC.idx}/prompt`,{method:"PUT",body:{template:"",...employeeIdentityMutationFields(SPEC)}});
     toast("已恢复"); SPEC = await api("/depts/emp/"+SPEC.idx); drawSpec(); }catch(e){ toast(e.message); }
 }
+function employeeProfileRows(key,value,detailMaps){
+  if((key==="skill_tree"||key==="capabilities")&&Array.isArray(value)){
+    const dm=(detailMaps&&typeof detailMaps==="object"&&detailMaps[key]&&typeof detailMaps[key]==="object")?detailMaps[key]:{};
+    return value.map(item=>{
+      if(typeof item!=="string"||!item.trim()) return "";
+      const detail=typeof dm[item]==="string"?dm[item].trim():"";
+      if(!detail) return `<li>${esc(item)}</li>`;
+      return `<li style="list-style:none;margin-left:-14px"><details>
+        <summary style="cursor:pointer;font-weight:700">${esc(item)}<span class="sub" style="margin-left:6px;font-weight:400">点开看介绍</span></summary>
+        <div class="sub" style="margin:6px 0 2px;line-height:1.65">${esc(detail)}</div></details></li>`;
+    }).filter(Boolean);
+  }
+  if(key==="operating_rhythm"&&value&&typeof value==="object"&&!Array.isArray(value)){
+    const labels={daily:"日常",event_driven:"事件触发",review:"复盘"};
+    return Object.entries(labels).map(([field,label])=>value[field]
+      ?`<li><b>${label}：</b>${esc(value[field])}</li>`:"").filter(Boolean);
+  }
+  if(key==="tool_permissions"&&Array.isArray(value)) return value.map(item=>item&&typeof item==="object"
+    ?`<li><b>${esc(item.tool||"岗位工具")}</b><span class="tag" style="margin-left:6px">${item.access==="read_only"?"只读":esc(item.access||"权限待核")}</span><div class="sub">${esc(item.scope||"范围待核")}</div></li>`:"").filter(Boolean);
+  if(key==="escalation_matrix"&&Array.isArray(value)) return value.map(item=>item&&typeof item==="object"
+    ?`<li><b>${esc(item.level||"升级")}</b><div class="sub"><b>触发：</b>${esc(item.condition||"—")}</div><div class="sub"><b>负责人：</b>${esc(item.owner||"—")}</div><div class="sub"><b>动作：</b>${esc(item.action||"—")}</div></li>`:"").filter(Boolean);
+  if(!Array.isArray(value)) return typeof value==="string"&&value.trim()?`<li>${esc(value)}</li>`:[];
+  return value.map(item=>typeof item==="string"&&item.trim()?`<li>${esc(item)}</li>`:"").filter(Boolean);
+}
+function employeeProfessionalProfile(employee,{readonly=false,compact=false}={}){
+  const profile=employee?.professional_profile;
+  if(!profile||typeof profile!=="object"||Array.isArray(profile)||!Object.keys(profile).length){
+    return `<div class="notice" style="margin-top:10px"><b>专业岗位档案待补齐</b><div class="sub">当前身份已冻结，不会用其他同编号岗位的资料代替。</div></div>`;
+  }
+  const groups=[
+    ["skill_tree","🌳 技能树"],["capabilities","🧰 核心能力"],
+    ["knowledge_domains","📖 专业知识域"],["data_objects","🗂️ 数据对象"],
+    ["operating_rhythm","🔁 工作流程"],["tool_permissions","🔐 工具权限"],
+    ["escalation_matrix","🚨 升级路径"],["learning_tracks","🎓 学习路径"]
+  ];
+  const decisions=employeeProfileRows("decisions",profile.decisions);
+  const detailMaps=(employee?.capability_details&&typeof employee.capability_details==="object")?employee.capability_details:null;
+  const details=groups.map(([key,label],index)=>{
+    const rows=employeeProfileRows(key,profile[key],detailMaps);
+    return `<details ${!compact&&index<2?"open":""} style="border:1px solid #ddd3bf;border-radius:10px;padding:8px 10px;background:#fff;margin:0">
+      <summary style="cursor:pointer;font-weight:850">${label}<span class="sub" style="margin-left:6px">${rows.length}项</span></summary>
+      ${rows.length?`<ul style="margin:8px 0 2px;padding-left:20px;display:grid;gap:7px">${rows.join("")}</ul>`:`<div class="sub" style="margin-top:7px">本版本未记录</div>`}</details>`;
+  }).join("");
+  return `<section aria-label="专业岗位档案" style="margin-top:10px">
+    <div class="notice ${readonly?"violet":""}" style="margin-top:0"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><b style="flex:1">🪪 专业岗位档案</b><span class="tag">${readonly?"冻结版本 · 只读":"当前岗位"}</span>${Number(employee?.config_revision)>0?`<span class="sub">配置 r${Number(employee.config_revision)}</span>`:""}</div>
+      ${profile.scope?`<div style="margin-top:6px">${esc(profile.scope)}</div>`:""}
+      ${decisions.length?`<div class="sub" style="margin-top:7px"><b>负责决策：</b>${decisions.map(row=>row.replace(/^<li>|<\/li>$/g,"")).join("；")}</div>`:""}</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:8px">${details}</div>
+  </section>`;
+}
 function specInfoTab(e){
-  return `<div class="topic"><div class="t">🪪 岗位职责</div><div class="sub" style="margin-top:4px">${esc(e.desc)}</div></div>
+  const readonly=!employeeCanAssignNew(e);
+  const stats=e.stats||{};
+  return `${isBoss()?`<div class="topic"><div class="t">🪪 岗位职责</div><div class="sub" style="margin-top:4px">${esc(e.desc)}</div></div>
   <div class="topic"><div class="t">🏢 所属</div><div class="sub" style="margin-top:4px">${esc(e.dept_name)} · ${esc(e.group)}</div></div>
-  <div class="topic"><div class="t">📈 出勤统计</div><div class="sub" style="margin-top:4px">交付 ${e.stats.runs} 单 · 累计花费 ${rmb(e.stats.cost_usd)}</div></div>`;
+  <div class="topic"><div class="t">📈 当前岗位统计</div><div class="sub" style="margin-top:4px">交付 ${Number(stats.runs)||0} 单 · 累计花费 ${rmb(stats.cost_usd)}</div></div>`:
+  `<div class="topic"><div class="t">🏢 当前岗位</div><div class="sub" style="margin-top:4px">${esc(e.dept_name||"")} · ${esc(e.name||"")}</div></div>`}
+  ${employeeProfessionalProfile(e,{readonly})}`;
 }
 
 /* ---------- 打断 / 恢复 ---------- */
@@ -3199,6 +3815,1177 @@ function metaCells(m){
     <td>${esc(m?.timeliness||"…")}</td><td>${esc(m?.sentiment||"…")}</td>
     <td class="sub">${esc(m?.summary||"评估中…")}</td>`;
 }
+/* ---------- V51:行业老板决策看板 ---------- */
+let BOSS_DASH_SCOPES=null, BOSS_DASH_DATA=null, BOSS_DASH_REQUEST_SEQ=0,
+  BOSS_EMPLOYEE_DETAIL=null,BOSS_EMPLOYEE_REQUEST_SEQ=0;
+let BOSS_DASH_FILTER={tenantId:0,industryKey:"",days:30};
+function bossDashDuration(value){
+  if(value===null||value===undefined||value==="")return "—";
+  const n=Number(value);if(!Number.isFinite(n)||n<0)return "—";
+  if(n<60)return `${Math.round(n)}秒`;
+  if(n<3600)return `${Math.round(n/60)}分钟`;
+  return `${(n/3600).toFixed(n>=36000?0:1)}小时`;
+}
+function bossDashPct(value){
+  if(value===null||value===undefined||value==="")return "—";
+  const n=Number(value);return Number.isFinite(n)?`${Math.round(n*100)}%`:"—";
+}
+function bossDashNumber(value,digits=0){
+  if(value===null||value===undefined||value==="")return "—";
+  const n=Number(value);return Number.isFinite(n)?n.toLocaleString("zh-CN",{maximumFractionDigits:digits}):"—";
+}
+function bossStatusClass(value){
+  return ({active:"running",waiting:"awaiting_review",completed:"done",failed:"failed",cancelled:"cancelled"})[value]||"running";
+}
+function bossStatusLabel(value){
+  return ({queued:"排队中",running:"执行中",done:"已交付",completed:"已完成",failed:"失败",cancelled:"已取消",preparing:"准备中",analyzing:"分析中",
+    awaiting_review:"等待审核",awaiting_execution:"待执行",executing:"执行中",paused:"已暂停",stopped:"已停止",pending_charge:"待扣费",
+    gate_blocked:"门禁拦截",interrupted:"已中断",refunded:"已退款",recovered:"已恢复"})[value]||value||"—";
+}
+function employeeIdentityState(employee){
+  if(!employee||typeof employee!=="object") return {personStatus:"unknown",identityStatus:"unknown"};
+  const explicitPerson=String(employee.person_status||"");
+  const explicitIdentity=String(employee.identity_status||"");
+  const personStatus=["active","inactive"].includes(explicitPerson)
+    ?explicitPerson:(employee.enabled===false?"inactive":((employee.enabled!==undefined||employee.can_assign!==undefined)?"active":"unknown"));
+  const compatibility=String(employee.roster_status||"");
+  const identityStatus=["current","historical","unknown"].includes(explicitIdentity)
+    ?explicitIdentity:(compatibility==="active"?"current":compatibility==="legacy"?"historical":"unknown");
+  return {personStatus,identityStatus};
+}
+function employeeCanAssignNew(employee){
+  const state=employeeIdentityState(employee);
+  if(state.personStatus!=="active"||state.identityStatus!=="current") return false;
+  if(employee?.can_assign_new!==undefined) return employee.can_assign_new===true;
+  return employee?.enabled!==false&&employee?.can_assign!==false;
+}
+function employeeCanContinue(employee){
+  const state=employeeIdentityState(employee);
+  if(state.personStatus!=="active"||state.identityStatus==="unknown") return false;
+  return employee?.can_continue===undefined?true:employee.can_continue===true;
+}
+function employeeCanLearn(employee){
+  const state=employeeIdentityState(employee);
+  if(state.personStatus!=="active"||state.identityStatus!=="current") return false;
+  return employee?.can_learn===undefined?employeeCanAssignNew(employee):employee.can_learn===true;
+}
+function employeeDisplayIdentity(employee){
+  const person=String(employee?.person||"").trim();
+  const job=String(employee?.name||employee?.role||"").trim();
+  return {
+    person:person||job||"未命名数字员工",
+    job:job||"岗位待核",
+    label:person&&job?`${person} · ${job}`:(person||job||"未命名数字员工")
+  };
+}
+function employeeIdentityMutationFields(employee){
+  const identityRef=String(employee?.identity_ref||"").trim();
+  const revision=Number(employee?.config_revision);
+  const fields={};
+  if(/^[0-9a-f]{64}$/.test(identityRef)) fields.identity_ref=identityRef;
+  if(Number.isInteger(revision)&&revision>0) fields.config_revision=revision;
+  const configHash=String(employee?.config_sha256||"").trim();
+  if(/^[0-9a-f]{64}$/.test(configHash)) fields.config_sha256=configHash;
+  const bundleHash=String(employee?.bundle_sha256||employee?.role_bundle_sha256||"").trim();
+  if(/^[0-9a-f]{64}$/.test(bundleHash)) fields.bundle_sha256=bundleHash;
+  return fields;
+}
+function employeeLearningPanel(employee,{readonly=false,bindingScope="spec"}={}){
+  const runs=Array.isArray(employee?.learning_runs)?employee.learning_runs:[];
+  const latest=employee?.learning_run||runs[0]||null;
+  const status=String(latest?.status||"");
+  const labels={queued:"排队中",researching:"研究中",drafted:"草案",awaiting_approval:"待审核",
+    activated:"已激活",rejected:"已驳回",failed:"失败",blocked:"证据不足",expired:"已过期"};
+  const sources=Array.isArray(latest?.sources)?latest.sources:[];
+  const artifacts=Array.isArray(latest?.artifacts)?latest.artifacts:[];
+  const kindLabels={knowledge:"知识",knowledge_domain:"知识",skill:"技能",capability:"能力",
+    workflow:"工作流",workflow_step:"工作流",tool:"工具",escalation:"升级规则",metric:"指标"};
+  const logs=LEARN_LOGS[employee?.idx]||[];
+  const activated=status==="activated"||Number(employee?.activated_learning_runs)>0;
+  const stateText=status?`本轮状态：${labels[status]||status}`:
+    (activated?"已激活":"尚未完成全网进修");
+  const sourceRows=sources.map(source=>{
+    const href=safeExternalUrl(source.source_url||source.canonical_url||source.url);
+    return `<li>${href?`<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(source.source_title||source.title||href)}</a>`:esc(source.source_title||source.title||"来源待核")}
+      <span class="sub">${esc(source.publisher||"")}${source.retrieved_at||source.fetched_at?` · 核验 ${esc(source.retrieved_at||source.fetched_at)}`:""}</span></li>`;
+  }).join("");
+  const artifactRows=artifacts.map(item=>`<div class="skillcard">
+    <span class="tag">${esc(kindLabels[item.kind]||item.kind||"变更")}</span>
+    <div style="flex:1"><div class="t">${esc(item.title||"待审核变更")}</div><div class="sub">${esc(item.statement||item.detail||"")}</div></div></div>`).join("");
+  const binding=employeeIdentityMutationFields(employee);
+  const reviewBinding=employeeLearningRunMutationFields(latest);
+  const hasReviewBinding=Object.keys(reviewBinding).length===4;
+  const canStart=!readonly&&employeeCanLearn(employee)&&!employee?.learning;
+  const bindingExpr=bindingScope==="admin"?"window.__ADM_DETAIL":"SPEC";
+  return `<div class="notice violet" style="margin-top:0">📚 <b>可审计全网进修</b>：静态岗位档案只是基线，不代表学过。研究必须保存真实来源和证据，形成知识、技能、能力、工作流提案，审核后才用于新任务。</div>
+    <div class="actions" style="margin-top:10px">
+      <span class="tag ${status==="activated"?"green":""}">${esc(stateText)}</span>
+      ${readonly?`<span class="tag readonly">只读</span>`:`<button class="btn pri" ${canStart?"":"disabled"} onclick="employeeStartLearning(${Number(employee?.idx)||0},${bindingExpr})">${employee?.learning?`<span class="spin"></span> 研究中…`:"🔎 发起证据研究"}</button>`}
+      ${!readonly&&isBoss()?`<button class="btn" onclick="openEmployeeLearningBatchManager()">🏭 修理厂 · 全员进修</button>`:""}
+      ${status==="awaiting_approval"&&!readonly?`<button class="btn blue" ${hasReviewBinding?"":"disabled"} onclick="employeeApproveLearning(${Number(latest.run_id||latest.id)||0},${cp(bindingScope)},${Number(latest.batch_id)||0},${Number(employee?.idx)||0})">✅ 审核并激活</button>`:""}
+      ${status==="awaiting_approval"&&isBoss()?`<button class="btn bad" ${hasReviewBinding?"":"disabled"} onclick="employeeRejectLearning(${Number(latest.run_id||latest.id)||0},${cp(bindingScope)},${Number(latest.batch_id)||0},${Number(employee?.idx)||0})">✕ 拒绝提案</button>`:""}
+    </div>
+    ${(employee?.learning||logs.length)?`<div class="steps" id="learnlog-${Number(employee?.idx)||0}" style="margin-top:10px">${logs.map(x=>stepRow(x)).join("")}</div>`:""}
+    <h3>真实来源(${sources.length})</h3>${sourceRows?`<ul>${sourceRows}</ul>`:`<div class="empty">还没有达到来源门禁的证据包</div>`}
+    <h3>待审核/已激活变化(${artifacts.length})</h3>${artifactRows||`<div class="empty">尚无知识、技能、能力或工作流变化</div>`}
+    ${Object.keys(binding).length?`<div class="sub">身份、配置和能力包均已绑定；过期页面不能激活新版本。</div>`:""}`;
+}
+async function employeeStartLearning(idx,employee){
+  const binding=employeeIdentityMutationFields(employee);
+  const {identity_ref,config_revision,config_sha256,bundle_sha256}=binding;
+  const requestKey=persistentMutationRequestKey("employee-learning",`${idx}:${identity_ref||"unknown"}`,binding);
+  try{
+    setBoundedState(LEARN_LOGS,idx,[]);
+    const result=await api(`/employees/${idx}/learning-runs`,{method:"POST",body:{request_key:requestKey,identity_ref,config_revision,config_sha256,bundle_sha256}});
+    clearPersistentMutationRequestKey("employee-learning",`${idx}:${identity_ref||"unknown"}`,requestKey);
+    toast("已创建全网证据研究，完成后需要审核才会生效");
+    if(SPEC&&Number(SPEC.idx)===Number(idx)){
+      SPEC={...SPEC,learning:true,learning_run:result?.run||null}; drawSpec();
+    }
+    if(window.__ADM_DETAIL&&Number(window.__ADM_DETAIL.idx)===Number(idx)){
+      await admDetail(idx);
+    }
+    return result;
+  }catch(e){ toast(e.message); return null; }
+}
+async function employeeApproveLearning(runId,bindingScope="spec",batchId=0,employeeIdx=0){
+  const run=employeeLearningRunForReview(runId,bindingScope,batchId);
+  const {identity_ref,config_revision,config_sha256,bundle_sha256}=employeeLearningRunMutationFields(run);
+  if(!identity_ref||!config_revision||!config_sha256||!bundle_sha256){
+    toast("进修提案缺少冻结岗位四元组，请刷新后再审核");return null;
+  }
+  if(!await uiConfirm("确认来源和岗位变化后激活新能力版本？旧任务仍使用原冻结版本。",{title:"审核全网进修",confirmText:"审核并激活"})) return null;
+  const resolvedBatchId=Number(batchId||run?.batch_id)||0,resolvedEmployeeIdx=Number(employeeIdx||run?.employee_idx)||0;
+  try{
+    const result=await api(`/employee-learning/runs/${runId}/approve`,{method:"POST",body:{identity_ref,config_revision,config_sha256,bundle_sha256}});
+    toast("已激活新的知识、技能、能力与工作流版本");
+    try{await employeeLearningRefreshReviewViews(resolvedEmployeeIdx,resolvedBatchId);}
+    catch(e){toast(`能力已激活，但页面刷新失败：${e.message}`);}
+    return result;
+  }catch(e){
+    toast(e.message);
+    try{await employeeLearningRefreshReviewViews(resolvedEmployeeIdx,resolvedBatchId);}
+    catch(refreshError){toast(`审核状态刷新失败：${refreshError.message}`);}
+    return null;
+  }
+}
+function employeeLearningRunMutationFields(run){
+  const identity_ref=String(run?.identity_ref||"").trim();
+  const config_revision=Number(run?.base_config_revision||run?.config_revision);
+  const config_sha256=String(run?.base_config_sha256||run?.config_sha256||"").trim();
+  const bundle_sha256=String(run?.bundle_sha256||"").trim();
+  if(!/^[0-9a-f]{64}$/.test(identity_ref)||!Number.isInteger(config_revision)||config_revision<1||
+    !/^[0-9a-f]{64}$/.test(config_sha256)||!/^[0-9a-f]{64}$/.test(bundle_sha256))return {};
+  return {identity_ref,config_revision,config_sha256,bundle_sha256};
+}
+function employeeLearningRunForReview(runId,bindingScope="spec",batchId=0){
+  const id=Number(runId),batch=Number(batchId)>0
+    ?(EMPLOYEE_LEARNING_BATCH.batches||[]).find(item=>Number(item.id)===Number(batchId)):null;
+  const batchRun=(batch?.runs||[]).find(run=>Number(run.id)===id);
+  if(batchRun)return batchRun;
+  const employee=bindingScope==="admin"?window.__ADM_DETAIL:SPEC;
+  const runs=[employee?.learning_run,...(Array.isArray(employee?.learning_runs)?employee.learning_runs:[])].filter(Boolean);
+  return runs.find(run=>Number(run.run_id||run.id)===id)||null;
+}
+async function employeeLearningRefreshReviewViews(employeeIdx=0,batchId=0){
+  const resolvedBatchId=Number(batchId)||0,resolvedEmployeeIdx=Number(employeeIdx)||0;
+  if(resolvedBatchId>0)await refreshEmployeeLearningBatch(resolvedBatchId,{redraw:Boolean($("#employee-learning-batch-dialog"))});
+  if(resolvedEmployeeIdx>0){
+    const fresh=await api(`/depts/emp/${resolvedEmployeeIdx}`);
+    if(SPEC&&Number(SPEC.idx)===resolvedEmployeeIdx){SPEC=fresh;drawSpec();}
+    if(window.__ADM_DETAIL&&Number(window.__ADM_DETAIL.idx)===resolvedEmployeeIdx)await admDetail(resolvedEmployeeIdx);
+  }
+}
+async function employeeRejectLearning(runId,bindingScope="spec",batchId=0,employeeIdx=0){
+  const run=employeeLearningRunForReview(runId,bindingScope,batchId);
+  const {identity_ref,config_revision,config_sha256,bundle_sha256}=employeeLearningRunMutationFields(run);
+  if(!identity_ref||!config_revision||!config_sha256||!bundle_sha256){
+    toast("进修提案缺少冻结岗位四元组，请刷新后再审核");return null;
+  }
+  const reasonInput=await uiPrompt({title:"拒绝进修提案",message:"拒绝后该提案不会激活；请留下可审计的复核原因。",label:"拒绝原因",multiline:true,
+    placeholder:"例：来源与本次岗位目标不匹配",requiredMessage:"请填写拒绝原因",confirmText:"确认拒绝",danger:true,
+    validate:value=>String(value||"").trim().length>200?"拒绝原因最多 200 字":""});
+  if(reasonInput===null)return null;
+  const reason=String(reasonInput||"").trim();
+  if(!reason||reason.length>200){toast("拒绝原因必须为 1–200 字");return null;}
+  let result;
+  try{
+    result=await api(`/employee-learning/runs/${Number(runId)}/reject`,{method:"POST",body:{identity_ref,config_revision,config_sha256,bundle_sha256,reason}});
+  }catch(e){toast(e.message);return null;}
+  toast("已拒绝该进修提案，能力版本未激活");
+  const resolvedBatchId=Number(batchId||run?.batch_id)||0,resolvedEmployeeIdx=Number(employeeIdx||run?.employee_idx)||0;
+  try{await employeeLearningRefreshReviewViews(resolvedEmployeeIdx,resolvedBatchId);}
+  catch(e){toast(`提案已拒绝，但页面刷新失败：${e.message}`);}
+  return result;
+}
+const EMPLOYEE_LEARNING_INDUSTRIES=[
+  ["all_v4","全部 V4 行业专属员工（360 人）"],["auto","汽车后市场"],["beauty","美容美业"],
+  ["convenience","便利店"],["fitness","健身瑜伽"],["grocery","商超零售"],["hotel","酒店住宿"],
+  ["pet","宠物服务"],["pharmacy","零售药房"],["snack","量贩零食"],["tea_coffee","茶咖现制"]
+];
+function employeeLearningBatchHashSummary(value){
+  const hash=String(value||"").trim();
+  return /^[0-9a-f]{64}$/.test(hash)?`${hash.slice(0,8)}…${hash.slice(-6)}`:"不可用";
+}
+function employeeLearningBatchPreviewReady(preview){
+  const sample=Array.isArray(preview?.target_sample)?preview.target_sample:[];
+  const counts=preview?.industry_counts;
+  return /^[0-9a-f]{64}$/.test(String(preview?.target_digest||""))&&
+    /^[0-9a-f]{64}$/.test(String(preview?.preview_token||""))&&sample.length>0&&
+    counts&&typeof counts==="object"&&Object.keys(counts).length>0&&sample.every(item=>
+      Number.isInteger(Number(item?.config_revision))&&Number(item.config_revision)>0&&
+      [item?.identity_ref,item?.config_sha256,item?.bundle_sha256].every(value=>/^[0-9a-f]{64}$/.test(String(value||"")))
+    );
+}
+function employeeLearningBatchExecuteSnapshot(preview){
+  return {scope:String(EMPLOYEE_LEARNING_BATCH.scope||"all_v4"),
+    maxConcurrency:Math.max(1,Math.min(8,Number(EMPLOYEE_LEARNING_BATCH.maxConcurrency)||2)),
+    requestKey:String(EMPLOYEE_LEARNING_BATCH.requestKey||""),
+    previewToken:String(preview?.preview_token||""),targetDigest:String(preview?.target_digest||"")};
+}
+function employeeLearningBatchExecuteIsCurrent(executeSeq,snapshot){
+  const preview=EMPLOYEE_LEARNING_BATCH.preview;
+  return Number(executeSeq)===EMPLOYEE_LEARNING_BATCH_EXECUTE_SEQ&&
+    String(EMPLOYEE_LEARNING_BATCH.scope||"all_v4")===snapshot.scope&&
+    (Math.max(1,Math.min(8,Number(EMPLOYEE_LEARNING_BATCH.maxConcurrency)||2)))===snapshot.maxConcurrency&&
+    String(EMPLOYEE_LEARNING_BATCH.requestKey||"")===snapshot.requestKey&&
+    String(preview?.preview_token||"")===snapshot.previewToken&&String(preview?.target_digest||"")===snapshot.targetDigest;
+}
+function employeeLearningBatchBillingProof(batch){
+  const proofStatus=String(batch?.billing_proof_status||""),billingMode=String(batch?.billing_mode||""),
+    plannedRaw=batch?.planned_wallet_charge_points??batch?.wallet_charge_points,
+    actualProofStatus=String(batch?.actual_wallet_debit_proof_status||""),actualRaw=batch?.actual_wallet_debit_points,
+    pointsRaw=batch?.points_per_employee,targetDigest=String(batch?.target_digest||"");
+  const plannedWalletCharge=Number(plannedRaw),actualWalletDebit=Number(actualRaw),pointsPerEmployee=Number(pointsRaw);
+  const ready=proofStatus==="verified"&&["platform_included","tenant_points"].includes(billingMode)&&plannedRaw!==null&&plannedRaw!==undefined&&plannedRaw!==""&&
+    Number.isFinite(plannedWalletCharge)&&plannedWalletCharge>=0&&Number.isFinite(pointsPerEmployee)&&Math.abs(pointsPerEmployee-3)<1e-9&&
+    /^[0-9a-f]{64}$/.test(targetDigest)&&(billingMode!=="platform_included"||plannedWalletCharge===0);
+  const actualReady=actualProofStatus==="verified"&&actualRaw!==null&&actualRaw!==undefined&&actualRaw!==""&&
+    Number.isFinite(actualWalletDebit)&&actualWalletDebit>=0;
+  return {ready,proofStatus,billingMode,plannedWalletCharge,actualReady,actualProofStatus,actualWalletDebit,pointsPerEmployee,targetDigest};
+}
+function employeeLearningBatchIndustryLabel(value){
+  return EMPLOYEE_LEARNING_INDUSTRIES.find(item=>item[0]===String(value||""))?.[1]||String(value||"未分类");
+}
+function employeeLearningBatchRequestBody(){
+  const scope=String(EMPLOYEE_LEARNING_BATCH.scope||"all_v4");
+  const max_concurrency=Math.max(1,Math.min(8,Number(EMPLOYEE_LEARNING_BATCH.maxConcurrency)||2));
+  if(!EMPLOYEE_LEARNING_BATCH.requestKey){
+    EMPLOYEE_LEARNING_BATCH.requestKey=persistentMutationRequestKey(
+      "employee-learning-batch",scope,{scope,max_concurrency}
+    );
+  }
+  return {request_key:EMPLOYEE_LEARNING_BATCH.requestKey,max_concurrency,
+    ...(scope!=="all_v4"?{industry_key:scope}:{})};
+}
+function employeeLearningBatchStatusLabel(value){
+  return ({queued:"排队中",running:"进修中",paused:"已暂停",awaiting_approval:"待审核",
+    completed:"已完成",cancelled:"已取消",failed:"失败"})[String(value||"")]||String(value||"—");
+}
+function employeeLearningBatchReviewList(batch){
+  if(!Array.isArray(batch?.runs)) return "";
+  const pending=batch.runs.filter(run=>String(run?.status||"")==="awaiting_approval");
+  if(!pending.length) return `<div class="empty" style="margin-top:8px">当前没有待审核员工</div>`;
+  return `<div style="margin-top:9px;border-top:1px solid #ddd3bf;padding-top:9px">
+    <div style="font-weight:850">待审员工（${bossDashNumber(pending.length)}）</div>
+    <div style="display:grid;gap:7px;max-height:320px;overflow:auto;margin-top:7px">
+      ${pending.map(run=>{const idx=Number(run.employee_idx)||0,person=String(run.person||"").trim(),job=String(run.name||"").trim(),hasBinding=Object.keys(employeeLearningRunMutationFields(run)).length===4;return `<div class="skillcard" data-learning-run="${Number(run.id)||0}">
+        <div style="flex:1;min-width:0"><div class="t">${esc(person||job||`员工 #${idx}`)}${person&&job?` · ${esc(job)}`:""}</div>
+          <div class="sub">员工 #${idx} · 进修运行 #${Number(run.id)||0} · 冻结岗位版本 r${Number(run.config_revision)||0}</div></div>
+        <div class="actions"><button class="btn sm blue" ${idx>0?"":"disabled"} onclick="openEmployeeLearningBatchReview(${idx})">打开详情审核</button>
+          <button class="btn sm bad" ${hasBinding?"":"disabled"} onclick="employeeRejectLearning(${Number(run.id)||0},'batch',${Number(batch.id)||0},${idx})">拒绝提案</button></div>
+      </div>`;}).join("")}
+    </div></div>`;
+}
+function closeEmployeeLearningBatchManager(){
+  EMPLOYEE_LEARNING_BATCH_PREVIEW_SEQ++;
+  EMPLOYEE_LEARNING_BATCH_EXECUTE_SEQ++;
+  EMPLOYEE_LEARNING_BATCH.loading=false;
+  if(EMPLOYEE_LEARNING_BATCH_TIMER){clearTimeout(EMPLOYEE_LEARNING_BATCH_TIMER);EMPLOYEE_LEARNING_BATCH_TIMER=null;}
+  $("#employee-learning-batch-dialog")?.remove();
+}
+function drawEmployeeLearningBatchManager(){
+  const state=EMPLOYEE_LEARNING_BATCH,preview=state.preview,batches=state.batches||[];
+  $("#employee-learning-batch-dialog")?.remove();
+  const previewReady=employeeLearningBatchPreviewReady(preview);
+  const previewIndustryHtml=preview?EMPLOYEE_LEARNING_INDUSTRIES.slice(1).map(([industryKey])=>
+    `<span class="tag" data-learning-industry="${esc(industryKey)}">${esc(employeeLearningBatchIndustryLabel(industryKey))} ${bossDashNumber(Number(preview.industry_counts?.[industryKey])||0)} 人</span>`
+  ).join(""):"";
+  const previewSampleHtml=preview?(Array.isArray(preview.target_sample)?preview.target_sample:[]).map(item=>{
+    const person=String(item?.person||"").trim(),job=String(item?.name||"").trim(),revision=Number(item?.config_revision)||0;
+    return `<div class="skillcard" data-learning-target-sample="${Number(item?.idx)||0}"><div style="flex:1;min-width:0">
+      <div class="t">${esc(person||job||`员工 #${Number(item?.idx)||0}`)}${person&&job?` · ${esc(job)}`:""}</div>
+      <div class="sub">${esc(employeeLearningBatchIndustryLabel(item?.industry_key))} · 配置 r${revision||"不可用"} · 四元摘要：身份 ${esc(employeeLearningBatchHashSummary(item?.identity_ref))} / 配置 ${esc(employeeLearningBatchHashSummary(item?.config_sha256))} / 能力包 ${esc(employeeLearningBatchHashSummary(item?.bundle_sha256))}</div>
+    </div></div>`;
+  }).join(""):"";
+  const previewHtml=preview?`<div class="notice violet" style="margin-top:12px">
+      <b>预览已锁定</b>：${bossDashNumber(preview.target_count)} 名员工 · 研究配额上限 ${bossDashNumber(preview.budget_cap_points)} 点
+      · 最大并发 ${bossDashNumber(preview.max_concurrency)}<br>
+      <span class="sub">${preview.billing_mode==="platform_included"?"总部平台账户套餐内包含，预计钱包扣点上限 0 点。":`预计钱包扣点上限 ${bossDashNumber(preview.planned_wallet_charge_points??preview.wallet_charge_points)} 点。`}
+      实际净扣将在创建后按持久账单证明展示；每人研究配额最多 3 点；研究完成后全部进入人工待审，不会自动批准或改写岗位。</span>
+      <div class="sub" style="margin-top:8px;overflow-wrap:anywhere"><b>目标冻结摘要 target_digest</b>：<code>${esc(preview.target_digest||"不可用")}</code></div>
+      <div style="margin-top:8px"><b>10 行业目标统计</b><div class="chips" style="margin-top:5px">${previewIndustryHtml}</div></div>
+      <div style="margin-top:8px"><b>冻结目标样本</b><div class="sub">仅展示前 ${bossDashNumber((preview.target_sample||[]).length)} 名；四元组只显示不可逆摘要，不在页面泄露完整哈希。</div>
+        <div style="display:grid;gap:6px;margin-top:5px">${previewSampleHtml||`<div class="empty">服务端未返回冻结目标样本</div>`}</div></div>
+      ${previewReady?"":`<div class="notice red" style="margin-top:8px">冻结目标四元组摘要不完整，已禁止执行；请刷新预览。</div>`}
+      <div class="actions" style="margin-top:8px"><button class="btn pri" ${state.loading||!previewReady?"disabled":""} onclick="executeEmployeeLearningBatch()">
+        ${state.loading?`<span class="spin"></span> 创建中…`:"确认预算并启动批次"}</button></div></div>`:"";
+  const batchRows=batches.map(batch=>{const c=batch.counts||{},hasRuns=Array.isArray(batch.runs),billingProof=employeeLearningBatchBillingProof(batch);return `<div class="card" style="margin-top:10px">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><b>批次 #${Number(batch.id)||0}</b>
+        <span class="tag">${esc(employeeLearningBatchStatusLabel(batch.status))}</span><span class="sub">${esc(new Date((Number(batch.created_at)||0)*1000).toLocaleString("zh-CN"))}</span></div>
+      <div class="kv" style="margin-top:7px"><span>目标 ${bossDashNumber(batch.target_count)}</span><span>预算 ${bossDashNumber(batch.budget_cap_points)} 点</span>
+        <span>已完成 ${bossDashNumber(c.completed)}</span><span>失败 ${bossDashNumber(c.failed)}</span><span>待审 ${bossDashNumber(c.pending_review)}</span>
+        <span>研究中 ${bossDashNumber(c.researching)}</span><span>排队 ${bossDashNumber(c.queued)}</span></div>
+      ${billingProof.ready?`<div class="sub" style="margin-top:6px"><b>${billingProof.billingMode==="platform_included"?"billing_mode platform_included（总部平台套餐内）":"billing_mode tenant_points（租户钱包计费）"}</b> · 预计钱包扣点上限 ${bossDashNumber(billingProof.plannedWalletCharge)} 点 · ${billingProof.actualReady?`实际净扣 ${bossDashNumber(billingProof.actualWalletDebit)} 点`:`<b style="color:var(--bad)">实际净扣证明缺失</b>`} · 每人 ${bossDashNumber(billingProof.pointsPerEmployee)} 点 · target_digest ${esc(employeeLearningBatchHashSummary(billingProof.targetDigest))}</div>`:
+        `<div class="notice red" style="margin-top:7px"><b>计费证明缺失</b>：不能据此判断预计钱包扣点上限或实际净扣，请刷新或升级服务端后再核验。</div>`}
+      ${batch.paused_reason?`<div class="sub" style="margin-top:5px">暂停原因：${esc(batch.paused_reason)}</div>`:""}
+      <div class="actions" style="margin-top:7px"><button class="btn sm" onclick="refreshEmployeeLearningBatch(${Number(batch.id)||0})">刷新</button>
+        ${Number(c.pending_review)>0?`<button class="btn sm blue" onclick="toggleEmployeeLearningBatchReviews(${Number(batch.id)||0})">${hasRuns?"收起待审清单":`查看待审员工（${bossDashNumber(c.pending_review)}）`}</button>`:""}
+        ${batch.can_pause?`<button class="btn sm" onclick="pauseEmployeeLearningBatch(${Number(batch.id)||0})">暂停后续启动</button>`:""}
+        ${batch.can_resume?`<button class="btn sm pri" onclick="resumeEmployeeLearningBatch(${Number(batch.id)||0})">继续排队进修</button>`:""}</div>
+      ${employeeLearningBatchReviewList(batch)}</div>`;}).join("");
+  document.body.insertAdjacentHTML("beforeend",`<div class="overlay" id="employee-learning-batch-dialog" role="presentation" onclick="if(event.target===this)closeEmployeeLearningBatchManager()">
+    <div class="panel" role="dialog" aria-modal="true" aria-labelledby="employee-learning-batch-title" style="max-width:900px">
+      <div class="phead"><div style="flex:1"><h2 id="employee-learning-batch-title" style="margin:0">🏭 修理厂 · 全员进修</h2>
+        <div class="sub">把行业专属员工送进修理厂做全网证据研究。先预览四元组和预算，确认后再开工；暂停不会打断已在核验的来源。</div></div>
+        <button class="btn sm" onclick="closeEmployeeLearningBatchManager()">✕</button></div>
+      <div class="pbody"><div class="grid2"><label>进修范围<select id="learning-batch-scope" onchange="employeeLearningBatchScopeChanged(this.value)">
+        ${EMPLOYEE_LEARNING_INDUSTRIES.map(([value,label])=>`<option value="${esc(value)}" ${state.scope===value?"selected":""}>${esc(label)}</option>`).join("")}</select></label>
+        <label>最大并发（1–8）<input id="learning-batch-concurrency" type="number" min="1" max="8" value="${Number(state.maxConcurrency)||2}" onchange="employeeLearningBatchConcurrencyChanged(this.value)"></label></div>
+        <div class="actions"><button class="btn blue" ${state.loading?"disabled":""} onclick="previewEmployeeLearningBatch()">
+          ${state.loading?`<span class="spin"></span> 核对中…`:"🔎 预览员工与预算"}</button><span class="sub">服务端硬限制每人 3 点、单批最多 360 人。</span></div>
+        ${state.error?`<div class="notice red" style="margin-top:10px">${esc(state.error)}</div>`:""}${previewHtml}
+        <h3>最近批次</h3>${batchRows||`<div class="empty">还没有批量进修记录</div>`}</div></div></div>`);
+}
+function employeeLearningBatchScopeChanged(value){
+  EMPLOYEE_LEARNING_BATCH_PREVIEW_SEQ++;
+  EMPLOYEE_LEARNING_BATCH_EXECUTE_SEQ++;
+  EMPLOYEE_LEARNING_BATCH={...EMPLOYEE_LEARNING_BATCH,scope:String(value||"all_v4"),preview:null,requestKey:"",error:"",loading:false};drawEmployeeLearningBatchManager();
+}
+function employeeLearningBatchConcurrencyChanged(value){
+  const parsed=Math.max(1,Math.min(8,Number(value)||2));
+  EMPLOYEE_LEARNING_BATCH_PREVIEW_SEQ++;
+  EMPLOYEE_LEARNING_BATCH_EXECUTE_SEQ++;
+  EMPLOYEE_LEARNING_BATCH={...EMPLOYEE_LEARNING_BATCH,maxConcurrency:parsed,preview:null,requestKey:"",error:"",loading:false};drawEmployeeLearningBatchManager();
+}
+async function loadEmployeeLearningBatches({silent=false}={}){
+  try{const previous=new Map((EMPLOYEE_LEARNING_BATCH.batches||[]).map(batch=>[Number(batch.id),batch]));
+    const result=await api("/employee-learning/batches?limit=8");
+    const summaries=Array.isArray(result.batches)?result.batches:[];
+    EMPLOYEE_LEARNING_BATCH.batches=summaries.map(batch=>{
+      const prior=previous.get(Number(batch.id));
+      return Array.isArray(prior?.runs)?{...batch,runs:prior.runs}:batch;
+    });
+    const expanded=EMPLOYEE_LEARNING_BATCH.batches.filter(batch=>Array.isArray(batch.runs));
+    if(expanded.length){
+      const details=await Promise.all(expanded.map(batch=>api(`/employee-learning/batches/${Number(batch.id)}`)));
+      const byId=new Map(details.map(result=>[Number(result.batch?.id),result.batch]));
+      EMPLOYEE_LEARNING_BATCH.batches=EMPLOYEE_LEARNING_BATCH.batches.map(batch=>byId.get(Number(batch.id))||batch);
+    }
+    EMPLOYEE_LEARNING_BATCH.error="";}
+  catch(e){if(!silent)EMPLOYEE_LEARNING_BATCH.error=e.message;}
+  if($("#employee-learning-batch-dialog"))drawEmployeeLearningBatchManager();
+}
+async function openEmployeeLearningBatchManager(){
+  if(!isBoss())return toast("仅超级管理账号 boss 可管理批量进修");
+  EMPLOYEE_LEARNING_BATCH_PREVIEW_SEQ++;
+  EMPLOYEE_LEARNING_BATCH_EXECUTE_SEQ++;
+  EMPLOYEE_LEARNING_BATCH={...EMPLOYEE_LEARNING_BATCH,preview:null,error:"",loading:false};drawEmployeeLearningBatchManager();
+  await loadEmployeeLearningBatches();
+  const poll=async()=>{if(!$("#employee-learning-batch-dialog"))return;await loadEmployeeLearningBatches({silent:true});EMPLOYEE_LEARNING_BATCH_TIMER=setTimeout(poll,5000);};
+  EMPLOYEE_LEARNING_BATCH_TIMER=setTimeout(poll,5000);
+}
+async function previewEmployeeLearningBatch(){
+  const requestSeq=++EMPLOYEE_LEARNING_BATCH_PREVIEW_SEQ;
+  EMPLOYEE_LEARNING_BATCH_EXECUTE_SEQ++;
+  const requestBody=employeeLearningBatchRequestBody();
+  const snapshot={scope:String(EMPLOYEE_LEARNING_BATCH.scope||"all_v4"),maxConcurrency:Number(EMPLOYEE_LEARNING_BATCH.maxConcurrency)||2,
+    requestKey:String(EMPLOYEE_LEARNING_BATCH.requestKey||"")};
+  EMPLOYEE_LEARNING_BATCH.loading=true;EMPLOYEE_LEARNING_BATCH.error="";drawEmployeeLearningBatchManager();
+  try{const result=await api("/employee-learning/batches/dry-run",{method:"POST",body:requestBody});
+    if(requestSeq!==EMPLOYEE_LEARNING_BATCH_PREVIEW_SEQ||snapshot.scope!==String(EMPLOYEE_LEARNING_BATCH.scope||"all_v4")||
+      snapshot.maxConcurrency!==(Number(EMPLOYEE_LEARNING_BATCH.maxConcurrency)||2)||snapshot.requestKey!==String(EMPLOYEE_LEARNING_BATCH.requestKey||""))return null;
+    EMPLOYEE_LEARNING_BATCH.preview=result.preview||null;return result;}
+  catch(e){if(requestSeq===EMPLOYEE_LEARNING_BATCH_PREVIEW_SEQ){EMPLOYEE_LEARNING_BATCH.preview=null;EMPLOYEE_LEARNING_BATCH.error=e.message;}return null;}
+  finally{if(requestSeq===EMPLOYEE_LEARNING_BATCH_PREVIEW_SEQ){EMPLOYEE_LEARNING_BATCH.loading=false;drawEmployeeLearningBatchManager();}}
+}
+async function executeEmployeeLearningBatch(){
+  const preview=EMPLOYEE_LEARNING_BATCH.preview;if(!preview)return toast("请先预览批次");
+  if(!employeeLearningBatchPreviewReady(preview))return toast("冻结目标四元组摘要不完整，请重新预览后再执行");
+  if(!await uiConfirm(`确认为 ${preview.target_count} 名员工启动全网证据研究？\n目标冻结摘要：${preview.target_digest}\n预算硬上限 ${preview.budget_cap_points} 点，研究完后仍需逐人审核，绝不自动批准。`,{
+    title:"确认批量进修",confirmText:"确认预算并执行",danger:false}))return;
+  if(EMPLOYEE_LEARNING_BATCH.preview!==preview)return toast("预览已变化，请重新确认当前目标");
+  const base=employeeLearningBatchRequestBody(),executeSeq=++EMPLOYEE_LEARNING_BATCH_EXECUTE_SEQ;
+  const snapshot=employeeLearningBatchExecuteSnapshot(preview);
+  let finalizeOwnedUi=false;
+  EMPLOYEE_LEARNING_BATCH.loading=true;drawEmployeeLearningBatchManager();
+  try{const result=await api("/employee-learning/batches",{method:"POST",body:{...base,
+      budget_cap_points:preview.budget_cap_points,preview_token:preview.preview_token,confirm_execute:true,auto_approve:false}});
+    if(result?.batch)EMPLOYEE_LEARNING_BATCH.batches=[result.batch,...(EMPLOYEE_LEARNING_BATCH.batches||[]).filter(item=>Number(item.id)!==Number(result.batch.id))];
+    toast(`批次 #${result.batch.id} 已启动，产物将进入人工待审`);
+    if(employeeLearningBatchExecuteIsCurrent(executeSeq,snapshot)){
+      finalizeOwnedUi=true;
+      clearPersistentMutationRequestKey("employee-learning-batch",snapshot.scope,snapshot.requestKey);
+      EMPLOYEE_LEARNING_BATCH.requestKey="";EMPLOYEE_LEARNING_BATCH.preview=null;
+      await loadEmployeeLearningBatches({silent:true});
+    }
+    return result;}
+  catch(e){if(employeeLearningBatchExecuteIsCurrent(executeSeq,snapshot)){finalizeOwnedUi=true;EMPLOYEE_LEARNING_BATCH.error=e.message;}else toast(`原批次启动失败：${e.message}`);return null;}
+  finally{if(finalizeOwnedUi&&executeSeq===EMPLOYEE_LEARNING_BATCH_EXECUTE_SEQ){EMPLOYEE_LEARNING_BATCH.loading=false;drawEmployeeLearningBatchManager();}}
+}
+async function refreshEmployeeLearningBatch(batchId,{redraw=true}={}){
+  try{const result=await api(`/employee-learning/batches/${Number(batchId)}`);const next=result.batch;
+    EMPLOYEE_LEARNING_BATCH.batches=[next,...EMPLOYEE_LEARNING_BATCH.batches.filter(item=>Number(item.id)!==Number(batchId))];if(redraw)drawEmployeeLearningBatchManager();return next;}
+  catch(e){toast(e.message);return null;}
+}
+async function toggleEmployeeLearningBatchReviews(batchId){
+  const current=EMPLOYEE_LEARNING_BATCH.batches.find(item=>Number(item.id)===Number(batchId));
+  if(Array.isArray(current?.runs)){
+    const {runs:_runs,...summary}=current;
+    EMPLOYEE_LEARNING_BATCH.batches=EMPLOYEE_LEARNING_BATCH.batches.map(item=>Number(item.id)===Number(batchId)?summary:item);
+    drawEmployeeLearningBatchManager();return;
+  }
+  await refreshEmployeeLearningBatch(batchId);
+}
+async function openEmployeeLearningBatchReview(idx){
+  if(!Number.isInteger(Number(idx))||Number(idx)<=0)return toast("待审员工编号无效");
+  closeEmployeeLearningBatchManager();
+  try{await openSpec(Number(idx),"skills");}
+  catch(e){toast(e.message);}
+}
+async function pauseEmployeeLearningBatch(batchId){
+  try{const result=await api(`/employee-learning/batches/${Number(batchId)}/pause`,{method:"POST",body:{reason:"老板手动暂停"}});
+    EMPLOYEE_LEARNING_BATCH.batches=[result.batch,...EMPLOYEE_LEARNING_BATCH.batches.filter(item=>Number(item.id)!==Number(batchId))];toast("已暂停后续员工启动，已在核验的任务会安全收尾");drawEmployeeLearningBatchManager();}
+  catch(e){toast(e.message);}
+}
+async function resumeEmployeeLearningBatch(batchId){
+  try{const result=await api(`/employee-learning/batches/${Number(batchId)}/resume`,{method:"POST",body:{}});
+    EMPLOYEE_LEARNING_BATCH.batches=[result.batch,...EMPLOYEE_LEARNING_BATCH.batches.filter(item=>Number(item.id)!==Number(batchId))];toast("已继续启动排队中的员工");drawEmployeeLearningBatchManager();}
+  catch(e){toast(e.message);}
+}
+function employeeIdentityLabel(employee){
+  const {personStatus,identityStatus}=employeeIdentityState(employee);
+  if(identityStatus==="historical") return personStatus==="active"
+    ?"员工仍在岗 · 此任务使用历史岗位版本"
+    :"员工暂未在岗 · 此任务使用历史岗位版本";
+  if(identityStatus==="current") return personStatus==="active"?"员工在岗 · 当前岗位":"员工暂未在岗 · 当前岗位";
+  return "岗位身份待核";
+}
+// One-release display alias. Capability decisions use the explicit helpers above.
+function employeeRosterLabel(value){
+  return ({active:"当前岗位",legacy:"岗位旧版本",unknown:"岗位身份待核",mixed:"多个岗位版本"})[String(value||"")]||"";
+}
+function employeeIsLegacy(employee){ return employeeIdentityState(employee).identityStatus==="historical"; }
+function employeeCanAssign(employee){ return employeeCanAssignNew(employee); }
+function employeeAssignmentState(employee){
+  const state=employeeIdentityState(employee);
+  if(state.personStatus==="unknown"&&state.identityStatus==="unknown") return "";
+  if(employeeCanAssignNew(employee)) return "";
+  return employeeIdentityLabel(employee);
+}
+function meetingMemberLabel(member){
+  const name=String(member?.name||"员工"), state=employeeIdentityState(member);
+  return state.identityStatus==="current"&&state.personStatus==="active"
+    ?name:`${name} · ${employeeIdentityLabel(member)}`;
+}
+function bossDashboardScopeSnapshot(){
+  return {tenantId:Number(BOSS_DASH_FILTER.tenantId)||0,
+    industryKey:String(BOSS_DASH_FILTER.industryKey||""),days:Number(BOSS_DASH_FILTER.days)||30};
+}
+function bossDashboardRequestIsCurrent(request){
+  const scope=bossDashboardScopeSnapshot(), expected=request?.scope||{};
+  return request?.seq===BOSS_DASH_REQUEST_SEQ&&scope.tenantId===expected.tenantId
+    &&scope.industryKey===expected.industryKey&&scope.days===expected.days;
+}
+function bossCarryInspectionIndustry(value){
+  const selected=String(value||"");if(!selected)return;
+  inspectionResetScope(selected);
+}
+async function bossDashboardView(){
+  const request={seq:++BOSS_DASH_REQUEST_SEQ,scope:bossDashboardScopeSnapshot()};
+  BOSS_EMPLOYEE_REQUEST_SEQ++;
+  const scopes=await api("/boss/dashboard/scopes");
+  if(!bossDashboardRequestIsCurrent(request))return;
+  BOSS_DASH_SCOPES=scopes;
+  const tenants=scopes.tenants||[];
+  if(!tenants.length){
+    $("#main").innerHTML=`<div class="card"><h2>📈 老板看板</h2><div class="empty">当前企业还没有显式绑定行业。请先在“团队与权限”中为企业选择行业；系统不会把空配置误当成所有行业。</div></div>`;return;
+  }
+  let tenant=tenants.find(t=>Number(t.id)===Number(BOSS_DASH_FILTER.tenantId))||tenants[0];
+  let industry=(tenant.industries||[]).find(i=>i.key===BOSS_DASH_FILTER.industryKey)||(tenant.industries||[])[0];
+  if(!industry){$("#main").innerHTML=`<div class="empty">该企业没有可用行业</div>`;return;}
+  BOSS_DASH_FILTER={...BOSS_DASH_FILTER,tenantId:Number(tenant.id),industryKey:industry.key};
+  request.scope=bossDashboardScopeSnapshot();
+  const qs=new URLSearchParams({tenant_id:String(tenant.id),industry_key:industry.key,days:String(BOSS_DASH_FILTER.days)});
+  const summary=await api(`/boss/dashboard/summary?${qs}`);
+  if(!bossDashboardRequestIsCurrent(request))return;
+  BOSS_DASH_DATA=summary;BOSS_EMPLOYEE_DETAIL=null;bossDashboardDraw();
+}
+function bossDashboardDraw(){
+  const scopes=BOSS_DASH_SCOPES||{},d=BOSS_DASH_DATA||{},scope=d.scope||{},period=d.period||{};
+  const tenants=scopes.tenants||[], tenant=tenants.find(t=>Number(t.id)===Number(BOSS_DASH_FILTER.tenantId))||tenants[0]||{};
+  const industries=tenant.industries||[],tasks=d.task_metrics||{},eff=d.efficiency_metrics||{},risk=d.risk_metrics||{},ins=d.inspection_metrics||{},inspectionBacklog=ins.backlog||{},biz=d.business_metrics||{},bizMetrics=biz.metrics||[];
+  const trend=(d.trend||[]).slice(-14), employees=d.employees||[],recent=d.recent_activity||[];
+  const selectStyle="min-width:150px;width:auto";
+  $("#main").innerHTML=`<div class="card" style="background:linear-gradient(120deg,#172126,#24343b);color:#fff;border-color:#172126">
+    <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap"><div style="flex:1;min-width:250px"><div class="sub" style="color:#b8c9c4">${esc(scope.industry_emoji||"")} ${esc(scope.industry_name||"")} · ${esc(scope.tenant_name||"")}</div>
+      <h2 style="margin:4px 0;color:#fff">老板经营驾驶舱</h2><div style="color:#d9e4df">先看风险，再看员工产出与执行效率；所有数字都来自派活任务和巡店记录。</div></div>
+      ${scopes.can_cross_tenant?`<div><label style="color:#d9e4df;margin-top:0">企业</label><select style="${selectStyle}" onchange="bossDashTenant(this.value)">${tenants.map(t=>`<option value="${t.id}" ${Number(t.id)===Number(tenant.id)?"selected":""}>${esc(t.name)}</option>`).join("")}</select></div>`:""}
+      <div><label style="color:#d9e4df;margin-top:0">行业</label><select style="${selectStyle}" onchange="bossDashIndustry(this.value)">${industries.map(i=>`<option value="${esc(i.key)}" ${i.key===scope.industry_key?"selected":""}>${esc(i.emoji||"")} ${esc(i.name)}</option>`).join("")}</select></div>
+      <div><label style="color:#d9e4df;margin-top:0">周期</label><select style="width:auto" onchange="bossDashDays(this.value)">${[7,30,60,90].map(x=>`<option value="${x}" ${Number(period.days)===x?"selected":""}>近${x}天</option>`).join("")}</select></div></div></div>
+  <div class="grid3" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-bottom:14px">
+    ${[["本期新建",bossDashNumber(tasks.total),"按任务创建时间"],["本期交付",bossDashNumber(tasks.completed),"按完成时间归期"],["同批完成率",bossDashPct(tasks.completion_rate),"本期新建任务当前完成比例"],["正在执行",bossDashNumber(tasks.active),"本期新建中的在办任务"],["失败 / 退款",`${bossDashNumber(tasks.failed)} / ${bossDashNumber(tasks.refunded)}`,"失败按终态时间，退款按结算记录"],["平均交付",bossDashDuration(eff.average_cycle_seconds),"本期完成任务周期"],["本期模型花费",`$${bossDashNumber(eff.cost_usd,2)}`,`点数消耗 ${bossDashNumber(eff.billing_points,1)} · tokens ${bossDashNumber(eff.tokens)}`]].map(([l,v,n])=>`<div class="topic" style="margin:0"><div class="sub">${l}</div><div style="font-size:26px;font-weight:900;margin:4px 0">${v}</div><div class="sub">${n}</div></div>`).join("")}</div>
+  <div class="row" style="align-items:stretch"><div class="card" style="flex:1;min-width:290px;margin:0"><h3 style="margin-top:0">🚨 先处理清单 <span class="sub" style="font-weight:400">（各项已标注口径）</span></h3>
+    ${[["超24小时仍在跑（历史总账）",risk.stale_active_tasks],["等待老板决策（历史总账）",risk.waiting_for_decision],["本期失败任务",risk.failed_tasks],["本期已退款任务",risk.refunded_tasks],["高风险巡店问题",risk.critical_inspection_issues],["逾期整改",risk.overdue_inspection_actions]].map(([l,v])=>`<div style="display:flex;justify-content:space-between;border-bottom:1px solid #eadfc4;padding:9px 0"><span>${l}</span><b style="color:${Number(v)>0?"#b4292f":"#28734f"}">${v===null||v===undefined?"未接入":v}</b></div>`).join("")}
+  </div><div class="card" style="flex:2;min-width:330px;margin:0"><h3 style="margin-top:0">🏪 巡店执行</h3>${ins.availability?`<div class="grid3" style="grid-template-columns:repeat(3,1fr)">
+    ${[["本期巡店",bossDashNumber(ins.visits)],["本期平均分",bossDashNumber(ins.average_score,1)],["未闭环问题总账",bossDashNumber(inspectionBacklog.open_issues)],["高风险总账",bossDashNumber(inspectionBacklog.critical_issues)],["整改中总账",bossDashNumber(inspectionBacklog.open_actions)],["逾期整改总账",bossDashNumber(inspectionBacklog.overdue_actions)]].map(([l,v])=>`<div><b style="font-size:21px">${v}</b><div class="sub">${l}</div></div>`).join("")}</div><div class="sub" style="margin-top:8px">本期指标按上方时间范围；“总账”展示历史全部未闭环风险。</div>${d.can_open_records?`<div class="actions"><a class="btn sm pri" href="${inspectionRecordHash(0,scope.industry_key)}">打开巡店工作台</a></div>`:`<div class="sub" style="margin-top:8px">跨企业看板仅供查看，不提供可写工作台跳转。</div>`}`:`<div class="notice violet"><b>巡店数据源暂不可用</b><div class="sub">系统已显式标记“未接入”，不会把缺失数据伪装成 0。原因码：${esc(ins.reason_code||"inspection_schema_unavailable")}</div></div>`}</div></div>
+  <div class="card"><h3 style="margin-top:0">📈 ${esc(scope.industry_name||"本行业")} 经营指标</h3><div class="sub" style="margin-bottom:10px">这些是该行业老板需要关注的经营卡。没有接入可信业务数据源时明确标记“待接入”，不用员工任务数伪造经营数。</div>
+    ${bizMetrics.length?`<div class="grid3" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr))">${bizMetrics.map(metric=>`<div class="topic" style="margin:0"><div class="sub">${esc(metric.label)}</div><b style="font-size:21px">${metric.availability?`${bossDashNumber(metric.value,2)} ${esc(metric.unit||"")}`:"待接入"}</b><div class="sub">所需数据：${esc(metric.source_required||"业务系统")}</div></div>`).join("")}</div>`:`<div class="notice violet">当前行业指标目录待配置。</div>`}</div>
+  <div class="card"><h3 style="margin-top:0">📦 最近交付 / 动态</h3><div class="sub" style="margin-bottom:8px">仅展示员工、状态、轮次和时间，不在看板里暴露业务正文。</div>${recent.length?recent.map(item=>{const rawRoute=safeRouteUrl(item.target_route),route=inspectionScopedRoute(rawRoute,scope.industry_key),kind=item.kind==="inspection"?"巡店":"任务",carry=item.kind==="inspection"?` onclick="bossCarryInspectionIndustry(${cp(scope.industry_key)})"`:"";return `<div style="display:flex;gap:8px;align-items:center;border-top:1px solid #eadfc4;padding:9px 0;flex-wrap:wrap"><span class="pill ${bossStatusClass(item.status_group)}">${esc(bossStatusLabel(item.status))}</span><span class="tag">${kind}</span><b>${esc(item.employee_name||"员工")}</b>${item.revision_no?`<span class="sub">第 ${bossDashNumber(item.revision_no)} 轮</span>`:""}<span class="sub" style="margin-left:auto">${item.occurred_at?new Date(item.occurred_at*1000).toLocaleString("zh-CN"):"—"}</span>${route?`<a class="btn sm" href="${esc(route)}"${carry}>查看</a>`:""}</div>`;}).join(""):`<div class="empty">当前周期还没有交付动态。</div>`}</div>
+  <div class="card"><h3 style="margin-top:0">🧑‍💼 每个员工做了什么、效率怎么样</h3>${employees.length?`<div class="dimwrap"><table class="dimtable"><thead><tr><th>员工</th><th>本期新建</th><th>本期交付</th><th>同批完成率</th><th>平均周期</th><th>等待/失败/退款</th><th>巡店</th><th></th></tr></thead><tbody>${employees.map(e=>`<tr><td><b>${esc(e.name)}</b>${e.employee_kind==="inspection"?`<div class="sub">区域巡店</div>`:`<div class="sub">${esc(employeeIdentityLabel(e))}${Number(e.config_revision)>0?` · 配置 r${Number(e.config_revision)}`:""}</div>`}</td><td>${bossDashNumber(e.tasks)}</td><td>${bossDashNumber(e.completed)}</td><td>${bossDashPct(e.completion_rate)}</td><td>${bossDashDuration(e.average_cycle_seconds)}</td><td>${bossDashNumber(e.waiting)} / ${bossDashNumber(e.failed)} / ${bossDashNumber(e.refunded)}</td><td>${bossDashNumber(e.inspection_visits)}</td><td><button class="btn sm" onclick="bossEmployeeDetail(${e.idx},${cp(e.identity_ref||"")},this,0)">看记录</button></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">这个周期还没有员工任务。</div>`}<div id="boss-employee-detail"></div></div>
+  <div class="card"><h3 style="margin-top:0">📅 近14天节奏 <span class="sub" style="font-weight:400">（无论选多长周期，此表固定展示最近14天）</span></h3>${trend.length?`<div class="dimwrap"><table class="dimtable"><thead><tr><th>日期</th><th>新任务</th><th>完成</th><th>失败</th><th>巡店</th><th>巡店均分</th></tr></thead><tbody>${trend.map(x=>`<tr><td>${esc(x.day)}</td><td>${bossDashNumber(x.tasks_created)}</td><td>${bossDashNumber(x.tasks_completed)}</td><td>${bossDashNumber(x.tasks_failed)}</td><td>${bossDashNumber(x.inspection_visits)}</td><td>${bossDashNumber(x.inspection_average_score,1)}</td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">暂无趋势数据</div>`}</div>
+  <div class="notice">💡 经营卡与派活员工效率分开计算；只有真实 POS、库存、排班、CRM 等数据接入后才会显示经营数值。</div>`;
+  if(BOSS_EMPLOYEE_DETAIL) bossEmployeeDetailDraw();
+}
+async function bossDashTenant(value){BOSS_DASH_FILTER.tenantId=Number(value);BOSS_DASH_FILTER.industryKey="";await bossDashboardView().catch(e=>toast(e.message));}
+async function bossDashIndustry(value){BOSS_DASH_FILTER.industryKey=String(value||"");await bossDashboardView().catch(e=>toast(e.message));}
+async function bossDashDays(value){BOSS_DASH_FILTER.days=Number(value)||30;await bossDashboardView().catch(e=>toast(e.message));}
+async function bossEmployeeDetail(idx,identityRef,btn,offset=0){
+  const requestSeq=++BOSS_EMPLOYEE_REQUEST_SEQ;
+  const scopeToken=`${BOSS_DASH_FILTER.tenantId}:${BOSS_DASH_FILTER.industryKey}:${BOSS_DASH_FILTER.days}`;
+  if(btn){btn.disabled=true;btn.innerHTML='<span class="spin"></span>';}
+  const pageSize=10,pageOffset=Math.max(0,Number(offset)||0),sectionLabel=`最近交付与执行记录（近 ${BOSS_DASH_FILTER.days} 天）`;
+  try{const qs=new URLSearchParams({tenant_id:String(BOSS_DASH_FILTER.tenantId),industry_key:BOSS_DASH_FILTER.industryKey,days:String(BOSS_DASH_FILTER.days),limit:String(pageSize),offset:String(pageOffset)});if(identityRef)qs.set("identity_ref",identityRef);
+    const d=await api(`/boss/dashboard/employees/${idx}?${qs}`);
+    if(requestSeq!==BOSS_EMPLOYEE_REQUEST_SEQ||scopeToken!==`${BOSS_DASH_FILTER.tenantId}:${BOSS_DASH_FILTER.industryKey}:${BOSS_DASH_FILTER.days}`)return;
+    BOSS_EMPLOYEE_DETAIL={idx:Number(idx),identityRef:String(identityRef||""),offset:pageOffset,pageSize,data:d,sectionLabel};
+    bossEmployeeDetailDraw();
+  }catch(e){toast(e.message);}finally{if(btn){btn.disabled=false;btn.textContent="看记录";}}
+}
+function bossEmployeeDetailDraw(){
+  const box=$("#boss-employee-detail"),state=BOSS_EMPLOYEE_DETAIL;if(!box||!state)return;
+  const d=state.data||{},tasks=d.tasks||{},visits=d.inspection_visits||{},taskItems=tasks.items||[],visitItems=visits.items||[];
+  const offset=state.offset,pageSize=state.pageSize;
+  const taskTotal=Number(tasks.total)||0,visitAvailable=visits.availability!==false;
+  const visitTotal=visitAvailable?(Number(visits.total)||0):null;
+  const hasPrevious=offset>0,hasNext=taskTotal>offset+pageSize||(visitTotal!==null&&visitTotal>offset+pageSize);
+  box.innerHTML=`<div class="topic" style="margin-top:14px"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><h3 style="margin:0;flex:1">${esc(d.employee?.name||"员工")} · ${esc(state.sectionLabel)}</h3><button class="btn sm" onclick="BOSS_EMPLOYEE_DETAIL=null;$('#boss-employee-detail').innerHTML=''">收起</button></div>
+    <div class="sub" style="margin:7px 0">任务 ${bossDashNumber(tasks.total)} 条 · 巡店 ${visitAvailable?bossDashNumber(visits.total):"未接入"}条。为保护业务内容，看板只展示结构化状态，点记录后才进入原交付。</div>
+    ${taskItems.map(t=>{const route=safeRouteUrl(t.target_route),eventAt=t.period_event_at||t.created_at;return `<div style="display:flex;gap:8px;align-items:center;border-top:1px solid #eadfc4;padding:9px 0;flex-wrap:wrap"><span class="pill ${bossStatusClass(t.status_group)}">${esc(bossStatusLabel(t.status))}</span>${route?`<a href="${esc(route)}">任务 #${t.id}</a>`:`<b>任务 #${t.id}</b>`}${t.source_task_id?`<span class="tag">连续修订</span>`:""}<span class="sub" style="margin-left:auto">${eventAt?new Date(eventAt*1000).toLocaleString("zh-CN"):""}</span></div>`;}).join("")}
+    ${visitItems.map(v=>{const scopedIndustry=d.scope?.industry_key||BOSS_DASH_FILTER.industryKey,route=inspectionScopedRoute(v.target_route,scopedIndustry),eventAt=v.period_event_at||v.created_at;return `<div style="display:flex;gap:8px;align-items:center;border-top:1px solid #eadfc4;padding:9px 0;flex-wrap:wrap"><span class="pill ${bossStatusClass(v.status==="completed"?"completed":v.status==="failed"?"failed":"active")}">${esc(bossStatusLabel(v.status))}</span>${route?`<a href="${esc(route)}" onclick="bossCarryInspectionIndustry(${cp(scopedIndustry)})">巡店 #${v.id}</a>`:`<b>巡店 #${v.id}</b>`}<span class="sub">评分 ${bossDashNumber(v.score,1)}</span><span class="sub" style="margin-left:auto">${eventAt?new Date(eventAt*1000).toLocaleString("zh-CN"):""}</span></div>`;}).join("")}
+    ${!visitAvailable?`<div class="notice violet">巡店明细未接入（${esc(visits.reason_code||"inspection_schema_unavailable")}），不按 0 条展示。</div>`:""}
+    ${!taskItems.length&&!visitItems.length?`<div class="empty">本页暂无记录</div>`:""}
+    <div class="actions" style="justify-content:flex-end"><button class="btn sm" ${hasPrevious?"":"disabled"} onclick="bossEmployeeDetailPage(${state.idx},${cp(state.identityRef)},${Math.max(0,offset-pageSize)})">← 上一页</button><span class="sub">第 ${Math.floor(offset/pageSize)+1} 页</span><button class="btn sm" ${hasNext?"":"disabled"} onclick="bossEmployeeDetailPage(${state.idx},${cp(state.identityRef)},${offset+pageSize})">下一页 →</button></div></div>`;
+}
+function bossEmployeeDetailPage(idx,identityRef,offset){return bossEmployeeDetail(idx,identityRef,null,offset);}
+/* ---------- V51:区域经理巡店工作台 ---------- */
+let INSPECTION_META=null, INSPECTION_LIST=null, INSPECTION_DETAIL=null;
+let INSPECTION_INDUSTRY="",INSPECTION_BRANCH_ID=0,INSPECTION_REGION=null,INSPECTION_CURSOR_STACK=[null],INSPECTION_CURSOR_PAGE=0;
+let INSPECTION_BRANCH_PICKER={status:"idle",items:[],q:"",region:"",cursorStack:[null],page:0,nextBeforeId:null,legacy:false,error:"",industry:""};
+let INSPECTION_CAPTURE_BRANCH_ID=0,INSPECTION_CHECKLIST={status:"idle",data:null,branchId:0,error:""};
+let INSPECTION_STANDARD_ADMIN={status:"idle",scopeKind:"tenant",scopeKey:"",data:null,error:"",branchId:0,industry:""};
+let INSPECTION_IMPORT_OPEN=false;
+let INSPECTION_IMPORT={status:"idle",preview:null,error:"",requestKey:"",fingerprint:""};
+let INSPECTION_IMPORT_PAGE={rowKind:"all",errorsOnly:false,cursorStack:[null],page:0,nextCursor:null,loading:false,error:""};
+function inspectionRecordHash(id=0,industry=INSPECTION_INDUSTRY){
+  const recordId=Math.max(0,Number(id)||0),key=String(industry||"").trim();
+  return `#/inspections/${recordId}${key?`/${encodeURIComponent(key)}`:""}`;
+}
+function inspectionScopedRoute(value,industry){
+  const route=safeRouteUrl(value),key=String(industry||"").trim();
+  if(!route||!/^[a-z0-9_-]{1,64}$/i.test(key))return route;
+  const match=route.match(/^#\/inspections\/(\d+)(?:\/[a-z0-9_-]{1,64})?$/i);
+  return match?inspectionRecordHash(match[1],key):route;
+}
+function inspectionResetScope(industry=INSPECTION_INDUSTRY){
+  INSPECTION_INDUSTRY=String(industry||"").trim();INSPECTION_BRANCH_ID=0;INSPECTION_REGION=null;
+  INSPECTION_CURSOR_STACK=[null];INSPECTION_CURSOR_PAGE=0;INSPECTION_META=null;INSPECTION_LIST=null;INSPECTION_DETAIL=null;
+  INSPECTION_CAPTURE_BRANCH_ID=0;INSPECTION_BRANCH_PICKER={status:"idle",items:[],q:"",region:"",cursorStack:[null],page:0,nextBeforeId:null,legacy:false,error:"",industry:""};
+  INSPECTION_CHECKLIST={status:"idle",data:null,branchId:0,error:""};INSPECTION_STANDARD_ADMIN={status:"idle",scopeKind:"tenant",scopeKey:"",data:null,error:"",branchId:0,industry:""};INSPECTION_IMPORT={status:"idle",preview:null,error:"",requestKey:"",fingerprint:""};
+  INSPECTION_IMPORT_OPEN=false;
+  INSPECTION_IMPORT_PAGE={rowKind:"all",errorsOnly:false,cursorStack:[null],page:0,nextCursor:null,loading:false,error:""};
+}
+async function apiUpload(path,form,{timeout=90000}={}){
+  busy(true); const ctl=new AbortController(), timer=setTimeout(()=>ctl.abort(),timeout);
+  try{
+    const r=await fetch(`/api${path}`,{method:"POST",body:form,credentials:"same-origin",signal:ctl.signal});
+    const responseCode=String(r.headers.get("X-Paihuo-Error-Code")||"").trim()||null;
+    if(r.status===401){location.href="/login";const err=new Error("请先登录");err.status=401;err.code=responseCode;throw err;}
+    if(r.status===402){const e=await r.json().catch(()=>({detail:"点数不足"}));pay402(e.detail);const err=new Error(e.detail||"点数不足");err.status=402;err.code=responseCode;throw err;}
+    if(!r.ok){const e=await r.json().catch(()=>({detail:"上传失败"})),err=new Error(e.detail||"上传失败");err.status=r.status;err.code=responseCode;throw err;}
+    return await r.json();
+  }catch(e){if(e.name==="AbortError"){const err=new Error("上传等待超时，服务器可能已接收。可直接重试，系统会复用同一请求号防止重复扣点");err.name="RequestTimeout";err.uncertain=true;throw err;}throw e;}
+  finally{clearTimeout(timer);busy(false);}
+}
+function inspectionStatusLabel(value){return ({preparing:"准备照片",analyzing:"分析中",completed:"已出报告",failed:"分析失败",open:"待整改",rectifying:"整改中",in_progress:"整改中",awaiting_recheck:"待企业主复核",reopened:"复核驳回",closed:"已人工闭环",pending:"待人工复核",approved:"复核通过",rejected:"复核驳回",close:"建议通过",reject:"建议驳回",manual_review:"需人工判断"})[value]||value||"—";}
+function inspectionStatusClass(value){return value==="completed"||value==="closed"||value==="approved"?"done":value==="failed"||value==="rejected"?"failed":value==="awaiting_recheck"||value==="pending"?"awaiting_review":"running";}
+function inspectionSeverity(value){return ({critical:"紧急",high:"高",medium:"中",low:"低"})[value]||value||"—";}
+async function inspectionFileFingerprint(file){
+  const bytes=await file.arrayBuffer();
+  if(globalThis.crypto?.subtle?.digest){
+    const digest=await crypto.subtle.digest("SHA-256",bytes);
+    return [...new Uint8Array(digest)].map(value=>value.toString(16).padStart(2,"0")).join("");
+  }
+  return `${clientErrorFingerprint(`${file.name}:${file.size}:${file.lastModified}`)}-${clientErrorFingerprint(String.fromCharCode(...new Uint8Array(bytes).slice(0,4096)))}`;
+}
+function inspectionBranchSearchItems(payload){
+  if(Array.isArray(payload))return payload;
+  if(Array.isArray(payload?.items))return payload.items;
+  if(Array.isArray(payload?.branches))return payload.branches;
+  return [];
+}
+async function inspectionBranchSearch({reset=false,silent=false}={}){
+  const state=INSPECTION_BRANCH_PICKER,meta=INSPECTION_META||{},industry_key=INSPECTION_INDUSTRY;
+  if(reset||state.industry!==industry_key){state.cursorStack=[null];state.page=0;state.nextBeforeId=null;}
+  state.industry=industry_key;state.status="loading";state.error="";if(!silent)inspectionDraw();
+  const query=new URLSearchParams({industry_key});
+  if(state.q)query.set("q",state.q);
+  if(state.region)query.set("region",state.region);
+  query.set("limit","20");
+  const beforeId=state.cursorStack[state.page];if(beforeId)query.set("before_id",String(beforeId));
+  try{
+    const result=await api(`/inspections/branches/search?${query}`);
+    state.items=inspectionBranchSearchItems(result).slice(0,20);
+    state.nextBeforeId=result?.next_before_id??result?.next_cursor??null;
+    state.legacy=false;state.status=state.items.length?"ready":"empty";
+  }catch(e){
+    if(e?.name==="NavigationAbort"||e?.status===401)throw e;
+    if(e?.status===403){state.items=[];state.status="permission";state.error="当前账号无权限查看该行业门店。";}
+    else if(e?.status===404||e?.status===405){
+      const q=state.q.toLowerCase(),region=state.region.toLowerCase(),all=Array.isArray(meta.branches)?meta.branches:[];
+      const filtered=all.filter(branch=>(!q||String(branch.store_code||"").toLowerCase().includes(q)||String(branch.name||"").toLowerCase().includes(q))&&(!region||String(branch.region||"").toLowerCase().includes(region)));
+      const offset=state.page*20;state.items=filtered.slice(offset,offset+20);state.nextBeforeId=filtered.length>offset+20?offset+20:null;
+      state.legacy=true;state.status=state.items.length?"ready":"empty";
+    }else{state.items=[];state.status="error";state.error=e?.message||"门店加载失败";}
+  }
+  if(!state.items.some(branch=>Number(branch.id)===Number(INSPECTION_CAPTURE_BRANCH_ID)))INSPECTION_CAPTURE_BRANCH_ID=state.items.length?Number(state.items[0].id)||0:0;
+  if(!INSPECTION_CAPTURE_BRANCH_ID)INSPECTION_CHECKLIST={status:"empty",data:null,branchId:0,error:""};
+  if(!silent)inspectionDraw();
+  return state;
+}
+async function inspectionBranchSearchFromForm(){
+  INSPECTION_BRANCH_PICKER.q=$("#inspection-branch-q")?.value.trim()||"";
+  INSPECTION_BRANCH_PICKER.region=$("#inspection-branch-region")?.value.trim()||"";
+  INSPECTION_CAPTURE_BRANCH_ID=0;
+  await inspectionBranchSearch({reset:true});
+  if(INSPECTION_CAPTURE_BRANCH_ID)await inspectionChecklistLoad(INSPECTION_CAPTURE_BRANCH_ID);
+}
+async function inspectionBranchSearchPage(direction){
+  const state=INSPECTION_BRANCH_PICKER;
+  if(direction<0&&state.page>0)state.page--;
+  if(direction>0&&state.nextBeforeId!==null&&state.nextBeforeId!==undefined){
+    state.cursorStack=state.cursorStack.slice(0,state.page+1);state.cursorStack.push(state.nextBeforeId);state.page++;
+  }
+  INSPECTION_CAPTURE_BRANCH_ID=0;await inspectionBranchSearch();
+  if(INSPECTION_CAPTURE_BRANCH_ID)await inspectionChecklistLoad(INSPECTION_CAPTURE_BRANCH_ID);
+}
+async function inspectionBranchSelect(value){
+  INSPECTION_CAPTURE_BRANCH_ID=Math.max(0,Number(value)||0);
+  await inspectionChecklistLoad(INSPECTION_CAPTURE_BRANCH_ID);
+}
+function inspectionBranchPickerHtml(){
+  const state=INSPECTION_BRANCH_PICKER,items=state.items||[];
+  const controls=`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(0,1fr));gap:10px;align-items:end">
+    <div style="min-width:0"><label>门店编号 / 名称</label><input id="inspection-branch-q" value="${esc(state.q)}" placeholder="例：S001 或 人民路店" style="width:100%;min-width:0"></div>
+    <div style="min-width:0"><label>区域筛选</label><input id="inspection-branch-region" value="${esc(state.region)}" placeholder="例：华东 / 静安" style="width:100%;min-width:0"></div>
+    <button class="btn" onclick="inspectionBranchSearchFromForm()">搜索门店</button></div>`;
+  if(state.status==="loading")return `${controls}<div class="notice" role="status"><span class="spin"></span> 正在加载门店…</div>`;
+  if(state.status==="permission")return `${controls}<div class="notice red">无权限：${esc(state.error)}</div>`;
+  if(state.status==="error")return `${controls}<div class="notice red">门店加载失败：${esc(state.error)} <button class="btn sm" onclick="inspectionBranchSearch()">重试</button></div>`;
+  if(state.status==="empty")return `${controls}<div class="empty">暂无匹配门店，请更换编号、名称或区域。</div>`;
+  return `${controls}${state.legacy?`<div class="notice">当前服务仍使用旧 branches 兼容模式，页面仅显示最多 20 家。</div>`:""}
+    <label>选择门店 *</label><select id="inspection-branch" onchange="inspectionBranchSelect(this.value)">${items.map(branch=>`<option value="${Number(branch.id)}" ${Number(branch.id)===Number(INSPECTION_CAPTURE_BRANCH_ID)?"selected":""}>${esc(branch.store_code?branch.store_code+" · ":"")}${esc(branch.name||"未命名门店")}${branch.region?` · ${esc(branch.region)}`:""}</option>`).join("")}</select>
+    <div class="sub" style="margin-top:8px">搜索结果：可选择本次巡店门店，也可直接查看该店历史。</div>
+    <div class="dimwrap"><table class="dimtable"><thead><tr><th>门店</th><th>区域</th><th>操作</th></tr></thead><tbody>${items.map(branch=>`<tr><td><b>${esc(branch.store_code||"—")}</b><div class="sub">${esc(branch.name||"未命名门店")}</div></td><td>${esc(branch.region||"未分区")}</td><td><div class="actions" style="margin:0;gap:6px"><button class="btn sm ${Number(branch.id)===Number(INSPECTION_CAPTURE_BRANCH_ID)?"pri":""}" onclick="inspectionBranchSelect(${Number(branch.id)})">选择巡店</button><button class="btn sm" onclick="inspectionFilterBranch(${Number(branch.id)})">看历史</button></div></td></tr>`).join("")}</tbody></table></div>
+    <div class="actions" style="justify-content:flex-end;flex-wrap:wrap"><button class="btn sm" ${state.page>0?"":"disabled"} onclick="inspectionBranchSearchPage(-1)">← 上一页</button><span class="sub">第 ${state.page+1} 页 · 每页最多 20 家</span><button class="btn sm" ${state.nextBeforeId!==null&&state.nextBeforeId!==undefined?"":"disabled"} onclick="inspectionBranchSearchPage(1)">下一页 →</button></div>`;
+}
+async function inspectionChecklistLoad(branchId,{silent=false}={}){
+  const branch_id=Math.max(0,Number(branchId)||0),industry_key=INSPECTION_INDUSTRY;
+  if(!branch_id){INSPECTION_CHECKLIST={status:"empty",data:null,branchId:0,error:""};INSPECTION_STANDARD_ADMIN={status:"idle",scopeKind:"tenant",scopeKey:"",data:null,error:"",branchId:0,industry:industry_key};if(!silent)inspectionDraw();return;}
+  INSPECTION_CHECKLIST={status:"loading",data:null,branchId:branch_id,error:""};if(!silent)inspectionDraw();
+  const query=new URLSearchParams({industry_key,branch_id:String(branch_id)});
+  try{const data=await api(`/inspections/checklist?${query}`);INSPECTION_CHECKLIST={status:"ready",data,branchId:branch_id,error:""};if(isAdmin())await inspectionStandardAdminLoad(INSPECTION_STANDARD_ADMIN.scopeKind,{silent:true,reset:INSPECTION_STANDARD_ADMIN.branchId!==branch_id||INSPECTION_STANDARD_ADMIN.industry!==industry_key});}
+  catch(e){if(e?.name==="NavigationAbort"||e?.status===401)throw e;INSPECTION_CHECKLIST={status:e?.status===403?"permission":"error",data:null,branchId:branch_id,error:e?.message||"检查清单加载失败"};}
+  if(!silent)inspectionDraw();
+}
+function inspectionStandardScopeKey(scopeKind){
+  const data=INSPECTION_CHECKLIST.data||{},branch=data.branch||{},kind=String(scopeKind||"");
+  if(kind==="tenant")return "";
+  if(kind==="region")return String(branch.region||"").trim();
+  if(kind==="branch")return String(Number(branch.id||INSPECTION_CHECKLIST.branchId)||"");
+  return "";
+}
+function inspectionStandardLayerName(value){return ({tenant:"企业",region:"区域",branch:"门店"})[value]||value||"产品基线";}
+async function inspectionStandardAdminLoad(scopeKind=INSPECTION_STANDARD_ADMIN.scopeKind,{silent=false,reset=false}={}){
+  if(!isAdmin())return;
+  const kind=["tenant","region","branch"].includes(String(scopeKind||""))?String(scopeKind):"tenant",branchId=Number(INSPECTION_CHECKLIST.branchId)||0,industry=INSPECTION_INDUSTRY;
+  if(!branchId||INSPECTION_CHECKLIST.status!=="ready")return;
+  const scopeKey=inspectionStandardScopeKey(kind);
+  if(kind==="region"&&!scopeKey){INSPECTION_STANDARD_ADMIN={status:"error",scopeKind:kind,scopeKey:"",data:null,error:"当前门店没有区域，不能设置区域标准",branchId,industry};if(!silent)inspectionDraw();return;}
+  if(reset)INSPECTION_STANDARD_ADMIN={status:"idle",scopeKind:kind,scopeKey,data:null,error:"",branchId,industry};
+  INSPECTION_STANDARD_ADMIN={...INSPECTION_STANDARD_ADMIN,status:"loading",scopeKind:kind,scopeKey,error:"",branchId,industry};if(!silent)inspectionDraw();
+  const query=new URLSearchParams({industry_key:industry,scope_kind:kind});if(scopeKey)query.set("scope_key",scopeKey);
+  try{
+    const data=await api(`/inspections/standards/overrides?${query}`);
+    if(INSPECTION_INDUSTRY!==industry||Number(INSPECTION_CHECKLIST.branchId)!==branchId)return;
+    INSPECTION_STANDARD_ADMIN={status:"ready",scopeKind:kind,scopeKey,data,error:"",branchId,industry};
+  }catch(e){
+    if(e?.name==="NavigationAbort"||e?.status===401)throw e;
+    INSPECTION_STANDARD_ADMIN={status:e?.status===403?"permission":"error",scopeKind:kind,scopeKey,data:null,error:e?.message||"企业标准加载失败",branchId,industry};
+  }
+  if(!silent)inspectionDraw();
+}
+async function inspectionStandardAdminScopeChanged(value){await inspectionStandardAdminLoad(value,{reset:true});}
+function inspectionStandardAdminRow(item,current,effectiveSources){
+  const patch=current?.active&&current.patch&&typeof current.patch==="object"?current.patch:{},code=String(item.item_code||""),mandatory=item.tier==="mandatory",sources=effectiveSources?.[code]||{};
+  const sourceBadges=Object.entries(sources).map(([field,layer])=>`<span class="tag">${esc(field)}：${esc(inspectionStandardLayerName(layer))}</span>`).join(" ")||`<span class="sub">当前全部继承产品基线</span>`;
+  const boolOptions=(value,allowFalse=true)=>`<option value="" ${value===undefined?"selected":""}>继承</option><option value="true" ${value===true?"selected":""}>启用 / 必填</option>${allowFalse?`<option value="false" ${value===false?"selected":""}>关闭 / 选填</option>`:""}`;
+  return `<details class="topic" data-standard-edit-row="${esc(code)}" style="margin:7px 0;min-width:0"><summary><b>${esc(item.label||code)}</b> <span class="tag">${esc(item.tier||"")}</span> ${current?.active?`<span class="tag">本层 v${Number(current.version)||0}</span>`:`<span class="sub">本层继承</span>`}</summary>
+    <div class="sub" style="margin:7px 0">当前生效层级：${sourceBadges}</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr));gap:8px">
+      <label class="sub">启用<select data-standard-field="enabled" style="width:100%;min-width:0">${boolOptions(patch.enabled,!mandatory)}</select></label>
+      <label class="sub">必填<select data-standard-field="required" style="width:100%;min-width:0">${boolOptions(patch.required,!mandatory)}</select></label>
+      <label class="sub">权重<input data-standard-field="weight" type="number" min="0" max="100" step="0.1" value="${patch.weight===undefined?"":esc(patch.weight)}" placeholder="继承" style="width:100%;min-width:0"></label>
+      <label class="sub">严重度<select data-standard-field="severity" style="width:100%;min-width:0"><option value="">继承</option>${["low","medium","high","critical"].map(value=>`<option value="${value}" ${patch.severity===value?"selected":""}>${esc(inspectionSeverity(value))}</option>`).join("")}</select></label>
+    </div>
+    <label class="sub">拍摄/核验说明（留空即继承）<textarea data-standard-field="shot_guide" maxlength="300" style="width:100%;min-width:0;min-height:70px">${esc(patch.shot_guide||"")}</textarea></label>
+    <div class="actions" style="margin-top:8px"><button class="btn sm pri" onclick="inspectionStandardOverrideSave(${cp(code)},this)">保存本层覆盖</button>${current?.active?`<button class="btn sm bad" onclick="inspectionStandardOverrideDisable(${Number(current.id)},${Number(current.version)},this)">恢复继承</button>`:""}<span class="sub">强制项不得关闭、取消必填、降低权重或严重度；最终由服务端校验。</span></div></details>`;
+}
+function inspectionStandardAdminHtml(){
+  if(!isAdmin())return "";
+  const state=INSPECTION_STANDARD_ADMIN,checklist=INSPECTION_CHECKLIST.data||{},branch=checklist.branch||{},summary=checklist.override_summary||{},version=checklist.template_version||checklist.catalog_version||"—";
+  const regionAvailable=Boolean(String(branch.region||"").trim()),scopeLabel=state.scopeKind==="tenant"?"整个企业":state.scopeKind==="region"?`区域：${branch.region||"未设置"}`:`门店：${branch.name||branch.id||"当前门店"}`;
+  const controls=`<div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap"><label style="min-width:190px">覆盖范围<select onchange="inspectionStandardAdminScopeChanged(this.value)" style="width:100%"><option value="tenant" ${state.scopeKind==="tenant"?"selected":""}>整个企业</option><option value="region" ${state.scopeKind==="region"?"selected":""} ${regionAvailable?"":"disabled"}>当前区域${regionAvailable?` · ${esc(branch.region)}`:" · 未设置"}</option><option value="branch" ${state.scopeKind==="branch"?"selected":""}>当前门店 · ${esc(branch.name||branch.id||"")}</option></select></label><button class="btn sm" onclick="inspectionStandardAdminLoad()">刷新</button><span class="sub">当前有效模板 ${esc(version)}</span></div>`;
+  if(state.status==="loading"||state.status==="idle")return `<details class="notice violet"><summary><b>企业巡店标准设置</b></summary>${controls}<div role="status"><span class="spin"></span> 正在加载 ${esc(scopeLabel)} 标准…</div></details>`;
+  if(state.status==="permission")return "";
+  if(state.status==="error")return `<details class="notice red" open><summary><b>企业巡店标准设置</b></summary>${controls}<div>${esc(state.error)}</div></details>`;
+  const data=state.data||{},baseItems=Array.isArray(data.base_items)?data.base_items:[],rows=Array.isArray(data.items)?data.items:[],currentByCode=new Map(rows.map(row=>[String(row.item_code||""),row])),field_sources=summary.field_sources||{};
+  return `<details class="notice violet"><summary><b>企业巡店标准设置</b> · ${esc(scopeLabel)} · ${Number(summary.applied_count)||0} 条覆盖正在影响当前门店</summary>${controls}<div class="sub" style="margin:8px 0">按“企业 → 区域 → 门店”顺序叠加，后一层只覆盖已填写字段。清空本层请点“恢复继承”；保存会生成新模板版本，已完成巡店仍保留原快照。</div>${baseItems.map(item=>inspectionStandardAdminRow(item,currentByCode.get(String(item.item_code||"")),field_sources)).join("")||`<div class="empty">暂无可配置检查项</div>`}</details>`;
+}
+async function inspectionStandardOverrideSave(itemCode,btn){
+  if(!isAdmin())return toast("仅企业主或平台管理员可管理巡店标准");
+  const code=String(itemCode||""),row=[...document.querySelectorAll("[data-standard-edit-row]")].find(node=>node.dataset.standardEditRow===code);if(!row)return toast("检查项已刷新，请重新打开设置");
+  const state=INSPECTION_STANDARD_ADMIN,current=(state.data?.items||[]).find(item=>String(item.item_code||"")===code),patch={};
+  for(const field of ["enabled","required","severity"]){const value=row.querySelector(`[data-standard-field="${field}"]`)?.value||"";if(value)patch[field]=field==="severity"?value:value==="true";}
+  const weight=row.querySelector('[data-standard-field="weight"]')?.value.trim()||"";if(weight){const number=Number(weight);if(!Number.isFinite(number)||number<0||number>100)return toast("权重必须是 0-100 的数字");patch.weight=number;}
+  const shotGuide=row.querySelector('[data-standard-field="shot_guide"]')?.value.trim()||"";if(shotGuide)patch.shot_guide=shotGuide;
+  if(!Object.keys(patch).length)return toast(current?.active?"如需清空本层，请点击“恢复继承”":"请至少填写一个覆盖字段");
+  const body={industry_key:INSPECTION_INDUSTRY,scope_kind:state.scopeKind,scope_key:state.scopeKind==="tenant"?null:state.scopeKey,item_code:code,patch,expected_version:Number(current?.version)||0};
+  btn.disabled=true;btn.innerHTML='<span class="spin"></span> 保存中…';
+  try{await api("/inspections/standards/overrides",{method:"PUT",body});toast("企业巡店标准已保存，新巡店将使用新版本");await inspectionChecklistLoad(state.branchId);}
+  catch(e){toast(e?.status===409?"标准已被其他人更新，请刷新后再编辑":e.message);await inspectionStandardAdminLoad(state.scopeKind,{reset:true}).catch(()=>{});}
+  finally{btn.disabled=false;btn.textContent="保存本层覆盖";}
+}
+async function inspectionStandardOverrideDisable(overrideId,expectedVersion,btn){
+  if(!isAdmin())return toast("仅企业主或平台管理员可管理巡店标准");
+  const state=INSPECTION_STANDARD_ADMIN;btn.disabled=true;btn.innerHTML='<span class="spin"></span> 恢复中…';
+  try{await api(`/inspections/standards/overrides/${Number(overrideId)}`,{method:"DELETE",body:{industry_key:INSPECTION_INDUSTRY,expected_version:Number(expectedVersion)}});toast("本层覆盖已关闭，当前项恢复继承");await inspectionChecklistLoad(state.branchId);}
+  catch(e){toast(e?.status===409?"标准已被其他人更新，请刷新后再操作":e.message);await inspectionStandardAdminLoad(state.scopeKind,{reset:true}).catch(()=>{});}
+  finally{btn.disabled=false;btn.textContent="恢复继承";}
+}
+function inspectionMetricValue(value,unit=""){
+  if(value===null||value===undefined||value==="")return `<span class="sub">待接入</span>`;
+  return `${esc(value)}${unit?` <span class="sub">${esc(unit)}</span>`:""}`;
+}
+function inspectionMetricsHtml(metrics=[]){
+  if(!metrics.length)return `<div class="empty">暂无经营指标口径。</div>`;
+  return `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:10px">${metrics.map(metric=>{
+    const actual=metric.actual??metric.value??null,target=metric.target??null,previous=metric.previous_period??metric.previous??null,same_year=metric.same_period_last_year??metric.same_year??metric.same_year_previous??null,benchmark=metric.benchmark??null,unit=metric.unit||"";
+    return `<div class="topic" style="margin:0;min-width:0;overflow-wrap:anywhere"><b>${esc(metric.label||metric.metric_code)}</b><div class="sub">${esc(metric.formula||"")}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(74px,1fr));gap:7px;margin-top:8px">${[["实际",actual],["目标",target],["上期",previous],["同期",same_year],["基准",benchmark]].map(([label,value])=>`<div><span class="sub">${label}</span><div>${inspectionMetricValue(value,unit)}</div></div>`).join("")}</div>
+      <label class="sub" for="inspection-observation-${esc(metric.metric_code)}">本次现场 / 系统核对值（选填）</label><input id="inspection-observation-${esc(metric.metric_code)}" type="number" step="any" data-observation-code="${esc(metric.metric_code)}" data-observation-unit="${esc(unit)}" inputmode="decimal" value="" placeholder="不会自动复制历史实际值" style="width:100%;min-width:0"></div>`;
+  }).join("")}</div>`;
+}
+function inspectionStandardMetaHtml(item){
+  const condition=String(item?.condition||"").trim(),jurisdiction=String(item?.jurisdiction||"").trim(),sourceNo=String(item?.source_no||"").trim(),source=safeExternalUrl(item?.source_url);
+  const parts=[];
+  if(condition)parts.push(`<span><b>适用条件：</b>${esc(condition)}</span>`);
+  if(jurisdiction)parts.push(`<span><b>管辖/适用范围：</b>${esc(jurisdiction)}</span>`);
+  if(sourceNo)parts.push(source?`<a href="${esc(source)}" target="_blank" rel="noopener noreferrer nofollow" referrerpolicy="no-referrer"><b>依据：</b>${esc(sourceNo)}</a>`:`<span><b>依据：</b>${esc(sourceNo)}</span>`);
+  return parts.length?`<div class="sub" style="display:grid;gap:3px;margin-top:6px">${parts.join("")}</div>`:"";
+}
+function inspectionObservationControlHtml(item){
+  const code=esc(item.item_code),type=String(item.input_type||"");
+  if(type==="boolean")return `<label class="sub">现场核验结果（选填）<select data-check-observation="${code}" data-observation-type="boolean" style="width:100%;min-width:0;margin-top:6px"><option value="">未记录</option><option value="true">是 / 符合</option><option value="false">否 / 不符合</option></select></label>`;
+  if(type==="document")return `<label class="sub">记录/凭证索引（选填）<input data-check-observation="${code}" data-observation-type="document" placeholder="例：当日消毒记录第 3 页" style="width:100%;min-width:0;margin-top:6px"></label>`;
+  return `<label class="sub">现场观察（选填）<input data-check-observation="${code}" data-observation-type="${esc(type||"text")}" style="width:100%;min-width:0;margin-top:6px"></label>`;
+}
+function inspectionChecklistHtml(){
+  const state=INSPECTION_CHECKLIST;
+  if(state.status==="idle"||state.status==="loading")return `<div class="notice" role="status"><span class="spin"></span> 正在加载门店标准与采集位…</div>`;
+  if(state.status==="permission")return `<div class="notice red">无权限：${esc(state.error)}</div>`;
+  if(state.status==="error")return `<div class="notice red">检查清单加载失败：${esc(state.error)} <button class="btn sm" onclick="inspectionChecklistLoad(${Number(state.branchId)})">重试</button></div>`;
+  if(state.status==="empty"||!state.data)return `<div class="empty">暂无检查清单，请先选择门店。</div>`;
+  const data=state.data,items=Array.isArray(data.items)?data.items:Array.isArray(data.checklist)?data.checklist:[],capture_slots=Array.isArray(data.capture_slots)?data.capture_slots:Array.isArray(data.slots)?data.slots:[],metrics=Array.isArray(data.metrics)?data.metrics:Array.isArray(data.operating_metrics)?data.operating_metrics:[];
+  const catalog_version=data.template_version||data.catalog_version||data.version?.catalog_version||data.version||"待接入",asOf=data.as_of||data.version?.as_of||"";
+  const tiers={mandatory:["法规 / 强制标准","仅在所列适用条件与管辖范围内必查，不得将地方或特定业态要求扩大为全国通用结论"],recommended:["专业建议","推荐性标准与专业做法，应结合门店业态及当地要求"],operations:["经营操作","企业自定经营与服务要求，不是法定阈值，需结合门店真实记录核验"]};
+  const tierHtml=Object.entries(tiers).map(([tier,[label,hint]])=>{const rows=items.filter(item=>item.tier===tier);return `<section style="min-width:0"><h4 style="margin-bottom:4px">${label} <span class="tag">${tier}</span></h4><div class="sub">${hint}</div>${rows.length?rows.map(item=>`<div class="topic" style="margin:7px 0;min-width:0;overflow-wrap:anywhere"><b>${esc(item.label)}</b><div class="sub">${esc(item.shot_guide||item.evidence||"")}</div>${inspectionStandardMetaHtml(item)}${inspectionObservationControlHtml(item)}</div>`).join(""):`<div class="empty">暂无此层级项目</div>`}</section>`;}).join("");
+  const slotHtml=capture_slots.map((slot,index)=>`<label class="topic" style="display:block;margin:0;min-width:0;overflow-wrap:anywhere"><b>${index+1}. ${esc(slot.label||slot.slot_code)}${slot.required?` <span class="tag">必拍</span>`:` <span class="sub">选拍</span>`}</b><div class="sub">${esc(slot.shot_guide||"请拍摄清晰现场图片")}</div><input type="file" accept="image/jpeg,image/png,image/webp" data-capture-slot="${esc(slot.slot_code)}" data-required="${slot.required?"true":"false"}" onchange="inspectionCaptureChanged()" style="width:100%;min-width:0;margin-top:7px"><div class="sub" data-slot-file="${esc(slot.slot_code)}">未选择文件</div></label>`).join("");
+  return `<div class="notice green">标准版本：${esc(catalog_version)}${asOf?` · 截至 ${esc(asOf)}`:""}</div>${inspectionStandardAdminHtml()}
+    <details><summary><b>查看分层检查标准（mandatory / recommended / operations）</b></summary><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr));gap:10px;margin-top:9px">${tierHtml}</div></details>
+    <h4>七个现场采集位</h4><div id="inspection-capture-progress" class="notice" role="status">必拍覆盖 0 / ${capture_slots.filter(slot=>slot.required).length}</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr));gap:10px">${slotHtml||`<div class="empty">暂无采集位</div>`}</div>
+    <h4>经营指标</h4>${inspectionMetricsHtml(metrics)}`;
+}
+function inspectionCaptureChanged(){
+  const inputs=[...document.querySelectorAll("[data-capture-slot]")],required=inputs.filter(input=>input.dataset.required==="true"),covered=required.filter(input=>input.files?.length).length;
+  inputs.forEach(input=>{const label=document.querySelector(`[data-slot-file="${CSS.escape(input.dataset.captureSlot||"")}"]`);if(label)label.textContent=input.files?.[0]?.name||"未选择文件";});
+  const progress=$("#inspection-capture-progress");if(progress){progress.textContent=`必拍覆盖 ${covered} / ${required.length}`;progress.classList.toggle("green",required.length>0&&covered===required.length);}
+}
+function inspectionObservations(){
+  const metrics=[...document.querySelectorAll("[data-observation-code]")].filter(input=>input.value.trim()!=="").map(input=>({metric_code:input.dataset.observationCode,value:Number(input.value),unit:input.dataset.observationUnit||null}));
+  const checklist=[...document.querySelectorAll("[data-check-observation]")].filter(input=>input.value.trim()!=="").map(input=>({item_code:input.dataset.checkObservation,value:input.dataset.observationType==="boolean"?input.value==="true":input.dataset.observationType==="number"?Number(input.value):input.value.trim()}));
+  return {metrics,checklist};
+}
+async function inspectionView(rawId,rawIndustry){
+  const id=Number(rawId||0);
+  if(rawIndustry){
+    let routeIndustry="";
+    try{routeIndustry=decodeURIComponent(String(rawIndustry));}catch(_){routeIndustry="";}
+    if(/^[a-z0-9_-]{1,64}$/i.test(routeIndustry)&&routeIndustry!==INSPECTION_INDUSTRY)inspectionResetScope(routeIndustry);
+  }
+  const metaQuery=new URLSearchParams();if(INSPECTION_INDUSTRY)metaQuery.set("industry_key",INSPECTION_INDUSTRY);
+  const meta=await api(`/inspections/meta${metaQuery.size?`?${metaQuery}`:""}`),selected=String(meta.industry_key||"");
+  if(selected!==INSPECTION_INDUSTRY)inspectionResetScope(selected);
+  const listQuery=new URLSearchParams({industry_key:selected,limit:"40"}),cursor=INSPECTION_CURSOR_STACK[INSPECTION_CURSOR_PAGE];
+  if(INSPECTION_BRANCH_ID)listQuery.set("branch_id",String(INSPECTION_BRANCH_ID));
+  if(INSPECTION_REGION!==null)listQuery.set("region",String(INSPECTION_REGION));
+  if(cursor)listQuery.set("before_id",String(cursor));
+  const detailQuery=new URLSearchParams({industry_key:selected});
+  let list={items:[],summary:{}},detail=null;
+  if(id){
+    detail=await api(`/inspections/${id}?${detailQuery}`);
+  }else{
+    try{list=await api(`/inspections?${listQuery}`);}
+    catch(e){
+      if(e?.status===404&&INSPECTION_BRANCH_ID){
+        INSPECTION_BRANCH_ID=0;INSPECTION_CURSOR_STACK=[null];INSPECTION_CURSOR_PAGE=0;
+        listQuery.delete("branch_id");listQuery.delete("before_id");
+        list=await api(`/inspections?${listQuery}`);
+      }else throw e;
+    }
+  }
+  INSPECTION_META=meta;INSPECTION_LIST=list;INSPECTION_DETAIL=detail;
+  if(!detail){
+    await inspectionBranchSearch({reset:INSPECTION_BRANCH_PICKER.industry!==selected,silent:true});
+    if(INSPECTION_CAPTURE_BRANCH_ID)await inspectionChecklistLoad(INSPECTION_CAPTURE_BRANCH_ID,{silent:true});
+  }
+  inspectionDraw();
+}
+async function inspectionSelectIndustry(value){
+  const selected=String(value||"");if(!selected||selected===INSPECTION_INDUSTRY)return;
+  inspectionResetScope(selected);
+  const target=inspectionRecordHash(0,selected);if(location.hash!==target)location.hash=target;else await inspectionView().catch(e=>toast(e.message));
+}
+async function inspectionPage(direction){
+  if(direction<0&&INSPECTION_CURSOR_PAGE>0)INSPECTION_CURSOR_PAGE--;
+  if(direction>0&&INSPECTION_LIST?.next_before_id){
+    const next=Number(INSPECTION_LIST.next_before_id);
+    INSPECTION_CURSOR_STACK=INSPECTION_CURSOR_STACK.slice(0,INSPECTION_CURSOR_PAGE+1);INSPECTION_CURSOR_STACK.push(next);INSPECTION_CURSOR_PAGE++;
+  }
+  await inspectionView().catch(e=>toast(e.message));
+}
+async function inspectionFilterBranch(branchId){
+  INSPECTION_BRANCH_ID=Math.max(0,Number(branchId)||0);INSPECTION_REGION=null;INSPECTION_CURSOR_STACK=[null];INSPECTION_CURSOR_PAGE=0;INSPECTION_DETAIL=null;
+  const target=inspectionRecordHash(0);if(location.hash!==target)location.hash=target;else await inspectionView().catch(e=>toast(e.message));
+}
+async function inspectionFilterRegion(region){
+  INSPECTION_BRANCH_ID=0;INSPECTION_REGION=region===null?null:String(region);INSPECTION_CURSOR_STACK=[null];INSPECTION_CURSOR_PAGE=0;INSPECTION_DETAIL=null;
+  const target=inspectionRecordHash(0);if(location.hash!==target)location.hash=target;else await inspectionView().catch(e=>toast(e.message));
+}
+function inspectionImportActionHtml(){
+  if(INSPECTION_DETAIL)return "";
+  const status=String(INSPECTION_IMPORT.status||"idle"),statusText=status==="loading"?"预检中":status==="ready"?"待确认":status==="committed"?"已完成":status==="error"||status==="permission"?"需处理":"";
+  return `<button id="inspection-import-toggle" type="button" class="btn inspection-import-toggle ${INSPECTION_IMPORT_OPEN?"pri":""}" aria-controls="inspection-import-workbench" aria-expanded="${INSPECTION_IMPORT_OPEN?"true":"false"}" onclick="inspectionImportToggle()"><span class="inspection-import-toggle-icon" aria-hidden="true">⇩</span><span data-inspection-import-toggle-label>${INSPECTION_IMPORT_OPEN?"收起批量导入":"批量导入门店"}</span>${statusText?`<span class="inspection-import-toggle-status">${esc(statusText)}</span>`:""}</button>`;
+}
+function inspectionImportToggle(force){
+  const next=typeof force==="boolean"?force:!INSPECTION_IMPORT_OPEN;
+  INSPECTION_IMPORT_OPEN=next;
+  const panel=$("#inspection-import-workbench"),toggle=$("#inspection-import-toggle"),label=toggle?.querySelector("[data-inspection-import-toggle-label]");
+  if(panel){panel.hidden=!next;panel.classList.toggle("is-open",next);}
+  if(toggle){toggle.setAttribute("aria-expanded",next?"true":"false");toggle.classList.toggle("pri",next);}
+  if(label)label.textContent=next?"收起批量导入":"批量导入门店";
+  requestAnimationFrame(()=>{
+    const target=next?panel:toggle;if(!target)return;
+    if(next)target.scrollIntoView({behavior:globalThis.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches?"auto":"smooth",block:"nearest"});
+    target.focus({preventScroll:next});
+  });
+}
+function inspectionImportScopeIsCurrent(industryKey,{requestKey="",importId=0}={}){
+  if(String(INSPECTION_INDUSTRY)!==String(industryKey))return false;
+  if(requestKey&&String(INSPECTION_IMPORT.requestKey||"")!==String(requestKey))return false;
+  const currentImportId=Number(INSPECTION_IMPORT.preview?.import_id)||0;
+  return !importId||!currentImportId||currentImportId===Number(importId);
+}
+function inspectionImportFileChanged(input){
+  const file=input?.files?.[0],name=$("#inspection-import-file-name"),upload=$("#inspection-import-upload-button");
+  if(name)name.textContent=file?`${file.name} · ${fmtB(Number(file.size)||0)}`:"尚未选择 Excel 文件";
+  if(upload)upload.disabled=!file||INSPECTION_IMPORT.status==="loading";
+}
+function inspectionImportRender(){
+  const state=INSPECTION_IMPORT,page=INSPECTION_IMPORT_PAGE,meta=INSPECTION_META||{},explicitPermission=meta.permissions?.can_import_branches,canImport=explicitPermission===true||(explicitPermission===undefined&&isAdmin()),preview=state.preview||{},counts=preview.counts||{create:0,update:0,skip:0,error:0},businessCounts=preview.business_counts||{create:0,update:0,skip:0,error:0},rows=(Array.isArray(preview.rows)?preview.rows:[]).slice(0,50),branchRows=rows.filter(row=>row.row_kind!=="business"),businessRows=rows.filter(row=>row.row_kind==="business"),totalErrors=(Number(counts.error)||0)+(Number(businessCounts.error)||0),industry_key=INSPECTION_INDUSTRY,industry=(meta.industries||[]).find(item=>item.key===industry_key)||{};
+  const templateUrl=`/api/inspections/branches/import-template?${new URLSearchParams({industry_key})}`,industryLabel=`${industry.emoji||"🏪"} ${industry.name||industry_key||"当前行业"}`,hasPreview=Boolean(preview.import_id),stage=state.status==="committed"?4:hasPreview?3:["loading","error","permission"].includes(state.status)?2:1;
+  let result="";
+  if(!canImport){
+    result=`<section class="inspection-import-result" aria-live="polite"><div class="notice red" role="alert">无权限：批量导入会写入店长信息、经营数据并可能更新门店状态，仅企业主或平台管理员可操作。</div></section>`;
+  }else if(state.status==="loading"){
+    result=`<section class="inspection-import-result" aria-live="polite"><div class="notice" role="status"><span class="spin"></span> 正在加载并校验 Excel，可安全离开后返回…</div></section>`;
+  }else if(state.status==="permission"){
+    result=`<section class="inspection-import-result" aria-live="polite"><div class="notice red" role="alert">无权限：${esc(state.error)}</div></section>`;
+  }else if(state.status==="error"){
+    result=`<section class="inspection-import-result" aria-live="polite"><div class="notice red" role="alert">加载失败：${esc(state.error)}</div></section>`;
+  }else if(state.status==="committed"){
+    result=`<section class="inspection-import-result" aria-live="polite"><div class="notice green" role="status">导入已提交，门店列表已刷新。</div></section>`;
+  }else if(hasPreview){
+    result=`<section class="inspection-import-result ${counts.error>0||businessCounts.error>0?"has-error":"is-ready"}" aria-live="polite" aria-labelledby="inspection-import-result-title">
+      <div class="inspection-import-result-head"><div><span class="inspection-import-eyebrow">预检结果</span><h4 id="inspection-import-result-title">${totalErrors>0?"发现需要修正的数据":"数据已通过校验"}</h4></div><span class="inspection-import-result-badge" role="${totalErrors>0?"alert":"status"}">${totalErrors>0?`${totalErrors} 项错误`:"可以提交"}</span></div>
+      <div class="inspection-import-summary">
+        <article><span>门店预检</span><strong>${bossDashNumber((Number(counts.create)||0)+(Number(counts.update)||0)+(Number(counts.skip)||0)+(Number(counts.error)||0))}</strong><p>新建 ${Number(counts.create)||0} · 更新 ${Number(counts.update)||0} · 跳过 ${Number(counts.skip)||0} · 错误 ${Number(counts.error)||0}</p></article>
+        <article><span>经营数据预检</span><strong>${bossDashNumber((Number(businessCounts.create)||0)+(Number(businessCounts.update)||0)+(Number(businessCounts.skip)||0)+(Number(businessCounts.error)||0))}</strong><p>新建 ${Number(businessCounts.create)||0} · 更新 ${Number(businessCounts.update)||0} · 跳过 ${Number(businessCounts.skip)||0} · 错误 ${Number(businessCounts.error)||0}</p></article>
+      </div>
+      <div class="inspection-import-filters actions"><span class="sub">预检明细</span>${[["all","全部行"],["branch","仅门店"],["business","仅经营数据"]].map(([kind,label])=>`<button type="button" class="btn sm ${page.rowKind===kind?"pri":""}" aria-pressed="${page.rowKind===kind?"true":"false"}" onclick="inspectionImportFilter(${cp(kind)})" ${page.loading?"disabled":""}>${label}</button>`).join("")}<button type="button" class="btn sm ${page.errorsOnly?"bad":""}" aria-pressed="${page.errorsOnly?"true":"false"}" onclick="inspectionImportErrorsOnly(${page.errorsOnly?"false":"true"})" ${page.loading?"disabled":""}>${page.errorsOnly?"显示全部结果":"仅错误"}</button></div>
+      ${page.loading?`<div class="notice" role="status"><span class="spin"></span> 正在加载本页预检明细…</div>`:""}${page.error?`<div class="notice red" role="alert">明细加载失败：${esc(page.error)}</div>`:""}
+      <div class="inspection-import-page-meta">当前页 ${rows.length} 行 · 筛选后共 ${bossDashNumber(preview.filtered_total_rows??rows.length)} 行 · 每页最多 ${bossDashNumber(preview.limit||50)} 行</div>
+      ${branchRows.length?`<div class="inspection-import-table-section"><h4>门店主表</h4><div class="inspection-import-table-wrap"><table class="dimtable inspection-import-table"><thead><tr><th>行</th><th>门店</th><th>处理</th><th>错误</th></tr></thead><tbody>${branchRows.map(row=>`<tr><td>${esc(row.row_no??row.row_number??"—")}</td><td class="inspection-import-break">${esc(row.store_code||"")}${row.name||row.data?.name?` · ${esc(row.name||row.data?.name)}`:""}</td><td>${esc(row.action||row.status||"—")}</td><td class="inspection-import-break">${esc(row.error_message||row.error_code||"—")}</td></tr>`).join("")}</tbody></table></div></div>`:""}
+      ${businessRows.length?`<div class="inspection-import-table-section"><h4>经营数据预检</h4><div class="inspection-import-table-wrap is-business"><table class="dimtable inspection-import-table"><thead><tr><th>行 / 门店</th><th>指标</th><th>期间</th><th>实际值</th><th>单位</th><th>来源</th><th>处理 / 错误</th></tr></thead><tbody>${businessRows.map(row=>{const data=row.data||{};return `<tr><td>${esc(row.row_no??row.row_number??"—")} · ${esc(row.store_code||data.store_code||"—")}</td><td>${esc(data.metric_key||"—")}</td><td>${esc(data.period_start||"—")} 至 ${esc(data.period_end||"—")}</td><td>${esc(data.value??"—")}</td><td>${esc(data.unit||"—")}</td><td class="inspection-import-break">${esc(data.source_ref||"—")}</td><td>${esc(row.action||row.status||"—")}${row.error_message||row.error_code?` · ${esc(row.error_message||row.error_code)}`:""}</td></tr>`;}).join("")}</tbody></table></div></div>`:""}
+      ${!page.loading&&!rows.length?`<div class="empty inspection-import-filter-empty">当前筛选下暂无预检明细。</div>`:""}
+      <div class="inspection-import-pager actions"><button type="button" class="btn sm" onclick="inspectionImportPage(-1)" ${page.page>0&&!page.loading?"":"disabled"}>← 上一页</button><span class="sub">第 ${page.page+1} 页</span><button type="button" class="btn sm" onclick="inspectionImportPage(1)" ${page.nextCursor!==null&&!page.loading?"":"disabled"}>下一页 →</button></div>
+      <footer class="inspection-import-commit"><div><b aria-current="step">③ 确认导入</b><p>${totalErrors>0?"请修正门店或经营数据错误后重新上传；任一错误都会阻止提交。":"确认后将一次性写入门店、店长与经营数据，过程不会产生半成功记录。"}</p></div><button type="button" class="btn pri" onclick="inspectionImportCommit(this)" ${totalErrors===0&&state.status==="ready"?"":"disabled"}>${totalErrors>0?"存在错误，暂不能提交":"确认提交导入"}</button></footer>
+    </section>`;
+  }
+  return `<section id="inspection-import-workbench" class="card inspection-import-workbench ${INSPECTION_IMPORT_OPEN?"is-open":""} ${canImport?"":"is-denied"}" ${INSPECTION_IMPORT_OPEN?"":"hidden"} tabindex="-1" aria-labelledby="inspection-import-title">
+    <div class="inspection-import-context-row"><div class="inspection-import-context-title"><h3 id="inspection-import-title">批量导入门店</h3><span class="inspection-import-industry">${esc(industryLabel)}</span></div><p>${canImport?"下载标准模板，填好后上传预检；确认提交前不会写入系统。":"当前账号仅可查看巡店数据，不能批量写入门店。"}</p></div>
+    ${canImport?`<div class="inspection-import-layout">
+      <a class="inspection-import-template" href="${esc(templateUrl)}" download aria-label="下载Excel模板"><span class="inspection-import-eyebrow" ${stage===1?`aria-current="step"`:""}>① 下载标准模板</span><strong>门店批量导入模板</strong><small>保留表头和工作表名，填写门店、店长及经营数据。</small><span class="inspection-import-template-action">下载 .xlsx →</span></a>
+      <section class="inspection-import-upload" aria-labelledby="inspection-import-upload-title"><div class="inspection-import-upload-copy"><span class="inspection-import-eyebrow" ${stage===2?`aria-current="step"`:""}>② 上传并预检</span><h4 id="inspection-import-upload-title">选择填好的 Excel</h4><p>先检查字段、重复门店与经营数据冲突。</p></div><input id="inspection-import-file" class="inspection-import-file" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" aria-describedby="inspection-import-file-help inspection-import-file-name" onchange="inspectionImportFileChanged(this)"><div id="inspection-import-file-name" class="inspection-import-file-name" aria-live="polite">尚未选择 Excel 文件</div><div id="inspection-import-file-help" class="inspection-import-file-help">16MB 以内 · 最多 2万家门店 · 4万行经营数据</div><button id="inspection-import-upload-button" type="button" class="btn pri inspection-import-upload-button" onclick="inspectionImportUpload(this)" disabled>上传并预检</button></section>
+    </div>`:""}
+    ${result}
+  </section>`;
+}
+async function inspectionImportLoadPage({reset=false}={}){
+  const preview=INSPECTION_IMPORT.preview||{},importId=Number(preview.import_id)||0,industry_key=INSPECTION_INDUSTRY,requestKey=String(INSPECTION_IMPORT.requestKey||""),page=INSPECTION_IMPORT_PAGE;if(!importId)return;
+  const isCurrent=()=>inspectionImportScopeIsCurrent(industry_key,{requestKey,importId});
+  if(reset){page.cursorStack=[null];page.page=0;page.nextCursor=null;}
+  const cursor=page.cursorStack[page.page],query=new URLSearchParams({industry_key,limit:"50",row_kind:page.rowKind,errors_only:String(page.errorsOnly)});
+  if(cursor!==null&&cursor!==undefined&&cursor!=="")query.set("cursor",cursor);
+  page.loading=true;page.error="";inspectionDraw();
+  try{
+    const result=await api(`/inspections/branches/imports/${importId}?${query}`);
+    if(!isCurrent())return;
+    INSPECTION_IMPORT.preview={...preview,...result};page.nextCursor=result.next_cursor??null;
+  }catch(e){
+    if(!isCurrent())return;
+    if(e?.name==="NavigationAbort"||e?.status===401)throw e;
+    page.error=e?.message||"预检明细加载失败";
+  }finally{if(isCurrent()){page.loading=false;inspectionDraw();}}
+}
+async function inspectionImportFilter(rowKind){
+  const selected=String(rowKind||"");if(!["all","branch","business"].includes(selected)||INSPECTION_IMPORT_PAGE.loading)return;
+  INSPECTION_IMPORT_PAGE.rowKind=selected;await inspectionImportLoadPage({reset:true});
+}
+async function inspectionImportErrorsOnly(value){
+  if(INSPECTION_IMPORT_PAGE.loading)return;
+  INSPECTION_IMPORT_PAGE.errorsOnly=value===true||value==="true";await inspectionImportLoadPage({reset:true});
+}
+async function inspectionImportPage(direction){
+  const page=INSPECTION_IMPORT_PAGE;if(page.loading)return;
+  if(direction<0&&page.page>0)page.page--;
+  else if(direction>0&&page.nextCursor!==null){
+    const nextCursor=page.nextCursor;page.cursorStack=page.cursorStack.slice(0,page.page+1);page.cursorStack.push(nextCursor);page.page++;
+  }else return;
+  await inspectionImportLoadPage();
+}
+async function inspectionImportPoll(importId,{industryKey=INSPECTION_INDUSTRY,requestKey=INSPECTION_IMPORT.requestKey}={}){
+  const industry_key=String(industryKey||""),capturedImportId=Number(importId)||0,isCurrent=()=>inspectionImportScopeIsCurrent(industry_key,{requestKey,importId:capturedImportId}),query=new URLSearchParams({industry_key,limit:"50",row_kind:"all",errors_only:"false"});
+  for(let attempt=0;attempt<20;attempt++){
+    if(!isCurrent())return null;
+    const result=await api(`/inspections/branches/imports/${capturedImportId}?${query}`);
+    if(!isCurrent()||Number(result?.import_id||capturedImportId)!==capturedImportId)return null;
+    INSPECTION_IMPORT.preview=result;
+    if(!["queued","parsing","processing","pending"].includes(String(result?.status||"").toLowerCase()))return result;
+    inspectionDraw();await new Promise(resolve=>setTimeout(resolve,750));
+    if(!isCurrent())return null;
+  }
+  if(!isCurrent())return null;
+  const timeout=new Error("预检仍在处理，请稍后重试；本次请求号已保留。");timeout.uncertain=true;throw timeout;
+}
+async function inspectionImportUpload(btn){
+  const file=$("#inspection-import-file")?.files?.[0],industry_key=String(INSPECTION_INDUSTRY||"");if(!file)return toast("请选择 .xlsx 模板文件");
+  if(!/\.xlsx$/i.test(file.name))return toast("仅支持 .xlsx 文件");
+  if(Number(file.size||0)>16*1024*1024)return toast("文件不能超过 16MB");
+  let requestKey="";
+  INSPECTION_IMPORT_OPEN=true;INSPECTION_IMPORT={...INSPECTION_IMPORT,status:"loading",preview:null,error:""};INSPECTION_IMPORT_PAGE={rowKind:"all",errorsOnly:false,cursorStack:[null],page:0,nextCursor:null,loading:false,error:""};inspectionDraw();
+  try{
+    const fingerprint=await inspectionFileFingerprint(file);
+    if(String(INSPECTION_INDUSTRY)!==industry_key)return;
+    const storageKey=persistentMutationStorageKey("inspectionbranchimport",industry_key);
+    try{const saved=JSON.parse(localStorage.getItem(storageKey)||"null");if(saved?.file_sha256===fingerprint&&/^[A-Za-z0-9][A-Za-z0-9._:-]{11,127}$/.test(saved.request_key||""))requestKey=saved.request_key;}catch(_){}
+    if(!requestKey)requestKey=persistentMutationRequestKey("inspectionbranchimport",industry_key,{industry_key,fingerprint});
+    try{const saved=JSON.parse(localStorage.getItem(storageKey)||"null")||{};localStorage.setItem(storageKey,JSON.stringify({...saved,request_key:requestKey,file_sha256:fingerprint,created_at:Date.now()}));}catch(_){}
+    if(String(INSPECTION_INDUSTRY)!==industry_key)return;
+    INSPECTION_IMPORT.requestKey=requestKey;INSPECTION_IMPORT.fingerprint=fingerprint;
+    const form=new FormData();form.append("industry_key",industry_key);form.append("request_key",requestKey);form.append("file",file,file.name);
+    let result=await apiUpload("/inspections/branches/imports",form,{timeout:120000});
+    if(!inspectionImportScopeIsCurrent(industry_key,{requestKey}))return;
+    const importId=Number(result?.import_id)||0;
+    if(importId&&["queued","parsing","processing","pending"].includes(String(result?.status||"").toLowerCase()))result=await inspectionImportPoll(importId,{industryKey:industry_key,requestKey});
+    if(!result||!inspectionImportScopeIsCurrent(industry_key,{requestKey,importId}))return;
+    INSPECTION_IMPORT.preview=result;INSPECTION_IMPORT.status="ready";INSPECTION_IMPORT_PAGE={rowKind:String(result?.row_kind||"all"),errorsOnly:result?.errors_only===true,cursorStack:[null],page:0,nextCursor:result?.next_cursor??null,loading:false,error:""};inspectionDraw();
+  }catch(e){
+    const expired=e?.status===409&&e?.code==="IMPORT_PREVIEW_EXPIRED";
+    if(expired&&requestKey)clearPersistentMutationRequestKey("inspectionbranchimport",industry_key,requestKey);
+    if(!inspectionImportScopeIsCurrent(industry_key,{requestKey}))return;
+    if(expired){
+      INSPECTION_IMPORT={status:"error",preview:null,error:"原预检已过期或无法继续，请重新点击上传生成新预检。",requestKey:"",fingerprint:""};
+      INSPECTION_IMPORT_PAGE={rowKind:"all",errorsOnly:false,cursorStack:[null],page:0,nextCursor:null,loading:false,error:""};
+      toast("原预检已过期，请重新上传。");
+    }else{
+      INSPECTION_IMPORT.status=e?.status===403?"permission":"error";
+      INSPECTION_IMPORT.error=e.uncertain?"响应超时，本次 request_key 已保留；直接重试不会重复导入。":e.message;
+    }
+    inspectionDraw();
+  }
+}
+async function inspectionImportCommit(btn){
+  const preview=INSPECTION_IMPORT.preview||{},counts=preview.counts||{},businessCounts=preview.business_counts||{},totalErrors=(Number(counts.error)||0)+(Number(businessCounts.error)||0),importId=Number(preview.import_id)||0,industry_key=String(INSPECTION_INDUSTRY||""),requestKey=String(INSPECTION_IMPORT.requestKey||"");if(!importId)return toast("请先上传并完成预检");if(totalErrors>0)return toast("请先修正门店与经营数据的所有逐行错误");
+  const isCurrent=()=>inspectionImportScopeIsCurrent(industry_key,{requestKey,importId}),body={industry_key};if(preview.expected_version!==null&&preview.expected_version!==undefined)body.expected_version=preview.expected_version;
+  btn.disabled=true;btn.innerHTML='<span class="spin"></span> 正在提交…';
+  try{
+    await api(`/inspections/branches/imports/${importId}/commit`,{method:"POST",body});
+    clearPersistentMutationRequestKey("inspectionbranchimport",industry_key,requestKey);
+    if(!isCurrent())return;
+    INSPECTION_IMPORT={status:"committed",preview:null,error:"",requestKey:"",fingerprint:""};INSPECTION_IMPORT_PAGE={rowKind:"all",errorsOnly:false,cursorStack:[null],page:0,nextCursor:null,loading:false,error:""};toast("门店导入已提交");INSPECTION_CAPTURE_BRANCH_ID=0;INSPECTION_BRANCH_PICKER.industry="";await inspectionView();
+  }catch(e){
+    const conflict=e?.status===409&&["IMPORT_STATE_CONFLICT","IMPORT_PREVIEW_EXPIRED"].includes(e?.code);
+    if(conflict)clearPersistentMutationRequestKey("inspectionbranchimport",industry_key,requestKey);
+    if(!isCurrent())return;
+    if(conflict){
+      INSPECTION_IMPORT={status:"error",preview:null,error:e?.code==="IMPORT_PREVIEW_EXPIRED"?"原预检已过期，请重新上传 Excel。":"预检后门店或经营数据已变化，请重新上传 Excel 生成新预检代次。",requestKey:"",fingerprint:""};
+      INSPECTION_IMPORT_PAGE={rowKind:"all",errorsOnly:false,cursorStack:[null],page:0,nextCursor:null,loading:false,error:""};
+      toast(e?.code==="IMPORT_PREVIEW_EXPIRED"?"原预检已过期，请重新上传。":"数据已变化，请重新上传并确认预检结果。");
+    }else{INSPECTION_IMPORT.status=e?.status===403?"permission":"error";INSPECTION_IMPORT.error=e.message;}
+    inspectionDraw();
+  }
+}
+function inspectionDraw(){
+  const meta=INSPECTION_META||{}, data=INSPECTION_LIST||{}, items=data.items||[], detail=INSPECTION_DETAIL;
+  const summary=data.summary||{},industries=meta.industries||[],branchMetrics=Array.isArray(summary.branches)?summary.branches:[],regionMetrics=Array.isArray(summary.regions)?summary.regions:[],legacyVisitedBranches=branchMetrics.filter(b=>Number(b.visits||0)>0).length,visitedBranches=summary.visited_branches!==null&&summary.visited_branches!==undefined?summary.visited_branches:legacyVisitedBranches,selectedBranch=branchMetrics.find(item=>Number(item.id)===Number(INSPECTION_BRANCH_ID)),selectedRegion=INSPECTION_REGION;
+  $("#main").innerHTML=`<div class="card" style="background:linear-gradient(120deg,#dff4eb,#fffaf0 70%)">
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap"><div style="flex:1;min-width:240px">
+      <h2 style="margin:0">🏪 区域经理巡店</h2><div class="sub" style="margin-top:5px">上传现场照片，巡店经理会标出可见问题、生成整改责任与期限，并持续跟踪复查。</div></div>
+      ${industries.length>1?`<div style="min-width:170px"><label style="margin-top:0">巡店行业</label><select onchange="inspectionSelectIndustry(this.value)">${industries.map(item=>`<option value="${esc(item.key)}" ${item.key===meta.industry_key?"selected":""}>${esc(item.emoji||"")} ${esc(item.name)}</option>`).join("")}</select></div>`:""}
+      ${inspectionImportActionHtml()}
+      <button class="btn" onclick="inspectionNewBranch()">＋ 新建门店</button></div></div>
+  ${detail?inspectionDetailHtml(detail):`${inspectionImportRender()}<div class="grid3" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));margin-bottom:16px">
+    ${[["已完成巡店",bossDashNumber(summary.visits)],["覆盖门店",bossDashNumber(visitedBranches)],["开放问题",bossDashNumber(summary.open_issues)],["逾期整改",bossDashNumber(summary.overdue_actions)],["已核验整改",bossDashNumber(summary.verified_actions)]].map(([l,v])=>`<div class="topic" style="margin:0"><div style="font-size:24px;font-weight:900">${v}</div><div class="sub">${l}</div></div>`).join("")}</div>
+  <div class="card"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><h3 style="margin:0;flex:1">🗺️ 区域汇总${selectedRegion!==null?` · ${esc(selectedRegion||"未分区")}`:""}</h3>${selectedRegion!==null?`<button class="btn sm" onclick="inspectionFilterRegion(null)">清除区域筛选</button>`:""}</div><div class="sub" style="margin:8px 0">按逾期、开放问题和低分排序，先处理风险最高的区域；点“看记录”下钻到该区域。</div>${regionMetrics.length?`<div class="dimwrap"><table class="dimtable"><thead><tr><th>区域</th><th>门店</th><th>均分</th><th>开放问题</th><th>逾期</th><th>末次巡店</th><th></th></tr></thead><tbody>${regionMetrics.map(r=>`<tr><td><b>${esc(r.region||"未分区")}</b></td><td>${bossDashNumber(r.branches)}</td><td>${bossDashNumber(r.average_score,1)}</td><td>${bossDashNumber(r.open_issues)}</td><td>${bossDashNumber(r.overdue_actions)}</td><td>${r.last_visit_at?new Date(r.last_visit_at*1000).toLocaleDateString("zh-CN"):"未巡店"}</td><td><button class="btn sm ${selectedRegion!==null&&String(selectedRegion)===String(r.region||"")?"pri":""}" onclick="inspectionFilterRegion(${cp(r.region||"")})">${selectedRegion!==null&&String(selectedRegion)===String(r.region||"")?"筛选中":"看记录"}</button></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">暂无可汇总的区域巡店数据。</div>`}</div>
+  <div class="card"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><h3 style="margin:0;flex:1">⚠️ 风险优先门店</h3>${selectedBranch?`<button class="btn sm" onclick="inspectionFilterBranch(0)">清除“${esc(selectedBranch.name)}”筛选</button>`:""}</div><div class="sub" style="margin:8px 0">点击门店，只看该店巡店记录；列表按逾期、开放问题和低分排序。</div>${branchMetrics.length?`<div class="dimwrap"><table class="dimtable"><thead><tr><th>门店 / 区域</th><th>均分</th><th>开放问题</th><th>逾期</th><th>末次巡店</th><th></th></tr></thead><tbody>${branchMetrics.map(b=>`<tr><td><b>${esc(b.name)}</b><div class="sub">${esc(b.region||"未分区")}</div></td><td>${bossDashNumber(b.average_score,1)}</td><td>${bossDashNumber(b.open_issues)}</td><td>${bossDashNumber(b.overdue_actions)}</td><td>${b.last_visit_at?new Date(b.last_visit_at*1000).toLocaleDateString("zh-CN"):"未巡店"}</td><td><button class="btn sm ${Number(b.id)===Number(INSPECTION_BRANCH_ID)?"pri":""}" onclick="inspectionFilterBranch(${Number(b.id)})">${Number(b.id)===Number(INSPECTION_BRANCH_ID)?"筛选中":"看记录"}</button></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">暂无门店风险数据。</div>`}</div>
+  <div class="card" style="min-width:0;overflow:hidden"><h3 style="margin-top:0">发起一次巡店</h3>
+    ${inspectionBranchPickerHtml()}
+    <label>巡检日期</label><input id="inspection-date" type="date" value="${new Date().toISOString().slice(0,10)}" style="max-width:100%">
+    <label>本次检查重点（选填）</label><textarea id="inspection-scope" style="min-height:58px" placeholder="例：重点检查前厅陈列、后厨清洁、消防通道和员工开店准备"></textarea>
+    ${inspectionChecklistHtml()}
+    <div class="sub">只上传您有权使用的现场照片；请避免拍到无关顾客、儿童、车牌、收据或个人联系方式。图片中的文字不会被当成系统指令。</div>
+    <div class="actions"><button class="btn pri" onclick="inspectionSubmit(this)" ${INSPECTION_CAPTURE_BRANCH_ID&&INSPECTION_CHECKLIST.status==="ready"?"":"disabled"}>📷 开始巡店（1点）</button></div></div>
+  <div class="card"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><h3 style="margin:0;flex:1">巡店记录${selectedBranch?` · ${esc(selectedBranch.name)}`:selectedRegion!==null?` · ${esc(selectedRegion||"未分区")}`:""}</h3>${selectedBranch?`<button class="btn sm" onclick="inspectionFilterBranch(0)">清除门店筛选</button>`:selectedRegion!==null?`<button class="btn sm" onclick="inspectionFilterRegion(null)">清除区域筛选</button>`:""}</div>${items.length?items.map(v=>`<div class="topic" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <div style="flex:1;min-width:200px"><b>#${v.id} · ${esc(v.branch?.name||"门店")}</b><div class="sub">${esc(v.branch?.region||"")} · ${new Date((v.visit_at||v.created_at)*1000).toLocaleDateString("zh-CN")} · ${inspectionStatusLabel(v.status)}</div></div>
+    ${v.score!==null&&v.score!==undefined?`<span class="tag">评分 ${Math.round(v.score)}</span>`:""}<span class="tag">问题 ${v.issue_count||0}</span>
+    <a class="btn sm pri" href="${inspectionRecordHash(v.id)}">查看记录</a></div>`).join(""):`<div class="empty">还没有巡店记录。上传第一组现场照片即可开始。</div>`}
+    <div class="actions" style="justify-content:flex-end"><button class="btn sm" ${INSPECTION_CURSOR_PAGE>0?"":"disabled"} onclick="inspectionPage(-1)">← 上一页</button><span class="sub">第 ${INSPECTION_CURSOR_PAGE+1} 页</span><button class="btn sm" ${data.next_before_id?"":"disabled"} onclick="inspectionPage(1)">下一页 →</button></div></div>`}`;
+  enhanceResponsiveTables($("#main"));inspectionCaptureChanged();
+}
+async function inspectionNewBranch(){
+  const name=await uiPrompt({title:"新建门店",label:"门店名称",placeholder:"例：人民路店",requiredMessage:"请填写门店名称"});if(name===null)return;
+  const region=await uiPrompt({title:"所属区域",label:"城市 / 区域（选填）",placeholder:"例：上海·静安",required:false});if(region===null)return;
+  const address=await uiPrompt({title:"门店地址",label:"详细地址（选填）",required:false});if(address===null)return;
+  const industry_key=INSPECTION_INDUSTRY;
+  try{const qs=new URLSearchParams({industry_key});await api(`/inspections/branches?${qs}`,{method:"POST",body:{name:name.trim(),region:region.trim(),address:address.trim(),industry_key}});toast("门店已创建");await inspectionView();}catch(e){toast(e.message);}
+}
+async function inspectionSubmit(btn){
+  const checklist=INSPECTION_CHECKLIST.data||{},slots=Array.isArray(checklist.capture_slots)?checklist.capture_slots:Array.isArray(checklist.slots)?checklist.slots:[];
+  const selected=slots.map(slot=>({slot,input:document.querySelector(`[data-capture-slot="${CSS.escape(String(slot.slot_code||""))}"]`)})),missing=selected.filter(({slot,input})=>slot.required&&!input?.files?.length);
+  if(missing.length)return toast(`请完成必拍采集位：${missing.map(({slot})=>slot.label||slot.slot_code).join("、")}`);
+  const ordered=selected.filter(({input})=>input?.files?.length).map(({slot,input})=>({slot:slot.slot_code,file:input.files[0]})),files=ordered.map(item=>item.file);if(!files.length||files.length>8)return toast("请选择1～8张现场照片");
+  if(files.reduce((total,file)=>total+Number(file.size||0),0)>38*1024*1024)return toast("现场照片总计不能超过 38MB");
+  const branchId=String(INSPECTION_CAPTURE_BRANCH_ID||$("#inspection-branch")?.value||""),visitAt=$("#inspection-date")?.value||"",scope=$("#inspection-scope")?.value.trim()||"",industry_key=INSPECTION_INDUSTRY,observations=inspectionObservations();
+  const templateVersion=checklist.template_version||checklist.catalog_version||checklist.version?.catalog_version||checklist.version||"";
+  const identity={industry_key,branch_id:branchId,visit_at:visitAt,scope,template_version:templateVersion,observations,files:ordered.map(({slot,file})=>({slot,name:file.name,size:file.size,type:file.type,lastModified:file.lastModified}))};
+  const requestKey=persistentMutationRequestKey("inspection",`${industry_key}:${branchId}`,identity);
+  const form=new FormData();form.append("branch_id",branchId);form.append("visit_at",visitAt);form.append("scope",scope);
+  form.append("industry_key",industry_key);form.append("request_key",requestKey);form.append("template_version",String(templateVersion));form.append("observations_json",JSON.stringify(observations));
+  ordered.forEach(({slot,file})=>{form.append("files",file,file.name);form.append("file_slots",slot);});btn.disabled=true;btn.innerHTML='<span class="spin"></span> 正在安全上传…';
+  try{const r=await apiUpload("/inspections",form,{timeout:120000});clearPersistentMutationRequestKey("inspection",`${industry_key}:${branchId}`,requestKey);toast("照片已交给巡店经理，分析完成后会形成整改清单");location.hash=inspectionRecordHash(r.inspection_id,industry_key);}
+  catch(e){toast(e.uncertain?"响应超时，本次巡店请求号已保留；直接重试不会重复扣点":e.message);btn.disabled=false;btn.textContent="📷 开始巡店（1点）";}
+}
+function inspectionEventLabel(kind){return ({visit_created:"建立巡店记录",issue_created:"生成问题与整改项",analysis_completed:"完成照片分析",action_assignment_updated:"人工确认/修改整改责任",action_transition:"更新整改进度",recheck_photos_added:"上传整改后复查照片",recheck_submitted:"提交复查",recheck_reviewed:"企业主完成人工复核",inspection_failed:"巡店分析未完成"})[kind]||"更新巡店记录";}
+function inspectionHasRecordedValue(value){return value!==null&&value!==undefined&&value!=="";}
+function inspectionObservationValue(value){return typeof value==="boolean"?(value?"是":"否"):String(value);}
+function inspectionRecordedDataHtml(detail){
+  const snapshot=detail.standard_snapshot&&typeof detail.standard_snapshot==="object"?detail.standard_snapshot:{},observations=detail.observations&&typeof detail.observations==="object"?detail.observations:{};
+  const metricCatalog=Array.isArray(snapshot.metrics)?snapshot.metrics:[],itemCatalog=Array.isArray(snapshot.items)?snapshot.items:[];
+  const metricByCode=new Map(metricCatalog.map(metric=>[String(metric.metric_code||""),metric])),itemByCode=new Map(itemCatalog.map(item=>[String(item.item_code||""),item]));
+  const metrics=(Array.isArray(observations.metrics)?observations.metrics:[]).filter(row=>row&&inspectionHasRecordedValue(row.value));
+  const checklist=(Array.isArray(observations.checklist)?observations.checklist:[]).filter(row=>row&&inspectionHasRecordedValue(row.value));
+  const templateVersion=detail.template_version||snapshot.template_version||"",asOf=snapshot.as_of||"";
+  const metricHtml=metrics.length?`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr));gap:9px">${metrics.map(row=>{const metric=metricByCode.get(String(row.metric_code||""))||{};return `<div class="topic" style="margin:0;min-width:0;overflow-wrap:anywhere"><div class="sub">${esc(metric.label||row.metric_code)}</div><b style="font-size:20px">${esc(row.value)}</b>${row.unit||metric.unit?` <span class="sub">${esc(row.unit||metric.unit)}</span>`:""}</div>`;}).join("")}</div>`:`<div class="empty">本次未录入经营或人员数据；系统不会用 0 或推测值补齐。</div>`;
+  const checklistHtml=checklist.length?`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr));gap:9px">${checklist.map(row=>{const item=itemByCode.get(String(row.item_code||""))||{};return `<div class="topic" style="margin:0;min-width:0;overflow-wrap:anywhere"><b>${esc(item.label||row.item_code)}</b><div style="margin-top:5px;white-space:pre-wrap">${esc(inspectionObservationValue(row.value))}</div></div>`;}).join("")}</div>`:`<div class="empty">本次未录入人工或系统观察记录。</div>`;
+  return `${templateVersion||asOf?`<div class="notice green">标准版本：${esc(templateVersion||"未记录")}${asOf?` · 截至 ${esc(asOf)}`:""}</div>`:""}
+    <section><h3>本次经营与人员数据</h3><div class="sub" style="margin-bottom:8px">只展示本次明确录入的结构化值，缺失项不补零、不推测。</div>${metricHtml}</section>
+    <section><h3>人工/系统观察记录</h3><div class="sub" style="margin-bottom:8px">按本次冻结检查标准显示，记录内容仅供企业内部核验。</div>${checklistHtml}</section>`;
+}
+function inspectionDetailHtml(d){
+  const v=d, photos=d.photos||[],beforePhotos=photos.filter(p=>p.phase==="before"),recheckPhotos=photos.filter(p=>p.phase==="recheck"),issues=d.issues||[],events=d.events||[],branch=v.branch||{};
+  const snapshot=v.standard_snapshot&&typeof v.standard_snapshot==="object"?v.standard_snapshot:{},captureSlots=Array.isArray(snapshot.capture_slots)?snapshot.capture_slots:[],slotLabels=new Map(captureSlots.map(slot=>[String(slot.slot_code||""),slot.label||slot.slot_code]));
+  const photoGrid=list=>`<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px">${list.map(p=>{const src=safeAssetUrl(p.url||`/files/${p.storage_key}`),slotLabel=slotLabels.get(String(p.capture_slot||""))||p.capture_slot||"";return src?`<a href="${esc(src)}" target="_blank" rel="noopener" class="topic" style="margin:0;text-align:center"><img src="${esc(src)}" alt="巡店照片 ${p.display_no}" style="width:100%;height:120px;object-fit:cover;border-radius:8px"><div class="sub">照片 ${p.display_no}${slotLabel?` · 采集位：${esc(slotLabel)}`:""}${p.caption?` · ${esc(p.caption)}`:""}</div></a>`:"";}).join("")||`<div class="sub">暂无照片</div>`}</div>`;
+  return `<div class="actions" style="margin:0 0 12px"><a class="btn sm" href="${inspectionRecordHash(0)}">← 全部巡店</a><button class="btn sm" onclick="inspectionView(${v.id})">↻ 刷新</button></div>
+  <div class="card"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><h2 style="margin:0;flex:1">🏪 ${esc(branch.name||"门店")} · 巡店 #${v.id}</h2>
+    <span class="pill ${inspectionStatusClass(v.status)}">${inspectionStatusLabel(v.status)}</span></div>
+    <div class="kv"><span>区域 ${esc(branch.region||"—")}</span><span>巡检 ${v.visit_at?new Date(v.visit_at*1000).toLocaleString("zh-CN"):"—"}</span>${v.score!==null&&v.score!==undefined?`<span>综合评分 ${Math.round(v.score)}</span>`:""}${v.task_id?`<a href="#/tasks/${v.task_id}">任务 #${v.task_id}</a>`:""}</div>
+    ${["preparing","analyzing"].includes(v.status)?`<div class="notice"><span class="spin"></span> 巡店经理正在逐张核查照片。可先离开，记录会保留在这里。</div>`:""}
+    ${v.status==="failed"?`<div class="notice red">本次图片分析没有安全完成，已按任务规则收口。可从任务中心免费重试。</div>`:""}
+    ${v.summary?`<div class="md">${md(v.summary)}</div>`:""}
+    ${inspectionRecordedDataHtml(v)}
+    <h3>整改前现场</h3>${photoGrid(beforePhotos)}
+    ${recheckPhotos.length?`<h3>整改后复查</h3><div class="sub" style="margin-bottom:8px">每张复查照片会在对应问题下关联到具体复查记录。</div>${photoGrid(recheckPhotos)}`:""}
+    <h3>问题与整改</h3>${issues.length?issues.map(issue=>inspectionIssueHtml(v,issue)).join(""):`<div class="empty">${["preparing","analyzing"].includes(v.status)?"分析完成后会在这里生成整改清单":"本次照片范围内没有形成可确认的问题；仍需按线下清单人工核查照片无法证明的事项。"}</div>`}
+    <h3>操作时间线</h3><div class="sub" style="margin-bottom:7px">只展示结构化操作与时间，不暴露内部分析数据。</div>${events.length?events.map(event=>`<div style="display:flex;gap:9px;align-items:center;border-top:1px solid #eadfc4;padding:8px 0"><span class="tag">${esc(inspectionEventLabel(event.kind))}</span>${event.issue_id?`<span class="sub">问题 #${event.issue_id}</span>`:""}<span class="sub" style="margin-left:auto">${event.created_at?new Date(event.created_at*1000).toLocaleString("zh-CN"):"—"}</span></div>`).join(""):`<div class="empty">暂无操作记录</div>`}
+  </div>`;
+}
+function inspectionIssueHtml(v,issue){
+  const action=issue.action||{}, evidence=issue.evidence||[],rechecks=action.rechecks||[],pending=rechecks.find(r=>r.status==="pending");
+  const canStart=["open","reopened"].includes(action.status),canUpload=action.status==="in_progress"||(action.status==="awaiting_recheck"&&!pending),canReview=!!pending&&action.status==="awaiting_recheck"&&isAdmin();
+  return `<div class="topic" style="margin:10px 0"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="tag">${inspectionSeverity(issue.severity)}风险</span><b style="flex:1">${esc(issue.title)}</b><span class="pill ${inspectionStatusClass(action.status||issue.status)}">${esc(inspectionStatusLabel(action.status||issue.status))}</span>${issue.needs_human_check?`<span class="tag">需人工查验</span>`:""}</div>
+    <div style="margin-top:7px">${esc(issue.description||"")}</div>${issue.root_cause?`<div class="sub" style="margin-top:5px">可能原因：${esc(issue.root_cause)}</div>`:""}${evidence.length?`<div class="sub" style="margin-top:6px">📷 证据：${evidence.map(e=>`照片 ${e.display_no||"—"}${e.note?` · ${esc(e.note)}`:""}`).join("、")}</div>`:""}
+    <div class="notice" style="margin:8px 0"><b>整改：</b>${esc(action.plan||"待确认")}<div class="sub">负责人 ${esc(action.owner||issue.owner||"待指派")} · 截止 ${action.due_at?new Date(action.due_at*1000).toLocaleDateString("zh-CN"):"待设置"}</div></div>
+    ${rechecks.map((r,index)=>`<div class="notice ${r.status==="approved"?"green":r.status==="rejected"?"red":"violet"}" style="margin:7px 0"><b>第 ${index+1} 次复查 · ${inspectionStatusLabel(r.status)}</b><div class="sub">AI建议：${esc(inspectionStatusLabel(r.model_recommendation))}（仅供人工复核）</div>${r.note?`<div>${esc(r.note)}</div>`:""}${(r.photos||[]).length?`<div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:8px">${r.photos.map(p=>{const src=safeAssetUrl(p.url||`/files/${p.storage_key}`);return src?`<a href="${esc(src)}" target="_blank" rel="noopener"><img src="${esc(src)}" alt="复查照片 ${p.display_no}" style="width:88px;height:70px;object-fit:cover;border-radius:7px"><div class="sub">照片 ${p.display_no}</div></a>`:"";}).join("")}</div>`:""}</div>`).join("")}
+    ${action.status!=="closed"?`<div class="actions">${isAdmin()?`<button class="btn sm" onclick="inspectionAssign(${v.id},${issue.id},${action.id},${action.version},${cp(action.owner||issue.owner||"")},${Number(action.due_at)||0},${cp(action.plan||"")})">确认 / 修改负责人与期限</button>`:""}${canStart?`<button class="btn sm" onclick="inspectionAction(${v.id},${issue.id},${action.id},${action.version},'in_progress')">① 开始整改</button>`:""}
+      ${canUpload?`<label class="btn sm" style="cursor:pointer">② 提交复查照片<input type="file" accept="image/jpeg,image/png,image/webp" style="display:none" onchange="inspectionRecheck(${v.id},${issue.id},${action.id},${action.version},this.files[0])"></label>`:""}
+      ${canReview?`<button class="btn sm pri" onclick="inspectionReview(${v.id},${pending.id},${action.version},'close')">③ 企业主确认通过</button><button class="btn sm bad" onclick="inspectionReview(${v.id},${pending.id},${action.version},'reject')">驳回继续整改</button>`:""}
+      ${pending&&!isAdmin()?`<span class="sub">复查证据已提交，等待企业主人工确认。</span>`:""}</div>`:""}</div>`;
+}
+async function inspectionAssign(visitId,issueId,actionId,expectedVersion,currentOwner,currentDueAt,currentPlan){
+  if(!isAdmin())return toast("仅企业主或平台管理员可确认整改责任");
+  const owner=await uiPrompt({title:"确认整改责任人",label:"实际负责人",value:currentOwner||"",requiredMessage:"请填写实际负责人"});if(owner===null)return;
+  const currentDate=currentDueAt?new Date(currentDueAt*1000).toISOString().slice(0,10):"";
+  const due=await uiPrompt({title:"确认整改期限",label:"截止日期",type:"date",value:currentDate,requiredMessage:"请选择截止日期"});if(due===null)return;
+  const plan=await uiPrompt({title:"整改计划（可选调整）",label:"整改计划",multiline:true,required:false,value:currentPlan||"",confirmText:"保存责任"});if(plan===null)return;
+  const due_at=new Date(`${due}T23:59:59`).getTime()/1000;if(!Number.isFinite(due_at))return toast("截止日期无效");
+  const body={action_id:actionId,expected_version:expectedVersion,owner:owner.trim(),due_at,industry_key:INSPECTION_INDUSTRY};if(plan.trim())body.plan=plan.trim();
+  try{await api(`/inspections/${visitId}/issues/${issueId}/assignment`,{method:"PATCH",body});toast("整改负责人与期限已确认");await inspectionView(visitId);}catch(e){toast(e.status===409?"记录已被其他人更新，请刷新后再操作":e.message);}
+}
+async function inspectionAction(visitId,issueId,actionId,expectedVersion,status){try{await api(`/inspections/${visitId}/issues/${issueId}`,{method:"PATCH",body:{action_id:actionId,expected_version:expectedVersion,status,industry_key:INSPECTION_INDUSTRY}});toast("整改状态已更新");await inspectionView(visitId);}catch(e){toast(e.status===409?"记录已被其他人更新，请刷新后再操作":e.message);}}
+async function inspectionRecheck(visitId,issueId,actionId,expectedVersion,file){
+  if(!file)return;const form=new FormData();form.append("visit_id",visitId);form.append("issue_id",issueId);form.append("action_id",actionId);form.append("expected_version",expectedVersion);form.append("industry_key",INSPECTION_INDUSTRY);form.append("file",file,file.name);
+  try{await apiUpload("/inspections/rechecks",form,{timeout:120000});toast("复查照片已提交，巡店经理正在对比整改前后");await inspectionView(visitId);}catch(e){toast(e.message);}
+}
+async function inspectionReview(visitId,recheckId,actionVersion,decision){
+  if(!isAdmin())return toast("仅企业主可完成复核");
+  const close=decision==="close",note=await uiPrompt({title:close?"确认整改通过":"驳回继续整改",message:close?"请记录您在照片中确认到的改变。":"请说明仍未达标的地方。",label:"人工复核意见",multiline:true,requiredMessage:"请填写复核意见",confirmText:close?"确认闭环":"驳回"});
+  if(note===null)return;
+  const reviewBody=close?{decision:"close",expected_action_version:actionVersion,note:note.trim(),industry_key:INSPECTION_INDUSTRY}:{decision:"reject",expected_action_version:actionVersion,note:note.trim(),industry_key:INSPECTION_INDUSTRY};
+  try{await api(`/inspections/rechecks/${recheckId}/review`,{method:"POST",body:reviewBody});toast(close?"已人工核验并闭环":"已驳回，整改任务重新打开");await inspectionView(visitId);}catch(e){toast(e.status===409?"复核记录已更新，请刷新后再操作":e.message);}
+}
+
 async function productionView(){
   const d = await api("/boss/production");
   const t = d.total;
@@ -3207,32 +4994,33 @@ async function productionView(){
   $("#main").innerHTML = `<div class="card"><h2>📊 员工产出总览</h2>
     <div class="sub">您手下每个数字员工干了多少活、产出什么、烧了多少 token 和钱,一目了然。点某一行看 TA 的逐条产出。</div>
     <div style="display:flex;gap:12px;flex-wrap:wrap;margin:12px 0">
-      ${[["在产员工",t.employees],["总产出",t.runs],["总 tokens",ktok(t.tokens)],["总花费",rmb(t.cost_usd)]]
+      ${[["产出身份",t.employees],["总产出",t.runs],["总 tokens",ktok(t.tokens)],["总花费",rmb(t.cost_usd)]]
         .map(([l,v])=>`<div style="flex:1;min-width:110px;background:#fff6dc;border:2px solid var(--ink);border-radius:12px;padding:10px 14px">
           <div style="font-size:22px;font-weight:800">${v}</div><div class="sub">${l}</div></div>`).join("")}
     </div>
     ${d.employees.length?`<div class="dimwrap"><table class="dimtable">
       <thead><tr><th>员工</th><th>部门</th><th>产出数</th><th>tokens</th><th>费用</th><th>最近</th><th></th></tr></thead>
-      <tbody>${d.employees.map(e=>`<tr>
-        <td><b>${esc(e.name)}</b></td><td class="sub">${esc(e.dept)}</td>
+      <tbody>${d.employees.map(e=>{const rowKey=`pd-${e.idx}-${e.identity_ref||"unknown"}`;return `<tr>
+        <td><b>${esc(e.name)}</b><div class="sub">${esc(employeeIdentityLabel(e))}${Number(e.config_revision)>0?` · 配置 r${Number(e.config_revision)}`:""}</div></td><td class="sub">${esc(e.dept)}</td>
         <td>${e.runs}</td><td>${ktok(e.tokens)}</td><td><b>${rmb(e.cost_usd)}</b></td>
         <td class="sub">${fmtDate(e.last_at)}</td>
-        <td><button class="btn sm" onclick="prodDetail(${e.idx},this)">看产出</button></td>
-      </tr><tr id="pd-${e.idx}" style="display:none"><td colspan="7" style="background:#faf6ec"></td></tr>`).join("")}</tbody>
+        <td><button class="btn sm" onclick="prodDetail(${e.idx},${cp(e.identity_ref||"")},this)">看产出</button></td>
+      </tr><tr id="${esc(rowKey)}" style="display:none"><td colspan="7" style="background:#faf6ec"></td></tr>`}).join("")}</tbody>
     </table></div>`:`<div class="empty">还没有产出记录。派活给员工、或跑一单内容,这里就会有数据。</div>`}
   </div>`;
 }
-async function prodDetail(idx,btn){
-  const row = $("#pd-"+idx); const cell = row.firstElementChild;
+async function prodDetail(idx,identityRef,btn){
+  const row = $("#pd-"+idx+"-"+(identityRef||"unknown")); const cell = row.firstElementChild;
   if(row.style.display!=="none"){ row.style.display="none"; btn.textContent="看产出"; return; }
   btn.disabled=true; btn.innerHTML='<span class="spin"></span>';
   try{
-    const d = await api("/boss/production/"+idx);
+    const qs=new URLSearchParams();if(identityRef)qs.set("identity_ref",identityRef);
+    const d = await api("/boss/production/"+idx+(qs.toString()?`?${qs}`:""));
     cell.innerHTML = d.items.length? d.items.map(it=>`<div style="padding:8px 4px;border-bottom:1px solid #eadfc4">
       <div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap">
         <b>${it.kind==="task"?"🎯":"🎬"} ${esc(it.title)}</b>
         <span class="sub">${it.tokens} tok · <b>${rmb(it.cost_usd)}</b> · ${new Date(it.at*1000).toLocaleString("zh-CN",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"})}</span>
-        ${it.kind==="task"?`<a class="sub" style="text-decoration:underline" href="#/">🎯专家任务</a>`:`<a class="sub" style="text-decoration:underline" href="#/delivery/${it.job_id}">看交付 →</a>`}
+        ${it.kind==="task"?`<a class="sub" style="text-decoration:underline" href="#/tasks/${it.id}">🎯专家任务</a>`:`<a class="sub" style="text-decoration:underline" href="#/delivery/${it.job_id}">看交付 →</a>`}
       </div>
       <div class="sub" style="margin-top:3px;white-space:pre-wrap;max-height:66px;overflow:hidden">${esc(it.preview)}</div>
     </div>`).join("") : `<div class="sub">暂无产出</div>`;
@@ -3855,9 +5643,10 @@ async function adminView(){
       </tbody></table></div>
     </details>
   </div>
-  <div class="card"><h2>☁️ 供应商 · 云雾API</h2>
+  <div class="card"><h2>☁️ 供应商 · OpenAI 兼容网关</h2>
+    <div class="sub" style="margin-bottom:8px">可填云雾或 <a href="https://doc.openlux.ai/" target="_blank" rel="noreferrer">OpenLux</a> 等兼容地址（不含 /v1）。</div>
     <div class="row">
-      <div><label>接口地址</label><input id="adm-base" value="${esc(ADM.provider.yunwu_base)}"></div>
+      <div><label>接口地址</label><input id="adm-base" value="${esc(ADM.provider.yunwu_base)}" placeholder="https://api.openlux.ai"></div>
       <div><label>API Key ${ADM.provider.yunwu_key?`<span class="tag">当前:${esc(ADM.provider.yunwu_key)}</span>`:`<span class="tag">未配置</span>`}</label>
         <input id="adm-key" type="password" placeholder="sk-…(留空不改)"></div>
     </div>
@@ -3915,7 +5704,7 @@ async function adminView(){
       ${list.map(e=>`<tr style="${e.enabled?"":"opacity:.5"}">
         <td>${e.core?`<span class="sub" title="流水线必备">🔒必备</span>`
           :`<span class="switch ${e.enabled?"on":""}" onclick="admToggleEmp(${e.idx},${e.enabled?0:1})"></span>`}</td>
-        <td><b>${esc(e.name)}</b>${e.web_required?" 🌐":""}${e.is_custom?` <span class="tag">自定义提示词</span>`:""}</td>
+        <td><b>${esc(e.person||e.name)}</b>${e.web_required?" 🌐":""}<div class="sub">${esc(e.name)}</div>${e.is_custom?` <span class="tag">自定义提示词</span>`:""}</td>
         <td>⚡${e.skills_n||0}</td>
         <td><select onchange="admSetModel(${e.idx},'model_text',this.value)" style="padding:4px">${opt(tm,e.model_text,"(默认)")}</select></td>
         <td>${ADM.image_capable.includes(e.idx)?`<select onchange="admSetModel(${e.idx},'model_image',this.value)" style="padding:4px">${opt(im,e.model_image,"(默认)")}</select>`:`<span class="sub">—</span>`}</td>
@@ -3952,26 +5741,33 @@ async function admSaveRouting(){
   try{ await api("/settings",{method:"PUT",body:{default_text_model:$("#adm-dt").value, default_image_model:$("#adm-di").value}});
     toast("模型路由已保存,下次开工生效"); }catch(e){ toast(e.message); }
 }
+function admEmployeeBinding(idx){
+  return (ADM?.employees||[]).find(item=>Number(item.idx)===Number(idx))||
+    (window.__ADM_DETAIL&&Number(window.__ADM_DETAIL.idx)===Number(idx)?window.__ADM_DETAIL:null)||{};
+}
 async function admSetModel(idx, field, val){
-  try{ await api(`/admin/employees/${idx}/models`,{method:"PUT",body:{[field]:val}}); toast("已保存"); }
+  try{ const r=await api(`/admin/employees/${idx}/models`,{method:"PUT",body:{[field]:val,...employeeIdentityMutationFields(admEmployeeBinding(idx))}}); Object.assign(admEmployeeBinding(idx),r); toast("已保存"); }
   catch(e){ toast(e.message); }
 }
 async function admToggleEmp(idx, en){
-  try{ await api(`/admin/employees/${idx}/enabled`,{method:"PUT",body:{enabled:!!en}});
+  const employee=admEmployeeBinding(idx);
+  try{ await api(`/admin/employees/${idx}/enabled`,{method:"PUT",body:{enabled:!!en,slot_row_version:employee.slot_row_version,...employeeIdentityMutationFields(employee)}});
     toast(en?"已启用":"已停用(楼层隐藏,派活/会议拦截)"); DEPTS=null; render(); }
   catch(e){ toast(e.message); }
 }
 async function admDetail(idx){
   const d = await api(`/admin/employees/${idx}/detail`);
+  window.__ADM_DETAIL = d;
   $("#adm-detail-box").innerHTML = `<div class="card" style="background:#eef7ff;margin-top:12px">
     <div style="display:flex;gap:10px;align-items:center">
-      <h3 style="margin:0;flex:1">🧰 ${esc(d.name)} · 档案管理</h3>
+      <h3 style="margin:0;flex:1">🧰 ${esc(d.person||d.name)} · ${esc(d.name)} · 档案管理</h3>
       ${d.core?`<span class="tag">流水线必备</span>`:`<span class="switch ${d.enabled?"on":""}" onclick="admToggleEmp(${idx},${d.enabled?0:1})"></span>`}
       <button class="btn sm" onclick="$('#adm-detail-box').innerHTML=''">收起</button></div>
     <div class="kv" style="margin-top:6px"><span>${esc(d.dept)}</span><span>${esc(d.duty)}</span>
       <span>出勤 ${d.stats.runs} 次</span><span>历史成本 ${rmb(d.stats.cost_usd)}</span>
       <span>${d.learned_at?"上次进修 "+new Date(d.learned_at*1000).toLocaleDateString("zh-CN"):"未进修过"}</span></div>
-    <div class="actions"><button class="btn pri sm" ${d.learning?"disabled":""} onclick="this.disabled=true;this.textContent='🎓 进修中…';api('/employees/${idx}/learn',{method:'POST'}).then(()=>toast('已送去进修(3点),结果会发站内通知')).catch(e=>{toast(e.message);this.disabled=false;this.textContent='🎓 送去进修(3点)';})">🎓 送去进修(3点)</button></div>
+    ${d.catalog_version==="2026.08.v4"?employeeLearningPanel(d,{readonly:!employeeCanAssignNew(d),bindingScope:"admin"}):`
+    <div class="actions"><button class="btn pri sm" ${d.learning||!employeeCanLearn(d)?"disabled":""} onclick="admLearn(${idx},this)">🎓 送去进修(3点)</button></div>`}
     <h3>技能库(${(d.skills||[]).length})</h3>
     ${(d.skills||[]).map((k,i)=>`<div class="skillcard ${k.enabled===false?"off":""}">
       <span class="switch ${k.enabled!==false?"on":""}" onclick="admSkillToggle(${idx},${i})"></span>
@@ -3979,14 +5775,25 @@ async function admDetail(idx){
       <button class="btn sm bad" onclick="admSkillDel(${idx},${i})">🗑</button></div>`).join("")||`<div class="empty">还没技能</div>`}
     <h3>能力项(${(d.capabilities||[]).length})</h3>
     <div class="chips">${(d.capabilities||[]).map(c=>`<span class="chip ${c.enabled?"on":""}">${c.emoji||"🔹"} ${esc(c.name)}</span>`).join("")}</div>
+    ${employeeProfessionalProfile(d,{readonly:!employeeCanAssignNew(d)})}
   </div>`;
-  window.__ADM_DETAIL = d;
   $("#adm-detail-box").scrollIntoView({behavior:"smooth"});
+}
+async function admLearn(idx,button){
+  const employee=admEmployeeBinding(idx);
+  if(employee?.catalog_version==="2026.08.v4"){
+    const result=await employeeStartLearning(idx,employee);
+    if(result) await admDetail(idx);
+    return result;
+  }
+  if(button){button.disabled=true;button.textContent='🎓 进修中…';}
+  try{await api(`/employees/${idx}/learn`,{method:"POST",body:employeeIdentityMutationFields(admEmployeeBinding(idx))});toast('已送去进修(3点),结果会发站内通知');}
+  catch(e){toast(e.message);if(button){button.disabled=false;button.textContent='🎓 送去进修(3点)';}}
 }
 async function admSkillToggle(idx,i){
   const d = window.__ADM_DETAIL; const skills=[...d.skills];
   skills[i] = {...skills[i], enabled: skills[i].enabled===false};
-  try{ await api(`/employees/${idx}/skills`,{method:"PUT",body:{skills}}); admDetail(idx); }
+  try{ await api(`/employees/${idx}/skills`,{method:"PUT",body:{skills,...employeeIdentityMutationFields(d)}}); admDetail(idx); }
   catch(e){ toast(e.message); }
 }
 async function admSkillDel(idx,i){
@@ -3995,7 +5802,7 @@ async function admSkillDel(idx,i){
     title:"删除技能",confirmText:"删除"
   })) return;
   const skills = d.skills.filter((_,n)=>n!==i);
-  try{ await api(`/employees/${idx}/skills`,{method:"PUT",body:{skills}}); admDetail(idx); }
+  try{ await api(`/employees/${idx}/skills`,{method:"PUT",body:{skills,...employeeIdentityMutationFields(d)}}); admDetail(idx); }
   catch(e){ toast(e.message); }
 }
 async function admPrompt(idx){
@@ -4014,12 +5821,13 @@ async function admPrompt(idx){
 async function admSavePrompt(idx){
   const v = $("#adm-prompt-ta").value;
   const body = (ADM_PROMPT && v.trim()===String(ADM_PROMPT.default_template).trim())?{template:""}:{template:v};
+  Object.assign(body,employeeIdentityMutationFields(ADM_PROMPT));
   try{ await api(`/employees/${idx}/prompt`,{method:"PUT",body}); toast("提示词已保存"); render(); }
   catch(e){ toast(e.message); }
 }
 async function admResetPrompt(idx){
   if(!await uiConfirm("恢复默认提示词?",{title:"恢复提示词",confirmText:"恢复默认"})) return;
-  try{ await api(`/employees/${idx}/prompt`,{method:"PUT",body:{template:""}}); toast("已恢复"); render(); }
+  try{ await api(`/employees/${idx}/prompt`,{method:"PUT",body:{template:"",...employeeIdentityMutationFields(ADM_PROMPT)}}); toast("已恢复"); render(); }
   catch(e){ toast(e.message); }
 }
 
@@ -4069,11 +5877,69 @@ async function saveSupportContact(btn){
     if(META) META.support_contact=r.contact; toast('已保存,立即生效');
   }catch(e){ toast(e.message); } btn.disabled=false;
 }
+const TM_TITLE_TAG = {director:["🎖 总监","#e7d9ff"],manager:["📋 经理","#c9e2ff"],staff:["👤 员工","#efe7d4"]};
+function tmTitleTag(u){
+  if(u.role==="root") return `<span class="tag">👑 平台管理员</span>`;
+  if(u.role==="owner") return `<span class="tag" style="background:#ffe59a">⭐ 老板(主账号)</span>`;
+  const [label,bg]=TM_TITLE_TAG[u.job_title||"staff"]||TM_TITLE_TAG.staff;
+  return `<span class="tag" style="background:${bg}">${label}</span>`;
+}
+function tmAllocSummary(u,t){
+  if(u.role!=="member") return "";
+  const industries=(u.modules||[]).map(k=>esc((t.all_modules.find(m=>m.key===k)||{}).label||k)).join(" · ")||"(未开通行业,啥也用不了)";
+  const emp = u.allowed_emp_idxs===null||u.allowed_emp_idxs===undefined
+    ? "行业内全部数字员工可用"
+    : `指定 ${u.allowed_emp_idxs.length} 名数字员工可用`;
+  return `<div class="sub" style="margin-top:4px">行业/板块:${industries}</div>
+    <div class="sub" style="margin-top:2px">数字员工:${emp}</div>`;
+}
+function tmMemberRow(u,t){
+  const isSelf = ME && Number(ME.id)===Number(u.id);
+  const btns = [];
+  if(t.is_admin && u.role==="member"){
+    btns.push(`<button class="btn sm" onclick="tmEditMods(${u.id},${cp(u.username)},${cp(u.modules)})">🧩 行业/板块</button>`);
+    btns.push(`<button class="btn sm" onclick="tmEditTitle(${u.id},${cp(u.username)},${cp(u.job_title||"staff")})">🎖 职级</button>`);
+    btns.push(`<button class="btn sm" onclick="tmAllocForm(${u.id},${cp(u.username)})">🤝 分配数字员工</button>`);
+    btns.push(`<button class="btn sm" onclick="tmResetPw(${u.id})">🔑 改密</button>`);
+    btns.push(`<button class="btn sm" onclick="tmToggle(${u.id},${u.enabled?0:1})">${u.enabled?"⏸ 停用":"▶️ 启用"}</button>`);
+    btns.push(`<button class="btn sm bad" onclick="tmDel(${u.id},${cp(u.username)})">🗑</button>`);
+  }else if(!t.is_admin && u.role==="member" && !isSelf){
+    btns.push(`<button class="btn sm pri" onclick="tmAllocForm(${u.id},${cp(u.username)})">🤝 分配数字员工</button>`);
+  }
+  return `<div class="topic">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <b>${esc(u.username)}</b>${isSelf?`<span class="sub">(我)</span>`:""}
+      ${tmTitleTag(u)}
+      ${u.enabled?"":`<span class="tag" style="background:#ffb3b5">已停用</span>`}
+      <span style="flex:1"></span>
+      ${btns.join("\n")}
+    </div>
+    ${tmAllocSummary(u,t)}
+  </div>`;
+}
 async function teamView(){
   const t = await api("/team");
   const modChips = (sel)=>t.all_modules.map(m=>`<span class="chip mod-chip${(sel||[]).includes(m.key)?" on":""}" data-k="${m.key}" onclick="this.classList.toggle('on')">${esc(m.label)}</span>`).join("");
+  window.__modChips = modChips;
+  window.__TEAM = t;
+  if(!t.is_admin){
+    // 总监/经理受限视图:只做一件事——给自己团队里职级更低的成员分配数字员工
+    const mine = t.users.filter(u=>ME&&Number(u.id)===Number(ME.id));
+    const managed = t.users.filter(u=>!(ME&&Number(u.id)===Number(ME.id)));
+    $("#main").innerHTML = `
+    <div class="notice" style="margin-top:0">👥 <b>团队分配</b>:您是${esc({director:"总监",manager:"经理"}[t.my_job_title]||"管理者")},可以把<b>您自己行业里、您可用的数字员工</b>分配给职级低于您的成员。开通行业、调整职级、建号改密停用都归老板(主账号)管。</div>
+    ${mine.length?`<div class="card"><h2>🪪 我的权限</h2>${mine.map(u=>tmMemberRow(u,t)).join("")}</div>`:""}
+    <div class="card"><h2>🤝 我管理的成员(${managed.length}人)</h2>
+      ${managed.length?managed.map(u=>tmMemberRow(u,t)).join(""):`<div class="empty">暂时没有职级低于您的成员;请老板先创建员工级副账号。</div>`}
+      <div id="tm-allocbox"></div></div>
+    <div class="card"><h2>🔑 改我自己的密码</h2>
+      <div class="row"><div><label>旧密码</label><input id="tm-old" type="password"></div>
+        <div><label>新密码(≥12位，至少两类字符)</label><input id="tm-new" type="password"></div></div>
+      <div class="actions"><button class="btn pri" onclick="tmMyPw()">💾 修改</button></div></div>`;
+    return;
+  }
   $("#main").innerHTML = `
-  <div class="notice" style="margin-top:0">👥 <b>权限管理</b>:企业信息、副账号与板块权限${ME.role==="root"?"、租户(客户企业)管理、平台后台":""}。副账号只能看到被分配的板块,数据按企业完全隔离。</div>
+  <div class="notice" style="margin-top:0">👥 <b>团队与权限</b>:老板全权掌控——副账号的职级(总监/经理/员工)、可见行业、可用的数字员工、密码与启停都在这里定;每个数字员工用什么模型在员工面板里调。总监/经理登录后也能在自己行业内给下级分配数字员工。${ME.role==="root"?"另含租户(客户企业)管理、平台后台。":""}数据按企业完全隔离。</div>
   <div class="card"><h2>🏢 我的企业</h2>
     <div class="row" style="align-items:flex-end">
       <div style="flex:1"><label>企业名称</label><input id="tm-name" value="${esc(t.tenant.name)}"></div>
@@ -4082,22 +5948,11 @@ async function teamView(){
       <span>点数余额 ${(t.tenant.balance||0).toFixed(0)} 点</span>
       ${t.tenant.plan?`<span>套餐:${esc(t.tenant.plan)}</span>`:""}</div></div>
   <div class="card"><h2>👤 成员与副账号</h2>
+    <div class="sub" style="margin-bottom:6px">职级说明:🎖 <b>总监</b>可给经理和员工分配数字员工;📋 <b>经理</b>可给员工分配;👤 <b>员工</b>只用被分配的。行业(板块)决定TA能看到哪个行业,数字员工名单决定TA在行业里能用谁——不设名单=行业内全部可用。</div>
     <div class="actions"><button class="btn pri" onclick="tmUserForm()">➕ 创建副账号</button></div>
     <div id="tm-uform"></div>
-    ${t.users.map(u=>`<div class="topic">
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <b>${esc(u.username)}</b>
-        <span class="tag">${{root:"👑 平台管理员",owner:"⭐ 主账号",member:"副账号"}[u.role]}</span>
-        ${u.enabled?"":`<span class="tag" style="background:#ffb3b5">已停用</span>`}
-        <span style="flex:1"></span>
-        ${u.role==="member"?`<button class="btn sm" onclick="tmEditMods(${u.id},${cp(u.username)},${cp(u.modules)})">🧩 板块</button>
-        <button class="btn sm" onclick="tmResetPw(${u.id})">🔑 改密</button>
-        <button class="btn sm" onclick="tmToggle(${u.id},${u.enabled?0:1})">${u.enabled?"⏸ 停用":"▶️ 启用"}</button>
-        <button class="btn sm bad" onclick="tmDel(${u.id},${cp(u.username)})">🗑</button>`:""}
-      </div>
-      ${u.role==="member"?`<div class="sub" style="margin-top:4px">板块:${(u.modules||[]).map(k=>esc((t.all_modules.find(m=>m.key===k)||{}).label||k)).join(" · ")||"(未分配,啥也用不了)"}</div>`:""}
-    </div>`).join("")}
-    <div id="tm-modbox"></div></div>
+    ${t.users.map(u=>tmMemberRow(u,t)).join("")}
+    <div id="tm-modbox"></div><div id="tm-allocbox"></div></div>
   <div class="card"><h2>🔑 改我自己的密码</h2>
     <div class="row"><div><label>旧密码</label><input id="tm-old" type="password"></div>
       <div><label>新密码(≥12位，至少两类字符)</label><input id="tm-new" type="password"></div></div>
@@ -4153,23 +6008,82 @@ async function teamView(){
 }
 async function tmRename(){ try{ await api("/team/tenant",{method:"PUT",body:{name:$("#tm-name").value.trim()}}); toast("已保存"); ME=null; render(); }catch(e){ toast(e.message); } }
 function tmUserForm(){
+  const titles=(window.__TEAM?.job_titles)||[{key:"director",label:"总监"},{key:"manager",label:"经理"},{key:"staff",label:"员工"}];
+  const titleDesc={director:"可给经理和员工分配数字员工",manager:"可给员工分配数字员工",staff:"只用被分配的数字员工"};
   $("#tm-uform").innerHTML = `<div class="card" style="background:#fff6dc">
     <div class="row"><div><label>用户名</label><input id="tm-u"></div><div><label>密码(≥12位，至少两类字符)</label><input id="tm-p" type="password"></div></div>
-    <label>开通板块(多选)</label><div class="chips" id="tm-mods">${window.__modChips([])}</div>
+    <label>职级</label><div class="chips" id="tm-title">${titles.map((x,i)=>`<span class="chip${x.key==="staff"?" on":""}" data-k="${x.key}" onclick="document.querySelectorAll('#tm-title .chip').forEach(c=>c.classList.remove('on'));this.classList.add('on')">${{director:"🎖",manager:"📋",staff:"👤"}[x.key]||""} ${esc(x.label)}<span class="sub" style="margin-left:4px">${titleDesc[x.key]||""}</span></span>`).join("")}</div>
+    <label>开通行业/板块(多选)</label><div class="chips" id="tm-mods">${window.__modChips([])}</div>
+    <div class="sub" style="margin-top:4px">建好后可点成员行的「🤝 分配数字员工」进一步限定TA能用行业里的哪些人;不限定=行业内全部可用。</div>
     <div class="actions"><button class="btn pri" onclick="tmUserCreate()">💾 创建</button>
       <button class="btn" onclick="$('#tm-uform').innerHTML=''">取消</button></div></div>`;
 }
 async function tmUserCreate(){
   const mods = [...document.querySelectorAll("#tm-mods .on")].map(e=>e.dataset.k);
+  const jobTitle = document.querySelector("#tm-title .on")?.dataset.k || "staff";
   const password=$("#tm-p").value, passwordError=passwordPolicyError(password);
   if(passwordError) return toast(passwordError);
   if(!mods.length && !await uiConfirm(
-    "还没勾选任何板块:员工登录后会是一片空白、啥也用不了。\n确定先建空账号,回头再分配?",
+    "还没勾选任何行业/板块:成员登录后会是一片空白、啥也用不了。\n确定先建空账号,回头再分配?",
     {title:"未分配板块",confirmText:"先建空账号"})) return;
   try{ await api("/team/users",{method:"POST",body:{username:$("#tm-u").value.trim(),
-    password, modules:mods}});
+    password, modules:mods, job_title:jobTitle}});
     toast(mods.length?"副账号已创建,把用户名密码发给TA即可"
-      :"副账号已创建(未分配板块):记得点「板块」分配,TA 才能用"); render(); }catch(e){ toast(e.message); }
+      :"副账号已创建(未分配板块):记得点「行业/板块」分配,TA 才能用"); render(); }catch(e){ toast(e.message); }
+}
+function tmEditTitle(uid, name, cur){
+  const titles=(window.__TEAM?.job_titles)||[];
+  $("#tm-modbox").innerHTML = `<div class="card" style="background:#fff6dc">
+    <b>调整「${esc(name)}」的职级</b>
+    <div class="chips" id="tm-title2" style="margin-top:8px">${titles.map(x=>`<span class="chip${x.key===cur?" on":""}" data-k="${x.key}" onclick="document.querySelectorAll('#tm-title2 .chip').forEach(c=>c.classList.remove('on'));this.classList.add('on')">${{director:"🎖",manager:"📋",staff:"👤"}[x.key]||""} ${esc(x.label)}</span>`).join("")}</div>
+    <div class="sub" style="margin-top:6px">总监可给经理/员工分配数字员工;经理可给员工分配;员工不管理任何人。</div>
+    <div class="actions"><button class="btn pri" onclick="tmSaveTitle(${uid})">💾 保存</button>
+      <button class="btn" onclick="$('#tm-modbox').innerHTML=''">取消</button></div></div>`;
+  $("#tm-modbox").scrollIntoView({behavior:"smooth"});
+}
+async function tmSaveTitle(uid){
+  const title = document.querySelector("#tm-title2 .on")?.dataset.k || "staff";
+  try{ await api(`/team/users/${uid}`,{method:"PUT",body:{job_title:title}}); toast("职级已更新"); render(); }catch(e){ toast(e.message); }
+}
+function tmAllocForm(uid, name){
+  const t = window.__TEAM||{};
+  const target = (t.users||[]).find(x=>Number(x.id)===Number(uid))||{};
+  const targetMods = new Set(target.modules||[]);
+  const groups = (t.industry_employees||[]).filter(g=>targetMods.has(g.key));
+  const sel = new Set(target.allowed_emp_idxs||[]);
+  const unrestricted = target.allowed_emp_idxs===null||target.allowed_emp_idxs===undefined;
+  const box = $("#tm-allocbox")||$("#tm-modbox");
+  if(!groups.length){
+    box.innerHTML = `<div class="card" style="background:#fff6dc"><b>给「${esc(name)}」分配数字员工</b>
+      <div class="sub" style="margin-top:6px">TA 还没开通任何行业${t.is_admin?"(先点「🧩 行业/板块」开通行业)":"(请老板先开通行业)"};或您没有与TA重合的行业可分配。</div>
+      <div class="actions" style="margin-top:8px"><button class="btn" onclick="this.closest('.card').remove()">关闭</button></div></div>`;
+    box.scrollIntoView({behavior:"smooth"});
+    return;
+  }
+  box.innerHTML = `<div class="card" style="background:#fff6dc">
+    <b>给「${esc(name)}」分配数字员工</b>
+    <label class="check" style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;cursor:pointer">
+      <input id="tm-alloc-all" type="checkbox" ${unrestricted?"checked":""} style="width:auto;margin-top:3px" onchange="$('#tm-alloc-groups').style.display=this.checked?'none':'block'">
+      <span><b>不限定:TA 开通行业内的全部数字员工都可用</b><span class="sub" style="display:block">取消勾选则只有下面勾中的数字员工对TA可见、可派活、可拉进会议。</span></span>
+    </label>
+    <div id="tm-alloc-groups" style="display:${unrestricted?"none":"block"};margin-top:8px">
+      ${groups.map(g=>`<div class="grouphead" style="margin-top:8px"><span>${g.emoji||"🏬"}</span>${esc(g.name)}<span class="sub">(${g.employees.length}人)</span>
+        <span class="sub" style="margin-left:8px;cursor:pointer;text-decoration:underline" onclick="document.querySelectorAll('[data-alloc-g=&quot;${g.key}&quot;]').forEach(c=>c.classList.add('on'))">全选</span>
+        <span class="sub" style="cursor:pointer;text-decoration:underline" onclick="document.querySelectorAll('[data-alloc-g=&quot;${g.key}&quot;]').forEach(c=>c.classList.remove('on'))">清空</span></div>
+      <div class="chips">${g.employees.map(e=>`<span class="chip tm-alloc-chip${sel.has(Number(e.idx))?" on":""}" data-i="${e.idx}" data-alloc-g="${g.key}" onclick="this.classList.toggle('on')">${e.emoji||"🧑‍💼"} ${esc(e.person?e.person+"·":"")}${esc(e.name)}</span>`).join("")}</div>`).join("")}
+    </div>
+    <div class="actions" style="margin-top:10px"><button class="btn pri" onclick="tmSaveAlloc(${uid})">💾 保存分配</button>
+      <button class="btn" onclick="this.closest('.card').remove()">取消</button></div></div>`;
+  box.scrollIntoView({behavior:"smooth"});
+}
+async function tmSaveAlloc(uid){
+  const unrestricted = $("#tm-alloc-all")?.checked;
+  const idxs = unrestricted?null:[...document.querySelectorAll(".tm-alloc-chip.on")].map(e=>Number(e.dataset.i));
+  if(!unrestricted && !idxs.length && !await uiConfirm(
+    "一个数字员工都没勾:TA 将在行业里看不到任何可用员工。\n确定这样保存?",
+    {title:"空名单",confirmText:"确定保存"})) return;
+  try{ await api(`/team/users/${uid}`,{method:"PUT",body:{allowed_emp_idxs:idxs}});
+    toast(unrestricted?"已放开:行业内全部数字员工可用":`已分配 ${idxs.length} 名数字员工`); render(); }catch(e){ toast(e.message); }
 }
 function tmEditMods(uid, name, mods){
   $("#tm-modbox").innerHTML = `<div class="card" style="background:#fff6dc">
@@ -4756,6 +6670,26 @@ function mtConsensus(cur){
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><h3 style="margin:0;flex:1">🧠 会议共识 · 跨轮接力棒</h3>${mtDecisionBadge(cur.decision)}</div>
     <div class="md" style="margin-top:8px">${md(cur.consensus_md)}</div></div>`;
 }
+function mtStructured(cur){
+  const props=cur.proposals||[], vals=cur.validations||[];
+  if(!props.length&&!vals.length) return "";
+  const verdictPill=v=>v==="PASS"?`<span class="pill done">PASS</span>`:v==="FAIL"?`<span class="pill failed">FAIL</span>`:`<span class="pill running">UNKNOWN</span>`;
+  const propCards=props.length?`<div class="card" style="background:#fff;margin-top:12px"><h3 style="margin-top:0">📑 本场提案(${props.length})</h3>
+    ${props.map(p=>`<div class="topic"><b>P${p.id}｜${esc(p.title||"")}</b><span class="sub" style="margin-left:6px">提案人:${esc(p.who||"")}</span>
+      ${p.position?`<div class="sub" style="margin-top:4px">${esc(p.position)}</div>`:""}
+      ${(p.plan||[]).length?`<div class="sub" style="margin-top:3px">🧭 ${p.plan.map(esc).join(" → ")}</div>`:""}
+      ${p.deliverable?`<div class="sub" style="margin-top:3px">📦 交付物:${esc(p.deliverable)}</div>`:""}
+      ${p.success_metric?`<div class="sub">🎯 成败指标:${esc(p.success_metric)}</div>`:""}
+      ${p.risk?`<div class="sub">⚠️ 最大风险:${esc(p.risk)}</div>`:""}</div>`).join("")}</div>`:"";
+  const valCards=vals.length?`<div class="card" style="background:#fff;margin-top:12px"><h3 style="margin-top:0">🔬 三视角验证矩阵</h3>
+    ${vals.map(v=>`<div class="topic" style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">
+      <span class="tag">${v.emoji||"🔍"} ${esc(v.label||v.lens||"")}</span>${verdictPill(String(v.verdict||"").toUpperCase())}<span class="sub">${esc(v.who||"")}</span>
+      <div style="flex:1;min-width:220px"><div class="sub">${esc(v.summary||"")}</div>
+      ${(v.evidence||[]).length?`<div class="sub" style="margin-top:3px">🧾 ${v.evidence.map(esc).join("；")}</div>`:""}
+      ${v.fatal_risk?`<div class="sub">☠️ 一票否决项:${esc(v.fatal_risk)}</div>`:""}
+      ${v.condition?`<div class="sub">✅ 放行条件:${esc(v.condition)}</div>`:""}</div></div>`).join("")}</div>`:"";
+  return propCards+valCards;
+}
 function mtBody(cur){
   const msgsBox = open => `<div id="mt-msgs" style="max-height:520px;overflow:auto;margin-top:10px;display:${open?"block":"none"}">${(cur.messages||[]).map(mtBubble).join("")||`<div class="empty">等员工进群…</div>`}</div>`;
   if(["failed","cancelled"].includes(cur.status)){
@@ -4803,8 +6737,10 @@ async function meetingsView(mid){
   const list = meetingsContract.items;
   const cur = MT_CUR ? await api("/meetings/"+MT_CUR).catch(optionalResult(null)) : null;
   const pool = [
-    ...META.stations.map(s=>({idx:s.idx,label:s.name,color:s.color,emoji:s.emoji,group:"内容生产部"})),
-    ...DEPTS.filter(d=>can(d.key)).flatMap(d=>d.employees.map(e=>({idx:e.idx,label:`${e.person||""}${e.person?"·":""}${e.name}`,color:e.color,emoji:e.emoji,group:e.group})))];
+    ...META.stations.filter(employeeCanAssignNew).map(s=>({idx:s.idx,label:s.name,color:s.color,emoji:s.emoji,group:"内容生产部",...employeeIdentityMutationFields(s)})),
+    ...DEPTS.filter(d=>can(d.key)).flatMap(d=>d.employees.filter(e=>employeeCanAssignNew(e)).map(e=>({idx:e.idx,label:`${e.person||""}${e.person?"·":""}${e.name}`,color:e.color,emoji:e.emoji,group:e.group,...employeeIdentityMutationFields(e)})))];
+  const availableMemberIds=new Set(pool.map(member=>Number(member.idx)));
+  MT_SEL=new Set([...MT_SEL].filter(idx=>availableMemberIds.has(Number(idx))));
   const groups = {};
   pool.forEach(p=>(groups[p.group]=groups[p.group]||[]).push(p));
   $("#main").innerHTML = `
@@ -4823,28 +6759,36 @@ async function meetingsView(mid){
       <input id="mt-auto" type="checkbox" checked style="width:auto;margin-top:3px">
       <span><b>决策后自动执行</b><span class="sub" style="display:block">GO 或 NEED INFO 后，自动启动最多 3 个真实员工任务；包含在本次会议中，不重复扣点。取消勾选则等您看完共识后再点执行。</span></span>
     </label>
+    <label style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;cursor:pointer">
+      <input id="mt-team" type="checkbox" style="width:auto;margin-top:3px">
+      <span><b>🤝 Agent 团队协作执行</b><span class="sub" style="display:block">不再各干各的：成员按分工接力开工，每一棒自动拿到前面队友的交付内容，最后由队长把全部交付整合成一份最终交付包。适合需要多人共创一个成果的议题；包含在本次会议中，不重复扣点。</span></span>
+    </label>
     <div class="actions"><button class="btn pri" onclick="mtStart(this)">🎯 开会并收敛(每人1点)</button></div></div>
   ${cur?`<div class="card" style="background:#fffaf0"><h2>会议 #${cur.id} ${{queued:"排队",running:"🗣 进行中…",done:"✅ 已收口",failed:"中断"}[cur.status]||cur.status}
+    ${cur.team_execute?`<span class="tag" style="background:#e7d9ff;font-weight:900">🤝 Agent 团队</span>`:""}
     ${cur.status==="done"?`<span style="float:right"><a class="btn sm" href="/api/meetings/${cur.id}/export.pdf">⬇️ PDF</a>
     <a class="btn sm" href="/api/meetings/${cur.id}/export.docx">⬇️ Word</a></span>`:""}</h2>
     <div class="sub" style="margin-bottom:6px">议题:${esc(cur.question)}</div>
-    <div class="chips">${(cur.members||[]).map(b=>`<span class="tag">${b.emoji||"🧑‍💼"} ${esc(b.name)}</span>`).join("")}</div>
+    <div class="chips">${(cur.members||[]).map(b=>`<span class="tag">${b.emoji||"🧑‍💼"} ${esc(meetingMemberLabel(b))}</span>`).join("")}</div>
     ${mtFlow(cur)}
     ${mtConsensus(cur)}
+    ${mtStructured(cur)}
     ${mtBody(cur)}
-    ${(cur.actions||[]).length?`<div class="card" style="background:#fff;margin-top:12px"><h3 style="margin-top:0">📋 已锁定行动 · 责任到人</h3>
+    ${(cur.actions||[]).length?`<div class="card" style="background:#fff;margin-top:12px"><h3 style="margin-top:0">${cur.team_execute?"🤝 Agent 团队分工 · 接力执行":"📋 已锁定行动 · 责任到人"}</h3>
+      ${cur.team_execute?`<div class="sub" style="margin-bottom:6px">每一棒自动拿到前面队友的交付内容；最后一棒是队长整合，输出一份最终交付包。</div>`:""}
       ${cur.actions.map((a,i)=>`<div class="topic" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        ${cur.team_execute?`<span class="tag" style="background:${a.team_role==="integrate"?"#e7d9ff":"#ffe59a"};font-weight:900">${a.team_role==="integrate"?"🧩 队长整合":`第 ${i+1} 棒`}</span>`:""}
         <div style="flex:1;min-width:220px"><b>${esc(a.who)}</b>:${esc(a.task)}${a.acceptance?`<div class="sub">验收:${esc(a.acceptance)}</div>`:""}</div>
-        ${a.task_id?`<span class="tag" style="background:#a7ecc9">✅ 任务 #${a.task_id}</span>`:
+        ${a.task_id?mtTeamTaskPill(cur,a):
           !cur.decision?`<button class="btn sm pri" onclick="mtAssign(${cur.id},${i},this)">🚀 派给TA(1点)</button>`:""}</div>`).join("")}
-      ${cur.phase==="awaiting_execution"?`<button class="btn pri" style="margin-top:8px" onclick="mtExecute(${cur.id},this)">🚀 执行会议决定</button>`:
+      ${cur.phase==="awaiting_execution"?`<button class="btn pri" style="margin-top:8px" onclick="mtExecute(${cur.id},this)">${cur.team_execute?"🤝 组队执行会议决定":"🚀 执行会议决定"}</button>`:
         !cur.decision?`<button class="btn sm" style="margin-top:8px" onclick="mtAssignAll(${cur.id},this)">⚡ 全部派活</button>`:""}</div>`:""}
     ${(cur.execution_tasks||[]).length?`<div class="card" style="background:#e9f8ef;margin-top:12px"><h3 style="margin-top:0">🚀 已启动执行</h3>
       ${cur.execution_tasks.map(t=>`<div class="topic" style="display:flex;gap:9px;align-items:center;flex-wrap:wrap">
-        <div style="flex:1;min-width:220px"><b>#${t.id} · ${esc(t.name)}</b><div class="sub">${esc(t.task)}</div></div>
+        <div style="flex:1;min-width:220px"><b>#${t.id} · ${esc(t.name)}</b><div class="sub">${esc(employeeIdentityLabel(t))}${Number(t.config_revision)>0?` · 配置 r${Number(t.config_revision)}`:""}</div><div class="sub">${esc(t.task)}</div></div>
         <span class="pill ${t.status==="done"?"done":t.status==="failed"?"failed":"running"}">${{queued:"排队",running:"执行中",done:"已交付",failed:"失败"}[t.status]||t.status}</span>
-        <button class="btn sm" onclick="mtOpenTask(${t.id},${t.emp_idx})">查看任务</button></div>`).join("")}</div>`:""}
-    ${cur.status!=="running"?`<div class="card" style="background:#e7f0ff;margin-top:12px"><b>👔 老板介入:补约束 / 挑战决定</b>
+        <button class="btn sm" onclick="mtOpenTask(${t.id})">查看任务</button></div>`).join("")}</div>`:""}
+    ${cur.status==="done"?`<div class="card" style="background:#e7f0ff;margin-top:12px"><b>👔 老板介入:补约束 / 挑战决定</b>
       <div class="row" style="margin-top:6px"><div style="flex:3"><input id="mt-ask" placeholder="例:预算砍一半还能干吗?/ 这个 GO 的关键证据是什么?"></div>
         <div><button class="btn pri" ${(cur.intervention_count||0)>=2?"disabled":""} onclick="mtAsk(${cur.id},this)">重新验证(${(cur.members||[]).length}点)</button></div></div>
       <div class="sub" style="margin-top:4px">这不是继续闲聊：员工只补新证据，主持人立即重做决定并更新 Next Action。每场最多 2 次，已用 ${cur.intervention_count||0} 次。</div></div>`:""}
@@ -4854,7 +6798,7 @@ async function meetingsView(mid){
     <div class="topic" style="cursor:pointer" onclick="location.hash='#/meetings/${x.id}'">
       <span class="t">#${x.id} ${esc(x.question.slice(0,42))}</span>
       <span style="float:right">${mtDecisionBadge(x.decision)} <span class="pill ${x.status==="done"?"done":x.status==="failed"?"failed":"running"}">${{queued:"排队",running:"进行中",done:"已收口",failed:"中断"}[x.status]||x.status}</span></span>
-      <div class="sub" style="margin-top:3px">${(x.members||[]).map(b=>esc(b.name)).join(" · ")} · ${esc(MT_PHASE_LABEL[x.phase]||"")}${x.task_count?` · 已派 ${x.task_count} 单`:""}</div></div>`).join(""):
+      <div class="sub" style="margin-top:3px">${(x.members||[]).map(b=>esc(meetingMemberLabel(b))).join(" · ")} · ${esc(MT_PHASE_LABEL[x.phase]||"")}${x.task_count?` · 已派 ${x.task_count} 单`:""}</div></div>`).join(""):
       `<div class="empty">这一页没有历史会议。</div>`}
     ${listPager(meetingsContract,"meetings")}</div>`:""}`;
   const box=$("#mt-msgs"); if(box) box.scrollTop=box.scrollHeight;
@@ -4893,11 +6837,27 @@ function mtToggle(el){
   else { MT_SEL.add(i); el.classList.add("on"); }
   mtRefreshPicked();
 }
+function meetingActionEmployee(cur,action){
+  return (cur?.members||[]).find(member=>Number(member.idx)===Number(action?.idx))||null;
+}
+function mtTeamTaskPill(cur,a){
+  const t=(cur.execution_tasks||[]).find(x=>Number(x.id)===Number(a.task_id));
+  const status=t?t.status:null;
+  const label={queued:"⏳ 排队",running:"🏃 接力中",done:"✅ 已交付",failed:"⚠️ 失败可重试"}[status];
+  if(!label) return `<a class="tag" style="background:#a7ecc9" href="#/tasks/${a.task_id}">✅ 任务 #${a.task_id}</a>`;
+  const bg=status==="done"?"#a7ecc9":status==="failed"?"#ffc3c3":"#ffe59a";
+  return `<a class="tag" style="background:${bg}" href="#/tasks/${a.task_id}">${label} · #${a.task_id}</a>`;
+}
 async function mtAssign(mid, i, btn){
   const cur = await api("/meetings/"+mid); const a = (cur.actions||[])[i]; if(!a) return;
+  const employee=meetingActionEmployee(cur,a);
+  if(!employeeCanAssignNew(employee)) return toast("此行动绑定任务创建时的岗位版本，请从原会议的执行入口继续。");
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span>`;
-  try{ const r = await api("/tasks",{method:"POST",body:{emp_idx:a.idx, brief:{direction:a.task, industry:""}}});
-    toast(`已派给 ${a.who}`); btn.outerHTML=`<span class="tag" style="background:#a7ecc9">✅ 已派 <button type="button" class="link-btn" onclick="openSpec(${Number(a.idx)||0},'task')" style="text-decoration:underline">看进度</button></span>`;
+  try{ const r = await api("/tasks",{method:"POST",body:{emp_idx:a.idx, brief:{direction:a.task, industry:""},...employeeIdentityMutationFields(employee)}});
+    const taskId=Number(r.task_id||0);
+    toast(`已派给 ${a.who}`); btn.outerHTML=Number.isInteger(taskId)&&taskId>0
+      ?`<a class="tag" style="background:#a7ecc9" href="#/tasks/${taskId}">✅ 已派 · 看任务 #${taskId}</a>`
+      :`<span class="tag" style="background:#a7ecc9">✅ 已派，可到任务中心查看</span>`;
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🚀 派给TA(1点)"; }
 }
 async function mtAssignAll(mid, btn){
@@ -4908,8 +6868,13 @@ async function mtAssignAll(mid, btn){
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 派活中…`;
   let ok=0; const failures=[];
   for(const a of cur.actions){
+    const employee=meetingActionEmployee(cur,a);
+    if(!employeeCanAssignNew(employee)){
+      failures.push({who:a.who||`员工 #${a.idx}`,task:a.task||"",error:"该行动使用任务创建时的岗位版本，只能在原会议线程执行"});
+      continue;
+    }
     try{
-      await api("/tasks",{method:"POST",body:{emp_idx:a.idx, brief:{direction:a.task}}});
+      await api("/tasks",{method:"POST",body:{emp_idx:a.idx, brief:{direction:a.task},...employeeIdentityMutationFields(employee)}});
       ok++;
     }catch(e){
       failures.push({who:a.who||`员工 #${a.idx}`,task:a.task||"",error:e?.message||"请求失败"});
@@ -4927,12 +6892,13 @@ async function mtAssignAll(mid, btn){
 async function mtExecute(mid, btn){
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 正在启动任务…`;
   try{ const r=await api(`/meetings/${mid}/execute`,{method:"POST"});
-    toast(`已启动 ${r.task_ids.length} 个执行任务`); render();
+    toast(r.team?"🤝 Agent 团队已开工，接力进度看会议消息流":`已启动 ${r.task_ids.length} 个执行任务`); render();
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🚀 执行会议决定"; }
 }
-async function mtOpenTask(tid, idx){
-  if(idx<100){ MODAL_IDX=idx; MODAL_TAB="solo"; SOLO_TASK=await api("/tasks/"+tid); drawModal(); }
-  else { await openSpec(idx,"task"); await specOpenTask(tid); }
+function mtOpenTask(tid){
+  const taskId=Number(tid);
+  if(!Number.isInteger(taskId)||taskId<1)return;
+  location.hash=`#/tasks/${taskId}`;
 }
 async function mtAsk(mid, btn){
   const q = $("#mt-ask").value.trim(); if(!q) return toast("先写您要追问的话");
@@ -4946,10 +6912,12 @@ async function mtStart(btn){
   if(MT_SEL.size<2) return toast("至少拉 2 位员工");
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 开会中…`;
   try{
-    const r = await api("/meetings",{method:"POST",body:{question:q, emp_idxs:[...MT_SEL],
+    const member_bindings=MT_POOL.filter(member=>MT_SEL.has(member.idx)).map(member=>({idx:Number(member.idx),...employeeIdentityMutationFields(member)}));
+    const r = await api("/meetings",{method:"POST",body:{question:q, emp_idxs:[...MT_SEL],member_bindings,
       constraints:$("#mt-constraints")?.value.trim()||"",
       acceptance_criteria:$("#mt-acceptance")?.value.trim()||"",
-      auto_execute:$("#mt-auto")?.checked!==false}});
+      auto_execute:$("#mt-auto")?.checked!==false,
+      team_execute:$("#mt-team")?.checked===true}});
     MT_CUR = r.meeting_id; MT_SEL = new Set(); toast("结果型会议开始：提案 → 验证 → 执行");
     location.hash="#/meetings/"+r.meeting_id;
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🎯 开会并收敛(每人1点)"; }
@@ -5753,12 +7721,12 @@ async function toolsView(tab,preserveDraft=false){
   } else if(TS.tab==="warm"){
     body = `<div class="sub">新账号从 0 起:军师先联网调研您行业在该平台的头部打法,再给《30天冷启动作战计划》——定位诊断/账号名/简介/对标账号/分周打法/30天逐日选题。</div>
     <div class="row">
-      <div style="flex:0 0 150px"><label>平台</label><select id="wm-pf">${["小红书","抖音","公众号","视频号"].map(x=>`<option>${x}</option>`).join("")}</select></div>
+      <div style="flex:0 0 150px"><label>平台</label><select id="wm-pf" onchange="TS.wmPf=this.value">${["小红书","抖音","公众号","视频号"].map(x=>`<option ${TS.wmPf===x?"selected":""}>${x}</option>`).join("")}</select></div>
       <div style="flex:1;min-width:200px"><label>行业</label>${indChips("wm-ind", TS.wmInd)}</div></div>
     <input id="wm-ind-c" placeholder="✏️ 或自己输入行业(填了就用这个)" value="${esc(TS.wmIndC||"")}" oninput="TS.wmIndC=this.value" style="margin-top:6px">
     <label>挂哪个人设档案 <span class="sub">(强烈建议选:账号名/简介/选题全按这个人设来;<a href="#/profiles" style="text-decoration:underline">没有就先建 →</a>)</span></label>
-    <select id="wm-profile"><option value="">(不用人设档案)</option>
-      ${(STATE.profiles||[]).map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join("")}</select>
+    <select id="wm-profile" onchange="TS.wmProfile=this.value"><option value="">(不用人设档案)</option>
+      ${(STATE.profiles||[]).map(p=>`<option value="${p.id}" ${String(TS.wmProfile||"")===String(p.id)?"selected":""}>${esc(p.name)}</option>`).join("")}</select>
     <label>您的定位想法(选填)</label><input id="wm-pos" placeholder="如:社区宝妈客群的轻食店,想走老板娘人设" value="${esc(TS.wmPos||"")}" oninput="TS.wmPos=this.value">
     <div class="actions"><button class="btn pri" ${TS.busy.warm||TS.running?.warm?"disabled":""} onclick="warmGo(this)">🚀 出30天起号计划(3点)</button></div>
     ${etaHint("warm","通常2-5分钟，最迟6分钟自动结束")}
@@ -5856,9 +7824,11 @@ async function remixGo(btn){
   btn.disabled=false; btn.textContent="🎞️ 开始混剪(3点)";
 }
 function hotHtml(h){
-  return `<div class="notice green">📡 ${esc(h.scan_note||"")}</div>` + (h.picks||[]).map(p=>`<div class="topic">
-    <b>${esc(p.title)}</b><div class="sub" style="margin:4px 0">🔥 ${esc(p.why||"")} · 角度:${esc(p.angle||"")}</div>
-    <button class="btn sm pri" onclick="hotStart(${cp(JSON.stringify({direction:p.direction||p.title, why:p.why||""}))})">⚡ 一键开工</button></div>`).join("");
+  const today=new Date().toLocaleDateString("sv-SE");
+  const stale=h.date&&h.date!==today?`<div class="notice" style="margin-top:6px">🕐 这是 <b>${esc(h.date)}</b> 的扫描结果，热点讲究当天发——建议重新扫一次。</div>`:"";
+  return stale+`<div class="notice green">📡 ${esc(h.scan_note||"")}</div>` + (h.picks||[]).map(p=>`<div class="topic">
+    <b>${esc(p.title)}</b>${p.channel?` <span class="tag">📡 ${esc(p.channel)}</span>`:""}<div class="sub" style="margin:4px 0">🔥 ${esc(p.why||"")} · 角度:${esc(p.angle||"")}</div>
+    <button class="btn sm pri" onclick="hotStart(${cp(JSON.stringify({direction:(p.direction||p.title)+(p.angle?`（切入角度：${p.angle}）`:""), why:p.why||"", industry:h.industry||""}))})">⚡ 一键开工</button></div>`).join("");
 }
 function hotStart(payloadStr){ localStorage.setItem("prefill_brief", payloadStr); location.hash="#/new"; }
 async function hdSave(){
@@ -6024,7 +7994,8 @@ function leadsHtml(L, context={}){
   const city=context.city??TS.ldCity??"", industry=context.industry??TS.ldInd??"";
   const reportTitle="线索雷达·"+city+industry, reportMd=leadsMd(L,city,industry);
   const iTag = i=>i==="高"?`<span class="tag" style="background:#ffc2c5">🔥 需求高</span>`:i==="中"?`<span class="tag" style="background:#ffe9ad">需求中</span>`:`<span class="tag">需求低</span>`;
-  return `<div class="notice green">🧭 ${esc(L.strategy||"")}</div>
+  return `${L.analysis_status==="degraded"?`<div class="notice" style="margin-top:0">⚠️ <b>本次为降级分析</b>：情报员深度分析未完成，以下分类与话术是按模板生成的基础版——原帖链接真实可用，但话术建议自己润色后再用，或重新侦察一次。</div>`:""}
+  <div class="notice green">🧭 ${esc(L.strategy||"")}</div>
   <div class="kv">${Object.entries(bc).map(([k,v])=>`<span>${esc(k)} ${esc(v)} 条</span>`).join("")}</div>
   ${(L.leads||[]).map(l=>{ const source=leadSourceUrl(l); return `<div class="topic lead-card">
     <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap"><span class="tag">${esc(l.category||"")}</span><span class="tag">${esc(l.platform||"")}</span>${iTag(l.intent)}
@@ -6147,4 +8118,4 @@ async function tvDel(id){
   render();
 }
 
-sse(); render();
+sse(); render(); agentTeamFloatRestore();

@@ -16,7 +16,9 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 全量套件已增长（schema55→57 新增大量用例，本地 M 系列 23 分钟、
+    # GitHub runner 实测 40 分钟仍不够），放宽到 75 分钟
+    timeout-minutes: 75
 
     steps:
       - name: Checkout

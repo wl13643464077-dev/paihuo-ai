@@ -123,6 +123,7 @@ class EndpointTests(unittest.TestCase):
         db._conn = None
         db.DB_PATH = os.path.join(cls.tmp.name, "obs.db")
         db.conn()
+        db.insert("tenants", {"id": 1, "name": "平台"})
         db.insert("tenants", {"id": 2, "name": "租户甲"})
         cls.member_uid = db.insert("users", {
             "tenant_id": 2, "username": "obs-owner",

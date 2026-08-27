@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 
-from app import auth, billing, db, employees, main, providers
+from app import auth, billing, db, employeeidentity, employees, main, providers
 from app.skills import registry
 
 
@@ -32,8 +32,15 @@ class SweepFixCase(unittest.IsolatedAsyncioTestCase):
         db.insert("users", {"tenant_id": 2, "username": "owner",
                             "password_hash": "x", "role": "owner"})
         self.idx = next(iter(registry.BY_IDX))
+        # 本类只验证内容部核心员工的进修结算。行业V3目录可在并行构建中
+        # fail-closed，不能让这个无关的全局加载掩盖核心员工身份/CAS合同。
+        self._industry_lookup = patch.object(
+            main.departments, "get_active", return_value=None,
+        )
+        self._industry_lookup.start()
 
     def tearDown(self):
+        self._industry_lookup.stop()
         auth.set_current(None)
         if db._conn is not None:
             db._conn.close()
@@ -62,8 +69,19 @@ class SweepFixCase(unittest.IsolatedAsyncioTestCase):
             (kind,),
         )
 
+    def _learn_binding(self):
+        employee = employeeidentity.active_employee(self.idx)
+        self.assertIsNotNone(employee)
+        config = employees.get_config(self.idx)
+        return {
+            "identity_ref": config["identity_ref"],
+            "config_revision": config["config_revision"],
+            "config_sha256": config["config_sha256"],
+            "bundle_sha256": config["bundle_sha256"],
+        }
+
     async def _run_learn(self):
-        result = await main.employee_learn(self.idx)
+        result = await main.employee_learn(self.idx, self._learn_binding())
         self.assertTrue(result["started"])
         for _ in range(20):
             await asyncio.sleep(0.01)
@@ -128,10 +146,11 @@ class SweepFixCase(unittest.IsolatedAsyncioTestCase):
             "learn",
             AsyncMock(return_value={"new": 1, "total": 1, "cost_usd": 0}),
         ):
-            first = asyncio.create_task(main.employee_learn(self.idx))
+            binding = self._learn_binding()
+            first = asyncio.create_task(main.employee_learn(self.idx, binding))
             self.assertTrue(await asyncio.to_thread(entered.wait, 1))
             with self.assertRaises(HTTPException) as raised:
-                await main.employee_learn(self.idx)
+                await main.employee_learn(self.idx, binding)
             self.assertEqual(429, raised.exception.status_code)
             release.set()
             self.assertTrue((await first)["started"])
@@ -171,11 +190,12 @@ class SweepFixCase(unittest.IsolatedAsyncioTestCase):
             "complete_operation",
             side_effect=slow_complete,
         ):
-            self.assertTrue((await main.employee_learn(self.idx))["started"])
+            binding = self._learn_binding()
+            self.assertTrue((await main.employee_learn(self.idx, binding))["started"])
             self.assertTrue(await asyncio.to_thread(entered.wait, 1))
             self.assertIn(self.idx, employees.LEARNING)
             with self.assertRaises(HTTPException) as raised:
-                await main.employee_learn(self.idx)
+                await main.employee_learn(self.idx, binding)
             self.assertEqual(429, raised.exception.status_code)
             release.set()
             for _ in range(50):
@@ -203,7 +223,9 @@ class SweepFixCase(unittest.IsolatedAsyncioTestCase):
             "start_operation",
             side_effect=slow_start,
         ):
-            request = asyncio.create_task(main.employee_learn(self.idx))
+            request = asyncio.create_task(
+                main.employee_learn(self.idx, self._learn_binding())
+            )
             self.assertTrue(await asyncio.to_thread(entered.wait, 1))
             request.cancel()
             release.set()

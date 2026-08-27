@@ -27,6 +27,11 @@ from typing import Sequence
 import uuid
 
 
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from deploy import preflight as release_preflight
+
+
 UTC = timezone.utc
 MANIFEST_NAME = "RELEASE-MANIFEST.json"
 MANIFEST_FORMAT = "paihuo-release-manifest/v1"
@@ -54,17 +59,27 @@ DEFAULT_ROOT_DIRS = (
 DEFAULT_DATA_FILES = (
     "data/gate_rules.json",
     "data/departments",
+    "data/industry_decisions",
+    "data/industry_decisions_v3",
+    "data/industry_decisions_v4",
     "data/industry_knowledge",
 )
 DEFAULT_EMPTY_DIRS = ()
 
 _IMMUTABLE_SEED_PATHS = (
     ("data/departments", "config/departments"),
+    ("data/industry_decisions", "config/industry_decisions"),
+    ("data/industry_decisions_v3", "config/industry_decisions_v3"),
+    ("data/industry_decisions_v4", "config/industry_decisions_v4"),
     ("data/industry_knowledge", "config/industry_knowledge"),
     ("data/gate_rules.json", "config/gate_rules.default.json"),
 )
 # 与部门配置同构的扁平 JSON 目录:发布制品里必须是不可变种子,不能混入子目录或脚本。
-_FLAT_JSON_SEED_PREFIXES = ("data/departments/", "data/industry_knowledge/")
+_FLAT_JSON_SEED_PREFIXES = (
+    "data/departments/", "data/industry_decisions/", "data/industry_decisions_v3/",
+    "data/industry_decisions_v4/",
+    "data/industry_knowledge/",
+)
 _IGNORED_DEPARTMENT_SEED_SOURCES = frozenset(
     {"data/departments/_source_ten.csv"}
 )
@@ -1100,6 +1115,16 @@ def build_release(
     temporary_receipt = workspace / "receipt.json"
     try:
         _stage_entries(staged_payload, entries)
+        if source_schema >= 55:
+            try:
+                release_preflight._validate_learning_evidence_gate(
+                    staged_payload / "app" / "learning_evidence_gate_v1.json",
+                    staged_payload / "config" / "industry_decisions_v4",
+                )
+            except release_preflight.PreflightError as exc:
+                raise ReleaseBuildError(
+                    f"learning evidence sidecar release gate failed: {exc}"
+                ) from exc
         _write_file(staged_payload / MANIFEST_NAME, manifest_body, 0o644)
         _verify_staging(
             staged_payload,

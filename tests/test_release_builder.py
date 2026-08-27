@@ -106,6 +106,24 @@ class ReleaseBuilderCase(unittest.TestCase):
             "build,source,only\n",
             encoding="utf-8",
         )
+        decisions = self.root / "data" / "industry_decisions"
+        decisions.mkdir(parents=True)
+        (decisions / "industry.json").write_text(
+            '{"key":"industry","catalog_version":"fixture","employees":[]}\n',
+            encoding="utf-8",
+        )
+        decisions_v3 = self.root / "data" / "industry_decisions_v3"
+        decisions_v3.mkdir(parents=True)
+        (decisions_v3 / "industry.json").write_text(
+            '{"key":"industry","catalog_version":"fixture-v3","employees":[]}\n',
+            encoding="utf-8",
+        )
+        decisions_v4 = self.root / "data" / "industry_decisions_v4"
+        decisions_v4.mkdir(parents=True)
+        (decisions_v4 / "industry.json").write_text(
+            '{"key":"industry","catalog_version":"fixture-v4","employees":[]}\n',
+            encoding="utf-8",
+        )
         knowledge = self.root / "data" / "industry_knowledge"
         knowledge.mkdir(parents=True)
         (knowledge / "industry.json").write_text(
@@ -133,6 +151,9 @@ class ReleaseBuilderCase(unittest.TestCase):
             self.assertIsNotNone(manifest_file)
             manifest = json.loads(manifest_file.read().decode("utf-8"))
         self.assertIn("./config/departments/industry.json", names)
+        self.assertIn("./config/industry_decisions/industry.json", names)
+        self.assertIn("./config/industry_decisions_v3/industry.json", names)
+        self.assertIn("./config/industry_decisions_v4/industry.json", names)
         self.assertIn("./config/industry_knowledge/industry.json", names)
         self.assertIn("./config/gate_rules.default.json", names)
         self.assertNotIn("./config/departments/_source_ten.csv", names)
@@ -150,6 +171,24 @@ class ReleaseBuilderCase(unittest.TestCase):
         departments.mkdir(parents=True)
         (departments / "industry.json").write_text(
             '{"key":"industry","employees":[]}\n',
+            encoding="utf-8",
+        )
+        decisions = self.root / "data" / "industry_decisions"
+        decisions.mkdir(parents=True)
+        (decisions / "industry.json").write_text(
+            '{"key":"industry","catalog_version":"fixture","employees":[]}\n',
+            encoding="utf-8",
+        )
+        decisions_v3 = self.root / "data" / "industry_decisions_v3"
+        decisions_v3.mkdir(parents=True)
+        (decisions_v3 / "industry.json").write_text(
+            '{"key":"industry","catalog_version":"fixture-v3","employees":[]}\n',
+            encoding="utf-8",
+        )
+        decisions_v4 = self.root / "data" / "industry_decisions_v4"
+        decisions_v4.mkdir(parents=True)
+        (decisions_v4 / "industry.json").write_text(
+            '{"key":"industry","catalog_version":"fixture-v4","employees":[]}\n',
             encoding="utf-8",
         )
         knowledge = self.root / "data" / "industry_knowledge"

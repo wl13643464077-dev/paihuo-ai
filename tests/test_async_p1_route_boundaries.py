@@ -110,7 +110,8 @@ class ReviewedP1RouteCallGraphTests(unittest.TestCase):
     LINEARIZED_QUEUE_ROUTES = {
         "create_job": 1,
         "task_create": 1,
-        "task_redo": 1,
+        # followups 与旧 redo 共用同一个持久化/启动线性化边界。
+        "_create_task_followup": 1,
         "task_retry": 1,
         "task_center_retry": 5,
         "avatar_job_create": 1,
@@ -206,23 +207,36 @@ class ReviewedP1RouteCallGraphTests(unittest.TestCase):
 
 
 class CancellationLinearizationTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _task_binding():
+        config = main.employees.get_config(5)
+        return {
+            "identity_ref": config["identity_ref"],
+            "config_revision": config["config_revision"],
+            "config_sha256": config["config_sha256"],
+            "bundle_sha256": config["bundle_sha256"],
+        }
+
     async def test_cancelled_expert_create_starts_worker_after_late_commit(self):
         entered = asyncio.Event()
         release = asyncio.Event()
         worker_started = asyncio.Event()
         committed = []
         worker_ids = []
+        binding = self._task_binding()
 
         async def fake_arun(fn, *args, **kwargs):
             if fn is main._need_module:
                 return None
             if fn is main.employees.is_enabled:
                 return True
-            if fn is main._create_charged_expert_task:
+            if fn is main._initial_task_replay:
+                return None
+            if fn is main._create_idempotent_expert_task:
                 entered.set()
                 await release.wait()
                 committed.append(42)
-                return 42
+                return {"created": True, "task_id": 42}
             self.fail(f"unexpected DB operation: {fn}")
 
         async def fake_worker(task_id, _broadcast):
@@ -230,10 +244,9 @@ class CancellationLinearizationTests(unittest.IsolatedAsyncioTestCase):
             worker_started.set()
 
         with mock.patch.object(main.departments, "get", return_value=None), \
-                mock.patch.object(main.registry, "BY_IDX", {5: {}}), \
                 mock.patch.object(
                     main.taskrunner,
-                    "normalize_brief",
+                    "normalize_task_brief",
                     return_value={"direction": "cancel test"},
                 ), \
                 mock.patch.object(main.db, "arun", side_effect=fake_arun), \
@@ -243,7 +256,12 @@ class CancellationLinearizationTests(unittest.IsolatedAsyncioTestCase):
                     new=fake_worker,
                 ):
             request = asyncio.create_task(
-                main.task_create({"emp_idx": 5, "brief": {}})
+                main.task_create({
+                    "emp_idx": 5,
+                    **binding,
+                    "brief": {},
+                    "request_key": "async-cancel-task-0001",
+                })
             )
             await entered.wait()
             request.cancel()
@@ -259,14 +277,17 @@ class CancellationLinearizationTests(unittest.IsolatedAsyncioTestCase):
         funnel_entered = asyncio.Event()
         funnel_release = asyncio.Event()
         worker_started = asyncio.Event()
+        binding = self._task_binding()
 
         async def fake_arun(fn, *args, **kwargs):
             if fn is main._need_module:
                 return None
             if fn is main.employees.is_enabled:
                 return True
-            if fn is main._create_charged_expert_task:
-                return 43
+            if fn is main._initial_task_replay:
+                return None
+            if fn is main._create_idempotent_expert_task:
+                return {"created": True, "task_id": 43}
             if fn is main.funnel.record_first_work:
                 funnel_entered.set()
                 await funnel_release.wait()
@@ -277,10 +298,9 @@ class CancellationLinearizationTests(unittest.IsolatedAsyncioTestCase):
             worker_started.set()
 
         with mock.patch.object(main.departments, "get", return_value=None), \
-                mock.patch.object(main.registry, "BY_IDX", {5: {}}), \
                 mock.patch.object(
                     main.taskrunner,
-                    "normalize_brief",
+                    "normalize_task_brief",
                     return_value={"direction": "funnel test"},
                 ), \
                 mock.patch.object(main.db, "arun", side_effect=fake_arun), \
@@ -290,12 +310,25 @@ class CancellationLinearizationTests(unittest.IsolatedAsyncioTestCase):
                     new=fake_worker,
                 ):
             result = await asyncio.wait_for(
-                main.task_create({"emp_idx": 5, "brief": {}}),
+                main.task_create({
+                    "emp_idx": 5,
+                    **binding,
+                    "brief": {},
+                    "request_key": "async-funnel-task-0001",
+                }),
                 timeout=1,
             )
             await asyncio.wait_for(worker_started.wait(), timeout=1)
             await asyncio.wait_for(funnel_entered.wait(), timeout=1)
-            self.assertEqual({"task_id": 43}, result)
+            self.assertEqual(
+                {
+                    "task_id": 43,
+                    "created": True,
+                    "replayed": False,
+                    **binding,
+                },
+                result,
+            )
             funnel_release.set()
             await asyncio.sleep(0)
 

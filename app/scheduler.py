@@ -544,7 +544,23 @@ def _tick(engine):
 
 async def _periodic():
     """V25:低频周期任务——台账自动复盘 + 竞品周报(周一上午)+ 每日必发推送(早7-9点)."""
-    from . import billing, growth, pubtrack
+    from . import billing, growth, inspectionimport, pubtrack
+    try:
+        retention = await db.arun(inspectionimport.cleanup_expired_previews)
+        log.info(
+            "inspection import retention periodic sweep scanned=%d expired=%d "
+            "compacted=%d wal_checkpointed=%d wal_busy=%d",
+            int((retention or {}).get("scanned", 0)),
+            int((retention or {}).get("expired", 0)),
+            int((retention or {}).get("compacted", 0)),
+            int((retention or {}).get("wal_checkpointed", 0)),
+            int((retention or {}).get("wal_busy", -1)),
+        )
+    except Exception as exc:
+        log.error(
+            "inspection import retention periodic sweep failed error_type=%s",
+            type(exc).__name__,
+        )
     await pubtrack.tick()
     now = datetime.now(TZ)
     if 7 <= now.hour <= 9:                                # 每日必发:一天一次
