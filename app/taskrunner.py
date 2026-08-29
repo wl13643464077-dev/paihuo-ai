@@ -758,9 +758,20 @@ async def run_task(task_id: int, broadcast):
             caps = departments.capabilities_for(
                 idx, cfg.get("caps_off"), employee=e
             )
+            # 员工自动进化:老板历次验收采纳的实战心得,随岗位配置注入本次任务。
+            insights_text = await db.arun(
+                employees.adopted_insights_text,
+                int(t.get("tenant_id") or 1), idx,
+            )
+            if insights_text:
+                progress(
+                    "tool",
+                    f"已装载老板验收沉淀的实战心得 {insights_text.count(chr(10)) + 1} 条",
+                )
             prompt = departments.build_task_prompt(
                 e, brief, employees.skills_block(idx, config=cfg), ctx_text, caps,
                 private_template=cfg.get("prompt_template"),
+                insights_text=insights_text,
             )
             # 产品承诺「派活即联网核实」:所有产业专家都经能力网关先核实事实与数据。
             web = True

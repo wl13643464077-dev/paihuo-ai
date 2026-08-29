@@ -1742,12 +1742,49 @@ async function taskDetailView(tid){
     ${["queued","running"].includes(t.status)?`<h3>实时进度</h3><div class="steps" data-tasksteps="${t.id}">${(t.steps||[]).map((s,i)=>stepRow(s,i+1)).join("")||`<div class="step"><span class="ic">⏳</span><span class="lb">员工正在上线…</span></div>`}</div>`:""}
     ${t.status==="done"?`<div class="actions"><button class="btn sm" onclick="copyText(${cp(t.output_md||"")})">📋 复制</button>
       <a class="btn sm" href="/api/tasks/${t.id}/export.pdf">⬇️ PDF</a><a class="btn sm" href="/api/tasks/${t.id}/export.docx">⬇️ Word</a>
-      <button class="btn sm" onclick="taskToKnow(${t.id})">📚 存入沉淀库</button></div>${taskBody(t)}${taskRevisionPanel(t,"page")}`:""}
+      <button class="btn sm" onclick="taskToKnow(${t.id})">📚 存入沉淀库</button></div><div id="task-verdict-${t.id}"></div>${taskBody(t)}${taskRevisionPanel(t,"page")}`:""}
     ${t.status==="failed"?`<div class="notice red">${esc(t.output_md||"任务执行失败")}
       <div class="actions">${t.retryable?`<button class="btn sm pri" onclick="retryExpertTask(${t.id},this)">🔁 免费重试</button>
         <span class="sub">沿用原任务，不会再次扣点 · 还可重试 ${t.free_retries_remaining} 次</span>`
         :`<span class="sub">${t.thread?.can_continue?"免费重试已用完，可从上一个已交付版本继续。":"免费重试次数已用完，请重新派一个任务"}</span>`}</div></div>${taskRevisionPanel(t,"page")}`:""}
   </div>`;
+  if(t.status==="done") taskVerdictLoad(t.id);
+}
+/* ---------- 任务验收(采纳/驳回+理由):每次验收都是员工进化的养料 ---------- */
+async function taskVerdictLoad(tid){
+  const box = document.getElementById("task-verdict-"+tid);
+  if(!box) return;
+  let saved = null;
+  try{ saved = (await api(`/tasks/${tid}/verdict`)).verdict; }catch(_){}
+  if(saved){
+    box.innerHTML = `<div class="notice green" style="margin-top:10px">${saved.verdict==="adopt"?"✅ 已验收:采纳":"❌ 已验收:驳回"}${saved.reason?` · 理由:${esc(saved.reason)}`:""}
+      <div class="sub" style="margin-top:3px">验收已转化为员工进化养料;到员工面板「派活」页可拍板生成的实战心得提案。</div></div>`;
+    return;
+  }
+  box.innerHTML = `<div class="notice" style="margin-top:10px"><b>🧠 验收这次交付</b>
+    <span class="sub">采纳/驳回和理由会被 AI 提炼成该员工的「实战心得」,员工越用越懂你</span>
+    <div class="actions" style="margin-top:8px">
+      <button class="btn sm ok" onclick="taskVerdictSubmit(${tid},'adopt',this,'')">✅ 采纳</button>
+      <button class="btn sm bad" onclick="taskVerdictRejectForm(${tid})">❌ 驳回(写理由)</button>
+    </div></div>`;
+}
+function taskVerdictRejectForm(tid){
+  const box = document.getElementById("task-verdict-"+tid);
+  if(!box) return;
+  box.innerHTML = `<div class="notice" style="margin-top:10px"><b>❌ 驳回理由(必填,一句话说清哪里不对)</b>
+    <textarea id="verdict-reason-${tid}" style="min-height:52px;margin-top:6px" placeholder="例:毛利口径不对,应按剔除包装费后的实收计算"></textarea>
+    <div class="actions" style="margin-top:6px">
+      <button class="btn sm bad" onclick="taskVerdictSubmit(${tid},'reject',this,document.getElementById('verdict-reason-${tid}').value.trim())">提交驳回</button>
+      <button class="btn sm" onclick="taskVerdictLoad(${tid})">取消</button></div></div>`;
+}
+async function taskVerdictSubmit(tid, verdict, btn, reason){
+  if(verdict==="reject"&&!reason) return toast("驳回时请写一句话理由,这会成为员工进化的养料");
+  btn.disabled = true;
+  try{
+    await api(`/tasks/${tid}/verdict`,{method:"POST",body:{verdict,reason:reason||""}});
+    toast("验收完成,AI 正在提炼实战心得提案");
+    taskVerdictLoad(tid);
+  }catch(e){ toast(e.message); btn.disabled = false; }
 }
 async function taskCenterRecordView(ref){
   const [kind,rawId]=ref.split(":"), rid=+rawId;
@@ -2504,6 +2541,36 @@ function drawSpec(){
       </div>
     </div></div>`;
   const box = $("#spec-steps"); if(box) box.scrollTop = box.scrollHeight;
+  if(SPEC_TAB==="task"&&canAssign) specInsightsLoad(e.idx);
+}
+/* ---------- 员工自动进化:实战心得(验收提炼的提案,老板拍板后下次任务自动带上) ---------- */
+async function specInsightsLoad(idx){
+  const box = document.getElementById("spec-insights-"+Number(idx));
+  if(!box) return;
+  let data;
+  try{ data = await api(`/employees/${idx}/insights`); }catch(_){ return; }
+  const pending = data.pending||[], adopted = data.adopted||[];
+  if(!pending.length && !adopted.length){ box.innerHTML = ""; return; }
+  box.innerHTML = `<details class="insight-card"${pending.length?" open":""}>
+    <summary>🧠 实战心得(自动进化) <span class="sub">待拍板 ${pending.length} · 已生效 ${adopted.length}</span></summary>
+    ${pending.length?`<div class="sub" style="margin:6px 0 2px"><b>验收提炼的新提案,采纳后 TA 下次干活自动带上:</b></div>`:""}
+    ${pending.map((row,i)=>`<div class="topic" style="margin:6px 0;display:flex;gap:8px;align-items:flex-start">
+      <span style="flex:1;min-width:0">💡 ${esc(row.insight||"")} <span class="sub">来自任务 #${Number(row.task_id)||"-"}</span></span>
+      <button class="btn sm ok" onclick="specInsightDecide(${idx},${i},'adopt',this)">采纳</button>
+      <button class="btn sm" onclick="specInsightDecide(${idx},${i},'dismiss',this)">忽略</button></div>`).join("")}
+    ${adopted.length?`<div class="sub" style="margin:8px 0 2px"><b>已生效(每次任务自动注入):</b></div>`:""}
+    ${adopted.map((row,i)=>`<div class="topic" style="margin:6px 0;display:flex;gap:8px;align-items:flex-start">
+      <span style="flex:1;min-width:0">✅ ${esc(row.insight||"")}</span>
+      <button class="btn sm" onclick="specInsightDecide(${idx},${i},'remove',this)">移除</button></div>`).join("")}
+  </details>`;
+}
+async function specInsightDecide(idx, index, action, btn){
+  btn.disabled = true;
+  try{
+    await api(`/employees/${idx}/insights/decide`,{method:"POST",body:{index,action}});
+    toast(action==="adopt"?"已采纳,下次任务自动带上":action==="remove"?"已移除":"已忽略");
+    specInsightsLoad(idx);
+  }catch(e){ toast(e.message); btn.disabled = false; }
 }
 function specIntroTab(e){
   return `<div class="card" style="background:linear-gradient(120deg,#fff6dc,#fffaf0);margin-top:0">
@@ -2544,8 +2611,9 @@ function specTaskTab(e){
   const prefill = EXP_PREFILL; EXP_PREFILL = "";   // 从「帮我选/改派」带过来的一句话,一次性回填
   return `
   <div class="notice" style="margin-top:0">📋 <b>给「${esc(e.name)}」派活</b>:一句话说清要什么。TA 会核实关键信息并围绕实际业务交付可执行结果(自动进资产库)。</div>
+  <div id="spec-insights-${Number(e.idx)}"></div>
   ${taskGuideCard(guide)}
-  <label>任务内容 *</label>
+  <label style="display:flex;align-items:center;gap:8px">任务内容 * ${voiceBtn("spec-dir")}</label>
   <textarea id="spec-dir" placeholder="${esc(guide.task_placeholder)}">${esc(prefill)}</textarea>
   <div class="row">
     <div><label>细分业态/经营场景(选填)</label><input id="spec-industry" placeholder="${esc(guide.industry_placeholder)}"></div>
@@ -2617,14 +2685,69 @@ async function specRedo(tid){
   return taskFollowup(tid,"spec",null,task.identity_ref||"",task.config_revision||0,task.config_sha256||"",task.bundle_sha256||"");
 }
 
+/* ---------- 语音派活:连续听写不断句 + 餐饮语境同音纠错(不支持的浏览器自动隐藏) ---------- */
+let VOICE_ACTIVE = null;   // {rec, targetId, btn, base}
+function voiceSupported(){ return !!(window.SpeechRecognition||window.webkitSpeechRecognition); }
+function voiceBtn(targetId){
+  if(!voiceSupported()) return "";
+  return `<button type="button" class="btn sm voice-btn" onclick="voiceToggle(${cp(targetId)},this)" title="连续语音输入不断句,说完再点一次结束;AI 会按餐饮语境自动纠正同音错字">🎤 语音</button>`;
+}
+function voiceToggle(targetId, btn){
+  if(VOICE_ACTIVE){ voiceStop(); return; }
+  const input = document.getElementById(targetId);
+  if(!input) return;
+  const SR = window.SpeechRecognition||window.webkitSpeechRecognition;
+  let rec;
+  try{ rec = new SR(); }catch(_){ return toast("当前浏览器不支持语音输入"); }
+  rec.lang = "zh-CN"; rec.continuous = true; rec.interimResults = true;
+  const base = input.value ? input.value.replace(/\s+$/,"") + " " : "";
+  let finals = "";
+  rec.onresult = ev => {
+    let interim = "";
+    for(let i = ev.resultIndex; i < ev.results.length; i++){
+      const tr = ev.results[i][0].transcript;
+      if(ev.results[i].isFinal) finals += tr; else interim += tr;
+    }
+    input.value = base + finals + interim;
+  };
+  rec.onerror = ev => { if(ev.error === "not-allowed") toast("麦克风权限被拒绝,请在浏览器设置中允许"); };
+  rec.onend = () => { if(VOICE_ACTIVE && VOICE_ACTIVE.rec === rec) voiceFinish(); };
+  VOICE_ACTIVE = {rec, targetId, btn, base};
+  btn.classList.add("on"); btn.innerHTML = "🔴 说话中,点击结束";
+  try{ rec.start(); }catch(_){ voiceFinish(); }
+}
+function voiceStop(){
+  const v = VOICE_ACTIVE;
+  if(!v) return;
+  try{ v.rec.onend = null; v.rec.stop(); }catch(_){}
+  voiceFinish(v);
+}
+async function voiceFinish(v){
+  v = v || VOICE_ACTIVE;
+  if(!v) return;
+  VOICE_ACTIVE = null;
+  v.btn.classList.remove("on"); v.btn.innerHTML = "🎤 语音";
+  const input = document.getElementById(v.targetId);
+  if(!input) return;
+  const text = input.value.trim();
+  if(!text || text === v.base.trim()) return;
+  try{
+    const r = await api("/voice/normalize",{method:"POST", body:{text}, timeout:18000});
+    if(r.text && r.corrected){ input.value = r.text; toast("已按餐饮语境自动纠正同音错字"); }
+  }catch(_){ /* 纠错失败保留原文,不拦输入 */ }
+}
+
 /* ---------- V27:智能派活路由(大白话找专家 + 派单预检引导) ---------- */
 function expFinderCard(deptKey){
   return `<div class="card" style="background:linear-gradient(120deg,#eef6ff,#fffaf0);margin-top:10px">
-    <b>🎯 不知道找谁?</b> <span class="sub">一句话描述你要办的活,AI 帮你从本部门专家里挑最对口的,并按协同小队展示。</span>
+    <b>🎯 不知道找谁?</b> <span class="sub">一句话说要办的活,AI 读花名册自动组建协同小队:队长拆解分工、依赖排序,支持自动派发全队或逐人派活。</span>
     <div style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;flex-wrap:wrap">
       <textarea id="ef-text-${deptKey}" style="flex:1;min-width:min(100%,240px);min-height:46px"
         placeholder="例:我想给门店做一场周年庆活动,怎么策划引流"></textarea>
-      <button class="btn pri" onclick="expFind(${cp(deptKey)},this)">🎯 帮我选</button>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <button class="btn pri" onclick="expFind(${cp(deptKey)},this)">🎯 帮我选</button>
+        ${voiceBtn(`ef-text-${deptKey}`)}
+      </div>
     </div>
     <div id="ef-result-${deptKey}"></div></div>`;
 }
@@ -2747,6 +2870,11 @@ async function agentTeamAutoDispatch(btn, logId="at-auto-log"){
       if(!Number.isInteger(tid) || tid < 1) throw new Error("任务已接收但编号异常，请到任务中心核对");
       clearPersistentMutationRequestKey("teamtask", String(m.idx), requestKey);
       ok++;
+      agentTeamPatch(saved => {
+        const list = (saved.dispatched||[]).filter(row => Number(row.tid) !== tid);
+        list.push({idx: m.idx, tid, name: m.name||m.role, role: m.roleInTeam||"", status: "running"});
+        saved.dispatched = list.slice(-8);
+      });
       if(row) row.innerHTML = `✅ <b>${esc(m.name||m.role)}</b>（${esc(m.roleInTeam||"")}）已开工 → <a href="#/tasks/${tid}" style="text-decoration:underline">任务 #${tid}</a>`;
     }catch(err){
       if(row) row.innerHTML = `❌ <b>${esc(m.name||m.role)}</b>：${esc(err.message||"派单失败")}`;
@@ -2825,6 +2953,7 @@ function agentTeamFloatRender(expanded){
       <button type="button" class="btn sm pri" onclick="agentTeamAutoDispatch(this,'atf-auto-log')">🚀 自动派给全队（${members.length}点）</button>
       <a class="btn sm" href="#/tasks">📋 任务中心</a>
     </div>
+    ${agentTeamProgressHtml(st)}
     <div id="atf-auto-log"></div>
   </div>`;
 }
@@ -2832,6 +2961,87 @@ async function agentTeamFloatClose(){
   if(!await uiConfirm("关闭并清除当前协同小队面板？之后需要重新「帮我选」组队。",{title:"关闭小队面板",confirmText:"关闭"})) return;
   try{ localStorage.removeItem(AGENT_TEAM_STORE); }catch(_){}
   document.getElementById("agent-team-float")?.remove();
+}
+/* ---------- 队长收尾汇总:跟踪小队任务,干完自动派队长出总结+下一步行动计划 ---------- */
+function agentTeamPatch(mutate){
+  try{
+    const saved = JSON.parse(localStorage.getItem(AGENT_TEAM_STORE)||"null");
+    if(!saved) return;
+    mutate(saved);
+    localStorage.setItem(AGENT_TEAM_STORE, JSON.stringify(saved));
+  }catch(_){}
+}
+function agentTeamProgressHtml(st){
+  const dispatched = (st && st.dispatched)||[];
+  if(!dispatched.length) return "";
+  const icon = s => s==="done"?"✅":s==="failed"?"❌":"⚙️";
+  const rows = dispatched.map(row =>
+    `<div class="atf-taskrow">${icon(row.status)} <a href="#/tasks/${Number(row.tid)}">#${Number(row.tid)}</a> ${esc(row.name||"")}<i>${esc(row.role||"")}</i></div>`
+  ).join("");
+  const doneCount = dispatched.filter(row => row.status==="done").length;
+  let summaryHtml = "";
+  if(st.summaryTaskId){
+    summaryHtml = `<div class="atf-summary">📊 队长收尾汇总 → <a href="#/tasks/${Number(st.summaryTaskId)}">任务 #${Number(st.summaryTaskId)}</a></div>`;
+  }else if(doneCount === dispatched.length){
+    summaryHtml = `<div class="actions" style="margin-top:6px"><button type="button" class="btn sm pri" onclick="agentTeamSummarize(false,this)">📊 让队长收尾汇总（1点）</button></div>`;
+  }else{
+    summaryHtml = `<div class="sub" style="margin-top:4px">小队进行中 ${doneCount}/${dispatched.length};全部交付后队长将自动收尾汇总(1点)。</div>`;
+  }
+  return `<div class="atf-progress"><div class="atf-p-label">小队任务</div>${rows}${summaryHtml}</div>`;
+}
+let AGENT_TEAM_SUMMARIZING = false;
+async function agentTeamPollTick(){
+  const st = agentTeamState();
+  if(!st || !(st.dispatched||[]).length || st.summaryTaskId) return;
+  if(!ME) return;
+  let changed = false, allDone = true;
+  for(const row of st.dispatched){
+    if(["done","failed"].includes(row.status)){ if(row.status!=="done") allDone = false; continue; }
+    try{
+      const t = await api(`/tasks/${Number(row.tid)}`, {timeout: 12000});
+      if(t.status !== row.status){ row.status = t.status; changed = true; }
+      if(!["done"].includes(t.status)) allDone = ["failed"].includes(t.status) ? allDone : false;
+      if(t.status === "failed") allDone = false;
+    }catch(_){ allDone = false; }
+  }
+  if(changed) agentTeamPatch(saved => { saved.dispatched = st.dispatched; });
+  const expandedPanel = document.querySelector("#agent-team-float .atf-panel");
+  if(changed && expandedPanel) agentTeamFloatRender(true);
+  if(allDone && st.dispatched.every(row => row.status === "done")){
+    agentTeamSummarize(true);
+  }
+}
+async function agentTeamSummarize(auto, btn){
+  if(AGENT_TEAM_SUMMARIZING) return;
+  const st = agentTeamState();
+  if(!st || st.summaryTaskId) return;
+  const dispatched = (st.dispatched||[]).filter(row => row.status === "done");
+  if(!dispatched.length) return toast("小队还没有已完成的任务");
+  const team = st.team||{};
+  const members = team.members||[];
+  const lead = members.find(m => m.roleInTeam === "队长") || members[0];
+  if(!lead) return;
+  AGENT_TEAM_SUMMARIZING = true;
+  if(btn){ btn.disabled = true; btn.innerHTML = `<span class="spin"></span> 队长汇总中…`; }
+  try{
+    const payload = {leader_idx: lead.idx,
+      task_ids: dispatched.map(row => Number(row.tid)),
+      query: st.query||"", team_name: team.teamName||"经营协同小队"};
+    payload.request_key = persistentMutationRequestKey("teamsummary", String(lead.idx), payload);
+    const r = await api("/experts/team-summary",{method:"POST", body: payload, timeout: 25000});
+    const tid = Number(r.task_id||0);
+    if(Number.isInteger(tid) && tid > 0){
+      clearPersistentMutationRequestKey("teamsummary", String(lead.idx), payload.request_key);
+      agentTeamPatch(saved => { saved.summaryTaskId = tid; });
+      agentTeamFloatRender(true);
+      toast(auto ? "小队全部交付,队长已自动开始收尾汇总" : "队长已开始收尾汇总");
+    }
+  }catch(e){
+    if(!auto) toast(e.message||"汇总派单失败");
+  }finally{
+    AGENT_TEAM_SUMMARIZING = false;
+    if(btn){ btn.disabled = false; btn.innerHTML = "📊 让队长收尾汇总（1点）"; }
+  }
 }
 function agentTeamsDag(members){
   if(!members.length) return "";
@@ -5650,6 +5860,12 @@ async function adminView(){
       <div><label>API Key ${ADM.provider.yunwu_key?`<span class="tag">当前:${esc(ADM.provider.yunwu_key)}</span>`:`<span class="tag">未配置</span>`}</label>
         <input id="adm-key" type="password" placeholder="sk-…(留空不改)"></div>
     </div>
+    <h3>🐟 TinyFish 免费联网情报(选配)</h3>
+    <div class="sub" style="margin-bottom:6px">配置后老板参谋、工具箱、员工调研优先走 <a href="https://docs.tinyfish.ai/" target="_blank" rel="noreferrer">TinyFish</a> 真浏览器搜索与抓取(Search/Fetch 免费,动态页也抓得到);失败自动回退原联网通道。</div>
+    <div class="row">
+      <div><label>TinyFish API Key ${ADM.provider.tinyfish_key?`<span class="tag">当前:${esc(ADM.provider.tinyfish_key)}</span>`:`<span class="tag">未配置</span>`}</label>
+        <input id="adm-tinyfish" type="password" placeholder="tf-…(留空不改)"></div>
+    </div>
     <div class="actions"><button class="btn pri" onclick="admSaveProvider()">💾 保存供应商</button>
       <span class="sub">所有数字员工与工具能力统一使用此 API,不依赖服务器本地模型登录态。</span></div></div>
   <div class="card"><h2>🎥 数字人引擎</h2>
@@ -5716,6 +5932,7 @@ async function adminView(){
 async function admSaveProvider(){
   const body = {yunwu_base:$("#adm-base").value.trim()};
   const k = $("#adm-key").value.trim(); if(k) body.yunwu_key = k;
+  const tf = $("#adm-tinyfish")?.value.trim(); if(tf) body.tinyfish_key = tf;
   try{ await api("/settings",{method:"PUT",body}); toast("供应商已保存"); render(); }catch(e){ toast(e.message); }
 }
 async function admSaveMail(){
@@ -8119,3 +8336,4 @@ async function tvDel(id){
 }
 
 sse(); render(); agentTeamFloatRestore();
+setInterval(()=>{ if(document.visibilityState==="visible") agentTeamPollTick().catch(()=>{}); }, 30000);

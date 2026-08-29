@@ -18,6 +18,42 @@ log = logging.getLogger("employees")
 
 LEARNING: set = set()          # 正在进修中的工位 idx
 MAX_SKILLS_IN_PROMPT = 12      # 注入提示词的技能条数上限
+
+# ---- 员工自动进化:验收沉淀的实战心得(存 app_setting,无 schema 变更) ----
+INSIGHT_PENDING_MAX = 20       # 待老板拍板的提案上限
+INSIGHT_ADOPTED_MAX = 12       # 注入提示词的已采纳心得上限
+
+
+def _insight_setting_key(kind: str, tenant: int, idx: int) -> str:
+    return f"emp_insights_{kind}:{int(tenant)}:{int(idx)}"
+
+
+def insight_lists(tenant: int, idx: int) -> dict:
+    """返回 {pending:[...], adopted:[...]};损坏数据按空处理。"""
+    out = {}
+    for kind in ("pending", "adopted"):
+        rows = db.jloads(
+            db.get_setting(_insight_setting_key(kind, tenant, idx)) or "[]", [],
+        )
+        out[kind] = rows if isinstance(rows, list) else []
+    return out
+
+
+def save_insights(kind: str, tenant: int, idx: int, rows: list):
+    cap = INSIGHT_PENDING_MAX if kind == "pending" else INSIGHT_ADOPTED_MAX
+    db.set_setting(
+        _insight_setting_key(kind, tenant, idx),
+        json.dumps(rows[-cap:], ensure_ascii=False),
+    )
+
+
+def adopted_insights_text(tenant: int, idx: int) -> str:
+    """已采纳实战心得 → 注入岗位 system 的文本块(taskrunner 派活时调用)."""
+    lines = [str(row.get("insight") or "").strip()
+             for row in insight_lists(tenant, idx)["adopted"]
+             if isinstance(row, dict)]
+    lines = [line for line in lines if line][:INSIGHT_ADOPTED_MAX]
+    return "\n".join(f"- {line}" for line in lines)
 MAX_SKILLS_CHARS = 2400        # 注入提示词的技能总字数上限
 
 

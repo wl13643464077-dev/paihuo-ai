@@ -31,6 +31,7 @@ SECRET_SETTING_KEYS = (
     "feishu_app_secret",
     "smtp_authcode",
     "runninghub_key",
+    "tinyfish_key",
 )
 _SECRET_SETTING_SET = frozenset(SECRET_SETTING_KEYS)
 
