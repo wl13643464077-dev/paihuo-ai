@@ -32,6 +32,7 @@ from . import (analyzer, assetfiles, auth, billing, bossdashboard, db, departmen
 from . import instancelock, retention, timeutil  # 单进程锁 / 数据保留期 / 北京时间
 from . import wxpay  # 微信支付 APIv3(默认关闭)
 from . import photoproof  # 店员现场照片(压缩+水印+落盘)
+from . import api_checklist, reminders  # 第2期:开闭店清单/门店排行路由 + 提醒升级循环
 from .engine import engine
 from .skills import registry
 
@@ -189,10 +190,36 @@ _TRANSIENT_UPLOAD_ROUTES = {
 }
 
 
+# 第 2 期:带路径参数的店员拍照上传。只限权限和大小,不占「每企业同时只能
+# 一个上传」的名额(开店时多家门店会同时拍照);门店归属由服务层校验。
+_BOUNDED_UPLOAD_PATTERNS = (
+    (
+        re.compile(r"^/api/checklist/runs/\d{1,12}/items/[a-z0-9_]{1,32}$"),
+        (
+            "checklist-photo",
+            "*user",
+            photoproof.MAX_UPLOAD_BYTES + _UPLOAD_MULTIPART_OVERHEAD_BYTES,
+        ),
+    ),
+)
+
+
+def _bounded_upload_policy(method: str, path: str):
+    if method != "POST":
+        return None
+    for pattern, policy in _BOUNDED_UPLOAD_PATTERNS:
+        if pattern.match(path):
+            return policy
+    return None
+
+
 def _upload_permission_allowed(module: str) -> bool:
     """Resolve upload permissions before multipart parsing starts."""
     if module == "*admin":
         return auth.is_admin()
+    if module == "*user":
+        user = auth.current() or {}
+        return user.get("role") in ("root", "owner", "member")
     if module != "*work":
         return auth.allowed(module)
     user = auth.current() or {}
@@ -506,6 +533,7 @@ async def _startup():
     obs.watch_task("pay_orders", asyncio.create_task(purchases.pay_order_loop()))
     # 数据保留期:每天北京时间凌晨分批清理过期日志;循环内部兜住所有异常并自报心跳。
     app.state.retention_task = asyncio.create_task(retention.loop())
+    app.state.reminders_task = asyncio.create_task(reminders.loop())  # 第2期:清单生成/提醒升级/早报,自报心跳
     taskrunner.resume_pending(engine.broadcast)
     await _resume_inspection_tasks()
     avatar.resume_pending(engine.broadcast)      # 数字人:queued重开/running退点
@@ -664,6 +692,9 @@ async def _auth_mw(request: Request, call_next):
     if upload_policy is None:
         upload_policy = _TRANSIENT_UPLOAD_ROUTES.get(upload_key)
         upload_kind = "transient"
+    if upload_policy is None:
+        upload_policy = _bounded_upload_policy(*upload_key)
+        upload_kind = "bounded"
     if upload_policy:
         action, module, request_limit = upload_policy
         if not await db.arun(_upload_permission_allowed, module):
@@ -715,6 +746,8 @@ async def _auth_mw(request: Request, call_next):
             _persistent_upload_slot(action)
             if upload_kind == "persistent"
             else _transient_upload_slot(action)
+            if upload_kind == "transient"
+            else _bounded_upload_slot(action)
         )
         reserved_context = (
             _PERSISTENT_UPLOAD_RESERVED
@@ -13991,6 +14024,17 @@ async def _transient_upload_slot(action: str):
                 _transient_upload_active_tenants.discard(tid)
 
 
+_BOUNDED_UPLOAD_GLOBAL_SEM = asyncio.Semaphore(8)
+
+
+@_asynccontextmanager
+async def _bounded_upload_slot(action: str):
+    """第 2 期店员拍照:全站最多 8 个同时解析,不按企业互斥。"""
+    del action
+    async with _BOUNDED_UPLOAD_GLOBAL_SEM:
+        yield
+
+
 _FREE_AI_GLOBAL_SEM = asyncio.Semaphore(2)
 _FREE_AI_COUNTER_GUARD = threading.Lock()
 _FREE_AI_TENANT_DAILY = 180
@@ -19435,6 +19479,9 @@ def matrix_tasks(
 async def matrix_task_retry(pid: int):
     # 保留旧前端路径，但能力判断与 CAS 必须走任务中心统一契约。
     return await task_center_retry("publish", pid)
+
+
+app.include_router(api_checklist.router)  # 第2期:开闭店清单/门店排行
 
 
 # ---------------- 静态 ----------------

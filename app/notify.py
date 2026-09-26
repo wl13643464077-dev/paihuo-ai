@@ -89,9 +89,17 @@ def build_msg(kind: str, payload: dict) -> str:
             lines.append("⏰ 套餐:" + ("已到期,请尽快续费"
                          if expire_days < 0
                          else f"还有 {expire_days} 天到期,记得续费"))
+        # 第 2 期老板早报:门店清单/逾期/排行/等老板处理(有门店才有)
+        for line in (p.get("store_lines") or [])[:20]:
+            lines.append(str(line)[:200])
         lines.append(f"[看账单明细]({base}/#/billing)"
-                     + (f" · [去处理定时任务]({base}/#/schedules)" if p.get("paused") else ""))
+                     + (f" · [去处理定时任务]({base}/#/schedules)" if p.get("paused") else "")
+                     + (f" · [看门店清单]({base}/#/checklists)" if p.get("store_lines") else ""))
+        lines.append(f"📣 今天发什么?[点这里,照着发就行]({base}/#/tools/hot)")
         return "\n".join(lines)
+    if kind in PERSONAL_KINDS:
+        # 提醒/升级:企微群里用 text 消息发(才能 @ 手机号),这里只给 markdown 兜底
+        return f"**⏰ 派活 · {p.get('headline') or '提醒'}**\n{(p.get('text') or '')[:300]}"
     if kind == "member_reviewed":
         verdict = "通过" if p.get("approved") else "打回"
         return (f"**👤 派活 · 成员代拍板**\n"
@@ -143,6 +151,9 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
         "learn_done": "员工进修完成",
         "learn_failed": "员工进修失败(已退点)",
         "daily_digest": f"昨日经营简报({p.get('date', '')})",
+        # 第 2 期:派给店员的活/开闭店清单/巡店整改 快到期、到期、逾期升级
+        "staff_remind": p.get("headline") or "有事快到截止时间了",
+        "staff_escalate": p.get("headline") or "有事超时没做完",
         "schedule_failed": "定时任务连续失败,可能断更",
         "schedule_paused": "定时任务因点数不足已暂停,内容会断更",
         "purchase_requested": "有新的套餐购买申请",
@@ -159,6 +170,7 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
     title = str(labels.get(kind) or "派活有新进展")[:80]
     body = str(
         p.get("summary")
+        or p.get("text")
         or p.get("title")
         or p.get("why")
         or ""
@@ -176,8 +188,12 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
         link = "#/channels"
     elif kind in {"task_outcome", "meeting_outcome"}:
         link = str(p.get("link") or "#/tasks")
+    elif kind == "daily_digest" and p.get("store_lines"):
+        link = "#/checklists"
     elif kind == "daily_digest" or kind.startswith("purchase_"):
         link = "#/billing"
+    elif kind in PERSONAL_KINDS:
+        link = str(p.get("link") or "#/")
     elif kind in {"schedule_paused", "schedule_failed"}:
         link = "#/schedules"
     else:
@@ -210,6 +226,10 @@ BOSS_ONLY_KINDS = {
 PURCHASE_CUSTOMER_KINDS = {
     "purchase_contacted", "purchase_lost", "purchase_paid",
 }
+
+# 第 2 期:提醒/升级只发给具体的人(按人一行,绝不广播)。任何角色都能看
+# 发给自己的这类通知;没有收件人时直接不落库。
+PERSONAL_KINDS = {"staff_remind", "staff_escalate"}
 
 # 普通业务通知仍保留 schema48 的租户广播行，但读取和标记已读都必须经过
 # 同一份板块白名单。未知 kind 默认只允许 root，避免新增类型自动外泄。
@@ -262,6 +282,7 @@ def _allowed_kinds(user: dict | None) -> tuple[str, ...] | None:
     if role == "owner":
         return tuple(sorted(
             set(KIND_MODULES) | BOSS_ONLY_KINDS | PURCHASE_CUSTOMER_KINDS
+            | PERSONAL_KINDS
         ))
     if role != "member":
         return ()
@@ -271,8 +292,8 @@ def _allowed_kinds(user: dict | None) -> tuple[str, ...] | None:
         if isinstance(module, str)
     }
     return tuple(sorted(
-        kind for kind, required in KIND_MODULES.items()
-        if required.intersection(modules)
+        {kind for kind, required in KIND_MODULES.items()
+         if required.intersection(modules)} | PERSONAL_KINDS
     ))
 
 
@@ -287,6 +308,8 @@ def can_view(user: dict | None, item: dict) -> bool:
     if uid <= 0:
         return False
     target = item.get("user_id")
+    if target is None and str(item.get("kind") or "") in PERSONAL_KINDS:
+        return False
     if target is not None:
         try:
             if int(target) != uid:
@@ -488,6 +511,8 @@ def record(
             if not target:
                 return None
             targets = [int(target["id"])]
+        elif kind in PERSONAL_KINDS:
+            return None                      # 提醒类只按人发,不广播
         elif kind in ROOT_ONLY_KINDS:
             targets = _root_uids(tid)
             if not targets:
@@ -546,6 +571,125 @@ def send_sync(tid: int, kind: str, payload: dict) -> bool:
             type(exc).__name__,
         )
         return False
+
+
+# ---------------- 企微群机器人 @ 手机号(第 2 期) ----------------
+# 群机器人只有 text 消息支持 mentioned_mobile_list;markdown 消息 @ 不了人。
+_MOBILE_RE = re.compile(r"^1[3-9]\d{9}$")
+TEXT_MAX_BYTES = 2000          # 企微 text 上限 2048 字节,留点余量
+MAX_MENTIONS = 50
+
+
+def clean_mobile(value) -> str:
+    """users.phone → 可 @ 的 11 位手机号;不合规返回空串(就不 @)。"""
+    digits = re.sub(r"[\s-]", "", str(value or ""))
+    if digits.startswith("+86"):
+        digits = digits[3:]
+    elif digits.startswith("86") and len(digits) == 13:
+        digits = digits[2:]
+    return digits if _MOBILE_RE.match(digits) else ""
+
+
+def mobiles_for_users(tid: int, user_ids) -> list[str]:
+    """按人取手机号(本租户、启用中、填了合规号码的),去重保序。"""
+    ids = []
+    for value in user_ids or ():
+        try:
+            uid = int(value)
+        except (TypeError, ValueError):
+            continue
+        if uid > 0 and uid not in ids:
+            ids.append(uid)
+    if not ids:
+        return []
+    marks = ",".join("?" for _ in ids)
+    phones = {
+        int(row["id"]): clean_mobile(row.get("phone"))
+        for row in db.q(
+            f"SELECT id,phone FROM users WHERE tenant_id=? AND id IN ({marks}) "
+            "AND COALESCE(enabled,1)=1",
+            (int(tid), *ids),
+        )
+    }
+    out: list[str] = []
+    for uid in ids:
+        mobile = phones.get(uid) or ""
+        if mobile and mobile not in out:
+            out.append(mobile)
+    return out[:MAX_MENTIONS]
+
+
+def text_message(content: str, mobiles=()) -> dict:
+    """企微群机器人 text 消息体;有手机号时带 mentioned_mobile_list。"""
+    text = str(content or "").strip() or "派活提醒"
+    raw = text.encode("utf-8")
+    if len(raw) > TEXT_MAX_BYTES:
+        text = raw[:TEXT_MAX_BYTES - 6].decode("utf-8", "ignore").rstrip() + "…"
+    body: dict = {"content": text}
+    clean = []
+    for mobile in mobiles or ():
+        value = clean_mobile(mobile)
+        if value and value not in clean:
+            clean.append(value)
+    if clean:
+        body["mentioned_mobile_list"] = clean[:MAX_MENTIONS]
+    return {"msgtype": "text", "text": body}
+
+
+def send_text_sync(tid: int, content: str, mobiles=()) -> bool:
+    """同步发一条 text 消息(可 @ 手机号);没配 webhook 静默跳过。"""
+    url = get_webhook(tid)
+    if not url:
+        return False
+    try:
+        r = httpx.post(url, json=text_message(content, mobiles), timeout=8)
+        d = r.json()
+        if d.get("errcode") != 0:
+            log.warning(
+                "企微提醒失败 tid=%s errcode=%s",
+                tid,
+                d.get("errcode"),
+            )
+            return False
+        return True
+    except Exception as exc:
+        log.warning(
+            "企微提醒异常 tid=%s error_type=%s",
+            tid,
+            type(exc).__name__,
+        )
+        return False
+
+
+def push_to_users(tid: int, kind: str, payload: dict, user_ids, *,
+                  mention: bool = True) -> list[int]:
+    """按人发:每人一条站内通知 + 企微群一条 text 消息 @ 这些人的手机号。
+
+    返回落库成功的通知 id。企微正文取 payload["text"],没有就用站内标题。
+    """
+    ids: list[int] = []
+    targets = []
+    for value in user_ids or ():
+        try:
+            uid = int(value)
+        except (TypeError, ValueError):
+            continue
+        if uid > 0 and uid not in targets:
+            targets.append(uid)
+    for uid in targets:
+        row_id = record(tid, kind, payload, target_user_id=uid)
+        if row_id is not None:
+            ids.append(int(row_id))
+    if not targets or not get_webhook(tid):
+        return ids
+    content = str((payload or {}).get("text") or _inbox_item(kind, payload)[0])
+    mobiles = mobiles_for_users(tid, targets) if mention else []
+    try:
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, send_text_sync, tid, content, mobiles)
+    except RuntimeError:
+        send_text_sync(tid, content, mobiles)
+    return ids
 
 
 def push(tid: int, kind: str, payload: dict):
