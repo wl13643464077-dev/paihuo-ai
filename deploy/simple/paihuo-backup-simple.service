@@ -1,0 +1,36 @@
+# 派活 简易部署通道的定时备份（数据库 + 素材 + 可选异地）。
+# 与旧体系的 paihuo-backup.service 二选一：旧的依赖固定运维目录和升级控制面，
+# 简易通道直接用线上版本里的 deploy/backup_db.py。
+# 安装见 deploy/simple/README.md「配置备份」。
+
+[Unit]
+Description=派活 数据库与素材定时备份（简易通道）
+After=local-fs.target
+OnFailure=paihuo-failure-alert@%n.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/srv/paihuo/current
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONPATH=/srv/paihuo/current
+# 可选：异地备份目标和凭据（root 600），例如
+#   PAIHUO_BACKUP_REMOTE=rclone:paihuo-oss:paihuo-backup/prod
+#   RCLONE_CONFIG=/etc/paihuo/rclone.conf
+EnvironmentFile=-/etc/paihuo/backup.env
+ExecStart=/usr/bin/python3 -m deploy.backup_db --database /var/lib/paihuo/data/contentcrew.db --backup-dir /var/backups/paihuo --keep-days 14 --keep-minimum 24 --restore-drill --asset-source assets=/var/lib/paihuo/data/assets --asset-source pub=/srv/paihuo-pub --remote-timeout-seconds 1200
+# 75 = 数据库已备份成功，但素材快照或异地同步失败（已单独告警），不算整体失败
+SuccessExitStatus=75
+TimeoutStartSec=30min
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# 只读系统，只能写备份目录；数据目录只读（备份绝不能改线上数据）
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/var/lib/paihuo/data -/srv/paihuo-pub
+ReadWritePaths=/var/backups/paihuo
