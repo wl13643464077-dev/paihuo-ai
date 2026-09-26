@@ -522,8 +522,8 @@ class SchemaV58MigrationTests(unittest.TestCase):
 
     def test_fresh_database_is_v58_with_user_branch_contract(self):
         db.conn()
-        self.assertEqual(59, db.LATEST_SCHEMA_VERSION)
-        self.assertEqual(59, db.one("PRAGMA user_version")["user_version"])
+        self.assertEqual(60, db.LATEST_SCHEMA_VERSION)
+        self.assertEqual(60, db.one("PRAGMA user_version")["user_version"])
         self.assertEqual(
             "member-branch-scope",
             db.one("SELECT name FROM schema_version WHERE version=58")["name"],
@@ -560,7 +560,7 @@ class SchemaV58MigrationTests(unittest.TestCase):
             "PRAGMA user_version=57",
         )
         db.conn()
-        self.assertEqual(59, db.one("PRAGMA user_version")["user_version"])
+        self.assertEqual(60, db.one("PRAGMA user_version")["user_version"])
         self.assertEqual(
             0, db.one("SELECT COUNT(*) n FROM user_branch")["n"],
         )
