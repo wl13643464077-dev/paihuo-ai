@@ -239,7 +239,7 @@ async def _metrics_mw(request: Request, call_next):
 
 
 @app.get("/healthz", include_in_schema=False)
-def healthz(request: Request, deep: str = ""):
+def healthz(request: Request = None, deep: str = ""):
     """供反向代理/守护进程探活；响应不暴露版本、路径、配置或异常内容。
 
     ``?deep=1`` 额外返回各后台循环的心跳是否超时,只对本机直连或带
@@ -255,9 +255,10 @@ def healthz(request: Request, deep: str = ""):
         return JSONResponse({"status": "unavailable"}, status_code=503)
     if deep not in ("1", "true", "yes"):
         return {"status": "ok"}
+    headers = request.headers if request is not None else {}
     if not obs.deep_health_allowed(
-        _client_ip(request),
-        request.headers.get("x-health-token") or "",
+        _client_ip(request) if request is not None else "",
+        headers.get("x-health-token") or "",
         os.environ.get("CONTENTCREW_HEALTH_TOKEN") or "",
     ):
         return JSONResponse({"status": "forbidden"}, status_code=403)

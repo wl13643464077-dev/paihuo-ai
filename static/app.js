@@ -448,6 +448,22 @@ function pay402(msg){
 function copyText(s){ navigator.clipboard?.writeText(s).then(()=>toast("已复制")).catch(()=>{
   const ta=document.createElement("textarea"); ta.value=s; document.body.appendChild(ta); ta.select();
   document.execCommand("copy"); ta.remove(); toast("已复制");});}
+/* localStorage 安全读写:无痕模式/浏览器禁用存储时 localStorage 一碰就抛错,
+   不能因为记不住"折叠/不再提示"就让首页整页报错。读失败当作没记录,写失败静默。 */
+function lsGet(key){ try{ return localStorage.getItem(key); }catch(_){ return null; } }
+function lsSet(key,value){ try{ localStorage.setItem(key,String(value)); return true; }catch(_){ return false; } }
+function lsDel(key){ try{ localStorage.removeItem(key); }catch(_){} }
+/* 退出登录时只保留纯界面偏好(楼层展开、引导卡"不再提示"、公众号排版主题);
+   工具箱缓存(含获客线索)、购买联系方式、草稿、待提交请求等业务数据一律清掉——
+   店里常几个人共用一台手机/电脑,下一个登录的人不能看到上一个人的东西。 */
+const LS_UI_PREF_PREFIXES=["deptopen_","trio_hide_","howto_hide_","ob_hide_","ob_force_","mp_theme"];
+function clearBusinessStorage(){
+  let keys=[];
+  try{
+    for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); if(k!==null) keys.push(k); }
+  }catch(_){ return; }
+  keys.filter(k=>!LS_UI_PREF_PREFIXES.some(p=>k.startsWith(p))).forEach(lsDel);
+}
 
 /* ---------- 卡通员工 SVG ----------
    state: idle(打盹) work(敲键盘) await(举手等审批) fail(晕/被打断) learn(读书进修) */
@@ -544,8 +560,9 @@ function nav(){
 }
 document.addEventListener("click", e=>{ if(!e.target.closest(".navmore")) document.querySelectorAll(".navmore.open").forEach(x=>x.classList.remove("open")); });
 async function logout(){
-  if(ME&&ME.role==="tour"){ location.href="/promo"; return; }
+  if(ME&&ME.role==="tour"){ clearBusinessStorage(); location.href="/promo"; return; }
   await api("/auth/logout",{method:"POST"}).catch(()=>{});
+  clearBusinessStorage();
   TS = {tab:"hot", busy:{}, hot:null, pcal:null,
     pcalYm:new Date().toISOString().slice(0,7), warm:null, leads:null,
     vars:null, shot:null, menu:null};
@@ -1073,7 +1090,7 @@ function gateRoom(){
 /* ---------- V27 首页聚焦:三大动作卡 + 部门楼层折叠(仅非 root 租户) ---------- */
 function deptOpenKey(key){ return "deptopen_"+((ME&&ME.tenant)||"")+"_"+key; }
 function deptIsOpen(key){
-  const v = localStorage.getItem(deptOpenKey(key));
+  const v = lsGet(deptOpenKey(key));
   // 无记录(新租户首访)时默认:内容生产部展开、其他楼层收起;手动开合过则完全尊重记录
   if(v===null) return key==="content";
   return v==="1";
@@ -1081,13 +1098,13 @@ function deptIsOpen(key){
 function toggleDept(key){
   const k = deptOpenKey(key);
   // 显式记 "0"/"1":收起也落一笔,避免「内容生产部收起后因无记录又默认展开」
-  localStorage.setItem(k, deptIsOpen(key)?"0":"1");
+  lsSet(k, deptIsOpen(key)?"0":"1");
   render();
 }
 function goExperts(){
   const d = (DEPTS||[]).filter(x=>can(x.key))[0];
   if(!d){ toast("您的账号还没有开通产业专家板块,找企业主账号开通"); return; }
-  localStorage.setItem(deptOpenKey(d.key),"1");
+  lsSet(deptOpenKey(d.key),"1");
   render().then(()=>{ const el=document.querySelector(`[data-deptsec="${d.key}"]`);
     if(el) el.scrollIntoView({behavior:"smooth",block:"start"}); });
 }
@@ -1287,7 +1304,7 @@ async function notificationHistoryReadAll(btn){
 /* V27.2:「发布三件套」向导——把 成片→审查→排版 串成一条可点的流程(对外主推卖点的上手版) */
 function trioCard(){
   if(!ME || !["owner","root"].includes(ME.role) || !can("content")) return "";
-  if(localStorage.getItem("trio_hide_"+(ME.tenant||""))) return "";
+  if(lsGet("trio_hide_"+(ME.tenant||""))) return "";
   const tr = STATE.trio||{};
   const steps = [
     {done:tr.video, e:"🎬", t:"① 图文一键成片", act:"trioGo('video')",
@@ -1305,7 +1322,7 @@ function trioCard(){
   return `<div class="card" style="background:linear-gradient(120deg,#e8f0ff,#fffaf0 70%)">
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       <h2 style="margin:0;flex:1;min-width:200px">🧰 发布三件套 · 一篇图文这样发出去(还差 ${undone} 步)</h2>
-      <span class="sub" style="cursor:pointer;text-decoration:underline" onclick="localStorage.setItem('trio_hide_'+(ME.tenant||''),1);render()">不再提示</span></div>
+      <span class="sub" style="cursor:pointer;text-decoration:underline" onclick="lsSet('trio_hide_'+(ME.tenant||''),1);render()">不再提示</span></div>
     <div class="grid3" style="grid-template-columns:repeat(auto-fill,minmax(250px,1fr));margin-top:10px">
       ${steps.map(x=>`<div class="topic" style="margin:0;cursor:pointer;${x.done?"opacity:.55":""}" onclick="${x.act}">
         <b>${x.done?"✅":x.e} ${x.t}</b><div class="sub" style="margin-top:3px">${x.d}${x.done?"":" →"}</div>
@@ -1316,7 +1333,7 @@ function trioCard(){
 /* 「数字员工怎么用」教程卡:常驻首页的用人指南,可不再提示,重看引导时恢复 */
 function howtoCard(){
   if(!ME || !["owner","root"].includes(ME.role)) return "";
-  if(localStorage.getItem("howto_hide_"+(ME.tenant||""))) return "";
+  if(lsGet("howto_hide_"+(ME.tenant||""))) return "";
   const steps = [
     {e:"🧭", t:"① 挑人", d:"下面「行业市场」进您的行业,每个岗位一位专职员工;不知道找谁就用行业里的「找专家」搜索框,直接搜您遇到的事(比如\u201c顾客要退卡\u201d)"},
     {e:"📋", t:"② 派活", d:"点员工→「派活」。一句话说清背景+想要什么结果,再把手头材料(数据/记录/照片)贴上;说得越具体,交付越准"},
@@ -1326,7 +1343,7 @@ function howtoCard(){
   return `<div class="card" style="background:linear-gradient(120deg,#fdf3e3,#fffaf0 70%)">
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       <h2 style="margin:0;flex:1;min-width:200px">📖 数字员工怎么用 · 四步用人法</h2>
-      <span class="sub" style="cursor:pointer;text-decoration:underline" onclick="localStorage.setItem('howto_hide_'+(ME.tenant||''),1);render()">不再提示</span></div>
+      <span class="sub" style="cursor:pointer;text-decoration:underline" onclick="lsSet('howto_hide_'+(ME.tenant||''),1);render()">不再提示</span></div>
     <div class="grid3" style="grid-template-columns:repeat(auto-fill,minmax(250px,1fr));margin-top:10px">
       ${steps.map(x=>`<div class="topic" style="margin:0"><b>${x.e} ${x.t}</b>
         <div class="sub" style="margin-top:3px">${x.d}</div></div>`).join("")}
@@ -1343,17 +1360,19 @@ function trioGo(step){
 /* 「更多」菜单里的「重看新手引导」:不是真页面,清掉两张引导卡的「不再提示」标记后回办公室。
    借用 routes 机制(菜单项统一是 #/xxx 链接);改 hash 后本次 render 会因 hash 变化自动中止,由 hashchange 重新渲染办公室 */
 function guideReset(){
+  try{
   localStorage.removeItem("ob_hide_"+((ME&&ME.tenant)||""));
   localStorage.removeItem("trio_hide_"+((ME&&ME.tenant)||""));
   localStorage.removeItem("howto_hide_"+((ME&&ME.tenant)||""));
   // 四步都完成时引导卡默认不渲染;点了"重看"就强制展示一次完成态
   localStorage.setItem("ob_force_"+((ME&&ME.tenant)||""),"1");
+  }catch(_){}   // 存储被禁用时引导卡本来就不会被隐藏,无需处理
   toast("新手引导已恢复,回到办公室即可重看");
   location.hash = "#/";
 }
 function obCard(){
   if(!ME || !["owner","root"].includes(ME.role)) return "";
-  if(localStorage.getItem("ob_hide_"+(ME.tenant||""))) return "";
+  if(lsGet("ob_hide_"+(ME.tenant||""))) return "";
   const su = STATE.setup||{};
   const steps = [
     {done:su.profile, t:"① 建人设档案", h:"#/profiles",
@@ -1374,10 +1393,10 @@ function obCard(){
       how:"怎么做:数字人摄影棚→声音克隆→跟着念一段文字即可"},
   ];
   const undone = steps.filter(x=>!x.done).length;
-  const forced = localStorage.getItem("ob_force_"+(ME.tenant||""));
+  const forced = lsGet("ob_force_"+(ME.tenant||""));
   if(!undone && !forced) return "";
   if(!undone && forced){
-    localStorage.removeItem("ob_force_"+(ME.tenant||""));
+    lsDel("ob_force_"+(ME.tenant||""));
     return `<div class="card" style="background:linear-gradient(120deg,#e7f6ec,#fffaf0 70%)">
       <h2 style="margin:0">🎉 开工四步已全部完成</h2>
       <div class="sub" style="margin-top:6px">配置齐了:人设、首单、微信通知、原声克隆都已就绪。日常从「➕ 下达新任务」或「⏰ 定时任务」开工即可。</div></div>`;
@@ -1385,7 +1404,7 @@ function obCard(){
   return `<div class="card" style="background:linear-gradient(120deg,#e8f7ee,#fffaf0 70%)">
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       <h2 style="margin:0;flex:1;min-width:200px">🚀 开工四步(还差 ${undone} 步)</h2>
-      <span class="sub" style="cursor:pointer;text-decoration:underline" onclick="localStorage.setItem('ob_hide_'+(ME.tenant||''),1);render()">不再提示</span></div>
+      <span class="sub" style="cursor:pointer;text-decoration:underline" onclick="lsSet('ob_hide_'+(ME.tenant||''),1);render()">不再提示</span></div>
     <div class="grid3" style="grid-template-columns:repeat(auto-fill,minmax(250px,1fr));margin-top:10px">
       ${steps.map(x=>`<a href="${x.h}" class="topic" style="margin:0;display:block;text-decoration:none;${x.done?"opacity:.55":""}">
         <b>${x.done?"✅":"⬜"} ${x.t}</b>${x.pts?` <span class="sub">${esc(x.pts)}</span>`:""}
@@ -6949,7 +6968,7 @@ if(!$("#fb-btn")) document.body.insertAdjacentHTML("beforeend", `<button id="fb-
 /* ---------- 公众号排版弹窗(12 主题 + 一键复制 + 发草稿箱) ---------- */
 let MP_CUR = null;
 async function mpOpen(jobId){
-  MP_CUR = {job:jobId, theme: localStorage.getItem("mp_theme")||"orange"};
+  MP_CUR = {job:jobId, theme: lsGet("mp_theme")||"orange"};
   document.body.insertAdjacentHTML("beforeend", `<div class="overlay" id="mp-ov" onclick="if(event.target===this)this.remove()">
     <div class="panel" style="max-width:920px;width:96vw;padding:18px">
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
@@ -6972,7 +6991,7 @@ async function mpLoad(){
     const r = await api(`/jobs/${MP_CUR.job}/mp-html?theme=${MP_CUR.theme}`);
     MP_CUR.html = r.html; MP_CUR.title = r.title;
     $("#mp-themes").innerHTML = r.themes.map(t=>`<span class="chip${t.key===MP_CUR.theme?" on":""}"
-      onclick="MP_CUR.theme=${cp(t.key)};localStorage.setItem('mp_theme',${cp(t.key)});mpLoad()">
+      onclick="MP_CUR.theme=${cp(t.key)};lsSet('mp_theme',${cp(t.key)});mpLoad()">
       <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${t.color};margin-right:4px"></span>${t.emoji} ${t.name}</span>`).join("");
     $("#mp-frame").srcdoc = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
       <body style="margin:0;background:#f2f2f2"><div style="max-width:414px;margin:0 auto;background:#fff;min-height:100vh;padding:20px 16px">
@@ -6981,13 +7000,66 @@ async function mpLoad(){
 }
 async function mpCopy(btn){
   if(!MP_CUR?.html) return toast("排版还没生成好");
+  const html = MP_CUR.html, okMsg = "✅ 已复制(带排版):去公众号编辑器直接粘贴,标题另填";
+  // ① 新浏览器:异步剪贴板写富文本
+  if(window.ClipboardItem && navigator.clipboard?.write){
+    try{
+      const item = new ClipboardItem({
+        "text/html": new Blob([html],{type:"text/html"}),
+        "text/plain": new Blob([mpSanitizedFragment(html).textContent||""],{type:"text/plain"})});
+      await navigator.clipboard.write([item]);
+      return toast(okMsg);
+    }catch(_){}
+  }
+  // ② 微信内置浏览器/部分安卓:选中隐藏的可编辑容器,用 execCommand 复制富文本
+  if(mpCopyViaSelection(html)) return toast(okMsg);
+  // ③ 都不行:把排版好的文章摆出来,请老板长按全选复制(绝不复制 HTML 源码)
+  mpShowManualCopy(html);
+}
+/* 在惰性文档里解析排版 HTML(不执行脚本、不触发事件),去掉脚本、表单、事件属性和
+   危险链接,只留公众号需要的标签和内联样式,再搬进当前页面。 */
+function mpSanitizedFragment(html){
+  const doc = new DOMParser().parseFromString(`<!doctype html><body>${html||""}</body>`,"text/html");
+  doc.body.querySelectorAll("script,style,iframe,frame,object,embed,link,meta,base,form,input,button,textarea,select,template,noscript").forEach(n=>n.remove());
+  doc.body.querySelectorAll("*").forEach(el=>{
+    for(const attr of [...el.attributes]){
+      const name = attr.name.toLowerCase();
+      if(name.startsWith("on") || name==="srcset" || name==="formaction"){ el.removeAttribute(attr.name); continue; }
+      if(["href","src","xlink:href","action","background"].includes(name)
+        && /^\s*(javascript|vbscript|data:text)/i.test(attr.value)) el.removeAttribute(attr.name);
+    }
+  });
+  const frag = document.createDocumentFragment();
+  [...doc.body.childNodes].forEach(n=>frag.appendChild(document.importNode(n,true)));
+  return frag;
+}
+function mpCopyViaSelection(html){
+  let box = null;
+  const sel = window.getSelection && window.getSelection();
   try{
-    const item = new ClipboardItem({
-      "text/html": new Blob([MP_CUR.html],{type:"text/html"}),
-      "text/plain": new Blob([MP_CUR.html.replace(/<[^>]+>/g,"")],{type:"text/plain"})});
-    await navigator.clipboard.write([item]);
-    toast("✅ 已复制(带排版):去公众号编辑器直接粘贴,标题另填");
-  }catch(e){ copyText(MP_CUR.html); toast("浏览器不支持富文本复制,已复制 HTML 源码"); }
+    if(!sel || !document.queryCommandSupported?.("copy")) return false;
+    box = document.createElement("div");
+    box.setAttribute("contenteditable","true");
+    box.setAttribute("aria-hidden","true");
+    box.style.cssText = "position:fixed;left:-10000px;top:0;width:414px;opacity:0;pointer-events:none;background:#fff";
+    box.appendChild(mpSanitizedFragment(html));
+    document.body.appendChild(box);
+    const range = document.createRange();
+    range.selectNodeContents(box);
+    sel.removeAllRanges(); sel.addRange(range);
+    return document.execCommand("copy") === true;
+  }catch(_){ return false; }
+  finally{ try{ sel?.removeAllRanges(); }catch(_){} box?.remove(); }
+}
+function mpShowManualCopy(html){
+  const host = $("#mp-report");
+  if(!host) return toast("这个浏览器不支持一键复制,请换用电脑浏览器");
+  host.innerHTML = `<div class="notice">这个浏览器不支持一键复制。请<b>长按下面的文章 → 全选 → 复制</b>,再去公众号编辑器粘贴(标题另填)。</div>
+    <div id="mp-manual-copy" contenteditable="true" style="max-height:40vh;overflow:auto;border:2px dashed var(--line);border-radius:12px;padding:12px;background:#fff;margin-top:8px;-webkit-user-select:text;user-select:text"></div>`;
+  const box = $("#mp-manual-copy");
+  box.appendChild(mpSanitizedFragment(html));
+  box.scrollIntoView?.({block:"nearest"});
+  toast("请长按文章全选复制");
 }
 async function mpDraft(btn){
   if(!MP_CUR) return;
