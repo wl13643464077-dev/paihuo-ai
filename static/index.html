@@ -495,6 +495,18 @@ html,body{max-width:100%;overflow-x:hidden}
 .atf-m-name{display:flex;flex:1;min-width:0;flex-direction:column;line-height:1.25}
 .atf-m-name b{font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .atf-m-name i{font-style:normal;font-size:11px;color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.atf-progress{margin-top:6px;padding:8px;border:2px dashed var(--line);border-radius:12px;background:#fff}
+.atf-p-label{font-size:11.5px;font-weight:900;color:var(--ink2);margin-bottom:4px}
+.atf-taskrow{display:flex;gap:6px;align-items:center;font-size:12.5px;padding:2px 0}
+.atf-taskrow a{font-weight:800;text-decoration:underline}
+.atf-taskrow i{font-style:normal;font-size:11px;color:var(--ink2)}
+.atf-summary{margin-top:6px;font-size:13px;font-weight:800}
+/* 语音派活按钮 */
+.voice-btn.on{background:#ffd7d9;animation:voicePulse 1.2s ease-in-out infinite}
+@keyframes voicePulse{0%,100%{box-shadow:2px 2px 0 rgba(51,41,31,.2)}50%{box-shadow:0 0 0 4px rgba(229,72,77,.25)}}
+/* 实战心得卡 */
+.insight-card{margin:10px 0;padding:10px 12px;border:2px solid var(--ink);border-radius:13px;background:#ece3ff}
+.insight-card summary{cursor:pointer;font-weight:900}
 @media (max-width:640px){#agent-team-float{right:8px;bottom:74px}}
 </style>
 </head>

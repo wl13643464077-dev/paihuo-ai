@@ -340,13 +340,47 @@ class WebToolExecutionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_web_call_rejects_text_without_successful_search(self):
         proc = _Proc([
-            {"type": "result", "is_error": False, "result": "ungrounded answer"},
+            {
+                "type": "result",
+                "is_error": False,
+                "result": "ungrounded answer",
+                "total_cost_usd": 0.125,
+                "usage": {
+                    "input_tokens": 2,
+                    "output_tokens": 3,
+                    "cache_read_input_tokens": 4,
+                },
+            },
         ])
         with patch.object(llm, "CLAUDE", sys.executable), \
                 patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
-            with self.assertRaises(llm.LLMError):
+            with self.assertRaises(llm.WebSearchRequiredError) as caught:
                 await llm.call(
                     "检索任务", web=True, provider_env=self._provider_env()
+                )
+        self.assertEqual(0.125, caught.exception.cost_usd)
+        self.assertEqual(9, caught.exception.tokens)
+
+    async def test_missing_or_error_result_is_not_classified_as_no_search(self):
+        for events in (
+            [],
+            [{"type": "result", "is_error": True, "error": "private"}],
+        ):
+            with self.subTest(events=events):
+                proc = _Proc(events)
+                with patch.object(llm, "CLAUDE", sys.executable), \
+                        patch(
+                            "asyncio.create_subprocess_exec",
+                            AsyncMock(return_value=proc),
+                        ):
+                    with self.assertRaises(llm.LLMError) as caught:
+                        await llm.call(
+                            "检索任务",
+                            web=True,
+                            provider_env=self._provider_env(),
+                        )
+                self.assertNotIsInstance(
+                    caught.exception, llm.WebSearchRequiredError
                 )
 
     async def test_system_prompt_uses_private_ephemeral_file_not_argv(self):

@@ -37,7 +37,7 @@ _all_connections: set[sqlite3.Connection] = set()
 # schema lock to finish.
 _generation_lock = threading.RLock()
 _generation_switching = threading.Event()
-LATEST_SCHEMA_VERSION = 57
+LATEST_SCHEMA_VERSION = 61
 MIGRATION_LOCK_SUFFIX = ".migration.lock"
 
 SCHEMA = """
@@ -2383,6 +2383,40 @@ def _validate_migrated_database(c) -> None:
             "id", "tenant_id", "name", "enabled", "fail_streak",
         },
         "knowledge": {"id", "tenant_id", "title", "content", "deleted_at"},
+        "brand_package": {
+            "id", "tenant_id", "version", "brand_name", "store_hint", "status",
+            "failure_reason", "created_by", "confirmed_by", "confirmed_at",
+            "created_at", "updated_at",
+        },
+        "brand_package_fact": {
+            "id", "package_id", "fact_key", "value", "source_kind",
+            "source_url", "source_title", "source_excerpt",
+            "source_captured_at", "source_sha256", "created_at", "updated_at",
+        },
+        "team_run": {
+            "id", "tenant_id", "actor_id", "request_key", "payload_sha256",
+            "query", "team_name", "team_summary", "mode", "depth",
+            "leader_emp_idx", "status", "summary_task_id", "summary_status",
+            "summary_attempt_no", "summary_claim_until", "summary_error",
+            "created_at", "updated_at",
+        },
+        "team_run_member": {
+            "id", "team_run_id", "tenant_id", "position", "emp_idx",
+            "name", "role", "role_in_team", "task_text", "depends_on_json",
+            "status", "approved", "approved_at", "attempt_no", "task_id",
+            "claim_until", "last_error", "created_at", "updated_at",
+        },
+        "task_activity_image": {
+            "id", "tenant_id", "task_id", "group_key", "file_path",
+            "status", "quality_json", "required_text_json", "billing_op_key",
+            "brand_package_id", "brand_version",
+            "created_at",
+        },
+        "task_activity_image_review": {
+            "id", "tenant_id", "task_id", "image_id", "reviewer_id",
+            "decision", "result_status", "note", "observed_text",
+            "logo_match", "no_extra_claims", "quality_json", "created_at",
+        },
         "avatar_job": {
             "id", "tenant_id", "params_json", "status", "billing_status",
             "retry_count", "deleted_at", "created_by",
@@ -2556,6 +2590,16 @@ def _validate_migrated_database(c) -> None:
         "idx_inspection_business_value_natural",
         "idx_inspection_business_value_period",
         "idx_inspection_standard_override_scope",
+        "idx_brand_package_tenant_version",
+        "idx_brand_package_tenant_status",
+        "idx_brand_package_active",
+        "idx_brand_package_fact_key",
+        "idx_team_run_tenant_recent",
+        "idx_team_run_active",
+        "idx_team_run_member_task",
+        "idx_task_activity_image_scope_group",
+        "idx_task_activity_image_billing_op",
+        "idx_task_activity_review_scope",
     }
     missing_indexes = sorted(required_indexes - indexes)
     if missing_indexes:
@@ -2563,6 +2607,48 @@ def _validate_migrated_database(c) -> None:
             "数据库迁移后结构不完整：purchase_intent 缺少索引 "
             + ",".join(missing_indexes)
         )
+    _require_index_contract(
+        c, "brand_package", "idx_brand_package_tenant_version",
+        ("tenant_id", "version"), unique=True, partial=False,
+    )
+    _require_index_contract(
+        c, "brand_package", "idx_brand_package_active",
+        ("tenant_id",), unique=True, partial=True,
+    )
+    active_index = c.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' "
+        "AND name='idx_brand_package_active'"
+    ).fetchone()
+    active_index_sql = "".join(
+        str(active_index["sql"] or "").lower().split()
+    ) if active_index else ""
+    if "wherestatus='confirmed'" not in active_index_sql:
+        raise RuntimeError("数据库迁移后结构不完整：品牌确认版唯一约束不完整")
+    _require_index_contract(
+        c, "brand_package", "idx_brand_package_tenant_status",
+        ("tenant_id", "status", "created_at"), unique=False, partial=False,
+    )
+    _require_index_contract(
+        c, "brand_package_fact", "idx_brand_package_fact_key",
+        ("package_id", "fact_key"), unique=True, partial=False,
+    )
+    for table, name, cols in (
+        ("team_run", "idx_team_run_tenant_recent", ("tenant_id", "updated_at")),
+        ("team_run", "idx_team_run_active", ("tenant_id", "status", "updated_at")),
+        ("team_run_member", "idx_team_run_member_task", ("tenant_id", "task_id")),
+        ("task_activity_image", "idx_task_activity_image_scope_group", ("tenant_id", "task_id", "group_key", "id")),
+        ("task_activity_image_review", "idx_task_activity_review_scope", ("tenant_id", "task_id", "image_id", "id")),
+    ):
+        _require_index_contract(c, table, name, cols, unique=False, partial=False)
+    _require_index_contract(
+        c, "task_activity_image", "idx_task_activity_image_billing_op",
+        ("billing_op_key",), unique=True, partial=True,
+    )
+    if c.execute(
+        "SELECT 1 FROM brand_package_fact f LEFT JOIN brand_package p "
+        "ON p.id=f.package_id WHERE p.id IS NULL LIMIT 1"
+    ).fetchone():
+        raise RuntimeError("数据库迁移后结构不完整：品牌事实存在孤儿记录")
     _require_index_contract(
         c,
         "store_branch",
@@ -4013,6 +4099,60 @@ def _initialize_anchor_locked(path: str):
           ON employee_learning_artifact(run_id,status);
         """)
         _schema55_migrate(_conn, source_schema_version=found_version)
+        # v58:联网品牌资料先形成租户内版本化草稿。只有 confirmed 版本
+        # 是数字员工可读取的品牌事实；候选事实保留逐项网页引用或人工来源。
+        _execute_migration_script(_conn, """
+        CREATE TABLE IF NOT EXISTS brand_package(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tenant_id INTEGER NOT NULL,
+          version INTEGER NOT NULL CHECK(version >= 1),
+          brand_name TEXT NOT NULL CHECK(trim(brand_name) <> ''),
+          store_hint TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL CHECK(status IN ('draft','failed','confirmed','superseded')),
+          failure_reason TEXT,
+          created_by INTEGER,
+          confirmed_by INTEGER,
+          confirmed_at REAL,
+          created_at REAL NOT NULL,
+          updated_at REAL NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_brand_package_tenant_version
+          ON brand_package(tenant_id,version);
+        CREATE INDEX IF NOT EXISTS idx_brand_package_tenant_status
+          ON brand_package(tenant_id,status,created_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_brand_package_active
+          ON brand_package(tenant_id) WHERE status='confirmed';
+        CREATE TABLE IF NOT EXISTS brand_package_fact(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          package_id INTEGER NOT NULL,
+          fact_key TEXT NOT NULL,
+          value TEXT NOT NULL CHECK(trim(value) <> ''),
+          source_kind TEXT NOT NULL CHECK(source_kind IN ('web','manual')),
+          source_url TEXT,
+          source_title TEXT,
+          source_excerpt TEXT,
+          source_captured_at REAL NOT NULL,
+          source_sha256 TEXT,
+          created_at REAL NOT NULL,
+          updated_at REAL NOT NULL,
+          CHECK(source_kind='manual' OR (
+            source_url IS NOT NULL AND trim(source_url) <> '' AND
+            source_title IS NOT NULL AND trim(source_title) <> '' AND
+            source_excerpt IS NOT NULL AND trim(source_excerpt) <> ''
+          ))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_brand_package_fact_key
+          ON brand_package_fact(package_id,fact_key);
+        """)
+        # 早期 v58 预览库已建 brand_package，但尚无同名门店辨识提示。
+        # CREATE TABLE IF NOT EXISTS 不会补旧表列，需受控幂等迁移。
+        _add_column(_conn, "brand_package", "store_hint", "TEXT NOT NULL DEFAULT ''")
+        # v59:手机小队服务端持久编排与超级店长活动效果图附件。
+        # v60:候选图冻结必要文案并记录不可覆盖的人工复核历史。
+        # v61:候选图绑定计费操作；未结算图片不可见，重启可清理已退款候选图。
+        from . import brand_media_schema, teamrun_schema
+        teamrun_schema.install_schema(_conn)
+        brand_media_schema.install_schema(_conn)
         # 只把旧 tenants.industries_json 中显式列出的部门迁入规范化映射。
         # 非平台租户的空列表不再被老板看板解释为“全行业”。
         for tenant in _conn.execute(
@@ -4107,6 +4247,26 @@ def _initialize_anchor_locked(path: str):
         _conn.execute(
             "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
             "VALUES(57,'member-hierarchy-employee-allocation',?)",
+            (time.time(),),
+        )
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(58,'reviewed-brand-knowledge-packages',?)",
+            (time.time(),),
+        )
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(59,'persistent-team-runs-and-activity-artwork',?)",
+            (time.time(),),
+        )
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(60,'activity-artwork-manual-review-audit',?)",
+            (time.time(),),
+        )
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(61,'activity-artwork-billing-link',?)",
             (time.time(),),
         )
         _conn.execute(f"PRAGMA user_version={LATEST_SCHEMA_VERSION}")

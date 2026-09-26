@@ -15,8 +15,8 @@ from app import db
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_SCHEMA_VERSION = 57
-EXPECTED_SCHEMA_LEDGER_NAME = "member-hierarchy-employee-allocation"
+EXPECTED_SCHEMA_VERSION = 61
+EXPECTED_SCHEMA_LEDGER_NAME = "activity-artwork-billing-link"
 
 INITIALIZE_WORKER = textwrap.dedent(
     """

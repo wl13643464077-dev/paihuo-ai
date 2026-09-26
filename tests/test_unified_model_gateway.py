@@ -105,6 +105,41 @@ class ProviderGatewayBehaviorTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(providers.ProviderError, "文本模型不可用"):
                 await providers.chat("测试", model="invented-model")
 
+    async def test_bounded_text_uses_selected_api_model_and_forwards_output_cap(self):
+        delivered = {"text": '{"facts":[]}', "cost_usd": 0.0, "tokens": 2}
+        with patch.object(providers.db, "arun", new=_inline_db_run), patch.object(
+            providers, "text_model_for", return_value="deepseek-v4-flash"
+        ), patch.object(
+            providers, "yunwu_conf", return_value=("https://proxy.example", "key")
+        ), patch.object(
+            providers, "chat", AsyncMock(return_value=delivered)
+        ) as gateway:
+            result = await providers.call_text(
+                None, "抽取已核验品牌资料", web=False, timeout=55,
+                max_tokens=1400, system_prompt="只输出 JSON",
+            )
+        self.assertEqual(result["text"], delivered["text"])
+        self.assertEqual(gateway.await_args.kwargs["model"], "deepseek-v4-flash")
+        self.assertEqual(gateway.await_args.kwargs["timeout"], 55)
+        self.assertEqual(gateway.await_args.kwargs["max_tokens"], 1400)
+
+    async def test_bounded_text_rejects_invalid_caps_before_model_lookup(self):
+        for invalid in (0, -1, True, 1.5, "1400", 8193):
+            with self.subTest(invalid=invalid), patch.object(
+                providers.db, "arun", side_effect=AssertionError("invalid cap must not query DB")
+            ):
+                with self.assertRaisesRegex(providers.ProviderError, "文本输出上限无效"):
+                    await providers.call_text(None, "测试", max_tokens=invalid)
+
+    async def test_bounded_text_rejects_uncapped_tool_agent_route(self):
+        with patch.object(providers.db, "arun", new=_inline_db_run), patch.object(
+            providers, "text_model_for", return_value=providers.CLAUDE_LOCAL
+        ), patch.object(
+            providers, "yunwu_conf", side_effect=AssertionError("must fail before credentials")
+        ):
+            with self.assertRaisesRegex(providers.ProviderError, "不支持受控文本输出上限"):
+                await providers.call_text(None, "测试", max_tokens=1400)
+
     async def test_internal_text_override_rejects_unknown_and_local_tool_models(self):
         for model in ("invented-model", providers.CLAUDE_LOCAL, 123):
             with self.subTest(model=model), patch.object(

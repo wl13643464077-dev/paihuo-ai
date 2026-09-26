@@ -175,7 +175,7 @@ class NoLocalModelFallbackTests(unittest.TestCase):
 
     def test_web_runner_fails_closed_without_successful_websearch(self):
         self.assertTrue(hasattr(llm, "_require_successful_websearch"))
-        with self.assertRaises(llm.LLMError):
+        with self.assertRaises(llm.WebSearchRequiredError):
             llm._require_successful_websearch(
                 {"WebSearch": {"attempts": 1, "success": 0, "errors": 1}}
             )

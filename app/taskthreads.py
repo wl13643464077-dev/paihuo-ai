@@ -1206,6 +1206,17 @@ def thread_summary_for_task(
             _employee_thread_policy(connection, int(task["emp_idx"]))
         )
         done = task.get("status") == "done"
+        failed = task.get("status") == "failed"
+        standalone_blocked_by = (
+            blocked_code if not can_continue_employee else None
+        )
+        if failed and standalone_blocked_by is None:
+            if task.get("billing_status") not in {"refunded", "included"}:
+                standalone_blocked_by = "refund_pending"
+            elif int(task.get("retry_count") or 0) < MAX_FREE_RETRIES:
+                standalone_blocked_by = "free_retry_available"
+            else:
+                standalone_blocked_by = "no_delivered_revision"
         return {
             "thread_id": None,
             "status": "standalone",
@@ -1216,9 +1227,9 @@ def thread_summary_for_task(
             "revision_count": 1,
             "can_continue": done and can_continue_employee,
             "can_accept": done and can_accept_employee,
-            "continue_blocked_by": (
-                blocked_code if not can_continue_employee else None
-            ),
+            "continue_blocked_by": standalone_blocked_by,
+            "resume_task_id": task_id if done else None,
+            "failed_current_task_id": task_id if failed else None,
             "revisions": [{
                 "task_id": task_id,
                 "revision_no": 1,

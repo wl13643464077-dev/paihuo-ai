@@ -32,6 +32,7 @@ def status_cn(value) -> str:
 
 MAX_RETRY = 2
 LAST_IDX = 9
+REPORT_REVISION_SKILL = f"{registry.BY_IDX[LAST_IDX]['skill']}#completed-revision"
 JOB_WORKING_STATUSES = (
     "pending_charge", "running", "awaiting_review", "gate_blocked", "paused",
 )
@@ -348,9 +349,13 @@ class Engine:
 
         def _recover():
             # 断点恢复:被重启打断的 running 工位重跑,进行中的工单重新入队
-            for r in db.q("SELECT id FROM station_run WHERE status='running'"):
-                db.update("station_run", r["id"], {"status": "rejected",
-                                                   "review_comment": "服务重启,自动重跑"})
+            for r in db.q("SELECT id,skill_id FROM station_run WHERE status='running'"):
+                if r["skill_id"] == REPORT_REVISION_SKILL:
+                    # 完成后续改版复用同一 vN 行；意见不能被通用恢复文案覆盖。
+                    db.update("station_run", r["id"], {"status": "queued"})
+                else:
+                    db.update("station_run", r["id"], {"status": "rejected",
+                                                       "review_comment": "服务重启,自动重跑"})
             running = [j["id"] for j in db.q(
                 "SELECT id FROM job WHERE status IN ('running')")]
             # 兼容旧版本“先标失败、来不及退款”的窗口；CAS 保证多次启动也只退一次。
@@ -409,7 +414,67 @@ class Engine:
     # ---------- 推进状态机 ----------
     def _latest_run(self, job_id, idx):
         return db.one("SELECT * FROM station_run WHERE job_id=? AND station_idx=? "
-                      "ORDER BY version DESC LIMIT 1", (job_id, idx))
+                      "ORDER BY version DESC,id DESC LIMIT 1", (job_id, idx))
+
+    @staticmethod
+    def _report_revision(row) -> bool:
+        return bool(row and row["station_idx"] == LAST_IDX
+                    and row["skill_id"] == REPORT_REVISION_SKILL)
+
+    def redo_completed_report(self, job_id: int, comment: str) -> int:
+        """对已交付的复盘报告续改一版，返回新版本号。
+
+        仅追加一个排队中的工位版本并重启同一已付费工单；旧版保持 done，
+        不发生新的整单扣费。其它已完成工位一律不能通过这个入口重跑。
+        """
+        note = str(comment or "").strip()
+        if not note:
+            raise ValueError("请写清报告需要修改的地方")
+        if len(note) > 2000:
+            raise ValueError("修改意见不能超过 2000 字")
+        with db.atomic() as c:
+            job = c.execute(
+                "SELECT status,billing_status FROM job WHERE id=? AND deleted_at IS NULL",
+                (job_id,),
+            ).fetchone()
+            if not job:
+                raise ValueError("工单不存在")
+            if job["status"] != "done" or job["billing_status"] != "charged":
+                raise ValueError("仅已完成且已结算的工单可继续修改复盘报告")
+            prior = c.execute(
+                "SELECT version,output_json FROM station_run "
+                "WHERE job_id=? AND station_idx=? AND status='done' "
+                "AND output_json IS NOT NULL "
+                "ORDER BY version DESC,id DESC LIMIT 1",
+                (job_id, LAST_IDX),
+            ).fetchone()
+            prior_report = (db.jloads(prior["output_json"], {}).get("report")
+                            if prior else None)
+            if not isinstance(prior_report, str) or not prior_report.strip():
+                raise ValueError("原复盘报告尚未交付，不能在原版上继续修改")
+            newest = c.execute(
+                "SELECT COALESCE(MAX(version),0) FROM station_run "
+                "WHERE job_id=? AND station_idx=?",
+                (job_id, LAST_IDX),
+            ).fetchone()[0]
+            version = int(newest) + 1
+            now = time.time()
+            c.execute(
+                "INSERT INTO station_run"
+                "(job_id,station_idx,skill_id,version,status,review_comment,created_at,updated_at) "
+                "VALUES(?,?,?,?,'queued',?,?,?)",
+                (job_id, LAST_IDX, REPORT_REVISION_SKILL, version, note, now, now),
+            )
+            changed = c.execute(
+                "UPDATE job SET status='running',current_idx=?,updated_at=? "
+                "WHERE id=? AND status='done' AND billing_status='charged'",
+                (LAST_IDX, now, job_id),
+            )
+            if changed.rowcount != 1:
+                raise ValueError("工单状态刚刚改变，请刷新后再试")
+        self.notify(job_id)
+        self.touch(job_id)
+        return version
 
     @staticmethod
     def _job_row_executable(row) -> bool:
@@ -444,6 +509,50 @@ class Engine:
             (job_id,),
         ))
 
+    def _restore_completed_report_after_failure(self, job_id: int,
+                                                reason: str) -> bool:
+        """续改失败只收口新版，原整单交付与既有扣费保持不变。"""
+        with db.atomic() as c:
+            job = c.execute(
+                "SELECT status,billing_status FROM job WHERE id=?",
+                (job_id,),
+            ).fetchone()
+            if (not job or job["status"] in ("done", "cancelled")
+                    or job["billing_status"] != "charged"):
+                return False
+            latest = c.execute(
+                "SELECT * FROM station_run WHERE job_id=? AND station_idx=? "
+                "ORDER BY version DESC,id DESC LIMIT 1",
+                (job_id, LAST_IDX),
+            ).fetchone()
+            if not self._report_revision(latest):
+                return False
+            prior = c.execute(
+                "SELECT id FROM station_run WHERE job_id=? AND station_idx=? "
+                "AND status='done' AND version<? AND output_json IS NOT NULL "
+                "ORDER BY version DESC,id DESC LIMIT 1",
+                (job_id, LAST_IDX, latest["version"]),
+            ).fetchone()
+            if not prior:
+                return False
+            now = time.time()
+            if latest["status"] != "done":
+                original_note = str(latest["review_comment"] or "").split(
+                    "\n修订失败：", 1)[0]
+                c.execute(
+                    "UPDATE station_run SET status='failed',review_comment=?,"
+                    "output_json=NULL,updated_at=? WHERE id=? "
+                    "AND status IN ('queued','running','rejected','interrupted','failed')",
+                    ((original_note + "\n修订失败：" + reason)[:240],
+                     now, latest["id"]),
+                )
+            changed = c.execute(
+                "UPDATE job SET status='done',current_idx=?,updated_at=? "
+                "WHERE id=? AND status=? AND billing_status='charged'",
+                (LAST_IDX, now, job_id, job["status"]),
+            )
+            return changed.rowcount == 1
+
     def settle_failure(self, job_id: int, reason: str) -> bool:
         """收口工单与运行工位；无可用正文时按实际扣点金额幂等退款。"""
         from . import obs
@@ -455,6 +564,9 @@ class Engine:
         if not job or job["status"] in ("done", "cancelled"):
             return False
         reason = (reason or "执行失败")[:240]
+        if self._restore_completed_report_after_failure(job_id, reason):
+            self.touch(job_id)
+            return False
         if self._has_usable_delivery(job_id) or job.get("billing_status") != "charged":
             with db.atomic() as c:
                 now = time.time()
@@ -599,6 +711,35 @@ class Engine:
                     f"工单{status_cn(status)},不能取消；请新建工单")
                 return False
 
+            latest = c.execute(
+                "SELECT id,station_idx,skill_id,status,version FROM station_run "
+                "WHERE job_id=? AND station_idx=? "
+                "ORDER BY version DESC,id DESC LIMIT 1",
+                (job_id, LAST_IDX),
+            ).fetchone()
+            if (billed == "charged" and self._report_revision(latest)
+                    and latest["status"] in (
+                        "queued", "running", "rejected", "interrupted")):
+                prior = c.execute(
+                    "SELECT id FROM station_run WHERE job_id=? AND station_idx=? "
+                    "AND status='done' AND version<? LIMIT 1",
+                    (job_id, LAST_IDX, latest["version"]),
+                ).fetchone()
+                if prior:
+                    now = time.time()
+                    c.execute(
+                        "UPDATE station_run SET status='cancelled',output_json=NULL,"
+                        "updated_at=? WHERE id=?",
+                        (now, latest["id"]),
+                    )
+                    c.execute(
+                        "UPDATE job SET status='done',current_idx=?,updated_at=? "
+                        "WHERE id=? AND status=? AND billing_status='charged'",
+                        (LAST_IDX, now, job_id, status),
+                    )
+                    outcome["cancelled"] = True
+                    return False
+
             # 兼容升级前留下的 cancelled+charged：仅在确实没有可用交付时补退。
             if billed == "charged" and not usable:
                 cur = c.execute(
@@ -730,7 +871,24 @@ class Engine:
             # 执行(全新 or 重跑)
             revision_note, prev_output = None, None
             version = 1
-            if run and run["status"] == "rejected":
+            pending_run_id = None
+            if (self._report_revision(run)
+                    and run["status"] in ("queued", "rejected")):
+                prior = await db.aone(
+                    "SELECT output_json FROM station_run "
+                    "WHERE job_id=? AND station_idx=? AND status='done' "
+                    "AND version<? ORDER BY version DESC,id DESC LIMIT 1",
+                    (job_id, LAST_IDX, run["version"]),
+                )
+                if not prior:
+                    await db.arun(self.settle_failure, job_id,
+                                  "原报告版本已丢失，无法继续修改")
+                    return True
+                revision_note = run["review_comment"]
+                prev_output = db.jloads(prior["output_json"], {})
+                version = run["version"]
+                pending_run_id = run["id"]
+            elif run and run["status"] == "rejected":
                 revision_note = run["review_comment"]
                 prev_output = db.jloads(run["output_json"], {})
                 version = run["version"] + 1
@@ -742,7 +900,8 @@ class Engine:
                 revision_note = "此前执行被老板打断,请重新完整完成本工位。"
 
             res = await self._execute(job_id, idx, cfg, brief, profile, version,
-                                      revision_note, prev_output)
+                                      revision_note, prev_output,
+                                      pending_run_id=pending_run_id)
             if res in ("cancelled", "deleted"):
                 return True
             if res == "stale":
@@ -868,22 +1027,28 @@ class Engine:
                 )
                 if cur.rowcount != 1:
                     return False
-                c.execute(
-                    "INSERT INTO asset"
-                    "(type,job_id,tenant_id,payload_json,created_at,updated_at) "
-                    "VALUES('final',?,?,?,?,?)",
-                    (
-                        job_id,
-                        int(current["tenant_id"] or 1),
-                        json.dumps(
-                            {"title": title,
-                             "brief": brief.get("direction")},
-                            ensure_ascii=False,
+                existing_asset = c.execute(
+                    "SELECT id FROM asset WHERE type='final' AND job_id=? "
+                    "AND deleted_at IS NULL LIMIT 1",
+                    (job_id,),
+                ).fetchone()
+                if not existing_asset:
+                    c.execute(
+                        "INSERT INTO asset"
+                        "(type,job_id,tenant_id,payload_json,created_at,updated_at) "
+                        "VALUES('final',?,?,?,?,?)",
+                        (
+                            job_id,
+                            int(current["tenant_id"] or 1),
+                            json.dumps(
+                                {"title": title,
+                                 "brief": brief.get("direction")},
+                                ensure_ascii=False,
+                            ),
+                            now,
+                            now,
                         ),
-                        now,
-                        now,
-                    ),
-                )
+                    )
                 return int(current["tenant_id"] or 1)
 
         completed_tenant = await db.arun(_complete_tx)
@@ -909,16 +1074,15 @@ class Engine:
                 ).fetchone()
                 if not job or job["status"] != "done":
                     return
-                if c.execute(
-                        "SELECT id FROM knowledge "
-                        "WHERE job_id=? AND source='auto' "
-                        "AND deleted_at IS NULL LIMIT 1",
-                        (job_id,)).fetchone():
-                    return
+                existing = c.execute(
+                    "SELECT id FROM knowledge WHERE job_id=? AND source='auto' "
+                    "AND deleted_at IS NULL LIMIT 1",
+                    (job_id,),
+                ).fetchone()
                 retro = c.execute(
                     "SELECT output_json FROM station_run "
-                    "WHERE job_id=? AND station_idx=? "
-                    "ORDER BY version DESC LIMIT 1",
+                    "WHERE job_id=? AND station_idx=? AND status='done' "
+                    "ORDER BY version DESC,id DESC LIMIT 1",
                     (job_id, LAST_IDX),
                 ).fetchone()
                 out = db.jloads(retro["output_json"], {}) if retro else {}
@@ -936,21 +1100,30 @@ class Engine:
                 for tip in out.get("profile_updates") or []:
                     parts.append(f"经验:{tip}")
                 now = time.time()
-                c.execute(
-                    "INSERT INTO knowledge"
-                    "(title,content,tags_json,source,job_id,tenant_id,"
-                    "created_at,updated_at) "
-                    "VALUES(?,?,?,'auto',?,?,?,?)",
-                    (
-                        f"《{title}》交付复盘",
-                        "\n".join(parts) or "(复盘官未产出要点)",
-                        json.dumps(["自动沉淀"], ensure_ascii=False),
-                        job_id,
-                        int(job["tenant_id"] or 1),
-                        now,
-                        now,
-                    ),
-                )
+                title_text = f"《{title}》交付复盘"
+                content_text = "\n".join(parts) or "(复盘官未产出要点)"
+                if existing:
+                    c.execute(
+                        "UPDATE knowledge SET title=?,content=?,updated_at=? "
+                        "WHERE id=?",
+                        (title_text, content_text, now, existing["id"]),
+                    )
+                else:
+                    c.execute(
+                        "INSERT INTO knowledge"
+                        "(title,content,tags_json,source,job_id,tenant_id,"
+                        "created_at,updated_at) "
+                        "VALUES(?,?,?,'auto',?,?,?,?)",
+                        (
+                            title_text,
+                            content_text,
+                            json.dumps(["自动沉淀"], ensure_ascii=False),
+                            job_id,
+                            int(job["tenant_id"] or 1),
+                            now,
+                            now,
+                        ),
+                    )
         except Exception as exc:
             log.error(
                 "distill knowledge for job %s failed error_type=%s",
@@ -1041,7 +1214,7 @@ class Engine:
         return g["passed"]
 
     async def _execute(self, job_id, idx, cfg, brief, profile, version,
-                       revision_note, prev_output) -> bool:
+                       revision_note, prev_output, *, pending_run_id=None) -> bool:
         def _open_tx():
             with db.atomic() as c:
                 job = c.execute(
@@ -1050,13 +1223,26 @@ class Engine:
                     return ("deleted" if not job else "cancelled"), None, 1
                 tenant = int(job["tenant_id"] or 1)
                 now = time.time()
-                cur = c.execute(
-                    "INSERT INTO station_run"
-                    "(job_id,station_idx,skill_id,version,status,created_at,updated_at) "
-                    "VALUES(?,?,?,?, 'running',?,?)",
-                    (job_id, idx, cfg["skill"], version, now, now),
-                )
-                rid = cur.lastrowid
+                if pending_run_id is not None:
+                    cur = c.execute(
+                        "UPDATE station_run SET status='running',output_json=NULL,"
+                        "updated_at=? WHERE id=? AND job_id=? AND station_idx=? "
+                        "AND skill_id=? AND version=? "
+                        "AND status IN ('queued','rejected')",
+                        (now, pending_run_id, job_id, idx,
+                         REPORT_REVISION_SKILL, version),
+                    )
+                    if cur.rowcount != 1:
+                        return "cancelled", None, tenant
+                    rid = pending_run_id
+                else:
+                    cur = c.execute(
+                        "INSERT INTO station_run"
+                        "(job_id,station_idx,skill_id,version,status,created_at,updated_at) "
+                        "VALUES(?,?,?,?, 'running',?,?)",
+                        (job_id, idx, cfg["skill"], version, now, now),
+                    )
+                    rid = cur.lastrowid
                 changed = c.execute(
                     "UPDATE job SET status='running',current_idx=?,updated_at=? "
                     "WHERE id=? AND billing_status='charged' "
@@ -1119,6 +1305,12 @@ class Engine:
                         (time.time(), run_id),
                     )
                     return "deleted" if not after_provider else "cancelled"
+
+                if pending_run_id is not None:
+                    data = r.get("data") if isinstance(r, dict) else None
+                    report = data.get("report") if isinstance(data, dict) else None
+                    if not isinstance(report, str) or not report.strip():
+                        raise ValueError("修订版复盘报告缺少正文")
 
                 progress("done", f"产出完成 · 用时 {int(time.time() - t0)}s · "
                                  f"{r['tokens']} tokens · ${r['cost_usd']:.3f}")
@@ -1240,7 +1432,10 @@ class Engine:
                     (
                         int((time.time() - t0) * 1000),
                         steps_snapshot,
-                        providers.public_failure_message(last_err),
+                        ((str(revision_note or "") + "\n修订失败："
+                          + providers.public_failure_message(last_err))[:240]
+                         if pending_run_id is not None
+                         else providers.public_failure_message(last_err)),
                         time.time(),
                         run_id,
                     ),
@@ -1461,9 +1656,10 @@ class Engine:
                 raise ValueError("工单状态刚刚更新了(可能已被他人操作或已推进),刷新页面按最新状态处理")
             c.execute(
                 "UPDATE station_run SET status='interrupted',"
-                "review_comment='老板打断',updated_at=? "
+                "review_comment=CASE WHEN skill_id=? THEN review_comment "
+                "ELSE '老板打断' END,updated_at=? "
                 "WHERE job_id=? AND status='running'",
-                (now, job_id),
+                (REPORT_REVISION_SKILL, now, job_id),
             )
         killed = llm.kill(f"job{job_id}:")
         log.info("job%s 被老板打断,终止了 %s 个进行中的调用", job_id, killed)
@@ -1483,14 +1679,15 @@ class Engine:
             # 只改每个工位的最新版本，历史版本保留审计原貌。
             c.execute(
                 "UPDATE station_run SET status='rejected',"
-                "review_comment='此前执行被老板打断,恢复后重新完整完成本工位。',"
+                "review_comment=CASE WHEN skill_id=? THEN review_comment "
+                "ELSE '此前执行被老板打断,恢复后重新完整完成本工位。' END,"
                 "updated_at=? "
                 "WHERE job_id=? AND status='interrupted' "
                 "AND version=("
                 "SELECT MAX(s2.version) FROM station_run s2 "
                 "WHERE s2.job_id=station_run.job_id "
                 "AND s2.station_idx=station_run.station_idx)",
-                (now, job_id),
+                (REPORT_REVISION_SKILL, now, job_id),
             )
             changed = c.execute(
                 "UPDATE job SET status='running',updated_at=? "
