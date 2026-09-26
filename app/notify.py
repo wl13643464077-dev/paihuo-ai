@@ -32,6 +32,14 @@ def set_webhook(tid: int, url: str):
     db.set_setting(f"wechat_webhook:{tid}", url or None)
 
 
+# 第 2 期逐人通知的三个小类(权限统一见 PERSONAL_KINDS)
+STAFF_TASK_KINDS = frozenset({
+    "staff_task_assigned", "staff_task_submitted", "staff_task_reviewed",
+})
+REMIND_KINDS = frozenset({"staff_remind", "staff_escalate"})
+ASSIGN_KINDS = frozenset({"inspection_action_assigned"})
+
+
 def build_msg(kind: str, payload: dict) -> str:
     """事件 → 企微 markdown 消息(老板一眼能看懂,带直达链接)."""
     base = db.get_setting("site_base") or "https://paihuo.ai"
@@ -98,7 +106,7 @@ def build_msg(kind: str, payload: dict) -> str:
                      + (f" · [看门店清单]({base}/#/checklists)" if p.get("store_lines") else ""))
         lines.append(f"📣 今天发什么?[点这里,照着发就行]({base}/#/tools/hot)")
         return "\n".join(lines)
-    if kind in PERSONAL_KINDS:
+    if kind in REMIND_KINDS:
         # 提醒/升级:企微群里用 text 消息发(才能 @ 手机号),这里只给 markdown 兜底
         return f"**⏰ 派活 · {p.get('headline') or '提醒'}**\n{(p.get('text') or '')[:300]}"
     if kind == "member_reviewed":
@@ -120,13 +128,17 @@ def build_msg(kind: str, payload: dict) -> str:
     if kind in {"task_outcome", "meeting_outcome"}:
         return (f"**📋 派活 · {p.get('report_name', '任务有结果了')}**\n{(p.get('summary') or '')[:180]}\n"
                 f"[查看]({base}/{p.get('link') or '#/tasks'})")
+    if kind in ASSIGN_KINDS:
+        return (f"**🧾 派活 · {p.get('headline') or '有一件事派给了你'}**\n"
+                f"{(p.get('summary') or '')[:180]}\n"
+                f"[去处理]({base}/{p.get('link') or '#/'})")
     if kind == "report":
         return (f"**📰 派活 · {p.get('report_name', '报告出炉')}**\n{(p.get('summary') or '')[:180]}\n"
                 f"[查看]({base}/{p.get('link') or '#/knowledge'})")
     if kind == "video":
         return (f"**🎬 派活 · 视频成片**\n《{title}》已出片,可下载发布\n"
                 f"[查看]({base}{p.get('file', '')})")
-    if kind in PERSONAL_KINDS:
+    if kind in STAFF_TASK_KINDS:
         # 派给店员的活:群里只报事,不带照片;链接进老板端/店员手机版都能看
         heads = {
             "staff_task_assigned": "📌 派活 · 新活派给店员",
@@ -182,6 +194,8 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
             f"工位{p.get('station', '')}:"
             f"{'通过' if p.get('approved') else '打回'}"
         ),
+        # v60 逐人通知：标题由调用方给出(如"门店整改派给了你")。
+        "inspection_action_assigned": p.get("headline") or "有一条门店整改派给了你",
     }
     title = str(labels.get(kind) or "派活有新进展")[:80]
     body = str(
@@ -208,12 +222,12 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
         link = "#/checklists"
     elif kind == "daily_digest" or kind.startswith("purchase_"):
         link = "#/billing"
-    elif kind in PERSONAL_KINDS:
+    elif kind in STAFF_TASK_KINDS:
+        link = str(p.get("link") or f"#/staff-tasks/{int(p.get('task_id') or 0)}")
+    elif kind in REMIND_KINDS or kind in ASSIGN_KINDS:
         link = str(p.get("link") or "#/")
     elif kind in {"schedule_paused", "schedule_failed"}:
         link = "#/schedules"
-    elif kind in PERSONAL_KINDS:
-        link = f"#/staff-tasks/{int(p.get('task_id') or 0)}"
     else:
         link = str(p.get("link") or "#/knowledge")
     if not re.match(r"^#/[A-Za-z0-9_~.%/?=&:+-]*$", link):
@@ -268,6 +282,16 @@ KIND_MODULES = {
     # 数字人摄影棚使用 avatar_job/SSE，不得把图文成片通知误投给 avatar-only 成员。
     "video": frozenset({"content"}),
 }
+
+# v60:逐人发送的通知。payload 必须带 user_id，只写 user_id 定向行，绝不做
+# 租户广播；任何在职账号(含店员)都能看到、且只能看到发给自己的那一行。
+# 新增“派给具体某个人”的通知类型登记在这里即可。
+PER_USER_KINDS = {
+    "inspection_action_assigned",
+}
+# 两套写法(target_user_id 参数 / payload.user_id)统一：逐人类型全部并入 PERSONAL_KINDS。
+PERSONAL_KINDS |= PER_USER_KINDS
+PER_USER_KINDS = PERSONAL_KINDS
 
 # 保留旧常量名供外部诊断脚本兼容；语义是“需要精确定向的管理通知”。
 OWNER_ONLY_KINDS = ROOT_ONLY_KINDS | BOSS_ONLY_KINDS
@@ -527,6 +551,14 @@ def record(
         except (TypeError, ValueError):
             job_id = None
         targets = [None]
+        if target_user_id is None and kind in PER_USER_KINDS:
+            # 逐人通知没有收件人就不发，绝不降级成全员广播。
+            try:
+                target_user_id = int((payload or {}).get("user_id") or 0) or None
+            except (TypeError, ValueError):
+                target_user_id = None
+            if target_user_id is None:
+                return None
         if target_user_id is not None:
             target = db.one(
                 "SELECT id FROM users WHERE id=? AND tenant_id=? "
@@ -687,37 +719,6 @@ def send_text_sync(tid: int, content: str, mobiles=()) -> bool:
         return False
 
 
-def push_to_users(tid: int, kind: str, payload: dict, user_ids, *,
-                  mention: bool = True) -> list[int]:
-    """按人发:每人一条站内通知 + 企微群一条 text 消息 @ 这些人的手机号。
-
-    返回落库成功的通知 id。企微正文取 payload["text"],没有就用站内标题。
-    """
-    ids: list[int] = []
-    targets = []
-    for value in user_ids or ():
-        try:
-            uid = int(value)
-        except (TypeError, ValueError):
-            continue
-        if uid > 0 and uid not in targets:
-            targets.append(uid)
-    for uid in targets:
-        row_id = record(tid, kind, payload, target_user_id=uid)
-        if row_id is not None:
-            ids.append(int(row_id))
-    if not targets or not get_webhook(tid):
-        return ids
-    content = str((payload or {}).get("text") or _inbox_item(kind, payload)[0])
-    mobiles = mobiles_for_users(tid, targets) if mention else []
-    try:
-        loop = asyncio.get_running_loop()
-        loop.run_in_executor(None, send_text_sync, tid, content, mobiles)
-    except RuntimeError:
-        send_text_sync(tid, content, mobiles)
-    return ids
-
-
 def push(tid: int, kind: str, payload: dict):
     """站内必达；配置企微时再异步发送外部提醒。"""
     record(tid, kind, payload)
@@ -730,10 +731,22 @@ def push(tid: int, kind: str, payload: dict):
         send_sync(tid, kind, payload)
 
 
-def push_to_users(tid: int, kind: str, payload: dict, user_ids) -> list[int]:
-    """逐人发送:每个收件人一行站内通知(停用/别家账号自动跳过)，企微群只发一条。
+def _run_detached(fn, *args) -> None:
+    """外发(企微)不能卡住调用方：有事件循环丢线程池，没有就起守护线程。"""
+    try:
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, fn, *args)
+    except RuntimeError:
+        # 同步路由跑在线程池里：企微最多等 8 秒，不能卡住店员的提交请求
+        threading.Thread(target=fn, args=args, daemon=True).start()
 
-    返回实际写入的通知 id。没有任何有效收件人时站内和企微都不发。
+
+def push_to_users(tid: int, kind: str, payload: dict, user_ids, *,
+                  mention: bool = True) -> list[int]:
+    """逐人发送：每个收件人一行站内通知(停用/别家账号自动跳过)，企微群只发一条。
+
+    企微消息：payload 带 ``text`` 或收件人有手机号时发 text 消息并 @ 这些人；
+    否则发普通 markdown 消息。返回实际写入的通知 id；没有有效收件人时都不发。
     """
     seen: list[int] = []
     for raw in user_ids or ():
@@ -750,14 +763,15 @@ def push_to_users(tid: int, kind: str, payload: dict, user_ids) -> list[int]:
             written.append(int(row_id))
     if not written or not get_webhook(tid):
         return written
-    try:
-        loop = asyncio.get_running_loop()
-        loop.run_in_executor(None, send_sync, tid, kind, payload)
-    except RuntimeError:
-        # 同步路由跑在线程池里：企微最多等 8 秒，不能卡住店员的提交请求
-        threading.Thread(
-            target=send_sync, args=(tid, kind, payload), daemon=True,
-        ).start()
+    mobiles = mobiles_for_users(tid, seen) if mention else []
+    text = str((payload or {}).get("text") or "").strip()
+    if text or mobiles:
+        if not text:
+            title, body, _link = _inbox_item(kind, payload)
+            text = f"{title}\n{body}".strip()
+        _run_detached(send_text_sync, tid, text, mobiles)
+    else:
+        _run_detached(send_sync, tid, kind, payload)
     return written
 
 

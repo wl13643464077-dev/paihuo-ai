@@ -234,29 +234,6 @@ def _relevant_rows(
     return [_row_public(row) for row in rows]
 
 
-def _industry_revision_token(tenant_id: int, industry_key: str) -> dict[str, int]:
-    """Return a bounded, monotonic ledger token for every override mutation.
-
-    The token prevents an effective version from returning to the bare catalog
-    version when a region is renamed or an override is disabled.  It is an
-    aggregate query rather than an unbounded scan, so checklist reads stay
-    constant-size even for large chains.
-    """
-    row = db.one(
-        "SELECT COUNT(*) row_count,COALESCE(SUM(row_version),0) version_sum "
-        "FROM inspection_standard_override WHERE tenant_id=? AND industry_key=?",
-        (int(tenant_id), industry_key),
-    ) or {}
-    try:
-        row_count = int(row.get("row_count") or 0)
-        version_sum = int(row.get("version_sum") or 0)
-    except (TypeError, ValueError, OverflowError):
-        _fail("OVERRIDE_STATE_INVALID", "企业巡店标准数据损坏")
-    if row_count < 0 or version_sum < row_count:
-        _fail("OVERRIDE_STATE_INVALID", "企业巡店标准数据损坏")
-    return {"row_count": row_count, "version_sum": version_sum}
-
-
 def _validate_connection_state(
     connection: Any,
     tenant_id: int,
@@ -328,8 +305,10 @@ def effective_snapshot(
         tenant_id, actor_id, industry_key, manager=False,
     )
     branch = _branch(tid, industry, branch_id)
+    # 第 2 期：版本只由“对这家门店真正生效”的覆盖（企业级 + 本区域 + 本门店，
+    # 含已停用行的版本号，防止关掉覆盖后版本回到旧值）决定。老板改别的区域/
+    # 门店的标准，不会再让这家店正在填的巡店提交失败。
     revision_rows = _relevant_rows(tid, industry, branch)
-    industry_revision = _industry_revision_token(tid, industry)
     rows = [row for row in revision_rows if row["active"]]
     layers: dict[str, dict[str, dict]] = {
         "tenant": {}, "region": {}, "branch": {},
@@ -372,7 +351,6 @@ def effective_snapshot(
         {
             "base_catalog_sha256": base["sha256"],
             "industry_key": industry,
-            "industry_revision": industry_revision,
             "revision_overrides": revisions,
             "active_overrides": applied,
             "items": items,
@@ -386,7 +364,7 @@ def effective_snapshot(
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     template_version = (
         inspectionstandards.CATALOG_VERSION
-        if not industry_revision["row_count"]
+        if not revisions
         else f"{inspectionstandards.CATALOG_VERSION}+{digest[:12]}"
     )
     return {
@@ -403,7 +381,7 @@ def effective_snapshot(
             "applied_count": len(applied),
             "scopes": list(dict.fromkeys(row["scope_kind"] for row in applied)),
             "revision_count": len(revisions),
-            "industry_revision_count": industry_revision["row_count"],
+            "industry_revision_count": len(revisions),
             "item_scopes": item_scopes,
             "field_sources": field_sources,
         },

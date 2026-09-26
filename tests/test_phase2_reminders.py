@@ -251,7 +251,8 @@ class ReminderFlowTests(Phase2Base):
 
     def test_push_to_users_records_per_person_and_mentions(self):
         notify.set_webhook(2, WEBHOOK)
-        with mock.patch.object(notify, "send_text_sync", return_value=True) as sent:
+        with mock.patch.object(notify, "send_text_sync", return_value=True) as sent, \
+                mock.patch.object(notify, "_run_detached", side_effect=lambda fn, *a: fn(*a)):
             ids = notify.push_to_users(2, "staff_remind",
                                        {"headline": "快到点了", "text": "朝阳店开店清单"},
                                        [22, 23, 23])

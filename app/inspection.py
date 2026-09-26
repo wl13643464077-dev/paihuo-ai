@@ -440,27 +440,81 @@ def _build_strict_visit_contract(
         or not snapshot.get("template_version")
     ):
         raise InspectionError("当前行业巡店标准不可用")
+    standard_refreshed = False
     if version != snapshot["template_version"]:
-        raise InspectionError("巡店模板版本已更新，请刷新后重新提交")
+        # 第 2 期：同一产品基线下只是企业/区域/门店覆盖变了，就用服务端最新快照
+        # 重新核对本次填写的内容；真正影响到填写项才要求重填。产品基线本身
+        # 换代（采集位/检查项整体变化）仍要求刷新。
+        if standard_snapshot is None or not _same_base_catalog(version, snapshot):
+            raise InspectionError("巡店模板版本已更新，请刷新后重新提交")
+        standard_refreshed = True
     raw_file_slots = _decoded_json_field(raw, "file_slots", "file_slots_json", [])
-    file_slots = _normalize_file_slots(raw_file_slots, snapshot)
-    snapshot["file_slots"] = list(file_slots)
-    observations = _normalize_observations(
-        _decoded_json_field(
-            raw,
-            "observations",
-            "observations_json",
-            {"metrics": [], "checklist": []},
-        ),
-        snapshot,
+    raw_observations = _decoded_json_field(
+        raw,
+        "observations",
+        "observations_json",
+        {"metrics": [], "checklist": []},
     )
+    try:
+        file_slots = _normalize_file_slots(raw_file_slots, snapshot)
+        snapshot["file_slots"] = list(file_slots)
+        observations = _normalize_observations(raw_observations, snapshot)
+    except InspectionError as exc:
+        if not standard_refreshed:
+            raise
+        raise InspectionError(
+            _refresh_conflict_message(industry_key, raw_observations, snapshot, exc)
+        ) from exc
     return {
         "template_key": industry_key,
-        "template_version": version,
+        "template_version": str(snapshot["template_version"]),
         "template_snapshot": snapshot,
         "observations": observations,
         "file_slots": file_slots,
+        "standard_refreshed": standard_refreshed,
     }
+
+
+def _same_base_catalog(claimed_version: str, snapshot: Mapping[str, Any]) -> bool:
+    base = str(
+        snapshot.get("base_catalog_version") or inspectionstandards.CATALOG_VERSION
+    )
+    return claimed_version == base or claimed_version.startswith(base + "+")
+
+
+def _refresh_conflict_message(
+    industry_key: str,
+    raw_observations: Any,
+    snapshot: Mapping[str, Any],
+    error: InspectionError,
+) -> str:
+    """标准刚改过且影响到本次填写项时，告诉店员具体是哪几项要重填。"""
+    current = {
+        str(item.get("item_code") or "")
+        for item in snapshot.get("items") or []
+        if isinstance(item, Mapping)
+    }
+    try:
+        labels = {
+            str(item.get("item_code") or ""): str(item.get("label") or "")
+            for item in inspectionstandards.effective_checklist(industry_key)
+        }
+    except inspectionstandards.InspectionStandardError:
+        labels = {}
+    affected: list[str] = []
+    rows = (
+        raw_observations.get("checklist")
+        if isinstance(raw_observations, Mapping) else None
+    )
+    if isinstance(rows, Sequence) and not isinstance(rows, (str, bytes, bytearray)):
+        for row in rows:
+            code = str(row.get("item_code") or "") if isinstance(row, Mapping) else ""
+            if code and code not in current:
+                affected.append(labels.get(code) or code)
+    if affected:
+        names = "、".join(dict.fromkeys(affected[:5]))
+        return f"老板刚调整了巡店标准，「{names}」已不在本店检查范围内。请刷新页面，按新标准重新填写后再提交"
+    return f"老板刚调整了巡店标准，本次填写的内容不符合新标准（{error}）。请刷新页面后重新填写"
 
 
 def _stored_visit_contract(row: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -1304,6 +1358,69 @@ def _validate_persisted_photo_contract(
         raise InspectionConflict("巡店照片与冻结采集计划不一致")
 
 
+def sniff_photo_ext(data: bytes) -> str | None:
+    """按文件内容（魔数）判断图片类型；不看文件名。
+
+    部分安卓/微信内置浏览器上传的文件名没有扩展名（如 ``image``、``blob``），
+    按扩展名判断会把正常照片误拒。
+    """
+    head = bytes(data[:16]) if isinstance(data, (bytes, bytearray)) else b""
+    if head.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return ".webp"
+    return None
+
+
+def normalize_photo_upload(data: bytes, filename: str = "") -> dict:
+    """校验、纠正方向并重编码为 JPEG，彻底移除 EXIF 与上传文件名。
+
+    类型只认文件内容；``filename`` 仅为兼容旧调用保留，不参与判断。
+    """
+    import hashlib
+    import io
+
+    from PIL import Image, ImageOps
+
+    from . import avatar
+
+    ext = sniff_photo_ext(data)
+    if ext is None:
+        raise ValueError("巡店照片仅支持 JPEG、PNG 或 WebP，请直接用手机相机拍照上传")
+    try:
+        avatar.validate_upload_media(data, ext, "photo")
+    except avatar.InvalidAvatarMedia as exc:
+        raise ValueError(str(exc)) from exc
+    try:
+        with Image.open(io.BytesIO(data)) as source:
+            image = ImageOps.exif_transpose(source)
+            if "A" in image.getbands():
+                base = Image.new("RGB", image.size, "white")
+                base.paste(image, mask=image.getchannel("A"))
+                image = base
+            else:
+                image = image.convert("RGB")
+            image.thumbnail((4096, 4096))
+            width, height = image.size
+            output = io.BytesIO()
+            image.save(output, "JPEG", quality=88, optimize=True)
+            normalized = output.getvalue()
+    except (OSError, ValueError) as exc:
+        raise ValueError("巡店照片无法安全解析") from exc
+    if not normalized or len(normalized) > MAX_PHOTO_BYTES:
+        raise ValueError("巡店照片重编码后超过 8MB")
+    return {
+        "data": normalized,
+        "mime_type": "image/jpeg",
+        "byte_size": len(normalized),
+        "sha256": hashlib.sha256(normalized).hexdigest(),
+        "width": width,
+        "height": height,
+    }
+
+
 def _find_request(tid: int, request_key: str) -> dict | None:
     return db.one(
         "SELECT id,tenant_id,industry_key,branch_id,created_by,status "
@@ -1376,7 +1493,12 @@ def _insert_visit(
         "created_by,created_at) VALUES(?,?,?,?,?,?)",
         (
             int(tid), visit_id, "visit_created",
-            _json({"note": request["note"]}), int(uid), now,
+            _json({
+                "note": request["note"],
+                # 标准在填写期间被老板改过、服务端已按最新标准自动核对通过。
+                **({"standard_refreshed": True} if request.get("standard_refreshed") else {}),
+            }),
+            int(uid), now,
         ),
     )
     return visit_id
@@ -1758,6 +1880,55 @@ def canonicalize_model_result(raw: Any) -> Any:
     return value
 
 
+RETAKE_REASONS = {
+    "unanalyzable": "照片看不清或拍错了地方",
+    "low_confidence": "照片不够清楚，AI 没把握",
+    "unresolved": "多次补拍仍看不清，请人工查看",
+}
+# 同一次巡店最多补拍 3 轮；再看不清就把这张标成“需人工查看”并出报告，
+# 不让巡店永远卡在待补拍。
+MAX_RETAKE_ROUNDS = 3
+
+
+def _retake_review(
+    photo_id: int,
+    value: Mapping[str, Any],
+    *,
+    reason: str,
+    confidence: float | None = None,
+) -> dict:
+    """看不清的照片只记“需补拍”，不读模型对它给出的结论。"""
+    raw_facts = value.get("visible_facts")
+    facts: list[str] = []
+    if isinstance(raw_facts, Sequence) and not isinstance(
+        raw_facts, (str, bytes, bytearray)
+    ):
+        for item in list(raw_facts)[:12]:
+            if isinstance(item, str) and item.strip() and not _CONTROL_RE.search(item):
+                facts.append(item.strip()[:300])
+    if confidence is None:
+        raw_confidence = value.get("confidence")
+        if (
+            isinstance(raw_confidence, (int, float))
+            and not isinstance(raw_confidence, bool)
+            and math.isfinite(float(raw_confidence))
+            and 0 <= float(raw_confidence) <= 1
+        ):
+            confidence = float(raw_confidence)
+    stored_reason = value.get("retake_reason")
+    if stored_reason in RETAKE_REASONS:
+        reason = str(stored_reason)
+    return {
+        "photo_id": int(photo_id),
+        "analyzable": reason != "unanalyzable",
+        "verdict": "retake",
+        "confidence": confidence,
+        "visible_facts": facts,
+        "needs_retake": True,
+        "retake_reason": reason,
+    }
+
+
 def _normalize_model_result_strict(
     raw: Mapping[str, Any],
     allowed_photo_ids: set[int],
@@ -1800,11 +1971,25 @@ def _normalize_model_result_strict(
         if not isinstance(analyzable, bool):
             raise InspectionError("逐图核查必须明确照片是否可分析")
         if not analyzable:
-            raise _contract_error(
-                "IC_REVIEW_UNANALYZABLE",
-                "存在不可分析的巡店照片",
-                retryable=False,
+            # 第 2 期：一张照片看不清只让店员补拍这一张，其他照片的结果保留，
+            # 不再让整次巡店作废。补拍照片不能作为问题证据。
+            review = _retake_review(photo_id, value, reason="unanalyzable")
+            review_by_photo_id[photo_id] = review
+            photo_reviews.append(review)
+            continue
+        confidence = _bounded_float(
+            value.get("confidence"),
+            field="逐图核查置信度",
+            minimum=0,
+            maximum=1,
+        )
+        if confidence < MIN_PHOTO_REVIEW_CONFIDENCE or value.get("needs_retake") is True:
+            review = _retake_review(
+                photo_id, value, reason="low_confidence", confidence=confidence,
             )
+            review_by_photo_id[photo_id] = review
+            photo_reviews.append(review)
+            continue
         verdict = _text(
             value.get("verdict"),
             field="逐图核查结论",
@@ -1813,18 +1998,6 @@ def _normalize_model_result_strict(
         ).lower()
         if verdict not in {"clean", "issue"}:
             raise InspectionError("逐图核查结论只能为 clean/issue")
-        confidence = _bounded_float(
-            value.get("confidence"),
-            field="逐图核查置信度",
-            minimum=0,
-            maximum=1,
-        )
-        if confidence < MIN_PHOTO_REVIEW_CONFIDENCE:
-            raise _contract_error(
-                "IC_REVIEW_CONFIDENCE_LOW",
-                "逐图核查置信度不足",
-                retryable=False,
-            )
         raw_facts = value.get("visible_facts")
         if (
             isinstance(raw_facts, (str, bytes, bytearray))
@@ -1848,6 +2021,11 @@ def _normalize_model_result_strict(
         photo_reviews.append(review)
     if set(review_by_photo_id) != allowed_photo_ids:
         raise InspectionError("逐图核查未精确覆盖全部初检照片")
+    retake_photo_ids = {
+        photo_id
+        for photo_id, review in review_by_photo_id.items()
+        if review.get("needs_retake")
+    }
 
     raw_issues = raw.get("issues")
     if isinstance(raw_issues, (str, bytes, bytearray)) or not isinstance(raw_issues, Sequence):
@@ -1898,6 +2076,9 @@ def _normalize_model_result_strict(
             if photo_id in seen_photo_ids:
                 continue
             seen_photo_ids.add(photo_id)
+            if photo_id in retake_photo_ids:
+                # 看不清的照片不能当证据；补拍后会重新分析这一张。
+                continue
             evidence.append({
                 "photo_id": photo_id,
                 "note": _text(evidence_value.get("note"), field="证据说明", limit=300),
@@ -1947,6 +2128,9 @@ def _normalize_model_result_strict(
         # “立即/0 天”生成的期限等于入库时刻，整改单一出生就逾期；
         # 最短给 1 天，让店里有时间处理和拍复查照片。
         due_days = max(1.0, due_days)
+        if not evidence:
+            # 证据全部落在待补拍照片上：先不记这个问题，补拍后再判断。
+            continue
         issues.append({
             "title": _text(value.get("title"), field="问题标题", limit=120, required=True),
             "description": _text(value.get("description"), field="问题描述", limit=1500, required=True),
@@ -1992,6 +2176,7 @@ def _normalize_model_result_strict(
         "score": score,
         "photo_reviews": photo_reviews,
         "issues": issues,
+        "retake_photo_ids": sorted(retake_photo_ids),
     }
     if issues:
         return {**result, "analysis_status": "issues_found"}
@@ -2090,6 +2275,214 @@ def normalize_model_result(
         ) from exc
 
 
+# 第 2 期：确定性评分。模型给的 0-100 分只作“AI 参考分”，不参与排行。
+SCORE_RULE = "severity_v1"
+SEVERITY_DEDUCTIONS = {"critical": 25, "high": 15, "medium": 8, "low": 3}
+FALSE_POSITIVE = "false_positive"
+
+
+def deterministic_score(issues: Sequence[Mapping[str, Any]]) -> float:
+    """门店得分 = 100 − Σ 问题扣分（同类问题同次只扣最重的一次，误报不扣），下限 0。"""
+    worst: dict[str, int] = {}
+    for item in issues or []:
+        if not isinstance(item, Mapping) or item.get("false_positive"):
+            continue
+        points = SEVERITY_DEDUCTIONS.get(str(item.get("severity") or "").lower(), 0)
+        category = str(item.get("category") or "").strip().lower() or "other"
+        worst[category] = max(worst.get(category, 0), points)
+    return float(max(0, 100 - sum(worst.values())))
+
+
+def _score_issue_rows(connection, tid: int, visit_id: int) -> list[dict]:
+    return [{
+        "severity": row["severity"],
+        "category": row["category"],
+        "false_positive": str(row["close_reason"] or "") == FALSE_POSITIVE,
+    } for row in connection.execute(
+        "SELECT i.severity,i.category,COALESCE(a.close_reason,'') close_reason "
+        "FROM inspection_issue i LEFT JOIN inspection_action a "
+        "ON a.issue_id=i.id AND a.tenant_id=i.tenant_id AND a.visit_id=i.visit_id "
+        "WHERE i.tenant_id=? AND i.visit_id=?",
+        (int(tid), int(visit_id)),
+    ).fetchall()]
+
+
+def _recompute_visit_score(connection, tid: int, visit_id: int) -> float | None:
+    """按当前问题（排除误报）重算已完成巡店的得分；模型原分留作 AI 参考分。"""
+    row = connection.execute(
+        "SELECT status,score,model_json FROM inspection_visit "
+        "WHERE id=? AND tenant_id=?",
+        (int(visit_id), int(tid)),
+    ).fetchone()
+    if not row or row["status"] != "completed":
+        return None
+    model = db.jloads(row["model_json"], {})
+    if not isinstance(model, dict):
+        model = {}
+    if "ai_reference_score" not in model:
+        # 历史记录：model_json 里的 score 就是当时模型给的分。
+        legacy = model.get("score", row["score"])
+        model["ai_reference_score"] = (
+            float(legacy)
+            if isinstance(legacy, (int, float)) and not isinstance(legacy, bool)
+            else None
+        )
+    model["score_rule"] = SCORE_RULE
+    score = deterministic_score(_score_issue_rows(connection, tid, visit_id))
+    connection.execute(
+        "UPDATE inspection_visit SET score=?,model_json=? WHERE id=? AND tenant_id=?",
+        (score, _json(model), int(visit_id), int(tid)),
+    )
+    return score
+
+
+def backfill_scores(batch_size: int = 200) -> int:
+    """把历史巡店按新规则重算一批；只处理还没有新口径标记的，重复执行无副作用。
+
+    返回本批处理条数；为 0 表示全部完成。调用方按批循环，别一次锁住整库。
+    """
+    size = max(1, min(int(batch_size), 1000))
+    rows = db.q(
+        "SELECT id,tenant_id FROM inspection_visit WHERE status='completed' "
+        "AND deleted_at IS NULL "
+        "AND instr(COALESCE(model_json,''),'\"score_rule\"')=0 "
+        "ORDER BY id LIMIT ?",
+        (size,),
+    )
+    if not rows:
+        return 0
+    with db.atomic() as connection:
+        for row in rows:
+            _recompute_visit_score(connection, int(row["tenant_id"]), int(row["id"]))
+    return len(rows)
+
+
+def _retake_state(model_json: Any) -> dict | None:
+    """读出“待补拍”的中间结果；没有就返回 None。"""
+    model = db.jloads(model_json, {}) if isinstance(model_json, str) else model_json
+    if not isinstance(model, Mapping):
+        return None
+    retake = model.get("retake")
+    if model.get("analysis_status") != "needs_retake" or not isinstance(retake, Mapping):
+        return None
+    try:
+        photo_ids = [int(value) for value in retake.get("photo_ids") or []]
+        pending = [int(value) for value in retake.get("pending") or []]
+        round_no = int(retake.get("round") or 1)
+    except (TypeError, ValueError):
+        raise InspectionConflict("巡店补拍记录损坏") from None
+    if not photo_ids or not set(pending) <= set(photo_ids):
+        raise InspectionConflict("巡店补拍记录损坏")
+    state = copy.deepcopy(dict(model))
+    state["retake"] = {"photo_ids": photo_ids, "pending": pending, "round": round_no}
+    return state
+
+
+def analysis_photo_ids(visit: Mapping[str, Any]) -> set[int]:
+    """这一轮要交给模型看的初检照片：补拍轮只看补拍的那几张。"""
+    before = {
+        int(photo["id"])
+        for photo in visit.get("photos") or []
+        if photo.get("phase") == "before"
+    }
+    retake = visit.get("retake")
+    if isinstance(retake, Mapping) and retake.get("photo_ids"):
+        chosen = {int(value) for value in retake["photo_ids"]} & before
+        if chosen:
+            return chosen
+    return before
+
+
+def union_retake_flags(
+    chosen: Mapping[str, Any],
+    candidates: Sequence[Mapping[str, Any]],
+) -> dict:
+    """零问题双模复核：任一模型看不清的照片，在最终结果里都记为需补拍。"""
+    result = copy.deepcopy(dict(chosen))
+    flagged: dict[int, dict] = {}
+    for candidate in candidates:
+        for review in candidate.get("photo_reviews") or []:
+            if isinstance(review, Mapping) and review.get("needs_retake"):
+                flagged.setdefault(int(review["photo_id"]), dict(review))
+    if not flagged:
+        return result
+    reviews = []
+    for review in result.get("photo_reviews") or []:
+        photo_id = int(review.get("photo_id") or 0)
+        if photo_id in flagged and not review.get("needs_retake"):
+            review = _retake_review(
+                photo_id,
+                flagged[photo_id],
+                reason=str(flagged[photo_id].get("retake_reason") or "low_confidence"),
+            )
+        reviews.append(review)
+    result["photo_reviews"] = reviews
+    result["retake_photo_ids"] = sorted(
+        {int(value) for value in result.get("retake_photo_ids") or []} | set(flagged)
+    )
+    return result
+
+
+def _merge_retake_round(
+    prior: Mapping[str, Any] | None,
+    normalized: Mapping[str, Any],
+) -> tuple[dict, list[int], int]:
+    """把补拍轮的结果并回上一轮：没补拍的照片结论和已发现的问题全部保留。"""
+    current = copy.deepcopy(dict(normalized))
+    retake_ids = [int(value) for value in current.get("retake_photo_ids") or []]
+    if prior is None:
+        return current, retake_ids, 1
+    retaken = {int(value) for value in prior["retake"]["photo_ids"]}
+    reviews = [
+        copy.deepcopy(review)
+        for review in prior.get("photo_reviews") or []
+        if int(review.get("photo_id") or 0) not in retaken
+    ] + list(current.get("photo_reviews") or [])
+    reviews.sort(key=lambda review: int(review.get("photo_id") or 0))
+    issues = copy.deepcopy(list(prior.get("issues") or [])) + list(
+        current.get("issues") or []
+    )
+    summary = "\n\n".join(
+        piece for piece in (
+            str(prior.get("summary") or "").strip(),
+            "补拍复核：" + str(current.get("summary") or "").strip(),
+        ) if piece
+    )[:4000]
+    scores = [
+        float(value) for value in (prior.get("score"), current.get("score"))
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    ]
+    merged: dict[str, Any] = {
+        "analysis_status": "issues_found" if issues else "clean_verified",
+        "summary": summary,
+        "score": min(scores) if scores else None,
+        "photo_reviews": reviews,
+        "issues": issues,
+        "retake_photo_ids": retake_ids,
+    }
+    verification = current.get("verification") or prior.get("verification")
+    if not issues and verification:
+        merged["verification"] = copy.deepcopy(verification)
+    return merged, retake_ids, int(prior["retake"].get("round") or 1) + 1
+
+
+def _single_branch_manager(connection, tid: int, branch_id: int, industry_key: str) -> dict | None:
+    """门店只有一个店长时返回他，用来默认指派 AI 生成的整改。"""
+    rows = connection.execute(
+        "SELECT u.id,u.username,u.modules_json FROM user_branch ub JOIN users u "
+        "ON u.id=ub.user_id AND u.tenant_id=ub.tenant_id WHERE ub.tenant_id=? "
+        "AND ub.branch_id=? AND u.role='member' AND u.job_title='manager' "
+        "AND COALESCE(u.enabled,1)=1 ORDER BY u.id LIMIT 2",
+        (int(tid), int(branch_id)),
+    ).fetchall()
+    if len(rows) != 1:
+        return None
+    modules = db.jloads(rows[0]["modules_json"], []) or []
+    if not isinstance(modules, list) or industry_key not in modules:
+        return None
+    return {"id": int(rows[0]["id"]), "username": str(rows[0]["username"] or "")}
+
+
 def complete_visit(
     tid: int,
     uid: int,
@@ -2100,7 +2493,7 @@ def complete_visit(
     _actor(tid, uid, industry_key)
     visit = db.one(
         "SELECT id,status,branch_id,version,template_key,template_version,"
-        "template_snapshot_json,observations_json FROM inspection_visit "
+        "template_snapshot_json,observations_json,model_json FROM inspection_visit "
         "WHERE id=? AND tenant_id=? AND industry_key=? AND deleted_at IS NULL",
         (int(visit_id), int(tid), industry_key),
     )
@@ -2118,10 +2511,18 @@ def complete_visit(
         (int(tid), int(visit_id)),
     )
     _validate_persisted_photo_contract(photo_rows, contract)
-    allowed_photo_ids = {int(item["id"]) for item in photo_rows}
-    if not allowed_photo_ids:
+    all_photo_ids = {int(item["id"]) for item in photo_rows}
+    if not all_photo_ids:
         raise InspectionConflict("巡店记录没有可用的初检照片")
+    prior = _retake_state(visit.get("model_json"))
+    allowed_photo_ids = (
+        {int(value) for value in prior["retake"]["photo_ids"]} & all_photo_ids
+        if prior else all_photo_ids
+    )
+    if not allowed_photo_ids:
+        raise InspectionConflict("巡店补拍记录与照片不一致")
     normalized = normalize_model_result(model_result, allowed_photo_ids)
+    merged, retake_ids, round_no = _merge_retake_round(prior, normalized)
     now = time.time()
     with db.atomic() as connection:
         current = connection.execute(
@@ -2146,8 +2547,61 @@ def complete_visit(
         ).fetchone()
         if existing_issue:
             raise InspectionConflict("巡店结果已生成，不能重复写入")
-        for item in normalized["issues"]:
+        if retake_ids and round_no <= MAX_RETAKE_ROUNDS:
+            # 有照片看不清：其他照片的结论先存着，只让店员补拍这几张。
+            state = {
+                **merged,
+                "analysis_status": "needs_retake",
+                "retake": {
+                    "photo_ids": list(retake_ids),
+                    "pending": list(retake_ids),
+                    "round": round_no,
+                },
+            }
+            changed = connection.execute(
+                "UPDATE inspection_visit SET status='needs_retake',summary_md=?,"
+                "model_json=?,updated_at=?,version=version+1 "
+                "WHERE id=? AND tenant_id=? AND industry_key=? AND status='analyzing' "
+                "AND version=? AND deleted_at IS NULL",
+                (
+                    merged["summary"], _json(state), now, int(visit_id), int(tid),
+                    industry_key, int(visit["version"]),
+                ),
+            )
+            if changed.rowcount != 1:
+                raise InspectionConflict("巡店结果已被其他请求更新")
+            connection.execute(
+                "INSERT INTO inspection_event(tenant_id,visit_id,kind,payload_json,"
+                "created_by,created_at) VALUES(?,?,?,?,?,?)",
+                (
+                    int(tid), int(visit_id), "retake_requested",
+                    _json({"photo_ids": list(retake_ids), "round": round_no}),
+                    int(uid), now,
+                ),
+            )
+            return get_visit(tid, uid, industry_key, int(visit_id))
+        if retake_ids:
+            # 补拍次数用完仍看不清：标成“需人工查看”，照样出报告。
+            unresolved = set(retake_ids)
+            for review in merged["photo_reviews"]:
+                if int(review.get("photo_id") or 0) in unresolved:
+                    review["needs_retake"] = False
+                    review["verdict"] = "unresolved"
+                    review["retake_reason"] = "unresolved"
+            merged["unresolved_photo_ids"] = sorted(unresolved)
+        merged["retake_photo_ids"] = []
+        branch_id = int(visit["branch_id"])
+        default_assignee = (
+            _single_branch_manager(connection, tid, branch_id, industry_key)
+            if merged["issues"] else None
+        )
+        assigned_actions: list[dict] = []
+        for item in merged["issues"]:
             due_at = now + item["action"]["due_days"] * 86400
+            owner_text = (
+                default_assignee["username"] if default_assignee
+                else item["action"]["owner"]
+            )
             issue_cursor = connection.execute(
                 "INSERT INTO inspection_issue(tenant_id,visit_id,title,description,"
                 "severity,category,status,owner,due_at,confidence,needs_human_check,"
@@ -2155,7 +2609,7 @@ def complete_visit(
                 "VALUES(?,?,?,?,?,?,'detected',?,?,?,?,?,?,?)",
                 (
                     int(tid), int(visit_id), item["title"], item["description"],
-                    item["severity"], item["category"], item["action"]["owner"],
+                    item["severity"], item["category"], owner_text,
                     due_at, item["confidence"], 1 if item["needs_human_check"] else 0,
                     item["root_cause"], now, now,
                 ),
@@ -2163,14 +2617,20 @@ def complete_visit(
             issue_id = int(issue_cursor.lastrowid)
             action_cursor = connection.execute(
                 "INSERT INTO inspection_action(tenant_id,visit_id,issue_id,status,"
-                "plan,owner,due_at,version,created_at,updated_at) "
-                "VALUES(?,?,?,'open',?,?,?,1,?,?)",
+                "plan,owner,due_at,version,assignee_user_id,created_at,updated_at) "
+                "VALUES(?,?,?,'open',?,?,?,1,?,?,?)",
                 (
                     int(tid), int(visit_id), issue_id, item["action"]["plan"],
-                    item["action"]["owner"], due_at, now, now,
+                    owner_text, due_at,
+                    default_assignee["id"] if default_assignee else None,
+                    now, now,
                 ),
             )
             action_id = int(action_cursor.lastrowid)
+            if default_assignee:
+                assigned_actions.append({
+                    "action_id": action_id, "title": item["title"], "due_at": due_at,
+                })
             for evidence in item["evidence"]:
                 connection.execute(
                     "INSERT INTO inspection_evidence(tenant_id,visit_id,issue_id,"
@@ -2190,17 +2650,24 @@ def complete_visit(
                     _json({
                         "severity": item["severity"],
                         "needs_human_check": item["needs_human_check"],
+                        "assignee_user_id": (
+                            default_assignee["id"] if default_assignee else None
+                        ),
                     }),
                     int(uid), now,
                 ),
             )
+        ai_score = merged.get("score")
+        merged["ai_reference_score"] = ai_score
+        merged["score_rule"] = SCORE_RULE
+        score = deterministic_score(merged["issues"])
         changed = connection.execute(
             "UPDATE inspection_visit SET status='completed',score=?,summary_md=?,"
             "model_json=?,completed_at=?,terminal_at=?,updated_at=?,version=version+1 "
             "WHERE id=? AND tenant_id=? AND industry_key=? AND status='analyzing' "
             "AND version=? AND deleted_at IS NULL",
             (
-                normalized["score"], normalized["summary"], _json(normalized),
+                score, merged["summary"], _json(merged),
                 now, now, now, int(visit_id), int(tid), industry_key,
                 int(visit["version"]),
             ),
@@ -2213,14 +2680,177 @@ def complete_visit(
             (
                 int(tid), int(visit_id), "analysis_completed",
                 _json({
-                    "analysis_status": normalized["analysis_status"],
-                    "score": normalized["score"],
-                    "issue_count": len(normalized["issues"]),
+                    "analysis_status": merged["analysis_status"],
+                    "score": score,
+                    "ai_reference_score": ai_score,
+                    "issue_count": len(merged["issues"]),
                 }),
                 int(uid), now,
             ),
         )
+        if default_assignee and assigned_actions:
+            # 与巡店结果同一事务写站内通知：结果回滚时不会留下“幽灵”提醒。
+            branch_name = str((connection.execute(
+                "SELECT name FROM store_branch WHERE id=? AND tenant_id=?",
+                (branch_id, int(tid)),
+            ).fetchone() or {"name": ""})["name"] or "")
+            _record_assignment_notice(
+                tid,
+                default_assignee["id"],
+                visit_id=int(visit_id),
+                industry_key=industry_key,
+                branch_name=branch_name,
+                actions=assigned_actions,
+                webhook=False,
+            )
     return get_visit(tid, uid, industry_key, int(visit_id))
+
+
+def retake_target(
+    tid: int,
+    uid: int,
+    industry_key: str,
+    visit_id: int,
+    photo_id: int,
+) -> dict:
+    """补拍前的校验：巡店正在等补拍，且这张照片确实在待补拍名单里。"""
+    user = _actor(tid, uid, industry_key)
+    visit = db.one(
+        "SELECT id,status,branch_id,model_json FROM inspection_visit WHERE id=? "
+        "AND tenant_id=? AND industry_key=? AND deleted_at IS NULL",
+        (_positive_id(visit_id, "巡店记录"), int(tid), industry_key),
+    )
+    if not visit:
+        raise InspectionNotFound("巡店记录不存在")
+    _branch_scope(tid, industry_key, int(visit["branch_id"]), actor=user)
+    if visit["status"] != "needs_retake":
+        raise InspectionConflict("这次巡店现在不需要补拍")
+    state = _retake_state(visit.get("model_json"))
+    target_id = _positive_id(photo_id, "补拍照片")
+    if state is None or target_id not in state["retake"]["pending"]:
+        raise InspectionConflict("这张照片已经补拍过了，或不需要补拍")
+    photo = db.one(
+        "SELECT id,storage_key,sha256,capture_slot,item_code FROM inspection_photo "
+        "WHERE id=? AND tenant_id=? AND visit_id=? AND phase='before'",
+        (target_id, int(tid), int(visit["id"])),
+    )
+    if not photo:
+        raise InspectionNotFound("补拍照片不存在")
+    return {
+        "visit_id": int(visit["id"]),
+        "photo_id": target_id,
+        "capture_slot": photo.get("capture_slot") or None,
+        "item_code": photo.get("item_code") or None,
+        "old_storage_key": str(photo.get("storage_key") or ""),
+    }
+
+
+def replace_retake_photo(
+    tid: int,
+    uid: int,
+    industry_key: str,
+    visit_id: int,
+    photo_id: int,
+    record: Mapping[str, Any],
+) -> dict:
+    """店员补拍一张：原地替换这张照片（编号不变，其他照片的结论保留）。
+
+    待补拍的照片全部补齐后，巡店回到“分析中”，原巡店任务在同一事务里免费
+    重新排队；返回 ``ready``/``task_id``，调用方据此启动分析。
+    """
+    target = retake_target(tid, uid, industry_key, visit_id, photo_id)
+    raw = dict(record) if isinstance(record, Mapping) else {}
+    # 采集位和检查项以原照片为准，不信上传方。
+    raw["capture_slot"] = target["capture_slot"]
+    raw["item_code"] = target["item_code"]
+    now = time.time()
+    with db.atomic() as connection:
+        visit = connection.execute(
+            "SELECT status,version,model_json,template_key,template_version,"
+            "template_snapshot_json,observations_json FROM inspection_visit "
+            "WHERE id=? AND tenant_id=? AND industry_key=? AND deleted_at IS NULL",
+            (target["visit_id"], int(tid), industry_key),
+        ).fetchone()
+        if not visit or visit["status"] != "needs_retake":
+            raise InspectionConflict("这次巡店现在不需要补拍")
+        state = _retake_state(visit["model_json"])
+        if state is None or target["photo_id"] not in state["retake"]["pending"]:
+            raise InspectionConflict("这张照片已经补拍过了，或不需要补拍")
+        contract = _stored_visit_contract(dict(visit))
+        photo = _normalize_photo(
+            raw,
+            tid,
+            phase="before",
+            standard_snapshot=(contract or {}).get("template_snapshot"),
+        )
+        changed = connection.execute(
+            "UPDATE inspection_photo SET storage_key=?,mime_type=?,byte_size=?,"
+            "sha256=?,width=?,height=?,created_by=?,created_at=? "
+            "WHERE id=? AND tenant_id=? AND visit_id=? AND phase='before'",
+            (
+                photo["storage_key"], photo["mime_type"], photo["byte_size"],
+                photo["sha256"], photo["width"], photo["height"], int(uid), now,
+                target["photo_id"], int(tid), target["visit_id"],
+            ),
+        )
+        if changed.rowcount != 1:
+            raise InspectionConflict("补拍照片已被其他请求更新")
+        pending = [
+            value for value in state["retake"]["pending"]
+            if value != target["photo_id"]
+        ]
+        state["retake"]["pending"] = pending
+        ready = not pending
+        changed = connection.execute(
+            "UPDATE inspection_visit SET status=?,model_json=?,updated_at=?,"
+            "version=version+1 WHERE id=? AND tenant_id=? AND status='needs_retake' "
+            "AND version=?",
+            (
+                "analyzing" if ready else "needs_retake", _json(state), now,
+                target["visit_id"], int(tid), int(visit["version"]),
+            ),
+        )
+        if changed.rowcount != 1:
+            raise InspectionConflict("巡店记录已被其他请求更新，请刷新")
+        task_id = None
+        if ready:
+            # 补齐后原巡店任务免费重新排队（首轮已扣过点，这轮不再扣）。
+            row = connection.execute(
+                "SELECT task_id FROM inspection_visit WHERE id=? AND tenant_id=?",
+                (target["visit_id"], int(tid)),
+            ).fetchone()
+            task_id = int(row["task_id"]) if row and row["task_id"] else None
+            if task_id is not None:
+                requeued = connection.execute(
+                    "UPDATE task SET status='queued',billing_status='included',"
+                    "output_md=NULL,summary_md=NULL,terminal_at=NULL,updated_at=? "
+                    "WHERE id=? AND tenant_id=? AND emp_idx=? AND status='done' "
+                    "AND deleted_at IS NULL",
+                    (now, task_id, int(tid), EMPLOYEE_IDX),
+                )
+                if requeued.rowcount != 1:
+                    raise InspectionConflict("巡店任务状态已变化，请刷新后再补拍")
+        connection.execute(
+            "INSERT INTO inspection_event(tenant_id,visit_id,kind,payload_json,"
+            "created_by,created_at) VALUES(?,?,?,?,?,?)",
+            (
+                int(tid), target["visit_id"], "photo_retaken",
+                _json({
+                    "photo_id": target["photo_id"],
+                    "round": state["retake"]["round"],
+                    "remaining": len(pending),
+                }),
+                int(uid), now,
+            ),
+        )
+    return {
+        "visit_id": target["visit_id"],
+        "photo_id": target["photo_id"],
+        "ready": ready,
+        "remaining": len(pending),
+        "task_id": task_id,
+        "old_storage_key": target["old_storage_key"],
+    }
 
 
 def _scoped_action(
@@ -2255,6 +2885,15 @@ def _action_public(row: dict) -> dict:
         "version": int(row.get("version") or 0),
         "closed_by": row.get("closed_by"),
         "closed_at": row.get("closed_at"),
+        "assignee_user_id": (
+            int(row["assignee_user_id"])
+            if row.get("assignee_user_id") is not None else None
+        ),
+        "close_reason": str(row.get("close_reason") or ""),
+        "dismiss_note": (
+            str(row.get("completion_note") or "")
+            if str(row.get("close_reason") or "") == FALSE_POSITIVE else ""
+        ),
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
     }
@@ -2415,6 +3054,440 @@ def transition_action(
             (int(action_id), int(tid)),
         ).fetchone()
     return _action_public(dict(row))
+
+
+# ---------------- 第 2 期：整改派到人 / 误报作废 ----------------
+ASSIGNED_NOTICE_KIND = "inspection_action_assigned"
+_TITLE_LABELS = {"director": "总监", "manager": "店长", "staff": "店员"}
+_RESTORABLE_ACTION_STATUSES = {
+    "open": "detected",
+    "in_progress": "rectifying",
+    "awaiting_recheck": "awaiting_recheck",
+    "reopened": "reopened",
+}
+
+
+def _record_assignment_notice(
+    tid: int,
+    user_id: int,
+    *,
+    visit_id: int,
+    industry_key: str,
+    branch_name: str,
+    actions: Sequence[Mapping[str, Any]],
+    webhook: bool = True,
+) -> None:
+    """按人通知被指派的整改；失败只记日志，不影响派活本身。"""
+    from . import notify, timeutil
+
+    if not actions:
+        return
+    first = actions[0]
+    count = len(actions)
+    title = str(first.get("title") or "门店整改")[:60]
+    due_at = first.get("due_at")
+    due_text = (
+        f"，{timeutil.format_cn(float(due_at), '%m月%d日')}前完成"
+        if isinstance(due_at, (int, float)) and due_at else ""
+    )
+    payload = {
+        "user_id": int(user_id),
+        "headline": "门店整改派给了你",
+        "title": title,
+        "summary": (
+            f"{branch_name or '门店'}：{title}"
+            + (f" 等 {count} 条" if count > 1 else "")
+            + due_text
+        ),
+        "visit_id": int(visit_id),
+        "action_id": int(first["action_id"]),
+        "action_ids": [int(item["action_id"]) for item in actions],
+        "branch_name": branch_name or "",
+        "due_at": due_at,
+        "link": f"#/inspections/{int(visit_id)}/{industry_key}",
+    }
+    if webhook:
+        notify.push(int(tid), ASSIGNED_NOTICE_KIND, payload)
+    else:
+        notify.record(int(tid), ASSIGNED_NOTICE_KIND, payload)
+
+
+def _action_context(tid: int, action_id: int) -> dict:
+    """整改单的服务端权威上下文（行业、门店、问题标题都从库里反查）。"""
+    row = db.one(
+        "SELECT a.*,v.industry_key,v.branch_id,b.name AS branch_name,"
+        "i.title AS issue_title,i.severity AS issue_severity "
+        "FROM inspection_action a JOIN inspection_visit v ON v.id=a.visit_id "
+        "AND v.tenant_id=a.tenant_id JOIN store_branch b ON b.id=v.branch_id "
+        "AND b.tenant_id=v.tenant_id JOIN inspection_issue i ON i.id=a.issue_id "
+        "AND i.tenant_id=a.tenant_id WHERE a.id=? AND a.tenant_id=? "
+        "AND v.deleted_at IS NULL",
+        (_positive_id(action_id, "整改任务"), int(tid)),
+    )
+    if not row:
+        raise InspectionNotFound("整改任务不存在")
+    return row
+
+
+def _can_assign_branch(user: Mapping[str, Any], tid: int, branch_id: int) -> bool:
+    """老板/总监可指派任何门店；店长只能指派自己负责的门店。"""
+    if sees_all_branches(user):
+        return True
+    if str(user.get("role") or "") != "member" or _member_title(user) != "manager":
+        return False
+    return bool(db.one(
+        "SELECT 1 AS ok FROM user_branch WHERE tenant_id=? AND user_id=? "
+        "AND branch_id=?",
+        (int(tid), int(user["id"]), int(branch_id)),
+    ))
+
+
+def assignable_users(tid: int, branch_id: int, industry_key: str) -> list[dict]:
+    """可以接这家门店整改的人：该门店绑定的成员，外加老板和总监。"""
+    rows = db.q(
+        "SELECT id,username,role,job_title,modules_json FROM users "
+        "WHERE tenant_id=? AND COALESCE(enabled,1)=1 AND ("
+        "role IN ('owner','root') OR (role='member' AND (job_title='director' "
+        "OR id IN (SELECT ub.user_id FROM user_branch ub WHERE ub.tenant_id=? "
+        "AND ub.branch_id=?)))) ORDER BY CASE role WHEN 'member' THEN 1 ELSE 0 END,"
+        "CASE job_title WHEN 'manager' THEN 0 WHEN 'staff' THEN 1 ELSE 2 END,id "
+        "LIMIT 200",
+        (int(tid), int(tid), int(branch_id)),
+    )
+    result: list[dict] = []
+    for row in rows:
+        role = str(row.get("role") or "")
+        if role == "member":
+            modules = db.jloads(row.get("modules_json"), []) or []
+            if not isinstance(modules, list) or industry_key not in modules:
+                continue
+            title = _member_title(row)
+            label = _TITLE_LABELS.get(title, "店员")
+        else:
+            title = ""
+            label = "老板"
+        result.append({
+            "id": int(row["id"]),
+            "username": str(row.get("username") or ""),
+            "role": role,
+            "job_title": title,
+            "label": f"{row.get('username') or ''}（{label}）",
+        })
+    return result
+
+
+def assign_action(
+    tid: int,
+    actor_uid: int,
+    action_id: int,
+    assignee_user_id: int,
+    due_at: float | None = None,
+) -> dict:
+    """把整改指派给具体账号，并按人通知他。
+
+    只有老板/总监/该门店店长可指派；被指派人必须绑定该门店，或是老板/总监。
+    owner 文本同步成账号名，兼容只认 owner 文字的旧页面。
+    """
+    context = _action_context(tid, action_id)
+    industry_key = str(context["industry_key"])
+    branch_id = int(context["branch_id"])
+    user = _actor(tid, actor_uid, industry_key)
+    _branch_scope(tid, industry_key, branch_id, actor=user)
+    if not _can_assign_branch(user, tid, branch_id):
+        raise InspectionForbidden("只有老板、总监或这家门店的店长可以指派整改")
+    if str(context.get("status") or "") == "closed":
+        raise InspectionConflict("已关闭的整改不能再指派")
+    target_id = _positive_id(assignee_user_id, "被指派人")
+    target = next(
+        (
+            item for item in assignable_users(tid, branch_id, industry_key)
+            if item["id"] == target_id
+        ),
+        None,
+    )
+    if target is None:
+        raise InspectionError("只能指派给这家门店的店长、店员，或老板、总监")
+    clean_due_at = None
+    if due_at not in (None, ""):
+        clean_due_at = _bounded_float(
+            due_at, field="整改期限", minimum=946684800, maximum=4_102_444_800,
+        )
+    now = time.time()
+    with db.atomic() as connection:
+        changed = connection.execute(
+            "UPDATE inspection_action SET assignee_user_id=?,owner=?,"
+            "due_at=COALESCE(?,due_at),version=version+1,updated_at=? "
+            "WHERE id=? AND tenant_id=? AND status!='closed' AND version=?",
+            (
+                target_id, target["username"], clean_due_at, now,
+                int(context["id"]), int(tid), int(context["version"]),
+            ),
+        )
+        if changed.rowcount != 1:
+            raise InspectionConflict("整改记录已更新，请刷新后再指派")
+        connection.execute(
+            "UPDATE inspection_issue SET owner=?,due_at=COALESCE(?,due_at),"
+            "updated_at=? WHERE id=? AND tenant_id=? AND status!='closed'",
+            (
+                target["username"], clean_due_at, now, int(context["issue_id"]),
+                int(tid),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO inspection_event(tenant_id,visit_id,issue_id,action_id,"
+            "kind,payload_json,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                int(tid), int(context["visit_id"]), int(context["issue_id"]),
+                int(context["id"]), "action_assigned",
+                _json({
+                    "from_user_id": context.get("assignee_user_id"),
+                    "to_user_id": target_id,
+                    "due_at": clean_due_at,
+                }),
+                int(actor_uid), now,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM inspection_action WHERE id=? AND tenant_id=?",
+            (int(context["id"]), int(tid)),
+        ).fetchone()
+    public = _action_public(dict(row))
+    public["assignee"] = target
+    if target_id != int(actor_uid):
+        try:
+            _record_assignment_notice(
+                tid,
+                target_id,
+                visit_id=int(context["visit_id"]),
+                industry_key=industry_key,
+                branch_name=str(context.get("branch_name") or ""),
+                actions=[{
+                    "action_id": int(context["id"]),
+                    "title": context.get("issue_title"),
+                    "due_at": public.get("due_at"),
+                }],
+            )
+        except Exception:
+            # 通知失败不回滚指派；站内待办仍能看到这条整改。
+            pass
+    return public
+
+
+def _action_next_step(status: str, pending_rechecks: int) -> dict:
+    if status in {"open", "reopened"}:
+        return {
+            "next_step": "start",
+            "button": "开始整改",
+            "hint": "按整改要求处理好，再拍一张整改后的照片",
+        }
+    if status == "awaiting_recheck" and pending_rechecks:
+        return {
+            "next_step": "wait_review",
+            "button": "",
+            "hint": "整改照片已交，等老板确认",
+        }
+    return {
+        "next_step": "upload_recheck",
+        "button": "拍整改后照片",
+        "hint": "对着原来的位置拍一张，交给老板确认",
+    }
+
+
+def actions_for_assignee(tid: int, uid: int) -> list[dict]:
+    """店员“我的待办”里的巡店整改：指派给我、还没关闭的。
+
+    经理/员工仍只看自己绑定门店的；停用门店、已删除巡店不出现。
+    """
+    user = db.one(
+        "SELECT id,tenant_id,role,job_title,enabled,modules_json FROM users WHERE id=?",
+        (int(uid),),
+    )
+    if (
+        not user
+        or not int(user.get("enabled") or 0)
+        or int(user.get("tenant_id") or 0) != int(tid)
+        or str(user.get("role") or "") not in {"root", "owner", "member"}
+    ):
+        return []
+    scope_sql, scope_params = branch_scope_sql(user, tid, "v.branch_id")
+    rows = db.q(
+        "SELECT a.id,a.visit_id,a.issue_id,a.status,a.plan,a.due_at,a.version,"
+        "a.updated_at,v.industry_key,v.branch_id,b.name AS branch_name,"
+        "i.title AS issue_title,i.severity,"
+        "(SELECT COUNT(*) FROM inspection_recheck r WHERE r.tenant_id=a.tenant_id "
+        " AND r.action_id=a.id AND r.status='pending') pending_rechecks "
+        "FROM inspection_action a JOIN inspection_visit v ON v.id=a.visit_id "
+        "AND v.tenant_id=a.tenant_id JOIN store_branch b ON b.id=v.branch_id "
+        "AND b.tenant_id=v.tenant_id AND b.active=1 JOIN inspection_issue i "
+        "ON i.id=a.issue_id AND i.tenant_id=a.tenant_id "
+        "WHERE a.tenant_id=? AND a.assignee_user_id=? AND a.status!='closed' "
+        "AND v.deleted_at IS NULL"
+        + scope_sql
+        + " ORDER BY a.due_at IS NULL,a.due_at,a.id LIMIT 200",
+        (int(tid), int(user["id"]), *scope_params),
+    )
+    modules = None
+    if str(user.get("role") or "") == "member":
+        raw_modules = db.jloads(user.get("modules_json"), []) or []
+        modules = set(raw_modules) if isinstance(raw_modules, list) else set()
+    now = time.time()
+    result: list[dict] = []
+    for row in rows:
+        if modules is not None and str(row["industry_key"]) not in modules:
+            continue
+        status = str(row["status"])
+        due_at = row.get("due_at")
+        step = _action_next_step(status, int(row.get("pending_rechecks") or 0))
+        result.append({
+            "kind": "inspection_action",
+            "id": int(row["id"]),
+            "visit_id": int(row["visit_id"]),
+            "issue_id": int(row["issue_id"]),
+            "branch_id": int(row["branch_id"]),
+            "branch_name": str(row.get("branch_name") or ""),
+            "industry_key": str(row["industry_key"]),
+            "title": str(row.get("issue_title") or ""),
+            "severity": str(row.get("severity") or ""),
+            "plan": str(row.get("plan") or ""),
+            "due_at": due_at,
+            "overdue": bool(
+                due_at is not None
+                and float(due_at) < now
+                and status not in {"awaiting_recheck"}
+            ),
+            "status": status,
+            "version": int(row.get("version") or 0),
+            **step,
+            # 前端直接用：开始整改走 PATCH，交照片走已有复查上传接口。
+            "start_endpoint": (
+                f"/api/inspections/{int(row['visit_id'])}/issues/{int(row['issue_id'])}"
+            ),
+            "recheck_endpoint": "/api/inspections/rechecks",
+            "link": f"#/inspections/{int(row['visit_id'])}/{row['industry_key']}",
+        })
+    return result
+
+
+def dismiss_action(
+    tid: int,
+    actor_uid: int,
+    action_id: int,
+    reason: str,
+) -> dict:
+    """老板/总监把 AI 误报的问题作废：不算问题、不算逾期、不扣门店分。"""
+    context = _action_context(tid, action_id)
+    industry_key = str(context["industry_key"])
+    user = _actor(tid, actor_uid, industry_key, branch_admin=True)
+    _assert_branch_visible(user, tid, int(context["branch_id"]))
+    clean_reason = _text(reason, field="误报原因", limit=500, required=True)
+    status = str(context.get("status") or "")
+    if status == "closed":
+        raise InspectionConflict("这条整改已经关闭，不能再标记误报")
+    now = time.time()
+    with db.atomic() as connection:
+        changed = connection.execute(
+            "UPDATE inspection_action SET status='closed',close_reason=?,"
+            "completion_note=?,closed_by=?,closed_at=?,version=version+1,"
+            "updated_at=? WHERE id=? AND tenant_id=? AND status=? AND version=?",
+            (
+                FALSE_POSITIVE, clean_reason, int(actor_uid), now, now,
+                int(context["id"]), int(tid), status, int(context["version"]),
+            ),
+        )
+        if changed.rowcount != 1:
+            raise InspectionConflict("整改记录已更新，请刷新后再操作")
+        connection.execute(
+            "UPDATE inspection_issue SET status='closed',closure_evidence=?,"
+            "updated_at=? WHERE id=? AND tenant_id=?",
+            (f"误报：{clean_reason}", now, int(context["issue_id"]), int(tid)),
+        )
+        connection.execute(
+            "INSERT INTO inspection_event(tenant_id,visit_id,issue_id,action_id,"
+            "kind,payload_json,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                int(tid), int(context["visit_id"]), int(context["issue_id"]),
+                int(context["id"]), "action_dismissed",
+                _json({"from_status": status, "reason": clean_reason}),
+                int(actor_uid), now,
+            ),
+        )
+        score = _recompute_visit_score(connection, tid, int(context["visit_id"]))
+        row = connection.execute(
+            "SELECT * FROM inspection_action WHERE id=? AND tenant_id=?",
+            (int(context["id"]), int(tid)),
+        ).fetchone()
+    public = _action_public(dict(row))
+    public["visit_score"] = score
+    return public
+
+
+def restore_dismissed_action(
+    tid: int,
+    actor_uid: int,
+    action_id: int,
+    note: str = "",
+) -> dict:
+    """撤销误报：整改回到作废前的状态，重新计入问题数和门店扣分。"""
+    context = _action_context(tid, action_id)
+    industry_key = str(context["industry_key"])
+    user = _actor(tid, actor_uid, industry_key, branch_admin=True)
+    _assert_branch_visible(user, tid, int(context["branch_id"]))
+    clean_note = _text(note, field="撤销说明", limit=500)
+    if (
+        str(context.get("status") or "") != "closed"
+        or str(context.get("close_reason") or "") != FALSE_POSITIVE
+    ):
+        raise InspectionConflict("这条整改没有被标记为误报")
+    last = db.one(
+        "SELECT payload_json FROM inspection_event WHERE tenant_id=? AND action_id=? "
+        "AND kind='action_dismissed' ORDER BY id DESC LIMIT 1",
+        (int(tid), int(context["id"])),
+    )
+    previous = str((db.jloads((last or {}).get("payload_json"), {}) or {}).get(
+        "from_status"
+    ) or "open")
+    if previous not in _RESTORABLE_ACTION_STATUSES:
+        previous = "open"
+    now = time.time()
+    with db.atomic() as connection:
+        changed = connection.execute(
+            "UPDATE inspection_action SET status=?,close_reason='',completion_note='',"
+            "closed_by=NULL,closed_at=NULL,version=version+1,updated_at=? "
+            "WHERE id=? AND tenant_id=? AND status='closed' AND close_reason=? "
+            "AND version=?",
+            (
+                previous, now, int(context["id"]), int(tid), FALSE_POSITIVE,
+                int(context["version"]),
+            ),
+        )
+        if changed.rowcount != 1:
+            raise InspectionConflict("整改记录已更新，请刷新后再操作")
+        connection.execute(
+            "UPDATE inspection_issue SET status=?,closure_evidence='',updated_at=? "
+            "WHERE id=? AND tenant_id=?",
+            (
+                _RESTORABLE_ACTION_STATUSES[previous], now,
+                int(context["issue_id"]), int(tid),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO inspection_event(tenant_id,visit_id,issue_id,action_id,"
+            "kind,payload_json,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                int(tid), int(context["visit_id"]), int(context["issue_id"]),
+                int(context["id"]), "action_dismiss_reverted",
+                _json({"to_status": previous, "note": clean_note}),
+                int(actor_uid), now,
+            ),
+        )
+        score = _recompute_visit_score(connection, tid, int(context["visit_id"]))
+        row = connection.execute(
+            "SELECT * FROM inspection_action WHERE id=? AND tenant_id=?",
+            (int(context["id"]), int(tid)),
+        ).fetchone()
+    public = _action_public(dict(row))
+    public["visit_score"] = score
+    return public
 
 
 def normalize_recheck_result(raw: Mapping[str, Any], allowed_photo_ids: set[int]) -> dict:
@@ -2629,12 +3702,13 @@ def review_recheck(
     with db.atomic() as connection:
         changed = connection.execute(
             "UPDATE inspection_action SET status=?,version=version+1,closed_by=?,"
-            "closed_at=?,updated_at=? WHERE id=? AND tenant_id=? AND visit_id=? "
-            "AND status='awaiting_recheck' AND version=?",
+            "closed_at=?,close_reason=?,updated_at=? WHERE id=? AND tenant_id=? "
+            "AND visit_id=? AND status='awaiting_recheck' AND version=?",
             (
                 action_status,
                 int(uid) if clean_decision == "close" else None,
                 now if clean_decision == "close" else None,
+                "fixed" if clean_decision == "close" else "",
                 now, int(action["id"]), int(tid), int(action["visit_id"]), expected,
             ),
         )
@@ -2802,6 +3876,30 @@ def get_visit(
     normalized_model = db.jloads(row.get("model_json"), {}) or {}
     if not isinstance(normalized_model, dict):
         normalized_model = {}
+    retake = None
+    if row["status"] != "completed":
+        # 补拍补齐后状态回到“分析中”（或分析失败待重试），仍要带着补拍名单，
+        # 分析时只看补拍的那几张。
+        state = _retake_state(normalized_model)
+        retake = state["retake"] if state else None
+    review_by_photo = {
+        int(review.get("photo_id") or 0): review
+        for review in normalized_model.get("photo_reviews") or []
+        if isinstance(review, dict)
+    }
+    pending_retake = set((retake or {}).get("pending") or [])
+    for photo in photos:
+        review = review_by_photo.get(int(photo["id"])) if photo["phase"] == "before" else None
+        reason = str((review or {}).get("retake_reason") or "")
+        photo["needs_retake"] = int(photo["id"]) in pending_retake
+        photo["retake_note"] = (
+            RETAKE_REASONS.get(reason, "")
+            if photo["needs_retake"] or reason == "unresolved" else ""
+        )
+    can_assign = _can_assign_branch(user, tid, int(row["branch_id"]))
+    ai_reference_score = normalized_model.get("ai_reference_score")
+    if ai_reference_score is None and row["status"] == "completed":
+        ai_reference_score = normalized_model.get("score")
     return {
         "id": int(row["id"]),
         "tenant_id": int(row["tenant_id"]),
@@ -2817,9 +3915,19 @@ def get_visit(
         "request_key": row["request_key"],
         "status": row["status"],
         "score": row.get("score"),
+        # 门店得分按问题严重度确定性计算；模型原分只作参考，不参与排行。
+        "score_rule": normalized_model.get("score_rule") or "",
+        "ai_reference_score": ai_reference_score,
         "summary": row.get("summary_md") or "",
         "analysis_status": normalized_model.get("analysis_status"),
         "photo_reviews": normalized_model.get("photo_reviews") or [],
+        "retake": copy.deepcopy(retake),
+        "unresolved_photo_ids": list(normalized_model.get("unresolved_photo_ids") or []),
+        "can_assign": can_assign,
+        "assignable_users": (
+            assignable_users(tid, int(row["branch_id"]), industry_key)
+            if can_assign else []
+        ),
         "template_key": (contract or {}).get("template_key"),
         "template_version": (contract or {}).get("template_version"),
         "standard_snapshot": copy.deepcopy(
@@ -2899,8 +4007,11 @@ def list_visits(
         "SELECT v.id,v.branch_id,v.employee_idx,v.task_id,v.status,v.score,"
         "v.summary_md,v.version,v.visit_at,v.completed_at,v.created_by,v.created_at,"
         "v.updated_at,b.name branch_name,b.region branch_region,"
+        # 误报作废的问题不算问题数。
         "(SELECT COUNT(*) FROM inspection_issue i WHERE i.tenant_id=v.tenant_id "
-        " AND i.visit_id=v.id) issue_count,"
+        " AND i.visit_id=v.id AND NOT EXISTS(SELECT 1 FROM inspection_action fa "
+        " WHERE fa.tenant_id=i.tenant_id AND fa.issue_id=i.id "
+        " AND fa.close_reason='false_positive')) issue_count,"
         "(SELECT COUNT(*) FROM inspection_issue i WHERE i.tenant_id=v.tenant_id "
         " AND i.visit_id=v.id AND i.status!='closed') open_issue_count,"
         "(SELECT COUNT(*) FROM inspection_action a WHERE a.tenant_id=v.tenant_id "
@@ -3044,9 +4155,12 @@ def aggregate(
             open_issues += int(item["n"])
             if item["severity"] in severity:
                 severity[item["severity"]] += int(item["n"])
+    # 误报作废的整改既不算总数也不算“已核验”，否则会虚抬整改率。
     action_metrics = db.one(
-        "SELECT COUNT(*) total,"
-        "SUM(CASE WHEN a.status='closed' THEN 1 ELSE 0 END) verified,"
+        "SELECT SUM(CASE WHEN a.close_reason='false_positive' THEN 0 ELSE 1 END) total,"
+        "SUM(CASE WHEN a.status='closed' AND a.close_reason!='false_positive' "
+        "THEN 1 ELSE 0 END) verified,"
+        "SUM(CASE WHEN a.close_reason='false_positive' THEN 1 ELSE 0 END) dismissed,"
         f"SUM(CASE WHEN a.status NOT IN {_OVERDUE_EXCLUDED_SQL} AND a.due_at<? "
         "THEN 1 ELSE 0 END) overdue "
         "FROM inspection_action a JOIN inspection_visit v "
@@ -3057,6 +4171,7 @@ def aggregate(
     total_actions = int(action_metrics.get("total") or 0)
     verified_actions = int(action_metrics.get("verified") or 0)
     overdue_actions = int(action_metrics.get("overdue") or 0)
+    dismissed_actions = int(action_metrics.get("dismissed") or 0)
     pending_rechecks = int((db.one(
         "SELECT COUNT(*) n FROM inspection_recheck r JOIN inspection_visit v "
         "ON v.id=r.visit_id AND v.tenant_id=r.tenant_id "
@@ -3297,6 +4412,7 @@ def aggregate(
         "rectification_rate": round(verified_actions * 100 / total_actions, 1)
         if total_actions else None,
         "overdue_actions": overdue_actions,
+        "dismissed_actions": dismissed_actions,
         "pending_rechecks": pending_rechecks,
         "branches": branches,
         "regions": regions,

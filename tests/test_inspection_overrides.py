@@ -423,13 +423,26 @@ class InspectionOverrideTests(unittest.TestCase):
                 stored["standard_snapshot"], self.operations_item["item_code"]
             )["shot_guide"],
         )
+        # 第 2 期：只改了拍摄说明、不影响本次填写项时，服务端按最新快照自动
+        # 重新核对通过，并冻结最新版本，不再让店员重填。
+        refreshed = inspection.create_visit_shell(
+            2,
+            20,
+            "restaurant",
+            self.branch["id"],
+            self._strict_raw(snapshot, "override-freeze-stale"),
+        )
+        self.assertEqual(current["template_version"], refreshed["template_version"])
         with self.assertRaises(inspection.InspectionError) as stale:
             inspection.create_visit_shell(
                 2,
                 20,
                 "restaurant",
                 self.branch["id"],
-                self._strict_raw(snapshot, "override-freeze-stale"),
+                {
+                    **self._strict_raw(snapshot, "override-freeze-rebased"),
+                    "template_version": "2020.01.0",
+                },
             )
         self.assertIn("版本已更新", str(stale.exception))
 
