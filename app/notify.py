@@ -111,6 +111,10 @@ def build_msg(kind: str, payload: dict) -> str:
     if kind in {"task_outcome", "meeting_outcome"}:
         return (f"**📋 派活 · {p.get('report_name', '任务有结果了')}**\n{(p.get('summary') or '')[:180]}\n"
                 f"[查看]({base}/{p.get('link') or '#/tasks'})")
+    if kind in PER_USER_KINDS:
+        return (f"**🧾 派活 · {p.get('headline') or '有一件事派给了你'}**\n"
+                f"{(p.get('summary') or '')[:180]}\n"
+                f"[去处理]({base}/{p.get('link') or '#/'})")
     if kind == "report":
         return (f"**📰 派活 · {p.get('report_name', '报告出炉')}**\n{(p.get('summary') or '')[:180]}\n"
                 f"[查看]({base}/{p.get('link') or '#/knowledge'})")
@@ -155,6 +159,8 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
             f"工位{p.get('station', '')}:"
             f"{'通过' if p.get('approved') else '打回'}"
         ),
+        # v60 逐人通知：标题由调用方给出(如"门店整改派给了你")。
+        "inspection_action_assigned": p.get("headline") or "有一条门店整改派给了你",
     }
     title = str(labels.get(kind) or "派活有新进展")[:80]
     body = str(
@@ -226,6 +232,13 @@ KIND_MODULES = {
     "video": frozenset({"content"}),
 }
 
+# v60:逐人发送的通知。payload 必须带 user_id，只写 user_id 定向行，绝不做
+# 租户广播；任何在职账号(含店员)都能看到、且只能看到发给自己的那一行。
+# 新增“派给具体某个人”的通知类型登记在这里即可。
+PER_USER_KINDS = {
+    "inspection_action_assigned",
+}
+
 # 保留旧常量名供外部诊断脚本兼容；语义是“需要精确定向的管理通知”。
 OWNER_ONLY_KINDS = ROOT_ONLY_KINDS | BOSS_ONLY_KINDS
 
@@ -262,6 +275,7 @@ def _allowed_kinds(user: dict | None) -> tuple[str, ...] | None:
     if role == "owner":
         return tuple(sorted(
             set(KIND_MODULES) | BOSS_ONLY_KINDS | PURCHASE_CUSTOMER_KINDS
+            | PER_USER_KINDS
         ))
     if role != "member":
         return ()
@@ -271,8 +285,10 @@ def _allowed_kinds(user: dict | None) -> tuple[str, ...] | None:
         if isinstance(module, str)
     }
     return tuple(sorted(
-        kind for kind, required in KIND_MODULES.items()
-        if required.intersection(modules)
+        {
+            kind for kind, required in KIND_MODULES.items()
+            if required.intersection(modules)
+        } | PER_USER_KINDS
     ))
 
 
@@ -287,6 +303,8 @@ def can_view(user: dict | None, item: dict) -> bool:
     if uid <= 0:
         return False
     target = item.get("user_id")
+    if target is None and str(item.get("kind") or "") in PER_USER_KINDS:
+        return False
     if target is not None:
         try:
             if int(target) != uid:
@@ -479,6 +497,14 @@ def record(
         except (TypeError, ValueError):
             job_id = None
         targets = [None]
+        if target_user_id is None and kind in PER_USER_KINDS:
+            # 逐人通知没有收件人就不发，绝不降级成全员广播。
+            try:
+                target_user_id = int((payload or {}).get("user_id") or 0) or None
+            except (TypeError, ValueError):
+                target_user_id = None
+            if target_user_id is None:
+                return None
         if target_user_id is not None:
             target = db.one(
                 "SELECT id FROM users WHERE id=? AND tenant_id=? "

@@ -4769,8 +4769,25 @@ async function apiUpload(path,form,{timeout=90000}={}){
   }catch(e){if(e.name==="AbortError"){const err=new Error("上传等待超时，服务器可能已接收。可直接重试，系统会复用同一请求号防止重复扣点");err.name="RequestTimeout";err.uncertain=true;throw err;}throw e;}
   finally{clearTimeout(timer);busy(false);}
 }
-function inspectionStatusLabel(value){return ({preparing:"准备照片",analyzing:"分析中",completed:"已出报告",failed:"分析失败",open:"待整改",rectifying:"整改中",in_progress:"整改中",awaiting_recheck:"待企业主复核",reopened:"复核驳回",closed:"已人工闭环",pending:"待人工复核",approved:"复核通过",rejected:"复核驳回",close:"建议通过",reject:"建议驳回",manual_review:"需人工判断"})[value]||value||"—";}
-function inspectionStatusClass(value){return value==="completed"||value==="closed"||value==="approved"?"done":value==="failed"||value==="rejected"?"failed":value==="awaiting_recheck"||value==="pending"?"awaiting_review":"running";}
+function inspectionStatusLabel(value){return ({preparing:"准备照片",analyzing:"分析中",needs_retake:"待补拍",completed:"已出报告",failed:"分析失败",open:"待整改",rectifying:"整改中",in_progress:"整改中",awaiting_recheck:"待企业主复核",reopened:"复核驳回",closed:"已人工闭环",pending:"待人工复核",approved:"复核通过",rejected:"复核驳回",close:"建议通过",reject:"建议驳回",manual_review:"需人工判断"})[value]||value||"—";}
+function inspectionStatusClass(value){return value==="completed"||value==="closed"||value==="approved"?"done":value==="failed"||value==="rejected"?"failed":value==="awaiting_recheck"||value==="pending"||value==="needs_retake"?"awaiting_review":"running";}
+/* 第 2 期：手机拍照先在前端压到长边 ≤1600 的 JPEG 再上传（省流量，基本不会碰到 8MB 上限）；
+   压缩失败（老浏览器/解码不了）就原样上传，由服务端按文件内容校验。 */
+async function inspectionCompressPhoto(file,{maxEdge=1600,quality=0.85}={}){
+  if(!file||!/^image\//.test(file.type||"image/"))return file;
+  try{
+    const url=URL.createObjectURL(file);
+    const img=await new Promise((resolve,reject)=>{const el=new Image();el.onload=()=>resolve(el);el.onerror=reject;el.src=url;});
+    URL.revokeObjectURL(url);
+    const w=img.naturalWidth||img.width,h=img.naturalHeight||img.height;if(!w||!h)return file;
+    const scale=Math.min(1,maxEdge/Math.max(w,h)),cw=Math.max(1,Math.round(w*scale)),ch=Math.max(1,Math.round(h*scale));
+    const canvas=document.createElement("canvas");canvas.width=cw;canvas.height=ch;
+    const ctx=canvas.getContext("2d");ctx.fillStyle="#fff";ctx.fillRect(0,0,cw,ch);ctx.drawImage(img,0,0,cw,ch);
+    const blob=await new Promise(resolve=>canvas.toBlob(resolve,"image/jpeg",quality));
+    if(!blob||(scale===1&&blob.size>=file.size&&/jpe?g/i.test(file.type||"")))return file;
+    return new File([blob],"photo.jpg",{type:"image/jpeg",lastModified:file.lastModified||Date.now()});
+  }catch(e){return file;}
+}
 function inspectionSeverity(value){return ({critical:"紧急",high:"高",medium:"中",low:"低"})[value]||value||"—";}
 // 本地日期(YYYY-MM-DD)：toISOString 是 UTC，北京时间 0-8 点会变成昨天。
 function inspectionLocalDate(value=new Date()){const d=value instanceof Date?value:new Date(value);if(!Number.isFinite(d.getTime()))return "";return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;}
@@ -4981,7 +4998,7 @@ function inspectionChecklistHtml(){
   const catalog_version=data.template_version||data.catalog_version||data.version?.catalog_version||data.version||"待接入",asOf=data.as_of||data.version?.as_of||"";
   const tiers={mandatory:["法规 / 强制标准","仅在所列适用条件与管辖范围内必查，不得将地方或特定业态要求扩大为全国通用结论"],recommended:["专业建议","推荐性标准与专业做法，应结合门店业态及当地要求"],operations:["经营操作","企业自定经营与服务要求，不是法定阈值，需结合门店真实记录核验"]};
   const tierHtml=Object.entries(tiers).map(([tier,[label,hint]])=>{const rows=items.filter(item=>item.tier===tier);return `<section style="min-width:0"><h4 style="margin-bottom:4px">${label} <span class="tag">${tier}</span></h4><div class="sub">${hint}</div>${rows.length?rows.map(item=>`<div class="topic" style="margin:7px 0;min-width:0;overflow-wrap:anywhere"><b>${esc(item.label)}</b><div class="sub">${esc(item.shot_guide||item.evidence||"")}</div>${inspectionStandardMetaHtml(item)}${inspectionObservationControlHtml(item)}</div>`).join(""):`<div class="empty">暂无此层级项目</div>`}</section>`;}).join("");
-  const slotHtml=capture_slots.map((slot,index)=>`<label class="topic" style="display:block;margin:0;min-width:0;overflow-wrap:anywhere"><b>${index+1}. ${esc(slot.label||slot.slot_code)}${slot.required?` <span class="tag">必拍</span>`:` <span class="sub">选拍</span>`}</b><div class="sub">${esc(slot.shot_guide||"请拍摄清晰现场图片")}</div><input type="file" accept="image/jpeg,image/png,image/webp" data-capture-slot="${esc(slot.slot_code)}" data-required="${slot.required?"true":"false"}" onchange="inspectionCaptureChanged()" style="width:100%;min-width:0;margin-top:7px"><div class="sub" data-slot-file="${esc(slot.slot_code)}">未选择文件</div></label>`).join("");
+  const slotHtml=capture_slots.map((slot,index)=>`<label class="topic" style="display:block;margin:0;min-width:0;overflow-wrap:anywhere"><b>${index+1}. ${esc(slot.label||slot.slot_code)}${slot.required?` <span class="tag">必拍</span>`:` <span class="sub">选拍</span>`}</b><div class="sub">${esc(slot.shot_guide||"请拍摄清晰现场图片")}</div><input type="file" accept="image/*" capture="environment" data-capture-slot="${esc(slot.slot_code)}" data-required="${slot.required?"true":"false"}" onchange="inspectionCaptureChanged()" style="width:100%;min-width:0;margin-top:7px"><div class="sub" data-slot-file="${esc(slot.slot_code)}">还没拍</div></label>`).join("");
   return `<div class="notice green">标准版本：${esc(catalog_version)}${asOf?` · 截至 ${esc(asOf)}`:""}</div>${inspectionStandardAdminHtml()}
     <details><summary><b>查看分层检查标准（mandatory / recommended / operations）</b></summary><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr));gap:10px;margin-top:9px">${tierHtml}</div></details>
     <h4>七个现场采集位</h4><div id="inspection-capture-progress" class="notice" role="status">必拍覆盖 0 / ${capture_slots.filter(slot=>slot.required).length}</div>
@@ -4990,7 +5007,7 @@ function inspectionChecklistHtml(){
 }
 function inspectionCaptureChanged(){
   const inputs=[...document.querySelectorAll("[data-capture-slot]")],required=inputs.filter(input=>input.dataset.required==="true"),covered=required.filter(input=>input.files?.length).length;
-  inputs.forEach(input=>{const label=document.querySelector(`[data-slot-file="${CSS.escape(input.dataset.captureSlot||"")}"]`);if(label)label.textContent=input.files?.[0]?.name||"未选择文件";});
+  inputs.forEach(input=>{const label=document.querySelector(`[data-slot-file="${CSS.escape(input.dataset.captureSlot||"")}"]`);if(label)label.textContent=input.files?.length?"已拍好 ✓":"还没拍";});
   const progress=$("#inspection-capture-progress");if(progress){progress.textContent=`必拍覆盖 ${covered} / ${required.length}`;progress.classList.toggle("green",required.length>0&&covered===required.length);}
 }
 function inspectionObservations(){
@@ -5251,7 +5268,7 @@ function inspectionDraw(){
     <div class="actions"><button class="btn pri" onclick="inspectionSubmit(this)" ${INSPECTION_CAPTURE_BRANCH_ID&&INSPECTION_CHECKLIST.status==="ready"?"":"disabled"}>📷 开始巡店（1点）</button></div></div>
   <div class="card"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><h3 style="margin:0;flex:1">巡店记录${selectedBranch?` · ${esc(selectedBranch.name)}`:selectedRegion!==null?` · ${esc(selectedRegion||"未分区")}`:""}</h3>${selectedBranch?`<button class="btn sm" onclick="inspectionFilterBranch(0)">清除门店筛选</button>`:selectedRegion!==null?`<button class="btn sm" onclick="inspectionFilterRegion(null)">清除区域筛选</button>`:""}</div>${items.length?items.map(v=>`<div class="topic" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
     <div style="flex:1;min-width:200px"><b>#${v.id} · ${esc(v.branch?.name||"门店")}</b><div class="sub">${esc(v.branch?.region||"")} · ${new Date((v.visit_at||v.created_at)*1000).toLocaleDateString("zh-CN")} · ${inspectionStatusLabel(v.status)}</div></div>
-    ${v.score!==null&&v.score!==undefined?`<span class="tag">评分 ${Math.round(v.score)}</span>`:""}<span class="tag">问题 ${v.issue_count||0}</span>
+    ${v.score!==null&&v.score!==undefined?`<span class="tag">得分 ${Math.round(v.score)}</span>`:""}<span class="tag">问题 ${v.issue_count||0}</span>${v.status==="needs_retake"?`<span class="tag">有照片要补拍</span>`:""}
     <a class="btn sm pri" href="${inspectionRecordHash(v.id)}">查看记录</a></div>`).join(""):`<div class="empty">还没有巡店记录。上传第一组现场照片即可开始。</div>`}
     <div class="actions" style="justify-content:flex-end"><button class="btn sm" ${INSPECTION_CURSOR_PAGE>0?"":"disabled"} onclick="inspectionPage(-1)">← 上一页</button><span class="sub">第 ${INSPECTION_CURSOR_PAGE+1} 页</span><button class="btn sm" ${data.next_before_id?"":"disabled"} onclick="inspectionPage(1)">下一页 →</button></div></div>`}`;
   enhanceResponsiveTables($("#main"));inspectionCaptureChanged();
@@ -5268,18 +5285,20 @@ async function inspectionSubmit(btn){
   const selected=slots.map(slot=>({slot,input:document.querySelector(`[data-capture-slot="${CSS.escape(String(slot.slot_code||""))}"]`)})),missing=selected.filter(({slot,input})=>slot.required&&!input?.files?.length);
   if(missing.length)return toast(`请完成必拍采集位：${missing.map(({slot})=>slot.label||slot.slot_code).join("、")}`);
   const ordered=selected.filter(({input})=>input?.files?.length).map(({slot,input})=>({slot:slot.slot_code,file:input.files[0]})),files=ordered.map(item=>item.file);if(!files.length||files.length>8)return toast("请选择1～8张现场照片");
-  if(files.reduce((total,file)=>total+Number(file.size||0),0)>38*1024*1024)return toast("现场照片总计不能超过 38MB");
   const branchId=String(INSPECTION_CAPTURE_BRANCH_ID||$("#inspection-branch")?.value||""),visitAt=$("#inspection-date")?.value||"",scope=$("#inspection-scope")?.value.trim()||"",industry_key=INSPECTION_INDUSTRY,observations=inspectionObservations();
   const templateVersion=checklist.template_version||checklist.catalog_version||checklist.version?.catalog_version||checklist.version||"";
   const identity={industry_key,branch_id:branchId,visit_at:visitAt,scope,template_version:templateVersion,observations,files:ordered.map(({slot,file})=>({slot,name:file.name,size:file.size,type:file.type,lastModified:file.lastModified}))};
   const requestKey=persistentMutationRequestKey("inspection",`${industry_key}:${branchId}`,identity);
+  btn.disabled=true;btn.innerHTML='<span class="spin"></span> 正在压缩照片…';
+  const compressed=[];for(const item of ordered)compressed.push({slot:item.slot,file:await inspectionCompressPhoto(item.file)});
+  if(compressed.reduce((total,item)=>total+Number(item.file.size||0),0)>38*1024*1024){btn.disabled=false;btn.textContent="📷 开始巡店（1点）";return toast("现场照片总计不能超过 38MB");}
   const form=new FormData();form.append("branch_id",branchId);form.append("visit_at",visitAt);form.append("scope",scope);
   form.append("industry_key",industry_key);form.append("request_key",requestKey);form.append("template_version",String(templateVersion));form.append("observations_json",JSON.stringify(observations));
-  ordered.forEach(({slot,file})=>{form.append("files",file,file.name);form.append("file_slots",slot);});btn.disabled=true;btn.innerHTML='<span class="spin"></span> 正在安全上传…';
+  compressed.forEach(({slot,file})=>{form.append("files",file,file.name||"photo.jpg");form.append("file_slots",slot);});btn.innerHTML='<span class="spin"></span> 正在安全上传…';
   try{const r=await apiUpload("/inspections",form,{timeout:120000});clearPersistentMutationRequestKey("inspection",`${industry_key}:${branchId}`,requestKey);toast("照片已交给巡店经理，分析完成后会形成整改清单");location.hash=inspectionRecordHash(r.inspection_id,industry_key);}
   catch(e){toast(e.uncertain?"响应超时，本次巡店请求号已保留；直接重试不会重复扣点":e.message);btn.disabled=false;btn.textContent="📷 开始巡店（1点）";}
 }
-function inspectionEventLabel(kind){return ({visit_created:"建立巡店记录",issue_created:"生成问题与整改项",analysis_completed:"完成照片分析",action_assignment_updated:"人工确认/修改整改责任",action_transition:"更新整改进度",recheck_photos_added:"上传整改后复查照片",recheck_submitted:"提交复查",recheck_reviewed:"企业主完成人工复核",inspection_failed:"巡店分析未完成"})[kind]||"更新巡店记录";}
+function inspectionEventLabel(kind){return ({visit_created:"建立巡店记录",issue_created:"生成问题与整改项",analysis_completed:"完成照片分析",action_assignment_updated:"人工确认/修改整改责任",action_transition:"更新整改进度",recheck_photos_added:"上传整改后复查照片",recheck_submitted:"提交复查",recheck_reviewed:"企业主完成人工复核",inspection_failed:"巡店分析未完成",retake_requested:"有照片看不清，等补拍",photo_retaken:"补拍了一张照片",action_assigned:"整改指派给具体的人",action_dismissed:"问题标记为误报",action_dismiss_reverted:"撤销误报"})[kind]||"更新巡店记录";}
 function inspectionHasRecordedValue(value){return value!==null&&value!==undefined&&value!=="";}
 function inspectionObservationValue(value){return typeof value==="boolean"?(value?"是":"否"):String(value);}
 function inspectionRecordedDataHtml(detail){
@@ -5298,32 +5317,37 @@ function inspectionRecordedDataHtml(detail){
 function inspectionDetailHtml(d){
   const v=d, photos=d.photos||[],beforePhotos=photos.filter(p=>p.phase==="before"),recheckPhotos=photos.filter(p=>p.phase==="recheck"),issues=d.issues||[],events=d.events||[],branch=v.branch||{};
   const snapshot=v.standard_snapshot&&typeof v.standard_snapshot==="object"?v.standard_snapshot:{},captureSlots=Array.isArray(snapshot.capture_slots)?snapshot.capture_slots:[],slotLabels=new Map(captureSlots.map(slot=>[String(slot.slot_code||""),slot.label||slot.slot_code]));
-  const photoGrid=list=>`<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px">${list.map(p=>{const src=safeAssetUrl(p.url||`/files/${p.storage_key}`),slotLabel=slotLabels.get(String(p.capture_slot||""))||p.capture_slot||"";return src?`<a href="${esc(src)}" target="_blank" rel="noopener" class="topic" style="margin:0;text-align:center"><img src="${esc(src)}" alt="巡店照片 ${p.display_no}" style="width:100%;height:120px;object-fit:cover;border-radius:8px"><div class="sub">照片 ${p.display_no}${slotLabel?` · 采集位：${esc(slotLabel)}`:""}${p.caption?` · ${esc(p.caption)}`:""}</div></a>`:"";}).join("")||`<div class="sub">暂无照片</div>`}</div>`;
+  const photoGrid=list=>`<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px">${list.map(p=>{const src=safeAssetUrl(p.url||`/files/${p.storage_key}`),slotLabel=slotLabels.get(String(p.capture_slot||""))||p.capture_slot||"";return src?`<div class="topic" style="margin:0;text-align:center;${p.needs_retake?"border:2px solid #d97706":""}"><a href="${esc(src)}" target="_blank" rel="noopener"><img src="${esc(src)}" alt="巡店照片 ${p.display_no}" style="width:100%;height:120px;object-fit:cover;border-radius:8px"></a><div class="sub">照片 ${p.display_no}${slotLabel?` · 采集位：${esc(slotLabel)}`:""}${p.caption?` · ${esc(p.caption)}`:""}</div>${p.retake_note?`<div class="sub" style="color:#b45309">${esc(p.retake_note)}</div>`:""}${p.needs_retake?`<label class="btn pri" style="cursor:pointer;display:block;margin-top:6px;font-size:16px;padding:10px">📷 补拍这张<input type="file" accept="image/*" capture="environment" style="display:none" onchange="inspectionRetake(${v.id},${Number(p.id)},this.files[0],this)"></label>`:""}</div>`:"";}).join("")||`<div class="sub">暂无照片</div>`}</div>`;
   return `<div class="actions" style="margin:0 0 12px"><a class="btn sm" href="${inspectionRecordHash(0)}">← 全部巡店</a><button class="btn sm" onclick="inspectionView(${v.id})">↻ 刷新</button></div>
   <div class="card"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><h2 style="margin:0;flex:1">🏪 ${esc(branch.name||"门店")} · 巡店 #${v.id}</h2>
     <span class="pill ${inspectionStatusClass(v.status)}">${inspectionStatusLabel(v.status)}</span></div>
-    <div class="kv"><span>区域 ${esc(branch.region||"—")}</span><span>巡检 ${v.visit_at?new Date(v.visit_at*1000).toLocaleString("zh-CN"):"—"}</span>${v.score!==null&&v.score!==undefined?`<span>综合评分 ${Math.round(v.score)}</span>`:""}${v.task_id?`<a href="#/tasks/${v.task_id}">任务 #${v.task_id}</a>`:""}</div>
+    <div class="kv"><span>区域 ${esc(branch.region||"—")}</span><span>巡检 ${v.visit_at?new Date(v.visit_at*1000).toLocaleString("zh-CN"):"—"}</span>${v.score!==null&&v.score!==undefined?`<span title="100 分起，按问题轻重扣分：高 15、中 8、低 3，同类问题只扣一次，误报不扣">门店得分 ${Math.round(v.score)}</span>`:""}${v.ai_reference_score!==null&&v.ai_reference_score!==undefined?`<span class="sub">AI 参考分 ${Math.round(v.ai_reference_score)}（不参与排行）</span>`:""}${v.task_id?`<a href="#/tasks/${v.task_id}">任务 #${v.task_id}</a>`:""}</div>
     ${["preparing","analyzing"].includes(v.status)?`<div class="notice"><span class="spin"></span> 巡店经理正在逐张核查照片。可先离开，记录会保留在这里。</div>`:""}
     ${v.status==="failed"?`<div class="notice red">本次图片分析没有安全完成，已按任务规则收口。可从任务中心免费重试。</div>`:""}
+    ${v.status==="needs_retake"?`<div class="notice" style="background:#fff7ed;border-color:#f59e0b"><b>有 ${(v.retake?.pending||[]).length} 张照片看不清，请补拍</b><div class="sub" style="font-size:16px">其他照片已经检查完、结果都保留着。只要在下面标橙色的照片上点「📷 补拍这张」，补齐后会自动继续分析，不再扣点。</div></div>`:""}
     ${v.summary?`<div class="md">${md(v.summary)}</div>`:""}
     ${inspectionRecordedDataHtml(v)}
     <h3>整改前现场</h3>${photoGrid(beforePhotos)}
     ${recheckPhotos.length?`<h3>整改后复查</h3><div class="sub" style="margin-bottom:8px">每张复查照片会在对应问题下关联到具体复查记录。</div>${photoGrid(recheckPhotos)}`:""}
-    <h3>问题与整改</h3>${issues.length?issues.map(issue=>inspectionIssueHtml(v,issue)).join(""):`<div class="empty">${["preparing","analyzing"].includes(v.status)?"分析完成后会在这里生成整改清单":"本次照片范围内没有形成可确认的问题；仍需按线下清单人工核查照片无法证明的事项。"}</div>`}
+    <h3>问题与整改</h3>${issues.length?issues.map(issue=>inspectionIssueHtml(v,issue)).join(""):`<div class="empty">${["preparing","analyzing","needs_retake"].includes(v.status)?"分析完成后会在这里生成整改清单":"本次照片范围内没有形成可确认的问题；仍需按线下清单人工核查照片无法证明的事项。"}</div>`}
     <h3>操作时间线</h3><div class="sub" style="margin-bottom:7px">只展示结构化操作与时间，不暴露内部分析数据。</div>${events.length?events.map(event=>`<div style="display:flex;gap:9px;align-items:center;border-top:1px solid #eadfc4;padding:8px 0"><span class="tag">${esc(inspectionEventLabel(event.kind))}</span>${event.issue_id?`<span class="sub">问题 #${event.issue_id}</span>`:""}<span class="sub" style="margin-left:auto">${event.created_at?new Date(event.created_at*1000).toLocaleString("zh-CN"):"—"}</span></div>`).join(""):`<div class="empty">暂无操作记录</div>`}
   </div>`;
 }
 function inspectionIssueHtml(v,issue){
   const action=issue.action||{}, evidence=issue.evidence||[],rechecks=action.rechecks||[],pending=rechecks.find(r=>r.status==="pending");
   const canStart=["open","reopened"].includes(action.status),canUpload=action.status==="in_progress"||(action.status==="awaiting_recheck"&&!pending),canReview=!!pending&&action.status==="awaiting_recheck"&&inspectionPerm("can_review"),canAssign=inspectionPerm("can_assign_actions");
-  return `<div class="topic" style="margin:10px 0"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="tag">${inspectionSeverity(issue.severity)}风险</span><b style="flex:1">${esc(issue.title)}</b><span class="pill ${inspectionStatusClass(action.status||issue.status)}">${esc(inspectionStatusLabel(action.status||issue.status))}</span>${issue.needs_human_check?`<span class="tag">需人工查验</span>`:""}</div>
+  const dismissed=action.close_reason==="false_positive",people=Array.isArray(v.assignable_users)?v.assignable_users:[],assignee=people.find(p=>Number(p.id)===Number(action.assignee_user_id));
+  const assignHtml=v.can_assign&&action.id&&action.status!=="closed"?`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0"><label for="inspection-assignee-${action.id}" style="margin:0">指派给</label><select id="inspection-assignee-${action.id}" style="min-width:160px;font-size:16px" onchange="inspectionAssignTo(${v.id},${action.id},this.value,this)"><option value="">${action.assignee_user_id?"":"— 选一个人 —"}</option>${people.map(p=>`<option value="${Number(p.id)}" ${Number(p.id)===Number(action.assignee_user_id)?"selected":""}>${esc(p.label||p.username)}</option>`).join("")}</select>${people.length?"":`<span class="sub">这家门店还没有绑定店长/店员，先到团队页给成员分配门店</span>`}</div>`:"";
+  const dismissHtml=dismissed?`<div class="notice" style="margin:8px 0"><b>已标记为误报</b>，不算问题、不算逾期、不扣门店分。${action.dismiss_note?`<div class="sub">原因：${esc(action.dismiss_note)}</div>`:""}${inspectionPerm("can_review")?`<div class="actions" style="margin:6px 0 0"><button class="btn sm" onclick="inspectionReopenDismissed(${v.id},${action.id})">撤销误报</button></div>`:""}</div>`:"";
+  return `<div class="topic" style="margin:10px 0"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="tag">${inspectionSeverity(issue.severity)}风险</span><b style="flex:1">${esc(issue.title)}</b><span class="pill ${inspectionStatusClass(action.status||issue.status)}">${esc(dismissed?"误报已作废":inspectionStatusLabel(action.status||issue.status))}</span>${issue.needs_human_check?`<span class="tag">需人工查验</span>`:""}</div>
     <div style="margin-top:7px">${esc(issue.description||"")}</div>${issue.root_cause?`<div class="sub" style="margin-top:5px">可能原因：${esc(issue.root_cause)}</div>`:""}${evidence.length?`<div class="sub" style="margin-top:6px">📷 证据：${evidence.map(e=>`照片 ${e.display_no||"—"}${e.note?` · ${esc(e.note)}`:""}`).join("、")}</div>`:""}
-    <div class="notice" style="margin:8px 0"><b>整改：</b>${esc(action.plan||"待确认")}<div class="sub">负责人 ${esc(action.owner||issue.owner||"待指派")} · 截止 ${action.due_at?new Date(action.due_at*1000).toLocaleDateString("zh-CN"):"待设置"}</div></div>
+    <div class="notice" style="margin:8px 0"><b>整改：</b>${esc(action.plan||"待确认")}<div class="sub">负责人 ${esc(assignee?.username||action.owner||issue.owner||"待指派")} · 截止 ${action.due_at?new Date(action.due_at*1000).toLocaleDateString("zh-CN"):"待设置"}</div></div>${assignHtml}${dismissHtml}
     ${rechecks.map((r,index)=>`<div class="notice ${r.status==="approved"?"green":r.status==="rejected"?"red":"violet"}" style="margin:7px 0"><b>第 ${index+1} 次复查 · ${inspectionStatusLabel(r.status)}</b><div class="sub">AI建议：${esc(inspectionStatusLabel(r.model_recommendation))}（仅供人工复核）</div>${r.note?`<div>${esc(r.note)}</div>`:""}${(r.photos||[]).length?`<div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:8px">${r.photos.map(p=>{const src=safeAssetUrl(p.url||`/files/${p.storage_key}`);return src?`<a href="${esc(src)}" target="_blank" rel="noopener"><img src="${esc(src)}" alt="复查照片 ${p.display_no}" style="width:88px;height:70px;object-fit:cover;border-radius:7px"><div class="sub">照片 ${p.display_no}</div></a>`:"";}).join("")}</div>`:""}</div>`).join("")}
     ${action.status!=="closed"?`<div class="actions">${canAssign?`<button class="btn sm" onclick="inspectionAssign(${v.id},${issue.id},${action.id},${action.version},${cp(action.owner||issue.owner||"")},${Number(action.due_at)||0},${cp(action.plan||"")})">确认 / 修改负责人与期限</button>`:""}${canStart?`<button class="btn sm" onclick="inspectionAction(${v.id},${issue.id},${action.id},${action.version},'in_progress')">① 开始整改</button>`:""}
-      ${canUpload?`<label class="btn sm" style="cursor:pointer">② 提交复查照片<input type="file" accept="image/jpeg,image/png,image/webp" style="display:none" onchange="inspectionRecheck(${v.id},${issue.id},${action.id},${action.version},this.files[0])"></label>`:""}
+      ${canUpload?`<label class="btn sm" style="cursor:pointer">② 提交复查照片<input type="file" accept="image/*" capture="environment" style="display:none" onchange="inspectionRecheck(${v.id},${issue.id},${action.id},${action.version},this.files[0])"></label>`:""}
       ${canReview?`<button class="btn sm pri" onclick="inspectionReview(${v.id},${pending.id},${action.version},'close')">③ 确认整改通过</button><button class="btn sm bad" onclick="inspectionReview(${v.id},${pending.id},${action.version},'reject')">驳回继续整改</button>`:""}
-      ${pending&&!inspectionPerm("can_review")?`<span class="sub">复查证据已提交，等待老板或总监确认。</span>`:""}</div>`:""}</div>`;
+      ${pending&&!inspectionPerm("can_review")?`<span class="sub">复查证据已提交，等待老板或总监确认。</span>`:""}
+      ${inspectionPerm("can_review")&&action.id?`<button class="btn sm" onclick="inspectionDismiss(${v.id},${action.id})">AI 看错了，标记误报</button>`:""}</div>`:""}</div>`;
 }
 async function inspectionAssign(visitId,issueId,actionId,expectedVersion,currentOwner,currentDueAt,currentPlan){
   if(!inspectionPerm("can_assign_actions"))return toast("仅企业主或平台管理员可确认整改责任");
@@ -5337,8 +5361,34 @@ async function inspectionAssign(visitId,issueId,actionId,expectedVersion,current
 }
 async function inspectionAction(visitId,issueId,actionId,expectedVersion,status){try{await api(`/inspections/${visitId}/issues/${issueId}`,{method:"PATCH",body:{action_id:actionId,expected_version:expectedVersion,status,industry_key:INSPECTION_INDUSTRY}});toast("整改状态已更新");await inspectionView(visitId);}catch(e){toast(e.status===409?"记录已被其他人更新，请刷新后再操作":e.message);}}
 async function inspectionRecheck(visitId,issueId,actionId,expectedVersion,file){
-  if(!file)return;const form=new FormData();form.append("visit_id",visitId);form.append("issue_id",issueId);form.append("action_id",actionId);form.append("expected_version",expectedVersion);form.append("industry_key",INSPECTION_INDUSTRY);form.append("file",file,file.name);
+  if(!file)return;file=await inspectionCompressPhoto(file);const form=new FormData();form.append("visit_id",visitId);form.append("issue_id",issueId);form.append("action_id",actionId);form.append("expected_version",expectedVersion);form.append("industry_key",INSPECTION_INDUSTRY);form.append("file",file,file.name||"photo.jpg");
   try{await apiUpload("/inspections/rechecks",form,{timeout:120000});toast("复查照片已提交，巡店经理正在对比整改前后");await inspectionView(visitId);}catch(e){toast(e.message);}
+}
+async function inspectionAssignTo(visitId,actionId,userId,select){
+  if(!userId)return;select.disabled=true;
+  try{await api(`/inspections/actions/${Number(actionId)}/assignee`,{method:"PUT",body:{assignee_user_id:Number(userId),industry_key:INSPECTION_INDUSTRY}});toast("已指派，对方会收到提醒");await inspectionView(visitId);}
+  catch(e){select.disabled=false;toast(e.status===409?"记录已被其他人更新，请刷新后再操作":e.message);}
+}
+async function inspectionDismiss(visitId,actionId){
+  if(!inspectionPerm("can_review"))return toast("仅老板或总监可以标记误报");
+  const reason=await uiPrompt({title:"标记为误报",message:"标记后这条不算问题、不算逾期、不扣门店分；以后可以撤销。",label:"为什么是误报",multiline:true,placeholder:"例：照片里是新到的货，正在上架，不是堆放",requiredMessage:"请写一句原因",confirmText:"确认是误报"});
+  if(reason===null)return;
+  try{await api(`/inspections/actions/${Number(actionId)}/dismiss`,{method:"POST",body:{reason:reason.trim(),industry_key:INSPECTION_INDUSTRY}});toast("已标记为误报");await inspectionView(visitId);}
+  catch(e){toast(e.status===409?"记录已被其他人更新，请刷新后再操作":e.message);}
+}
+async function inspectionReopenDismissed(visitId,actionId){
+  if(!await uiConfirm("撤销后这条问题会重新计入问题数和门店得分，整改回到原来的进度。",{title:"撤销误报",confirmText:"撤销"}))return;
+  try{await api(`/inspections/actions/${Number(actionId)}/reopen`,{method:"POST",body:{industry_key:INSPECTION_INDUSTRY}});toast("已撤销误报");await inspectionView(visitId);}
+  catch(e){toast(e.status===409?"记录已被其他人更新，请刷新后再操作":e.message);}
+}
+async function inspectionRetake(visitId,photoId,file,input){
+  if(!file)return;const label=input?.closest("label");if(label){label.style.pointerEvents="none";label.firstChild.textContent="正在上传…";}
+  try{
+    const photo=await inspectionCompressPhoto(file),form=new FormData();
+    form.append("visit_id",visitId);form.append("photo_id",photoId);form.append("industry_key",INSPECTION_INDUSTRY);form.append("file",photo,photo.name||"photo.jpg");
+    const r=await apiUpload("/inspections/retakes",form,{timeout:120000});
+    toast(r.analyzing?"补拍好了，正在继续分析":`补拍好了，还差 ${Number(r.remaining)||0} 张`);await inspectionView(visitId);
+  }catch(e){toast(e.message);if(label){label.style.pointerEvents="";label.firstChild.textContent="📷 补拍这张";}}
 }
 async function inspectionReview(visitId,recheckId,actionVersion,decision){
   if(!inspectionPerm("can_review"))return toast("仅老板或总监可以审核复查");

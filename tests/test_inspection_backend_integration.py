@@ -664,7 +664,9 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
             )["n"],
         )
 
-    def test_semantic_hard_gates_do_not_format_retry(self):
+    def test_unreadable_photo_waits_for_single_retake_without_format_retry(self):
+        # 第 2 期：看不清/低置信度不再让整次巡店失败退款，只让店员补拍这一张；
+        # 也不做格式重试（主模型 + 异模复核各调用一次）。
         for field, value in (("analyzable", False), ("confidence", .79)):
             task_id, visit = self._linked_task(
                 status="queued", billing_status="charged"
@@ -690,13 +692,20 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
                 main.providers, "vision_model_for", return_value="gpt-5.5",
             ), mock.patch.object(main.providers, "call_vision", gateway):
                 asyncio.run(main._run_inspection_task(task_id))
-            gateway.assert_awaited_once()
+            self.assertEqual(2, gateway.await_count)
             self.assertEqual(
-                {"status": "failed", "billing_status": "refunded"},
+                {"status": "done", "billing_status": "succeeded"},
                 db.one(
                     "SELECT status,billing_status FROM task WHERE id=?",
                     (task_id,),
                 ),
+            )
+            self.assertEqual(
+                "needs_retake",
+                db.one(
+                    "SELECT status FROM inspection_visit WHERE id=?",
+                    (visit["id"],),
+                )["status"],
             )
 
     def test_leak_provider_error_and_cancellation_never_format_retry(self):
@@ -869,7 +878,13 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
             "SELECT score,model_json FROM inspection_visit WHERE id=?", (visit["id"],)
         )["model_json"], {})
         self.assertEqual("clean_verified", stored["analysis_status"])
+        # model_json 里保留模型分（AI 参考分）；门店得分按问题扣分，零问题为 100。
         self.assertEqual(96, stored["score"])
+        self.assertEqual(96, stored["ai_reference_score"])
+        self.assertEqual(
+            100,
+            db.one("SELECT score FROM inspection_visit WHERE id=?", (visit["id"],))["score"],
+        )
         self.assertTrue(stored["verification"]["both_clean"])
 
     def test_audit_failure_fails_visit_and_refunds_charged_task(self):

@@ -796,20 +796,6 @@ class StoreInspectionTests(unittest.TestCase):
                     {**base["photo_reviews"][1], "photo_id": 99},
                 ],
             },
-            "unanalyzable": {
-                **base,
-                "photo_reviews": [
-                    {**base["photo_reviews"][0], "analyzable": False},
-                    base["photo_reviews"][1],
-                ],
-            },
-            "low_confidence": {
-                **base,
-                "photo_reviews": [
-                    {**base["photo_reviews"][0], "confidence": 0.79},
-                    base["photo_reviews"][1],
-                ],
-            },
             "empty_visible_facts": {
                 **base,
                 "photo_reviews": [
@@ -821,6 +807,17 @@ class StoreInspectionTests(unittest.TestCase):
         for name, value in invalid.items():
             with self.subTest(name=name), self.assertRaises(inspection.InspectionError):
                 inspection.normalize_model_result(value, allowed)
+        # 第 2 期：不可分析/低置信度改为“只补拍这一张”，不再整单拒绝。
+        for name, review in (
+            ("unanalyzable", {**base["photo_reviews"][0], "analyzable": False}),
+            ("low_confidence", {**base["photo_reviews"][0], "confidence": 0.79}),
+        ):
+            with self.subTest(name=name):
+                partial = inspection.normalize_model_result(
+                    {**base, "photo_reviews": [review, base["photo_reviews"][1]]},
+                    allowed,
+                )
+                self.assertEqual([11], partial["retake_photo_ids"])
 
         single_model = copy.deepcopy(base)
         single_model.pop("verification")
@@ -903,22 +900,24 @@ class StoreInspectionTests(unittest.TestCase):
         self.assertEqual("IC_REVIEW_CONFIDENCE_REQUIRED", missing.exception.validation_code)
         self.assertTrue(missing.exception.retryable)
 
-        for field, value, code in (
-            ("confidence", "79%", "IC_REVIEW_CONFIDENCE_LOW"),
-            ("analyzable", "false", "IC_REVIEW_UNANALYZABLE"),
+        # 第 2 期：看不清/没把握的照片不再让整次巡店作废，只标记这一张需补拍，
+        # 且它不能作为问题证据（证据全在补拍照片上的问题先不记）。
+        for field, value, reason in (
+            ("confidence", "79%", "low_confidence"),
+            ("analyzable", "false", "unanalyzable"),
         ):
             candidate = copy.deepcopy(raw)
             candidate["photo_reviews"][0][field] = value
-            with self.subTest(field=field), self.assertRaises(
-                inspection.InspectionContractError
-            ) as blocked:
-                inspection.normalize_model_result(
+            with self.subTest(field=field):
+                retake = inspection.normalize_model_result(
                     candidate,
                     {11},
                     allow_clean_candidate=True,
                 )
-            self.assertEqual(code, blocked.exception.validation_code)
-            self.assertFalse(blocked.exception.retryable)
+                self.assertEqual([11], retake["retake_photo_ids"])
+                self.assertTrue(retake["photo_reviews"][0]["needs_retake"])
+                self.assertEqual(reason, retake["photo_reviews"][0]["retake_reason"])
+                self.assertEqual([], retake["issues"])
 
         missing_id = copy.deepcopy(raw)
         missing_id["photo_reviews"][0].pop("photo_id")
@@ -1186,14 +1185,16 @@ class StoreInspectionTests(unittest.TestCase):
 
         metrics = inspection.aggregate(2, 20, "restaurant")
         self.assertEqual(2, metrics["visits"])
-        self.assertEqual(80.0, metrics["average_score"])
+        # 第 2 期确定性评分：一个 high 问题扣 15 → 85；无问题 100；均分 92.5
+        # （模型给的 60/100 只作 AI 参考分）。
+        self.assertEqual(92.5, metrics["average_score"])
         self.assertEqual(1, metrics["open_issues"])
         self.assertEqual(1, metrics["severity"]["high"])
         self.assertEqual(1, metrics["overdue_actions"])
         self.assertEqual(1, len(metrics["branches"]))
         self.assertEqual(self.branch["id"], metrics["branches"][0]["id"])
         self.assertEqual("华北区", metrics["regions"][0]["region"])
-        self.assertEqual(80.0, metrics["regions"][0]["average_score"])
+        self.assertEqual(92.5, metrics["regions"][0]["average_score"])
         self.assertEqual(1, metrics["regions"][0]["open_issues"])
         self.assertEqual(1, metrics["regions"][0]["overdue_actions"])
         self.assertIsNotNone(metrics["regions"][0]["last_visit_at"])

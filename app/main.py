@@ -155,6 +155,12 @@ _PERSISTENT_UPLOAD_ROUTES = {
         "*work",
         _INSPECTION_UPLOAD_MAX_BYTES + _UPLOAD_MULTIPART_OVERHEAD_BYTES,
     ),
+    # 第 2 期：巡店单张补拍（只传一张）。
+    ("POST", "/api/inspections/retakes"): (
+        "inspection-retake",
+        "*work",
+        _INSPECTION_UPLOAD_MAX_BYTES + _UPLOAD_MULTIPART_OVERHEAD_BYTES,
+    ),
 }
 _TRANSIENT_UPLOAD_RESERVED = contextvars.ContextVar(
     "transient_upload_reserved",
@@ -508,6 +514,11 @@ async def _startup():
     app.state.retention_task = asyncio.create_task(retention.loop())
     taskrunner.resume_pending(engine.broadcast)
     await _resume_inspection_tasks()
+    # 第 2 期：历史巡店按确定性评分分批回填（只处理缺标记的，后台跑，不拖慢启动）。
+    # 一次性任务，跑完即结束，不登记到存活监控里。
+    app.state.inspection_score_backfill = asyncio.create_task(
+        _backfill_inspection_scores()
+    )
     avatar.resume_pending(engine.broadcast)      # 数字人:queued重开/running退点
     meeting.resume_pending(engine.broadcast)     # 圆桌会:queued重开/running标失败
     from . import textvideo as _tv
@@ -11056,40 +11067,12 @@ def _assert_inspection_http_replay_contract(
 
 
 def _normalize_inspection_image(data: bytes, filename: str) -> dict:
-    """校验、纠正方向并重编码，彻底移除 EXIF 与上传文件名。"""
-    import io
-    from PIL import Image, ImageOps
+    """校验、纠正方向并重编码，彻底移除 EXIF 与上传文件名。
 
-    ext = os.path.splitext(filename or "")[1].lower()
-    if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
-        raise ValueError("巡店照片仅支持 JPEG、PNG 或 WebP")
-    avatar.validate_upload_media(data, ext, "photo")
-    try:
-        with Image.open(io.BytesIO(data)) as source:
-            image = ImageOps.exif_transpose(source)
-            if "A" in image.getbands():
-                base = Image.new("RGB", image.size, "white")
-                base.paste(image, mask=image.getchannel("A"))
-                image = base
-            else:
-                image = image.convert("RGB")
-            image.thumbnail((4096, 4096))
-            width, height = image.size
-            output = io.BytesIO()
-            image.save(output, "JPEG", quality=88, optimize=True)
-            normalized = output.getvalue()
-    except (OSError, ValueError) as exc:
-        raise ValueError("巡店照片无法安全解析") from exc
-    if not normalized or len(normalized) > inspection.MAX_PHOTO_BYTES:
-        raise ValueError("巡店照片重编码后超过 8MB")
-    return {
-        "data": normalized,
-        "mime_type": "image/jpeg",
-        "byte_size": len(normalized),
-        "sha256": hashlib.sha256(normalized).hexdigest(),
-        "width": width,
-        "height": height,
-    }
+    第 2 期：按文件内容（魔数）判断类型，不看扩展名；实现见
+    ``inspection.normalize_photo_upload``（可在无 fastapi 环境下测试）。
+    """
+    return inspection.normalize_photo_upload(data, filename)
 
 
 async def _prepare_inspection_uploads(files: list[UploadFile]) -> list[dict]:
@@ -11459,9 +11442,10 @@ def _inspection_authoritative_contract(allowed_photo_ids: set[int]) -> str:
                             "type": "string",
                             "enum": ["clean", "issue"],
                         },
+                        # 第 2 期：看不清就如实给低分，服务端只让店员补拍这一张。
                         "confidence": {
                             "type": "number",
-                            "minimum": inspection.MIN_PHOTO_REVIEW_CONFIDENCE,
+                            "minimum": 0,
                             "maximum": 1,
                         },
                         "visible_facts": {
@@ -11528,7 +11512,9 @@ def _inspection_authoritative_contract(allowed_photo_ids: set[int]) -> str:
         f"allowed_photo_ids={json.dumps(allowed, ensure_ascii=False)}",
         f"expected_photo_review_count={expected}",
         "所有 allowed_photo_ids 必须在 photo_reviews 中各出现一次，不得缺失、重复或引用外部 ID。",
-        "analyzable=false 表示照片不可分析，不得猜测或改成 true；每张可分析照片的 confidence 必须 >=0.8。",
+        "analyzable=false 表示照片不可分析，不得猜测或改成 true；"
+        f"看不清、拍偏或没把握的照片如实给 analyzable=false 或 confidence<{inspection.MIN_PHOTO_REVIEW_CONFIDENCE}，"
+        "系统只会让店员补拍这一张，不要为它编造问题或结论。",
         "verdict=issue 的 photo_id 集合必须与 issues[*].evidence[*].photo_id 集合完全一致。",
         "issues 非空时 analysis_status=issues_found；issues 为空时 analysis_status=clean_candidate。",
         "完整 JSON Schema：" + json.dumps(
@@ -11804,8 +11790,8 @@ async def _inspection_visual_candidate(
     """在共享绝对截止时间内获取一个严格候选。
 
     只有 JSON/字段/覆盖等合同遵循错误可以在不传第一版原文的
-    前提下同模重做一次。不可分析、低置信度、泄露、上游错误和
-    取消一律原样失败。
+    前提下同模重做一次。泄露、上游错误和取消一律原样失败；
+    不可分析、低置信度的照片（第 2 期）不重做，只标记这一张需补拍。
     """
     usage = {"cost_usd": 0.0, "tokens": 0}
     validation_code: str | None = None
@@ -11893,7 +11879,8 @@ def _finalize_inspection_candidates(
         primary if float(primary["score"]) <= float(review["score"]) else review
     )
     return {
-        **conservative,
+        # 零问题时只要任一模型认为某张照片看不清，就让店员补拍这一张。
+        **inspection.union_retake_flags(conservative, (primary, review)),
         "analysis_status": "clean_verified",
         "score": min(float(primary["score"]), float(review["score"])),
         "verification": {
@@ -11909,7 +11896,8 @@ def _inspection_markdown(visit: dict) -> str:
     lines = [
         f"# {branch.get('name') or '门店'}巡店记录",
         "",
-        f"- 综合评分：{visit.get('score') if visit.get('score') is not None else '待人工确认'}",
+        f"- 门店得分（按问题严重度扣分）：{visit.get('score') if visit.get('score') is not None else '待人工确认'}",
+        f"- AI 参考分（不参与排行）：{visit.get('ai_reference_score') if visit.get('ai_reference_score') is not None else '—'}",
         f"- 巡店结论：{visit.get('summary') or ''}",
         "",
         "## 问题与整改计划",
@@ -11946,6 +11934,12 @@ def _commit_inspection_delivery(
         visit = inspection.complete_visit(
             tid, uid, industry_key, visit_id, model_result
         )
+        if visit.get("status") == "needs_retake":
+            # 有照片看不清：这一轮分析算完成（点数不退），其他照片结论已保留；
+            # 店员补拍后同一任务免费重新排队，只分析补拍的那几张。
+            return _commit_inspection_retake_wait(
+                connection, task_id, visit, usage,
+            )
         markdown = _inspection_markdown(visit)
         now = time.time()
         changed = connection.execute(
@@ -11991,6 +11985,43 @@ def _commit_inspection_delivery(
             ),
         )
         return True
+
+
+def _commit_inspection_retake_wait(
+    connection,
+    task_id: int,
+    visit: dict,
+    usage: dict,
+) -> bool:
+    retake = visit.get("retake") or {}
+    count = len(retake.get("pending") or [])
+    photo_labels = "、".join(
+        f"照片{photo.get('display_no')}"
+        for photo in visit.get("photos") or []
+        if photo.get("needs_retake")
+    )
+    now = time.time()
+    changed = connection.execute(
+        "UPDATE task SET status='done',output_md=?,summary_md=?,cost_usd=?,"
+        "tokens=?,billing_status=CASE WHEN billing_status='charged' "
+        "THEN 'succeeded' ELSE billing_status END,terminal_at=?,updated_at=? "
+        "WHERE id=? AND status='running' "
+        "AND billing_status IN ('charged','included') AND deleted_at IS NULL",
+        (
+            f"# 需要补拍 {count} 张照片\n\n{photo_labels} 看不清，"
+            "其他照片的检查结果已保留。请店员在巡店记录里补拍这几张，"
+            "补拍后会自动继续分析，不再扣点。",
+            f"需要补拍 {count} 张照片"[:800],
+            float(usage.get("cost_usd") or 0),
+            int(usage.get("tokens") or 0),
+            now,
+            now,
+            task_id,
+        ),
+    )
+    if changed.rowcount != 1:
+        raise inspection.InspectionConflict("巡店任务状态已发生变化")
+    return True
 
 
 def _settle_inspection_failure(
@@ -12117,6 +12148,26 @@ def _recover_inspection_tasks() -> dict:
     return {"task_ids": resumable, "invalid": len(invalid)}
 
 
+async def _backfill_inspection_scores() -> int:
+    """每批 200 条、批间让出 0.2 秒；出错只记日志，下次启动接着补。"""
+    total = 0
+    try:
+        while True:
+            done = await db.arun(inspection.backfill_scores, 200)
+            if not done:
+                break
+            total += int(done)
+            await asyncio.sleep(0.2)
+    except Exception as exc:
+        log.warning(
+            "inspection score backfill stopped error_type=%s",
+            type(exc).__name__,
+        )
+    if total:
+        log.info("inspection score backfill updated=%d", total)
+    return total
+
+
 async def _resume_inspection_tasks() -> dict:
     recovered = await db.arun(_recover_inspection_tasks)
     for task_id in recovered["task_ids"]:
@@ -12168,13 +12219,15 @@ async def _run_inspection_task(task_id: int):
         )
         brief = db.jloads(claimed.get("brief_json"), {}) or {}
         visit["scope"] = str(brief.get("material") or "")[:1000]
+        # 补拍轮只把补拍的那几张交给模型，其他照片的结论已保留。
+        allowed_photo_ids = inspection.analysis_photo_ids(visit)
+        visit["photos"] = [
+            photo for photo in visit.get("photos") or []
+            if photo.get("phase") == "before"
+            and int(photo["id"]) in allowed_photo_ids
+        ]
         bundle = await db.arun(_inspection_prompt_bundle, tid, visit)
         images = await asyncio.to_thread(_load_inspection_images, tid, visit)
-        allowed_photo_ids = {
-            int(photo["id"])
-            for photo in visit.get("photos") or []
-            if photo.get("phase") == "before"
-        }
         primary_model = await db.arun(
             providers.vision_model_for,
             inspection.EMPLOYEE_IDX,
@@ -12924,6 +12977,102 @@ def inspection_action_assignment(visit_id: int, issue_id: int, body: dict):
         _raise_inspection_error(exc)
     except (TypeError, ValueError) as exc:
         raise HTTPException(400, "整改责任参数无效") from exc
+
+
+# ---------------- 第 2 期：整改派到人 / 误报作废 / 单张补拍 ----------------
+@app.put("/api/inspections/actions/{action_id}/assignee")
+def inspection_action_assignee(action_id: int, body: dict):
+    """把整改指派给具体账号（老板/总监/该门店店长），并按人通知。"""
+    try:
+        _inspection_scope(body.get("industry_key"))
+        return inspection.assign_action(
+            TEN(), _inspection_actor_id(), action_id,
+            body.get("assignee_user_id"), body.get("due_at"),
+        )
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
+
+
+@app.post("/api/inspections/actions/{action_id}/dismiss")
+def inspection_action_dismiss(action_id: int, body: dict):
+    """老板/总监把 AI 误报的问题作废（可撤销）。"""
+    try:
+        _inspection_scope(body.get("industry_key"))
+        return inspection.dismiss_action(
+            TEN(), _inspection_actor_id(), action_id, body.get("reason"),
+        )
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
+
+
+@app.post("/api/inspections/actions/{action_id}/reopen")
+def inspection_action_reopen(action_id: int, body: dict):
+    """撤销误报作废，整改回到作废前的状态。"""
+    try:
+        _inspection_scope(body.get("industry_key"))
+        return inspection.restore_dismissed_action(
+            TEN(), _inspection_actor_id(), action_id, body.get("note") or "",
+        )
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
+
+
+@app.post("/api/inspections/retakes")
+async def inspection_retake_upload(
+    visit_id: int = Form(...),
+    photo_id: int = Form(...),
+    industry_key: str = Form(""),
+    file: UploadFile = File(...),
+):
+    """补拍一张看不清的巡店照片；补齐后自动继续分析，不再扣点。"""
+    try:
+        selected, _choices = await db.arun(
+            _inspection_scope, industry_key or None
+        )
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
+    tid, uid = TEN(), _inspection_actor_id()
+    records: list[dict] = []
+    result: dict | None = None
+    async with _persistent_upload_slot("inspection-retake"):
+        try:
+            # 先确认这张确实在待补拍名单里，再读图落盘。
+            await db.arun(
+                inspection.retake_target, tid, uid, selected, visit_id, photo_id,
+            )
+        except inspection.InspectionError as exc:
+            _raise_inspection_error(exc)
+        prepared = await _prepare_inspection_uploads([file])
+        try:
+            records = await _run_inspection_file_safely(
+                _store_inspection_images, tid, visit_id, prepared
+            )
+            result = await _run_db_safely(
+                inspection.replace_retake_photo,
+                tid, uid, selected, visit_id, photo_id, records[0],
+            )
+        except inspection.InspectionError as exc:
+            _raise_inspection_error(exc)
+        finally:
+            if records:
+                await _run_inspection_file_safely(
+                    _cleanup_unreferenced_inspection_images, records
+                )
+    if result and result.get("old_storage_key"):
+        # 旧的模糊照片已不被引用，删掉，免得留孤儿文件。
+        await _run_inspection_file_safely(
+            _cleanup_unreferenced_inspection_images,
+            [{"storage_key": result["old_storage_key"]}],
+        )
+    if result and result.get("ready") and result.get("task_id"):
+        _start_inspection_task({"task_id": int(result["task_id"])})
+    return {
+        "ok": True,
+        "visit_id": int(visit_id),
+        "photo_id": int(photo_id),
+        "remaining": int((result or {}).get("remaining") or 0),
+        "analyzing": bool((result or {}).get("ready")),
+    }
 
 
 def _inspection_recheck_bundle(
