@@ -216,7 +216,7 @@ class ScheduledBillingOperationCase(unittest.IsolatedAsyncioTestCase):
             "app.linkgrab._guard_url",
             new=AsyncMock(return_value=None),
         ), patch(
-            "app.main._avatar_script_from_link_work",
+            "app.routes.avatar._avatar_script_from_link_work",
             new=AsyncMock(side_effect=RuntimeError("gateway unavailable")),
         ):
             with self.assertRaises(RuntimeError):
@@ -255,7 +255,7 @@ class ScheduledBillingOperationCase(unittest.IsolatedAsyncioTestCase):
                 "app.linkgrab._guard_url",
                 new=AsyncMock(),
             ) as guard, patch(
-                "app.main._avatar_script_from_link_work",
+                "app.routes.avatar._avatar_script_from_link_work",
                 new=AsyncMock(),
             ) as worker:
                 with self.assertRaises(HTTPException) as caught:
@@ -275,6 +275,7 @@ class ScheduledBillingOperationCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_product_shot_disk_failure_refunds_operation(self):
         from app import main
+        from app.routes import tools as tools_routes
 
         class Upload:
             filename = "product.png"
@@ -291,7 +292,7 @@ class ScheduledBillingOperationCase(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(
             main.growth, "product_shot", new=AsyncMock(return_value=b"png-result")
-        ), patch.object(main, "ROOT", self.tmp.name), \
+        ), patch.object(tools_routes, "ROOT", self.tmp.name), \
                 patch("builtins.open", side_effect=OSError("disk full")):
             with self.assertRaises(HTTPException) as failed:
                 await main.product_shot_api(Upload(), "桌面")
@@ -432,6 +433,7 @@ class ScheduledBillingOperationCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_voice_clone_result_and_billing_commit_together(self):
         from app import main
+        from app.routes import avatar as avatar_routes
 
         sample = os.path.join(self.tmp.name, "sample.mp3")
         with open(sample, "wb") as handle:
@@ -454,7 +456,7 @@ class ScheduledBillingOperationCase(unittest.IsolatedAsyncioTestCase):
             return voice
 
         clone = AsyncMock(side_effect=clone_private_copy)
-        with patch.object(main, "_avatar_asset_name", return_value="sample.mp3"), \
+        with patch.object(avatar_routes, "_avatar_asset_name", return_value="sample.mp3"), \
                 patch.object(main.avatar, "asset_path", return_value=sample), \
                 patch.object(main.avatar, "clone_voice", clone):
             got = await main.avatar_clone({
@@ -503,6 +505,7 @@ class ScheduledBillingOperationCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_voice_clone_failure_and_cancellation_refund_without_visibility(self):
         from app import main
+        from app.routes import avatar as avatar_routes
 
         sample = os.path.join(self.tmp.name, "sample.mp3")
         with open(sample, "wb") as handle:
@@ -522,7 +525,7 @@ class ScheduledBillingOperationCase(unittest.IsolatedAsyncioTestCase):
             raise asyncio.CancelledError()
 
         common = (
-            patch.object(main, "_avatar_asset_name", return_value="sample.mp3"),
+            patch.object(avatar_routes, "_avatar_asset_name", return_value="sample.mp3"),
             patch.object(main.avatar, "asset_path", return_value=sample),
         )
         with common[0], common[1], patch.object(
@@ -537,7 +540,7 @@ class ScheduledBillingOperationCase(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(db.get_setting("cloned_voices:2"))
 
         with patch.object(
-            main, "_avatar_asset_name", return_value="sample.mp3"
+            avatar_routes, "_avatar_asset_name", return_value="sample.mp3"
         ), patch.object(
             main.avatar, "asset_path", return_value=sample
         ), patch.object(

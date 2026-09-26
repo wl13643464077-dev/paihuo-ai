@@ -16,6 +16,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app import auth, billing, db, growth, main
+from app.routes import tools as tools_routes
 
 
 PNG = (b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
@@ -27,11 +28,14 @@ class PhotoFactoryTests(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.old_path = db.DB_PATH
         cls.old_root = main.ROOT
+        cls.old_tools_root = tools_routes.ROOT
         if db._conn is not None:
             db._conn.close()
         db._conn = None
         db.DB_PATH = os.path.join(cls.tmp.name, "factory.db")
         main.ROOT = cls.tmp.name
+        # 第 3 期拆分：拍照工厂在 app.routes.tools，落盘目录按那里的 ROOT 计算
+        tools_routes.ROOT = cls.tmp.name
         db.conn()
         db.insert("tenants", {"id": 2, "name": "租户甲", "balance": 100})
         cls.uid = db.insert("users", {
@@ -48,6 +52,7 @@ class PhotoFactoryTests(unittest.TestCase):
         db._conn = None
         db.DB_PATH = cls.old_path
         main.ROOT = cls.old_root
+        tools_routes.ROOT = cls.old_tools_root
         cls.tmp.cleanup()
 
     def setUp(self):
