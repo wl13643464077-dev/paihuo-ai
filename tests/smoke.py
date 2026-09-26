@@ -204,7 +204,8 @@ def main():
     ok("矩阵发布平台就绪", st == 200 and len(d.get("platforms", [])) >= 2, d)
     st, d, _ = _req("POST", "/api/matrix/publish",
                     {"platform": "xhs", "account": "nonexist", "title": "x", "body": "x"}, ck)
-    ok("矩阵发未绑定账号被拒(400)", st == 400, d)
+    # 第3期:自动代发默认关闭时接口直接 403;平台开启时未绑定账号 400
+    ok("矩阵发未绑定账号被拒(400/关闭时403)", st in (400, 403), d)
     st, d, _ = _req("POST", "/api/matrix/tasks/999999/retry", cookie=ck)
     ok("矩阵重试不存在任务404", st == 404, d)
     st, d, _ = _req("GET", "/api/text-video", cookie=ck)

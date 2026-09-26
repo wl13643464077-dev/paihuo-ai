@@ -293,12 +293,23 @@ class UpgradeSecurityCase(unittest.TestCase):
             asyncio.run(request_as(job_path, same_tenant_root)).status_code,
         )
 
-        # 供外部生成供应商拉取的 /pub 端点不属于登录态 /files 预览门，
-        # 保留既有的公开音色/素材传输语义。
+        # 供外部生成供应商拉取的 /pub 端点不属于登录态 /files 预览门(免登录)，
+        # 但第3期起只认带过期时间的签名链接，按文件名直接取一律 404。
         self.assertEqual(
             200,
             asyncio.run(request_as(f"/pub/{avatar_name}", None)).status_code,
         )
+        with self.assertRaises(HTTPException) as unsigned:
+            main.pub_promo_file(avatar_name)
+        self.assertEqual(404, unsigned.exception.status_code)
+        _, expires, sig, signed_name = avatar.signed_public_url(
+            avatar_name).rsplit("/", 3)
+        self.assertEqual(
+            200, main.pub_signed_file(expires, sig, signed_name).status_code
+        )
+        with self.assertRaises(HTTPException) as expired:
+            main.pub_signed_file(str(int(expires) - 10**6), sig, signed_name)
+        self.assertEqual(404, expired.exception.status_code)
         self.assertEqual(
             401,
             asyncio.run(request_as(avatar_path, None)).status_code,
@@ -326,7 +337,8 @@ class UpgradeSecurityCase(unittest.TestCase):
             self.assertEqual(64, len(main._guest_sign(7)))
             signed = mplayout.sign_file("job7/media.png")
             signature = signed.split("/")[2]
-            self.assertEqual(64, len(signature))
+            # 第3期:凭证是「过期时间-完整 64 位签名」
+            self.assertEqual(64, len(signature.split("-", 1)[1]))
             self.assertTrue(mplayout.verify_file(signature, "job7/media.png"))
             self.assertFalse(
                 mplayout.verify_file(signature[:20], "job7/media.png")
@@ -776,6 +788,9 @@ class UpgradeSecurityCase(unittest.TestCase):
                 "at_time": "09:00",
             })
 
+        # 第3期:真实图/混合模式受全网抓图开关控制(默认关闭)，这里验证开启后的清洗
+        from app import features
+        features.set_platform("imagehunt", True)
         clean = main._validated_brief({
             "direction": "新品上市",
             "platforms": ["小红书", "公众号", "小红书"],

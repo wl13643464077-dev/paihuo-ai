@@ -308,6 +308,12 @@ class LeadSourceUrlTests(unittest.TestCase):
 
 
 class LeadSourceVerificationTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # 第 3 期起搜索引擎网页抓取默认关闭(平台开关)；这组测试验证开启后的抓取逻辑。
+        patcher = patch("app.features.is_enabled", return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     async def test_direct_search_round_robins_before_verifying_the_first_ten(self):
         expected_queries = [
             "site:zhihu.com/question 成都 火锅 推荐 哪家好",

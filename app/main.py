@@ -34,6 +34,7 @@ from . import wxpay  # 微信支付 APIv3(默认关闭)
 from . import photoproof  # 店员现场照片(压缩+水印+落盘)
 from . import api_staff, stafftask  # 第 2 期:派给店员的任务(路由模块 + 服务层)
 from . import api_checklist, reminders  # 第2期:开闭店清单/门店排行路由 + 提醒升级循环
+from . import features  # 第3期:高风险功能开关 + AI 生成内容标识
 from .engine import engine
 from .skills import registry
 
@@ -549,6 +550,9 @@ async def _startup():
         _backfill_inspection_scores()
     )
     avatar.resume_pending(engine.broadcast)      # 数字人:queued重开/running退点
+    # 第3期:记下旧版永久图片链接过渡期起点；定期清理公开素材目录里的过期临时文件
+    await db.arun(features.legacy_since)
+    app.state.pub_cleanup_task = asyncio.create_task(avatar.public_cleanup_loop())
     meeting.resume_pending(engine.broadcast)     # 圆桌会:queued重开/running标失败
     from . import textvideo as _tv
     _tv.resume_pending(engine.broadcast)         # 图文成片:queued重开/running退点
@@ -3352,9 +3356,11 @@ def meta():
               "brief_templates": ["蹭热点", "日更选题", "产品软文", "观点输出", "教程干货", "二创改写"],
               "platforms": list(registry.PLATFORM_SPECS),
               "platform_specs": registry.PLATFORM_SPECS,
-              "image_modes": [{"key": "ai", "label": "🎨 AI生成"},
-                              {"key": "real", "label": "📷 真实图·全网抓取"},
-                              {"key": "mix", "label": "🎭 真实+AI混合"}],
+              # 第3期:全网抓图默认关闭(版权风险)，关闭时只给 AI 生图
+              "image_modes": [{"key": "ai", "label": "🎨 AI生成"}] + (
+                  [{"key": "real", "label": "📷 真实图·全网抓取"},
+                   {"key": "mix", "label": "🎭 真实+AI混合"}]
+                  if features.is_enabled("imagehunt") else []),
               "mp_themes": mplayout.theme_list()}  # mplayout 在下方 V24 段导入,调用时已就绪
     if _is_boss():
         result |= {"channel_catalog": registry.CHANNEL_CATALOG,
@@ -3578,6 +3584,8 @@ def _validated_brief(raw: dict) -> dict:
     image_mode = raw.get("image_mode") or "ai"
     if image_mode not in {"ai", "real", "mix"}:
         raise HTTPException(400, "配图模式无效")
+    if image_mode in {"real", "mix"}:
+        _require_feature("imagehunt")
     brief["image_mode"] = image_mode
     image_count = raw.get("image_count")
     if image_count is not None:
@@ -5067,6 +5075,8 @@ async def task_center_retry(kind: str, rid: int):
         meta = taskcenter.retry_meta(kind, row)
         if not meta["retryable"]:
             _raise_retry_denied(meta)
+        # 第3期:自动代发被平台关闭时不再重排队，老板改用半自动发布
+        await db.arun(_require_feature, "matrix_autopub")
         retries = int(row.get("retry_count") or 0)
         tenant_id = TEN()
 
@@ -14562,9 +14572,9 @@ def avatar_meta():
     return {"voices": avatar.cloned_voices() + avatar.VOICES,
             "engines": ([{"key": "basic", "label": "基础版·省钱(6点/条,不限时长)"}]
                         if avatar.rh_ready() else [])
-                       + [{"key": "", "label": f"自动(当前:{'HeyGen' if eng=='heygen' else '可灵'})"},
-                          {"key": "heygen", "label": "HeyGen(会动·快)"},
-                          {"key": "kling", "label": "可灵(对口型)"}],
+                       + [{"key": "", "label": f"自动(当前:{'HeyGen·境外' if eng=='heygen' else '可灵'})"},
+                          {"key": "heygen", "label": "HeyGen(会动·快 · 境外服务商)", "overseas": True},
+                          {"key": "kling", "label": "可灵(对口型 · 国内)"}],
             "durations": [{"s": 15, "label": "15秒(快闪)"}, {"s": 30, "label": "30秒(标准)"},
                           {"s": 60, "label": "60秒(深度)"}],
             "public_base": avatar.public_base(),
@@ -14573,6 +14583,12 @@ def avatar_meta():
             ),
             "heygen_exhausted": bool(db.get_setting("heygen_exhausted")),
             "own_voice_ready": True,
+            # 第3期:肖像/声音授权声明 + 境外传输告知 + 成片 AI 标识
+            "consent": {"version": avatar.CONSENT_VERSION, "text": avatar.CONSENT_TEXT,
+                        "overseas_text": avatar.OVERSEAS_TEXT},
+            "ai_label": features.ai_label_for(TEN()),
+            "link_video_enabled": features.is_enabled("linkgrab_video"),
+            "link_video_hint": features.off_hint("linkgrab_video"),
             "engine_note": ("可灵引擎 · 照片对口型出片(系统音色/克隆音色/您的原声都支持)"
                             if eng == "kling" else
                             "HeyGen · Avatar IV 动作引擎(人物会动会说)")}
@@ -14675,6 +14691,11 @@ async def avatar_script_from_link(body: dict):
     )
     safe_body = {"style": style, "profile_id": profile_id}
     from . import linkgrab
+    # 第3期:视频平台链接转文字默认关闭，扣点前直接拒绝并提示上传自己的文件
+    try:
+        await db.arun(linkgrab.ensure_video_allowed, url)
+    except features.FeatureDisabled as exc:
+        raise HTTPException(403, str(exc)) from None
     try:  # 防 SSRF:先卡掉内网/本机地址,再扣费(别为一次被拦的请求收钱)
         await linkgrab._guard_url(url)
     except ValueError as e:
@@ -14710,8 +14731,12 @@ async def avatar_script_from_link(body: dict):
 
 
 @app.post("/api/avatar/upload")
-async def avatar_upload(file: UploadFile = File(...), kind: str = Form("photo")):
+async def avatar_upload(file: UploadFile = File(...), kind: str = Form("photo"),
+                        consent: str = Form("")):
     _need_module("avatar")
+    # 第3期:照片/录音就是肖像和声音，上传前必须勾选授权声明(服务端校验+留痕)
+    if kind in ("photo", "voice") and not avatar.consent_given(consent):
+        raise HTTPException(400, avatar.CONSENT_MISSING)
     ext = (
         os.path.splitext(file.filename or "")[1].lower()
         or (".jpg" if kind == "photo" else ".mp3")
@@ -14759,6 +14784,11 @@ async def avatar_upload(file: UploadFile = File(...), kind: str = Form("photo"))
             raise HTTPException(400, str(exc)) from exc
         except avatar.AssetQuotaExceeded as exc:
             raise HTTPException(413, str(exc)) from exc
+    if kind in ("photo", "voice"):
+        await db.arun(
+            avatar.record_consent, TEN(), pub["name"], kind, "upload",
+            user=auth.current(),
+        )
     return {"name": pub["name"], "preview": f"/files/avatar-public/{pub['name']}"}
 
 
@@ -14784,6 +14814,9 @@ async def avatar_clone(body: dict):
     """克隆声音:audio_name 为已上传(kind=voice)的样本文件名."""
     await db.arun(_need_module, "avatar")
     tid = TEN()
+    # 第3期:克隆声音前必须勾选授权声明(服务端校验，样本通过校验后留痕)
+    if not avatar.consent_given(body.get("consent")):
+        raise HTTPException(400, avatar.CONSENT_MISSING)
     # Validation and the private copy share the asset lock, but the potentially
     # large copy/fsync runs on the default I/O executor rather than the loop or
     # the scarce DB executor.
@@ -14791,6 +14824,14 @@ async def avatar_clone(body: dict):
         body.get("audio_name"),
         tid,
     )
+    try:
+        await db.arun(
+            avatar.record_consent, tid, body.get("audio_name"), "voice",
+            "voice_clone", user=auth.current(),
+        )
+    except BaseException:
+        await asyncio.to_thread(_cleanup_avatar_clone_sample, sample_path, tid)
+        raise
 
     try:
         op_key = await _start_billing_operation_safely(
@@ -14975,6 +15016,13 @@ async def avatar_job_create(body: dict):
             f"{dur} 秒口播稿最多 {max_script_chars} 个字符，请精简或选择更长时长",
         )
     tid = TEN()
+    # 第3期:选 HeyGen(境外)必须明确同意；没同意的任务只用国内引擎
+    try:
+        overseas_ok = avatar.overseas_allowed(
+            body.get("engine") or "", body.get("overseas_ok")
+        )
+    except avatar.ConsentRequired as exc:
+        raise HTTPException(400, str(exc)) from None
 
     def create_job() -> int:
         all_voices = avatar.cloned_voices() + avatar.VOICES
@@ -14996,6 +15044,21 @@ async def avatar_job_create(body: dict):
                 {"voice"},
                 required=False,
             )
+            # 老素材(本期之前上传的)没有授权记录:本次必须勾选声明，勾了就补记
+            try:
+                avatar.require_consent(
+                    tid, [photo_name, own_audio_name], body.get("consent"),
+                    "avatar_job", user=auth.current(),
+                    kinds={photo_name: "photo", own_audio_name or "": "voice"},
+                )
+            except avatar.ConsentRequired as exc:
+                raise HTTPException(400, str(exc)) from None
+            if overseas_ok:
+                # 同意传输至境外服务商(HeyGen)也要留痕
+                for name, kind in ((photo_name, "photo"), (own_audio_name, "voice")):
+                    if name:
+                        avatar.record_consent(tid, name, kind, "overseas_transfer",
+                                              user=auth.current(), overseas=True)
             params = {
                 "photo_name": photo_name,
                 "script": script,
@@ -15005,6 +15068,7 @@ async def avatar_job_create(body: dict):
                 "engine": body.get("engine") or "",
                 "duration": dur,
                 "prompt": (body.get("prompt") or "").strip(),
+                "domestic_only": not overseas_ok,
             }
             return _create_charged_avatar_job(params, tid)
 
@@ -15567,6 +15631,7 @@ def meeting_export(mid: int, fmt: str):
           + (consensus + "\n\n" if consensus else "")
           + "# 完整会议记录\n\n" + "\n\n".join(
               f"## {x['who']}\n\n{x['text']}" for x in msgs if x["who"] != "系统"))
+    md = features.label_markdown(md, TEN())  # 第3期:导出文件末尾 AI 标识
     if fmt == "pdf":
         return Response(export.md_to_pdf(md), media_type="application/pdf",
                         headers={"Content-Disposition": f'attachment; filename="meeting{mid}.pdf"'})
@@ -15843,6 +15908,7 @@ def task_export(tid: int, fmt: str):
     t = _task_or_404(tid)
     md = t.get("output_md") or ""
     title = next((ln.lstrip("# ").strip() for ln in md.splitlines() if ln.startswith("#")), f"task{tid}")
+    md = features.label_markdown(md, TEN())  # 第3期:导出文件末尾 AI 标识
     if fmt == "pdf":
         return Response(export.md_to_pdf(md, title), media_type="application/pdf",
                         headers={"Content-Disposition": f'attachment; filename="task{tid}.pdf"'})
@@ -16206,6 +16272,8 @@ def build_delivery(job_id: int):
         imgs = [im for im in images if im.get("platform") in (p, "通用", None, "")]
         packs.append({**v, "emoji": spec.get("emoji", "📄"), "upload_url": spec.get("url", ""),
                       "cover": cover, "images": imgs})
+    # 第3期:发布包文案末尾统一加「AI 辅助生成」显式标识(企业设置可关、可按平台关)
+    packs = features.label_packs(packs, j.get("tenant_id") or TEN())
     return {
         "job_id": job_id, "status": j["status"],
         "title": tc[sel_t] if tc and sel_t < len(tc) else (tc[0] if tc else ""),
@@ -16319,7 +16387,7 @@ def export_md(job_id: int):
                       f"> {v.get('note','')}", ""]
     if d["retro"].get("report"):
         lines += ["\n---\n## 复盘报告\n", d["retro"]["report"]]
-    md = "\n".join(lines)
+    md = features.label_markdown("\n".join(lines), TEN())
     return PlainTextResponse(md, media_type="text/markdown; charset=utf-8",
                              headers={"Content-Disposition": f'attachment; filename="job{job_id}.md"'})
 
@@ -16329,6 +16397,7 @@ def export_fmt(job_id: int, fmt: str):
     _job_or_404(job_id)
     d = build_delivery(job_id)
     md = f"# {d['title']}\n\n{d['body']}\n\n**话题标签:** " + " ".join(f"#{t}" for t in d["tags"])
+    md = features.label_markdown(md, TEN())
     if fmt == "pdf":
         return Response(export.md_to_pdf(md, d["title"]), media_type="application/pdf",
                         headers={"Content-Disposition": f'attachment; filename="job{job_id}.pdf"'})
@@ -16589,15 +16658,124 @@ from . import censor, imagehunt, mplayout, wechat  # noqa: E402
 
 @app.get("/pubfile/{sig}/{rel:path}")
 def pubfile(sig: str, rel: str):
-    """签名公开图链:给公众号编辑器/微信服务器抓 job 素材图用(签名即凭证,免登录)."""
+    """签名公开图链:给公众号编辑器/微信服务器抓 job 素材图用(签名即凭证,免登录).
+
+    第3期:签名带过期时间(默认 7 天，可配)；旧版永久签名只在过渡期内有效。
+    """
     if not mplayout.verify_file(sig, rel):
-        raise HTTPException(403, "签名无效")
+        raise HTTPException(403, "图片链接已过期或无效，请回到派活重新生成排版")
     root = os.path.abspath(os.path.join(ROOT, "data", "assets"))
     p = os.path.normpath(os.path.join(root, rel))
-    if (not p.startswith(root) or not os.path.isfile(p)
+    if (not p.startswith(root + os.sep) or not os.path.isfile(p)
             or os.path.splitext(p)[1].lower() not in (".png", ".jpg", ".jpeg", ".gif", ".webp")):
         raise HTTPException(404)
     return FileResponse(p, headers={"Cache-Control": "public, max-age=86400"})
+
+
+# ================ 第3期:合规(功能开关 / 公开素材签名 / 授权留痕 / AI 标识) ================
+@app.exception_handler(features.FeatureDisabled)
+async def _feature_disabled(request, exc: features.FeatureDisabled):
+    """下层模块抛出的「功能已关闭」统一转 403 + 大白话原因。"""
+    return JSONResponse({"detail": str(exc)}, status_code=403)
+
+
+def _require_feature(key: str) -> None:
+    try:
+        features.require(key)
+    except features.FeatureDisabled as exc:
+        raise HTTPException(403, str(exc)) from None
+
+
+@app.get("/pub/s/{expires}/{sig}/{name}")
+def pub_signed_file(expires: str, sig: str, name: str):
+    """数字人照片/声音的临时签名链接:只给视频厂商拉取，过期即失效，目录不再静态公开。"""
+    path = avatar.resolve_signed_public(expires, sig, name)
+    if not path:
+        raise HTTPException(404, "链接已过期或无效")
+    return FileResponse(path, headers={
+        "Cache-Control": "private, max-age=300",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "sandbox; default-src 'none'",
+    })
+
+
+@app.get("/pub/{name}")
+def pub_promo_file(name: str):
+    """公开目录里只剩宣传片等固定前缀的运营素材可直接访问(生产由 Caddy 直接伺服)。"""
+    path = avatar.promo_file_path(name)
+    if not path:
+        raise HTTPException(404)
+    return FileResponse(path, headers={"Cache-Control": "public, max-age=3600",
+                                       "X-Content-Type-Options": "nosniff"})
+
+
+@app.get("/api/features")
+def features_current():
+    """当前企业各高风险功能是否可用(前端据此隐藏入口并给出说明)。"""
+    return features.public_flags()
+
+
+@app.get("/api/admin/features")
+def admin_features_get():
+    _need_root()
+    return features.admin_overview()
+
+
+@app.put("/api/admin/features/{key}")
+def admin_features_put(key: str, body: dict):
+    """平台开关;带 tenant_id 时只改该企业(enabled=null 表示取消企业单独设置)。仅 root。"""
+    _need_root()
+    if key not in features.FEATURES:
+        raise HTTPException(404, "没有这个功能开关")
+    enabled = body.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        raise HTTPException(400, "开关只能是开或关")
+    try:
+        if body.get("tenant_id") not in (None, ""):
+            tid = int(body["tenant_id"])
+            if not db.one("SELECT id FROM tenants WHERE id=?", (tid,)):
+                raise HTTPException(404, "企业不存在")
+            features.set_tenant(key, tid, enabled)
+        else:
+            if enabled is None:
+                raise HTTPException(400, "平台开关只能是开或关")
+            features.set_platform(key, enabled)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "企业编号无效") from None
+    return features.admin_overview()
+
+
+@app.put("/api/admin/compliance-config")
+def admin_compliance_config_put(body: dict):
+    _need_root()
+    try:
+        features.set_config(body if isinstance(body, dict) else {})
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return features.admin_overview()
+
+
+@app.get("/api/settings/ai-label")
+def ai_label_get():
+    return features.ai_label_conf(TEN())
+
+
+@app.put("/api/settings/ai-label")
+def ai_label_put(body: dict):
+    """企业设置:AI 生成内容标识(默认开启)。只有企业主账号能改。"""
+    _need_admin()
+    try:
+        return features.save_ai_label_conf(TEN(), body)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@app.get("/api/avatar/consents")
+def avatar_consents(limit: int = 200):
+    """肖像/声音授权留痕(谁、何时、哪个素材、声明版本)。主账号可查。"""
+    _need_module("avatar")
+    _need_admin()
+    return avatar.consent_records(TEN())[:max(1, min(int(limit or 200), 1000))]
 
 
 def _md_digest(body: str, n: int = 100) -> str:
@@ -16628,7 +16806,8 @@ def _mp_payload(job_id: int, theme: str) -> dict:
             except assetfiles.AssetAccessError as exc:
                 raise HTTPException(400, str(exc)) from exc
             imgs.append({"url": mplayout.sign_file(rel), "rel": rel})
-    html = mplayout.render(body, theme, images=imgs[:8], title=title)
+    html = mplayout.render(body, theme, images=imgs[:8], title=title,
+                           ai_label=features.ai_label_for(TEN(), "公众号"))
     # 封面:公众号平台专属封面 > 选中封面 > 首张素材图(都要 PNG/JPG 才能传微信)
     cover_rel = None
     pack = next((p for p in (d.get("packs") or []) if p.get("platform") == "公众号"), None)
@@ -17804,6 +17983,7 @@ def censor_logs(
 @app.get("/api/imagehunt")
 async def imagehunt_search(q: str, n: int = 24):
     _need_module("content")
+    await db.arun(_require_feature, "imagehunt")
     q = (q or "").strip()[:40]
     if not q:
         raise HTTPException(400, "输入要搜的画面关键词")
@@ -17814,6 +17994,7 @@ async def imagehunt_search(q: str, n: int = 24):
 async def imagehunt_thumb(u: str, f: str = ""):
     """缩略图代理:第三方图床大多防盗链,浏览器直挂会裂,由服务器带 Referer 取."""
     _need_module("content")
+    await db.arun(_require_feature, "imagehunt")
     headers = {"User-Agent": imagehunt.UA_DESKTOP}
     ref = imagehunt._REFERER.get(f)
     if ref:
@@ -17841,6 +18022,7 @@ async def imagehunt_thumb(u: str, f: str = ""):
 async def job_add_image(job_id: int, body: dict):
     """把老板在真实图库挑中的图下载入工单素材,追加到多媒体师产出."""
     _need_module("content")
+    await db.arun(_require_feature, "imagehunt")
     await db.arun(_job_or_404, job_id)
     url = (body.get("url") or "").strip()
     if not url.startswith("http"):
@@ -17921,6 +18103,8 @@ def _create_charged_tv_job(params: dict, tenant_id: int = None,
     except ValueError as exc:
         raise HTTPException(400, "配乐风格无效") from exc
     tid = int(tenant_id or TEN())
+    # 第3期:成片结尾卡最后一行加「AI 辅助生成」标识(企业设置可关)
+    params["end_text"] = features.label_end_text(tid, params.get("end_text") or "")
     points = 0.0 if tid == 1 else float(
         (billing.prices().get("text_video") or {"points": 1})["points"])
     data = {
@@ -19516,6 +19700,7 @@ def matrix_accounts_list():
 @app.post("/api/matrix/accounts")
 def matrix_account_add(body: dict):
     _need_admin()
+    _require_feature("matrix_autopub")
     try:
         return matrixpub.add_account(TEN(), body.get("platform"), body.get("name"),
                                      body.get("cookie"))
@@ -19526,6 +19711,7 @@ def matrix_account_add(body: dict):
 @app.post("/api/matrix/accounts/{acc_id}/check")
 async def matrix_account_check(acc_id: str):
     _need_module("content")
+    await db.arun(_require_feature, "matrix_autopub")
     try:
         return await matrixpub.check_account(TEN(), acc_id)
     except ValueError as e:
@@ -19542,6 +19728,7 @@ def matrix_account_del(acc_id: str):
 @app.post("/api/matrix/publish")
 async def matrix_publish(body: dict):
     await db.arun(_need_module, "content")
+    await db.arun(_require_feature, "matrix_autopub")
     platform = body.get("platform")
     if platform not in matrixpub.PLATFORMS:
         raise HTTPException(400, "平台不支持")
@@ -19679,9 +19866,8 @@ app.mount("/files/avatar-public",
 app.mount("/files", StaticFiles(directory=os.path.join(ROOT, "data", "assets"),
                                 follow_symlink=False), name="files")
 app.mount("/static", StaticFiles(directory=os.path.join(ROOT, "static")), name="static")
-# /pub 正常由 Caddy 直接伺服；应用侧只兜底到当前环境实际使用的公开素材目录。
-# 不再在 import 阶段硬依赖生产机专属的 /srv 路径，保证测试与新环境可启动。
-app.mount("/pub", StaticFiles(directory=avatar.PUBLIC_DIR, follow_symlink=False), name="pub")
+# 第3期:/pub 不再整目录静态公开。数字人素材只能走 /pub/s/<过期>/<签名>/<文件名>
+# (上方 pub_signed_file 校验签名)；宣传片等固定前缀文件由 Caddy 或 pub_promo_file 伺服。
 
 
 _HTML_ENTRY_NO_CACHE_HEADERS = {

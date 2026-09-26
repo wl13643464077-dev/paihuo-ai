@@ -458,6 +458,7 @@ class ScheduledBillingOperationCase(unittest.IsolatedAsyncioTestCase):
                 patch.object(main.avatar, "asset_path", return_value=sample), \
                 patch.object(main.avatar, "clone_voice", clone):
             got = await main.avatar_clone({
+                "consent": True,
                 "audio_name": "sample.mp3",
                 "label": "老板",
             })
@@ -530,7 +531,7 @@ class ScheduledBillingOperationCase(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(side_effect=fail_from_private_copy),
         ):
             with self.assertRaises(HTTPException) as failed:
-                await main.avatar_clone({"audio_name": "sample.mp3"})
+                await main.avatar_clone({"audio_name": "sample.mp3", "consent": True})
         self.assertEqual(500, failed.exception.status_code)
         self.assertEqual(20, billing.balance(2))
         self.assertIsNone(db.get_setting("cloned_voices:2"))
@@ -545,7 +546,7 @@ class ScheduledBillingOperationCase(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(side_effect=cancel_from_private_copy),
         ):
             with self.assertRaises(asyncio.CancelledError):
-                await main.avatar_clone({"audio_name": "sample.mp3"})
+                await main.avatar_clone({"audio_name": "sample.mp3", "consent": True})
         self.assertEqual(20, billing.balance(2))
         self.assertIsNone(db.get_setting("cloned_voices:2"))
         self.assertEqual(

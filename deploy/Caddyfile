@@ -29,8 +29,12 @@ paihuo.ai, www.paihuo.ai {
 		Cross-Origin-Resource-Policy "same-origin"
 	}
 
-	# 数字人素材(照片/音频)公开只读,供可灵/HeyGen抓取(uuid文件名即凭证)
-	handle_path /pub/* {
+	# /srv/paihuo-pub 不再整目录静态公开:数字人照片/声音只能走应用校验的
+	# 临时签名链接 /pub/s/<过期>/<签名>/<文件名>(反代到应用，过期即失效)。
+	# Caddy 只直接伺服宣传片等固定前缀的运营素材。
+	@pub_promo path_regexp pub_promo ^/pub/paihuo-promo-[A-Za-z0-9._-]+\.(mp4|webm|jpg|jpeg|png|webp)$
+	handle @pub_promo {
+		uri strip_prefix /pub
 		root * /srv/paihuo-pub
 		header {
 			X-Content-Type-Options "nosniff"
