@@ -1,0 +1,104 @@
+# 派活 简易部署通道的 systemd 服务单元。
+# 安装: sudo install -m 644 deploy/simple/paihuo.service /etc/systemd/system/paihuo.service
+#       sudo systemctl daemon-reload && sudo systemctl enable paihuo
+# 与旧体系的 contentcrew.service 二选一，不能同时启用（它们用同一个数据库）。
+
+[Unit]
+Description=派活 PaiHuo（门店 AI 督导 + 获客助手）
+Documentation=file:/srv/paihuo/current/deploy/simple/README.md
+# 要联网调用模型、发企业微信通知，等网络真正就绪再启动
+Wants=network-online.target
+After=network-online.target
+# 5 分钟内连续崩溃 10 次就不再拉起，避免死循环刷日志；发企业微信告警（单元可选安装）
+StartLimitIntervalSec=300
+StartLimitBurst=10
+OnFailure=paihuo-failure-alert@%n.service
+
+[Service]
+Type=simple
+# 用专门的低权限账号跑，网站被攻破也碰不到 root 的东西
+User=paihuo
+Group=paihuo
+WorkingDirectory=/srv/paihuo/current
+# 密钥（会话签名、配置加密、首次 root 密码等）放在 root 600 的文件里，不写进单元
+EnvironmentFile=/etc/paihuo/paihuo.env
+# 没配密钥就拒绝启动，而不是悄悄用临时密钥（那样一重启所有人都被踢下线、加密配置读不出）
+Environment=CONTENTCREW_REQUIRE_SESSION_SECRET=1
+Environment=CONTENTCREW_REQUIRE_CONFIG_KEY=1
+Environment=CONTENTCREW_ROOT=/srv/paihuo/current
+Environment=CONTENTCREW_PYTHON=/srv/paihuo/current/venv/bin/python
+# 数据库放在代码目录之外，换版本不影响数据；deploy.sh 也按这个路径备份和迁移
+Environment=CONTENTCREW_DB_PATH=/var/lib/paihuo/data/contentcrew.db
+# 数字人照片/声音给视频厂商拉取的临时文件目录（由应用签名临时链接对外提供）
+Environment=CONTENTCREW_PUBLIC_DIR=/srv/paihuo-pub
+Environment=HOME=/var/lib/paihuo
+# 只听本机，公网流量一律经 Caddy（HTTPS）转进来；只信任本机这一跳代理的来源 IP
+Environment=CONTENTCREW_HOST=127.0.0.1
+Environment=CONTENTCREW_PORT=8899
+Environment=CONTENTCREW_FORWARDED_ALLOW_IPS=127.0.0.1
+Environment=CONTENTCREW_TRUSTED_PROXIES=127.0.0.1/32,::1/128
+# 老板们按北京时间过日子：定时任务、早报、“今天”的额度都以北京时间换日
+Environment=TZ=Asia/Shanghai
+# 硬约束：只能 1 个进程。任务队列、任务锁、实时推送都在进程内存里，多进程会重复认领、重复扣点。
+# run.sh 固定 --workers 1；这里再清掉可能把 uvicorn 变成多进程的环境变量。
+Environment=CONTENTCREW_WORKERS=1
+UnsetEnvironment=WEB_CONCURRENCY
+# 代码目录只读，运行时不要往里写 .pyc
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/srv/paihuo/current/run.sh
+
+# 崩溃自动拉起（正常 stop 不拉起），隔 5 秒再试
+Restart=on-failure
+RestartSec=5
+# 首次启动要建库、迁移，给足时间
+TimeoutStartSec=120
+# 给正在进行的请求 30 秒收尾；主进程先收 SIGTERM，超时后整组强杀
+TimeoutStopSec=30
+KillMode=mixed
+# 新建的文件别人不可读（数据库、素材都有客户隐私）
+UMask=0027
+
+# 日志直接进 journald：journalctl -u paihuo -f 查看，按 journald 配置自动轮转
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=paihuo
+
+# 内存上限：超过 MemoryHigh 开始回收，超过 MemoryMax 被系统杀掉后由 Restart 拉起，
+# 不至于把整台机器（含 Caddy、ssh）一起拖死。4G 内存的机器按这个值，机器更大可以调高。
+MemoryHigh=2560M
+MemoryMax=3G
+TasksMax=512
+LimitNOFILE=65536
+
+# ---- 安全沙箱（简化版，每一项都是“万一网站被攻破能少丢什么”）----
+# 不能再提权（sudo/setuid 程序都失效）
+NoNewPrivileges=yes
+# 独立的 /tmp，别的程序看不到临时文件
+PrivateTmp=yes
+# 看不到真实硬件设备
+PrivateDevices=yes
+# 整个系统目录只读；只有下面列出的数据目录可写
+ProtectSystem=strict
+ReadWritePaths=/var/lib/paihuo -/srv/paihuo-pub
+# 看不到 /home 和 /root（运维的 ssh 密钥等）
+ProtectHome=yes
+# 不能改系统时间、内核参数、加载内核模块、读内核日志、改 cgroup
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+# 看不到别的进程
+ProtectProc=invisible
+# 不要任何 Linux 特权（只监听 8899 这种高端口，用不着）
+CapabilityBoundingSet=
+AmbientCapabilities=
+# 只允许本机套接字和 IPv4/IPv6 网络
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

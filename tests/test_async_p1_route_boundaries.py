@@ -96,6 +96,7 @@ class ReviewedP1RouteCallGraphTests(unittest.TestCase):
         },
         "matrix_publish": {
             "_need_module",
+            "_require_feature",
             "_job_or_404",
             "assetfiles.resolve_tenant_asset",
             "matrixpub.enqueue",
@@ -135,24 +136,43 @@ class ReviewedP1RouteCallGraphTests(unittest.TestCase):
             return ".".join(reversed(parts))
         return ""
 
+    @staticmethod
+    def _web_layer_async_functions():
+        """main.py 与第 3 期从它拆出的 app/routes/*.py 里的全部 async 函数。"""
+        app_dir = os.path.dirname(main.__file__)
+        routes_dir = os.path.join(app_dir, "routes")
+        paths = [os.path.join(app_dir, "main.py")] + sorted(
+            os.path.join(routes_dir, name)
+            for name in os.listdir(routes_dir)
+            if name.endswith(".py")
+        )
+        found = []
+        for path in paths:
+            with open(path, encoding="utf-8") as handle:
+                tree = ast.parse(handle.read(), filename=path)
+            filename = os.path.relpath(path, app_dir)
+            found.extend(
+                (filename, node)
+                for node in ast.walk(tree)
+                if isinstance(node, ast.AsyncFunctionDef)
+            )
+        return found
+
     def test_reviewed_p1_routes_have_no_inline_blocking_edges(self):
-        path = os.path.join(os.path.dirname(main.__file__), "main.py")
-        with open(path, encoding="utf-8") as handle:
-            tree = ast.parse(handle.read(), filename=path)
+        functions = self._web_layer_async_functions()
         offenders = []
         for function_name, forbidden in self.TARGETS.items():
             matches = [
-                node
-                for node in ast.walk(tree)
-                if isinstance(node, ast.AsyncFunctionDef)
-                and node.name == function_name
+                (filename, node)
+                for filename, node in functions
+                if node.name == function_name
             ]
             self.assertEqual(
                 1,
                 len(matches),
-                f"main.py:{function_name} 不再是唯一 async 入口",
+                f"{function_name} 不再是 main.py/routes 里唯一的 async 入口",
             )
-            target = matches[0]
+            filename, target = matches[0]
 
             class DirectEdgeVisitor(ast.NodeVisitor):
                 def visit_AsyncFunctionDef(self, node):
@@ -169,7 +189,7 @@ class ReviewedP1RouteCallGraphTests(unittest.TestCase):
                     name = ReviewedP1RouteCallGraphTests._call_name(node)
                     if name in forbidden:
                         offenders.append(
-                            f"main.py:{node.lineno} {function_name}->{name}"
+                            f"{filename}:{node.lineno} {function_name}->{name}"
                         )
                     self.generic_visit(node)
 
@@ -181,13 +201,9 @@ class ReviewedP1RouteCallGraphTests(unittest.TestCase):
         )
 
     def test_durable_queue_routes_linearize_commit_and_worker_start(self):
-        path = os.path.join(os.path.dirname(main.__file__), "main.py")
-        with open(path, encoding="utf-8") as handle:
-            tree = ast.parse(handle.read(), filename=path)
         functions = {
             node.name: node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.AsyncFunctionDef)
+            for _filename, node in self._web_layer_async_functions()
         }
         actual = {}
         for name, expected in self.LINEARIZED_QUEUE_ROUTES.items():
@@ -202,7 +218,7 @@ class ReviewedP1RouteCallGraphTests(unittest.TestCase):
             self.assertEqual(
                 expected,
                 actual[name],
-                f"main.py:{name} 的持久队列提交与 worker 启动边界发生变化",
+                f"{name} 的持久队列提交与 worker 启动边界发生变化",
             )
 
 
@@ -722,7 +738,15 @@ class CancellationLinearizationTests(unittest.IsolatedAsyncioTestCase):
                 return 42
             return fn(*args, **kwargs)
 
+        def feature_enabled(key, tenant_id=None):
+            # This test exercises cancellation after an authorized enqueue.
+            # Keep the real feature guard in the route; explicitly grant only
+            # the platform feature needed to reach the mocked queue boundary.
+            self.assertEqual("matrix_autopub", key)
+            return True
+
         with mock.patch.object(main.db, "arun", side_effect=fake_arun), \
+                mock.patch.object(main.features, "is_enabled", side_effect=feature_enabled) as feature_check, \
                 mock.patch.object(main.matrixpub, "enqueue", new=enqueue), \
                 mock.patch.object(main.matrixpub, "run_task", new=run_task):
             request = asyncio.create_task(
@@ -735,12 +759,29 @@ class CancellationLinearizationTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
             )
-            await entered.wait()
-            request.cancel()
-            release.set()
-            with self.assertRaises(asyncio.CancelledError):
-                await request
-            await asyncio.wait_for(worker_started.wait(), timeout=1)
+            gate = asyncio.create_task(entered.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    {gate, request}, timeout=5, return_when=asyncio.FIRST_COMPLETED,
+                )
+                if request in done:
+                    # Surface an early route error instead of hanging forever
+                    # waiting for an enqueue that will never be entered.
+                    await request
+                    self.fail("matrix request returned before reaching enqueue")
+                self.assertIn(gate, done, "matrix request did not reach enqueue within 5 seconds")
+                request.cancel()
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await request
+                await asyncio.wait_for(worker_started.wait(), timeout=1)
+            finally:
+                release.set()
+                gate.cancel()
+                if not request.done():
+                    request.cancel()
+                await asyncio.gather(gate, request, return_exceptions=True)
+            feature_check.assert_called_once_with("matrix_autopub", None)
 
         self.assertEqual([42], worker_ids)
 

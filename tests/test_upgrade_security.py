@@ -80,6 +80,14 @@ class UpgradeSecurityCase(unittest.TestCase):
     def test_inspection_file_keeps_industry_scope_inside_same_tenant(self):
         from app import assetfiles, main
 
+        # The file gate reads the current account and store assignment from DB,
+        # not just the session payload.
+        db.insert("users", {
+            "id": 20, "tenant_id": 2, "username": "restaurant-member",
+            "password_hash": "x", "role": "member", "enabled": 1,
+            "must_change_password": 0,
+            "modules_json": json.dumps(["restaurant"]),
+        })
         db.conn().executemany(
             "INSERT INTO tenant_industry(tenant_id,industry_key,is_primary,created_at) "
             "VALUES(2,?,?,0)",
@@ -107,6 +115,10 @@ class UpgradeSecurityCase(unittest.TestCase):
         self.assertEqual("auto", assetfiles.file_required_module(path))
 
         async def request_as(user):
+            db.execute(
+                "UPDATE users SET role=?,modules_json=? WHERE id=?",
+                (user["role"], json.dumps(user["modules"]), user["id"]),
+            )
             request = Request({
                 "type": "http",
                 "http_version": "1.1",
@@ -123,8 +135,7 @@ class UpgradeSecurityCase(unittest.TestCase):
             async def next_handler(_request):
                 return Response(status_code=200)
 
-            with patch.object(auth, "parse_session", return_value=user["id"]), \
-                    patch.object(auth, "get_user", return_value=user):
+            with patch.object(auth, "parse_session", return_value=user["id"]):
                 return await main._auth_mw(request, next_handler)
 
         member = {
@@ -134,8 +145,19 @@ class UpgradeSecurityCase(unittest.TestCase):
         }
         denied = asyncio.run(request_as(member))
         self.assertEqual(403, denied.status_code)
-        allowed = asyncio.run(request_as({**member, "modules": ["restaurant", "auto"]}))
+        member_with_industry = {**member, "modules": ["restaurant", "auto"]}
+        unbound = asyncio.run(request_as(member_with_industry))
+        self.assertEqual(403, unbound.status_code)
+        db.execute(
+            "INSERT INTO user_branch(tenant_id,user_id,branch_id,created_by,created_at) "
+            "VALUES(?,?,?,?,0)",
+            (2, member["id"], branch, member["id"]),
+        )
+        allowed = asyncio.run(request_as(member_with_industry))
         self.assertEqual(200, allowed.status_code)
+        db.execute("DELETE FROM user_branch WHERE user_id=?", (member["id"],))
+        revoked_binding = asyncio.run(request_as(member_with_industry))
+        self.assertEqual(403, revoked_binding.status_code)
         owner = asyncio.run(request_as({**member, "role": "owner", "modules": []}))
         self.assertEqual(200, owner.status_code)
         db.execute(
@@ -293,12 +315,23 @@ class UpgradeSecurityCase(unittest.TestCase):
             asyncio.run(request_as(job_path, same_tenant_root)).status_code,
         )
 
-        # 供外部生成供应商拉取的 /pub 端点不属于登录态 /files 预览门，
-        # 保留既有的公开音色/素材传输语义。
+        # 供外部生成供应商拉取的 /pub 端点不属于登录态 /files 预览门(免登录)，
+        # 但第3期起只认带过期时间的签名链接，按文件名直接取一律 404。
         self.assertEqual(
             200,
             asyncio.run(request_as(f"/pub/{avatar_name}", None)).status_code,
         )
+        with self.assertRaises(HTTPException) as unsigned:
+            main.pub_promo_file(avatar_name)
+        self.assertEqual(404, unsigned.exception.status_code)
+        _, expires, sig, signed_name = avatar.signed_public_url(
+            avatar_name).rsplit("/", 3)
+        self.assertEqual(
+            200, main.pub_signed_file(expires, sig, signed_name).status_code
+        )
+        with self.assertRaises(HTTPException) as expired:
+            main.pub_signed_file(str(int(expires) - 10**6), sig, signed_name)
+        self.assertEqual(404, expired.exception.status_code)
         self.assertEqual(
             401,
             asyncio.run(request_as(avatar_path, None)).status_code,
@@ -326,7 +359,8 @@ class UpgradeSecurityCase(unittest.TestCase):
             self.assertEqual(64, len(main._guest_sign(7)))
             signed = mplayout.sign_file("job7/media.png")
             signature = signed.split("/")[2]
-            self.assertEqual(64, len(signature))
+            # 第3期:凭证是「过期时间-完整 64 位签名」
+            self.assertEqual(64, len(signature.split("-", 1)[1]))
             self.assertTrue(mplayout.verify_file(signature, "job7/media.png"))
             self.assertFalse(
                 mplayout.verify_file(signature[:20], "job7/media.png")
@@ -776,6 +810,9 @@ class UpgradeSecurityCase(unittest.TestCase):
                 "at_time": "09:00",
             })
 
+        # 第3期:真实图/混合模式受全网抓图开关控制(默认关闭)，这里验证开启后的清洗
+        from app import features
+        features.set_platform("imagehunt", True)
         clean = main._validated_brief({
             "direction": "新品上市",
             "platforms": ["小红书", "公众号", "小红书"],

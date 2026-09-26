@@ -284,8 +284,20 @@ async def fetch_page_text(url: str) -> str:
     return (await fetch_page_evidence(url))["text"]
 
 
+def ensure_video_allowed(url: str, tenant_id: int = None) -> None:
+    """视频平台链接转文字受平台开关 linkgrab_video 控制(默认关闭).
+
+    关闭时抛 features.FeatureDisabled，提示老板上传自己的视频/音频文件。
+    非视频平台的网页链接不受影响。
+    """
+    from . import features
+    if is_video_link(url):
+        features.require("linkgrab_video", tenant_id)
+
+
 async def transcribe_link(url: str) -> str:
     """视频链接 → 文案文字。当前统一回退到受控云端联网能力。"""
+    # 调用方(接口层)必须先过 ensure_video_allowed:平台开关关闭时在扣点前就拒绝。
     if not is_video_link(url):
         raise ValueError("视频下载只允许受支持的平台域名")
     raise ValueError(

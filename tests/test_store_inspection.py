@@ -253,6 +253,8 @@ class StoreInspectionTests(unittest.TestCase):
             "restaurant",
             {"name": "朝阳一店", "region": "华北区", "address": "朝阳路 1 号"},
         )
+        # v58 起经理/员工只能巡老板分配给自己的门店。
+        inspection.set_member_branches(20, 21, [self.branch["id"]])
 
     def tearDown(self):
         db._shutdown_async_pool(wait=True)
@@ -321,8 +323,14 @@ class StoreInspectionTests(unittest.TestCase):
     def test_industry_actor_and_branch_scope_are_server_authoritative(self):
         with self.assertRaises(inspection.InspectionForbidden):
             inspection.create_branch(2, 20, "hotel", {"name": "伪造酒店"})
+        # v58：经理/员工不能自建门店，只有老板/总监可以。
+        with self.assertRaises(inspection.InspectionForbidden):
+            inspection.create_branch(
+                2, 21, "restaurant", {"name": "员工自建店", "region": "华东区"}
+            )
+        db.execute("UPDATE users SET job_title='director' WHERE id=21")
         member_branch = inspection.create_branch(
-            2, 21, "restaurant", {"name": "区域经理新建店", "region": "华东区"}
+            2, 21, "restaurant", {"name": "区域总监新建店", "region": "华东区"}
         )
         self.assertEqual(21, member_branch["created_by"])
         with self.assertRaises(inspection.InspectionForbidden):
@@ -330,7 +338,7 @@ class StoreInspectionTests(unittest.TestCase):
         db.execute("UPDATE users SET enabled=0 WHERE id=21")
         with self.assertRaises(inspection.InspectionForbidden):
             inspection.create_branch(2, 21, "restaurant", {"name": "停用账号门店"})
-        db.execute("UPDATE users SET enabled=1 WHERE id=21")
+        db.execute("UPDATE users SET enabled=1,job_title='staff' WHERE id=21")
         for unauthorized_user in (31, 32):
             with self.assertRaises(inspection.InspectionForbidden):
                 inspection.list_branches(2, unauthorized_user, "restaurant")
@@ -358,8 +366,11 @@ class StoreInspectionTests(unittest.TestCase):
     def test_visit_history_region_filter_is_exact_and_exclusive(self):
         north = self._draft(request_key="region-filter-north-0001")
         east_branch = inspection.create_branch(
-            2, 21, "restaurant",
+            2, 20, "restaurant",
             {"name": "华东二店", "region": "华东区", "address": "东路 2 号"},
+        )
+        inspection.set_member_branches(
+            20, 21, [self.branch["id"], east_branch["id"]],
         )
         east = inspection.create_visit_draft(
             2, 21, "restaurant", east_branch["id"],
@@ -367,8 +378,12 @@ class StoreInspectionTests(unittest.TestCase):
             [photo("inspections/2/regions/east.jpg", digest="a" * 64)],
         )
         unassigned_branch = inspection.create_branch(
-            2, 21, "restaurant",
+            2, 20, "restaurant",
             {"name": "待分区门店", "region": "", "address": "待补地址"},
+        )
+        inspection.set_member_branches(
+            20, 21,
+            [self.branch["id"], east_branch["id"], unassigned_branch["id"]],
         )
         unassigned = inspection.create_visit_draft(
             2, 21, "restaurant", unassigned_branch["id"],
@@ -781,20 +796,6 @@ class StoreInspectionTests(unittest.TestCase):
                     {**base["photo_reviews"][1], "photo_id": 99},
                 ],
             },
-            "unanalyzable": {
-                **base,
-                "photo_reviews": [
-                    {**base["photo_reviews"][0], "analyzable": False},
-                    base["photo_reviews"][1],
-                ],
-            },
-            "low_confidence": {
-                **base,
-                "photo_reviews": [
-                    {**base["photo_reviews"][0], "confidence": 0.79},
-                    base["photo_reviews"][1],
-                ],
-            },
             "empty_visible_facts": {
                 **base,
                 "photo_reviews": [
@@ -806,6 +807,17 @@ class StoreInspectionTests(unittest.TestCase):
         for name, value in invalid.items():
             with self.subTest(name=name), self.assertRaises(inspection.InspectionError):
                 inspection.normalize_model_result(value, allowed)
+        # 第 2 期：不可分析/低置信度改为“只补拍这一张”，不再整单拒绝。
+        for name, review in (
+            ("unanalyzable", {**base["photo_reviews"][0], "analyzable": False}),
+            ("low_confidence", {**base["photo_reviews"][0], "confidence": 0.79}),
+        ):
+            with self.subTest(name=name):
+                partial = inspection.normalize_model_result(
+                    {**base, "photo_reviews": [review, base["photo_reviews"][1]]},
+                    allowed,
+                )
+                self.assertEqual([11], partial["retake_photo_ids"])
 
         single_model = copy.deepcopy(base)
         single_model.pop("verification")
@@ -874,7 +886,8 @@ class StoreInspectionTests(unittest.TestCase):
         self.assertIsNone(issue["evidence"][0]["bbox"])
         self.assertEqual("立即设置警示；固定布线并拍照复查", issue["action"]["plan"])
         self.assertEqual("值班店长", issue["action"]["owner"])
-        self.assertEqual(0, issue["action"]["due_days"])
+        # “立即”也至少给 1 天整改期限，避免整改单一生成就逾期。
+        self.assertEqual(1, issue["action"]["due_days"])
 
         missing_confidence = copy.deepcopy(raw)
         missing_confidence["photo_reviews"][0].pop("confidence")
@@ -887,22 +900,24 @@ class StoreInspectionTests(unittest.TestCase):
         self.assertEqual("IC_REVIEW_CONFIDENCE_REQUIRED", missing.exception.validation_code)
         self.assertTrue(missing.exception.retryable)
 
-        for field, value, code in (
-            ("confidence", "79%", "IC_REVIEW_CONFIDENCE_LOW"),
-            ("analyzable", "false", "IC_REVIEW_UNANALYZABLE"),
+        # 第 2 期：看不清/没把握的照片不再让整次巡店作废，只标记这一张需补拍，
+        # 且它不能作为问题证据（证据全在补拍照片上的问题先不记）。
+        for field, value, reason in (
+            ("confidence", "79%", "low_confidence"),
+            ("analyzable", "false", "unanalyzable"),
         ):
             candidate = copy.deepcopy(raw)
             candidate["photo_reviews"][0][field] = value
-            with self.subTest(field=field), self.assertRaises(
-                inspection.InspectionContractError
-            ) as blocked:
-                inspection.normalize_model_result(
+            with self.subTest(field=field):
+                retake = inspection.normalize_model_result(
                     candidate,
                     {11},
                     allow_clean_candidate=True,
                 )
-            self.assertEqual(code, blocked.exception.validation_code)
-            self.assertFalse(blocked.exception.retryable)
+                self.assertEqual([11], retake["retake_photo_ids"])
+                self.assertTrue(retake["photo_reviews"][0]["needs_retake"])
+                self.assertEqual(reason, retake["photo_reviews"][0]["retake_reason"])
+                self.assertEqual([], retake["issues"])
 
         missing_id = copy.deepcopy(raw)
         missing_id["photo_reviews"][0].pop("photo_id")
@@ -1155,6 +1170,8 @@ class StoreInspectionTests(unittest.TestCase):
         inspection.complete_visit(2, 21, "restaurant", second["id"], analysis_result(second["photos"], {
             "summary": "正常", "score": 100, "issues": [],
         }))
+        # 整改期限最短 1 天；把期限挪到过去，模拟已逾期的整改单。
+        db.execute("UPDATE inspection_action SET due_at=due_at-2*86400 WHERE tenant_id=2")
 
         hotel = inspection.create_branch(3, 30, "hotel", {"name": "酒店店"})
         foreign = inspection.create_visit_draft(
@@ -1168,14 +1185,16 @@ class StoreInspectionTests(unittest.TestCase):
 
         metrics = inspection.aggregate(2, 20, "restaurant")
         self.assertEqual(2, metrics["visits"])
-        self.assertEqual(80.0, metrics["average_score"])
+        # 第 2 期确定性评分：一个 high 问题扣 15 → 85；无问题 100；均分 92.5
+        # （模型给的 60/100 只作 AI 参考分）。
+        self.assertEqual(92.5, metrics["average_score"])
         self.assertEqual(1, metrics["open_issues"])
         self.assertEqual(1, metrics["severity"]["high"])
         self.assertEqual(1, metrics["overdue_actions"])
         self.assertEqual(1, len(metrics["branches"]))
         self.assertEqual(self.branch["id"], metrics["branches"][0]["id"])
         self.assertEqual("华北区", metrics["regions"][0]["region"])
-        self.assertEqual(80.0, metrics["regions"][0]["average_score"])
+        self.assertEqual(92.5, metrics["regions"][0]["average_score"])
         self.assertEqual(1, metrics["regions"][0]["open_issues"])
         self.assertEqual(1, metrics["regions"][0]["overdue_actions"])
         self.assertIsNotNone(metrics["regions"][0]["last_visit_at"])

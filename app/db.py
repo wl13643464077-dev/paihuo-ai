@@ -37,7 +37,11 @@ _all_connections: set[sqlite3.Connection] = set()
 # schema lock to finish.
 _generation_lock = threading.RLock()
 _generation_switching = threading.Event()
-LATEST_SCHEMA_VERSION = 57
+# Production already owns versions 58–61 (brand packages, teams and artwork).
+# The offline v2 bundle independently used 58–60 for branch access, payments
+# and staff tasks. Merge those additions at 62–64 without rewriting either
+# lineage's existing ledger rows or skipping DDL based on an ambiguous number.
+LATEST_SCHEMA_VERSION = 64
 MIGRATION_LOCK_SUFFIX = ".migration.lock"
 
 SCHEMA = """
@@ -2208,7 +2212,7 @@ def _validate_migrated_database(c) -> None:
         "tenants": {"id", "name", "enabled", "balance"},
         "users": {
             "id", "tenant_id", "username", "password_hash", "role",
-            "modules_json", "enabled", "must_change_password",
+            "modules_json", "enabled", "must_change_password", "phone",
         },
         "job": {
             "id", "brief_json", "mode", "status", "current_idx", "tenant_id",
@@ -2302,6 +2306,9 @@ def _validate_migrated_database(c) -> None:
             "area_sqm", "seat_count", "longitude", "latitude", "remark",
             "row_version",
         },
+        "user_branch": {
+            "tenant_id", "user_id", "branch_id", "created_by", "created_at",
+        },
         "inspection_branch_import": {
             "id", "tenant_id", "industry_key", "request_key", "source_sha256",
             "filename", "status", "total_rows", "create_count", "update_count",
@@ -2359,6 +2366,7 @@ def _validate_migrated_database(c) -> None:
         "inspection_action": {
             "id", "tenant_id", "visit_id", "issue_id", "status", "plan",
             "due_at", "closed_at", "created_at", "updated_at",
+            "assignee_user_id", "close_reason",
         },
         "inspection_recheck": {
             "id", "tenant_id", "visit_id", "issue_id", "action_id",
@@ -2383,6 +2391,40 @@ def _validate_migrated_database(c) -> None:
             "id", "tenant_id", "name", "enabled", "fail_streak",
         },
         "knowledge": {"id", "tenant_id", "title", "content", "deleted_at"},
+        "brand_package": {
+            "id", "tenant_id", "version", "brand_name", "store_hint", "status",
+            "failure_reason", "created_by", "confirmed_by", "confirmed_at",
+            "created_at", "updated_at",
+        },
+        "brand_package_fact": {
+            "id", "package_id", "fact_key", "value", "source_kind",
+            "source_url", "source_title", "source_excerpt",
+            "source_captured_at", "source_sha256", "created_at", "updated_at",
+        },
+        "team_run": {
+            "id", "tenant_id", "actor_id", "request_key", "payload_sha256",
+            "query", "team_name", "team_summary", "mode", "depth",
+            "leader_emp_idx", "status", "summary_task_id", "summary_status",
+            "summary_attempt_no", "summary_claim_until", "summary_error",
+            "created_at", "updated_at",
+        },
+        "team_run_member": {
+            "id", "team_run_id", "tenant_id", "position", "emp_idx",
+            "name", "role", "role_in_team", "task_text", "depends_on_json",
+            "status", "approved", "approved_at", "attempt_no", "task_id",
+            "claim_until", "last_error", "created_at", "updated_at",
+        },
+        "task_activity_image": {
+            "id", "tenant_id", "task_id", "group_key", "file_path",
+            "status", "quality_json", "required_text_json", "billing_op_key",
+            "brand_package_id", "brand_version",
+            "created_at",
+        },
+        "task_activity_image_review": {
+            "id", "tenant_id", "task_id", "image_id", "reviewer_id",
+            "decision", "result_status", "note", "observed_text",
+            "logo_match", "no_extra_claims", "quality_json", "created_at",
+        },
         "avatar_job": {
             "id", "tenant_id", "params_json", "status", "billing_status",
             "retry_count", "deleted_at", "created_by",
@@ -2432,6 +2474,42 @@ def _validate_migrated_database(c) -> None:
         "wechat_draft_delivery": {
             "id", "tenant_id", "job_id", "request_hash", "status",
             "billing_status", "op_key",
+        },
+        "pay_order": {
+            "id", "tenant_id", "created_by", "channel", "intent_id",
+            "plan_key", "period_key", "plan_name", "period_label",
+            "quoted_points", "amount_fen", "out_trade_no", "transaction_id",
+            "status", "code_url", "expires_at", "last_query_at", "paid_at",
+            "closed_at", "close_reason", "subscription_op_key",
+            "activation_error", "receipt_json", "notify_digest",
+            "created_at", "updated_at",
+        },
+        # v64:派活给真人店员闭环。
+        "staff_task": {
+            "id", "tenant_id", "branch_id", "assignee_user_id", "title",
+            "detail", "source", "source_ref", "require_photo", "due_at",
+            "status", "priority", "created_by", "created_at", "updated_at",
+            "submitted_at", "submit_note", "reviewed_at", "reviewed_by",
+            "review_note", "ai_check_json", "remind_count", "last_remind_at",
+            "escalated_level", "request_key", "deleted_at",
+        },
+        "staff_task_photo": {
+            "id", "tenant_id", "task_id", "storage_key", "sha256",
+            "mime_type", "byte_size", "width", "height", "received_at",
+            "watermark_text", "created_by", "created_at",
+        },
+        "staff_task_event": {
+            "id", "tenant_id", "task_id", "actor_user_id", "kind", "note",
+            "created_at",
+        },
+        "checklist_template": {
+            "id", "tenant_id", "industry_key", "kind", "name", "items_json",
+            "due_time", "active", "created_by", "created_at", "updated_at",
+        },
+        "checklist_run": {
+            "id", "tenant_id", "branch_id", "template_id", "run_date", "kind",
+            "status", "assignee_user_id", "items_json", "completed_at",
+            "completed_by", "due_at", "created_at", "updated_at",
         },
     }
     tables = {
@@ -2523,6 +2601,27 @@ def _validate_migrated_database(c) -> None:
             "数据库迁移后结构不完整：inspection_branch_import "
             "状态约束不完整"
         )
+    # v64:状态/来源等枚举靠 CHECK 兜底；CREATE TABLE IF NOT EXISTS 修不了
+    # 同名但约束不同的旧表，缺失时拒绝启动，而不是让脏状态写进库。
+    for table, checks in {
+        "staff_task": (
+            "check(sourcein('boss','checklist','inspection','ai_action'))",
+            "check(statusin('todo','submitted','approved','rejected','cancelled'))",
+            "check(priorityin('low','normal','high'))",
+        ),
+        "checklist_template": (
+            "check(kindin('open','close','handover','custom'))",
+        ),
+        "checklist_run": (
+            "check(statusin('open','done','missed'))",
+        ),
+    }.items():
+        normalized = "".join(_table_sql(c, table).lower().split())
+        for check in checks:
+            if check not in normalized:
+                raise RuntimeError(
+                    f"数据库迁移后结构不完整：{table} 取值约束不完整"
+                )
     indexes = {
         str(row["name"])
         for row in c.execute(
@@ -2556,6 +2655,31 @@ def _validate_migrated_database(c) -> None:
         "idx_inspection_business_value_natural",
         "idx_inspection_business_value_period",
         "idx_inspection_standard_override_scope",
+        "idx_user_branch_branch",
+        "idx_pay_order_out_trade_no",
+        "idx_pay_order_transaction",
+        "idx_pay_order_tenant_created",
+        "idx_pay_order_status_expires",
+        "idx_users_tenant_phone",
+        "idx_staff_task_assignee",
+        "idx_staff_task_branch",
+        "idx_staff_task_due",
+        "idx_staff_task_request",
+        "idx_staff_task_photo_task",
+        "idx_staff_task_event_task",
+        "idx_checklist_template_active",
+        "idx_checklist_run_date",
+        "idx_checklist_run_assignee",
+        "idx_brand_package_tenant_version",
+        "idx_brand_package_tenant_status",
+        "idx_brand_package_active",
+        "idx_brand_package_fact_key",
+        "idx_team_run_tenant_recent",
+        "idx_team_run_active",
+        "idx_team_run_member_task",
+        "idx_task_activity_image_scope_group",
+        "idx_task_activity_image_billing_op",
+        "idx_task_activity_review_scope",
     }
     missing_indexes = sorted(required_indexes - indexes)
     if missing_indexes:
@@ -2563,6 +2687,48 @@ def _validate_migrated_database(c) -> None:
             "数据库迁移后结构不完整：purchase_intent 缺少索引 "
             + ",".join(missing_indexes)
         )
+    _require_index_contract(
+        c, "brand_package", "idx_brand_package_tenant_version",
+        ("tenant_id", "version"), unique=True, partial=False,
+    )
+    _require_index_contract(
+        c, "brand_package", "idx_brand_package_active",
+        ("tenant_id",), unique=True, partial=True,
+    )
+    active_index = c.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' "
+        "AND name='idx_brand_package_active'"
+    ).fetchone()
+    active_index_sql = "".join(
+        str(active_index["sql"] or "").lower().split()
+    ) if active_index else ""
+    if "wherestatus='confirmed'" not in active_index_sql:
+        raise RuntimeError("数据库迁移后结构不完整：品牌确认版唯一约束不完整")
+    _require_index_contract(
+        c, "brand_package", "idx_brand_package_tenant_status",
+        ("tenant_id", "status", "created_at"), unique=False, partial=False,
+    )
+    _require_index_contract(
+        c, "brand_package_fact", "idx_brand_package_fact_key",
+        ("package_id", "fact_key"), unique=True, partial=False,
+    )
+    for table, name, cols in (
+        ("team_run", "idx_team_run_tenant_recent", ("tenant_id", "updated_at")),
+        ("team_run", "idx_team_run_active", ("tenant_id", "status", "updated_at")),
+        ("team_run_member", "idx_team_run_member_task", ("tenant_id", "task_id")),
+        ("task_activity_image", "idx_task_activity_image_scope_group", ("tenant_id", "task_id", "group_key", "id")),
+        ("task_activity_image_review", "idx_task_activity_review_scope", ("tenant_id", "task_id", "image_id", "id")),
+    ):
+        _require_index_contract(c, table, name, cols, unique=False, partial=False)
+    _require_index_contract(
+        c, "task_activity_image", "idx_task_activity_image_billing_op",
+        ("billing_op_key",), unique=True, partial=True,
+    )
+    if c.execute(
+        "SELECT 1 FROM brand_package_fact f LEFT JOIN brand_package p "
+        "ON p.id=f.package_id WHERE p.id IS NULL LIMIT 1"
+    ).fetchone():
+        raise RuntimeError("数据库迁移后结构不完整：品牌事实存在孤儿记录")
     _require_index_contract(
         c,
         "store_branch",
@@ -2626,6 +2792,62 @@ def _validate_migrated_database(c) -> None:
         ("tenant_id", "industry_key", "active", "scope_kind", "scope_key"),
         unique=False,
         partial=False,
+    )
+    # 成员门店绑定的幂等写入依赖 (user_id,branch_id) 唯一键。
+    _require_unique_columns_contract(c, "user_branch", ("user_id", "branch_id"))
+    _require_index_contract(
+        c,
+        "user_branch",
+        "idx_user_branch_branch",
+        ("tenant_id", "branch_id"),
+        unique=False,
+        partial=False,
+    )
+    # v63:同一商户订单号只能对应一笔订单；回调/查单都按它幂等定位。
+    _require_index_contract(
+        c,
+        "pay_order",
+        "idx_pay_order_out_trade_no",
+        ("out_trade_no",),
+        unique=True,
+        partial=False,
+    )
+    _require_index_contract(
+        c,
+        "pay_order",
+        "idx_pay_order_transaction",
+        ("transaction_id",),
+        unique=True,
+        partial=True,
+    )
+    # v64:派活闭环。request_key 防重复派单；清单按店+模板+日期唯一，
+    # 定时生成当天清单靠这个唯一键幂等。
+    for table, name, columns, unique, partial in (
+        ("users", "idx_users_tenant_phone", ("tenant_id", "phone"), False, False),
+        ("staff_task", "idx_staff_task_assignee",
+         ("tenant_id", "assignee_user_id", "status", "due_at"), False, False),
+        ("staff_task", "idx_staff_task_branch",
+         ("tenant_id", "branch_id", "status"), False, False),
+        ("staff_task", "idx_staff_task_due",
+         ("tenant_id", "status", "due_at"), False, False),
+        ("staff_task", "idx_staff_task_request",
+         ("tenant_id", "request_key"), True, True),
+        ("staff_task_photo", "idx_staff_task_photo_task",
+         ("tenant_id", "task_id"), False, False),
+        ("staff_task_event", "idx_staff_task_event_task",
+         ("tenant_id", "task_id", "id"), False, False),
+        ("checklist_template", "idx_checklist_template_active",
+         ("tenant_id", "active"), False, False),
+        ("checklist_run", "idx_checklist_run_date",
+         ("tenant_id", "run_date", "status"), False, False),
+        ("checklist_run", "idx_checklist_run_assignee",
+         ("tenant_id", "assignee_user_id", "run_date"), False, False),
+    ):
+        _require_index_contract(
+            c, table, name, columns, unique=unique, partial=partial,
+        )
+    _require_unique_columns_contract(
+        c, "checklist_run", ("tenant_id", "branch_id", "template_id", "run_date"),
     )
 
 
@@ -2836,6 +3058,7 @@ def _initialize_anchor_locked(path: str):
           modules_json TEXT NOT NULL DEFAULT '[]',
           job_title TEXT NOT NULL DEFAULT 'staff',  -- member职级:director/manager/staff
           allowed_emp_idxs_json TEXT,           -- NULL=行业内全部;JSON数组=数字员工白名单
+          phone TEXT,                           -- v64:企业微信群 @提醒/短信用,可空
           enabled INTEGER NOT NULL DEFAULT 1,
           must_change_password INTEGER NOT NULL DEFAULT 0,
           created_at REAL, updated_at REAL
@@ -2963,6 +3186,46 @@ def _initialize_anchor_locked(path: str):
         CREATE UNIQUE INDEX IF NOT EXISTS idx_purchase_intent_subscription_op
           ON purchase_intent(subscription_op_key)
           WHERE subscription_op_key IS NOT NULL;
+        -- v63:微信支付 Native 扫码订单。金额只存服务端报价(分)，
+        -- 商户订单号全局唯一；开通走与人工确认到账同一套幂等入账。
+        CREATE TABLE IF NOT EXISTS pay_order(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tenant_id INTEGER NOT NULL,
+          created_by INTEGER NOT NULL,
+          channel TEXT NOT NULL DEFAULT 'wxpay_native',
+          intent_id INTEGER,
+          plan_key TEXT NOT NULL,
+          period_key TEXT NOT NULL,
+          plan_name TEXT NOT NULL,
+          period_label TEXT NOT NULL,
+          quoted_points REAL NOT NULL,
+          amount_fen INTEGER NOT NULL CHECK(amount_fen>0),
+          out_trade_no TEXT NOT NULL,
+          transaction_id TEXT,
+          status TEXT NOT NULL DEFAULT 'created'
+            CHECK(status IN ('created','paid','closed','refunded')),
+          code_url TEXT,
+          expires_at REAL NOT NULL,
+          last_query_at REAL,
+          paid_at REAL,
+          closed_at REAL,
+          close_reason TEXT,
+          subscription_op_key TEXT,
+          activation_error TEXT,
+          receipt_json TEXT,
+          notify_digest TEXT,
+          created_at REAL,
+          updated_at REAL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_order_out_trade_no
+          ON pay_order(out_trade_no);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_order_transaction
+          ON pay_order(transaction_id)
+          WHERE transaction_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_pay_order_tenant_created
+          ON pay_order(tenant_id,id DESC);
+        CREATE INDEX IF NOT EXISTS idx_pay_order_status_expires
+          ON pay_order(status,expires_at);
         CREATE TABLE IF NOT EXISTS wechat_draft_delivery(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           tenant_id INTEGER NOT NULL,
@@ -3451,6 +3714,8 @@ def _initialize_anchor_locked(path: str):
           completion_note TEXT NOT NULL DEFAULT '',
           closed_by INTEGER,
           closed_at REAL,
+          assignee_user_id INTEGER,
+          close_reason TEXT NOT NULL DEFAULT '',
           created_at REAL, updated_at REAL
         );
         CREATE INDEX IF NOT EXISTS idx_inspection_action_issue
@@ -3580,6 +3845,19 @@ def _initialize_anchor_locked(path: str):
         CREATE UNIQUE INDEX IF NOT EXISTS idx_store_branch_code
           ON store_branch(tenant_id,industry_key,store_code)
           WHERE store_code IS NOT NULL AND trim(store_code)<>'';
+
+        -- v62:成员负责门店。经理/员工只能看、操作绑定给自己的门店；
+        -- 老板/总监不依赖绑定。门店行业由 store_branch 反查，不在此冗余。
+        CREATE TABLE IF NOT EXISTS user_branch(
+          tenant_id INTEGER NOT NULL,
+          user_id INTEGER NOT NULL,
+          branch_id INTEGER NOT NULL,
+          created_by INTEGER,
+          created_at REAL NOT NULL,
+          PRIMARY KEY(user_id,branch_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_branch_branch
+          ON user_branch(tenant_id,branch_id);
 
         CREATE TABLE IF NOT EXISTS inspection_branch_import(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3765,6 +4043,140 @@ def _initialize_anchor_locked(path: str):
             _conn, "inspection_business_value", "row_version",
             "INTEGER NOT NULL DEFAULT 1",
         )
+        # v64:老板把活派给真人店员的闭环(派活任务/拍照交差/审计轨迹/开闭店清单)。
+        # 表与索引在第一次 _validate_migrated_database 之前建好，由那次校验覆盖，
+        # 不额外再整库校验一遍(每次约 0.8s)。旧库升级只加列/建表，无数据回填。
+        _add_column(_conn, "inspection_action", "assignee_user_id", "INTEGER")
+        # close_reason:'fixed'=已整改 / 'false_positive'=误报作废 / ''=未关闭。
+        # 不改 status 的 CHECK:误报用 status='closed' + close_reason='false_positive' 表达。
+        _add_column(
+            _conn, "inspection_action", "close_reason",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        _add_column(_conn, "users", "phone", "TEXT")
+        _execute_migration_script(_conn, """
+        CREATE INDEX IF NOT EXISTS idx_users_tenant_phone
+          ON users(tenant_id,phone);
+
+        -- 派给真人的任务。assignee_user_id 为空=还没指派给具体店员。
+        CREATE TABLE IF NOT EXISTS staff_task(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tenant_id INTEGER NOT NULL,
+          branch_id INTEGER,
+          assignee_user_id INTEGER,
+          title TEXT NOT NULL,
+          detail TEXT NOT NULL DEFAULT '',
+          source TEXT NOT NULL DEFAULT 'boss'
+            CHECK(source IN ('boss','checklist','inspection','ai_action')),
+          source_ref TEXT NOT NULL DEFAULT '',
+          require_photo INTEGER NOT NULL DEFAULT 1,
+          due_at REAL,
+          status TEXT NOT NULL DEFAULT 'todo'
+            CHECK(status IN ('todo','submitted','approved','rejected','cancelled')),
+          priority TEXT NOT NULL DEFAULT 'normal'
+            CHECK(priority IN ('low','normal','high')),
+          created_by INTEGER,
+          created_at REAL,
+          updated_at REAL,
+          submitted_at REAL,
+          submit_note TEXT NOT NULL DEFAULT '',
+          reviewed_at REAL,
+          reviewed_by INTEGER,
+          review_note TEXT NOT NULL DEFAULT '',
+          ai_check_json TEXT,
+          remind_count INTEGER NOT NULL DEFAULT 0,
+          last_remind_at REAL,
+          escalated_level INTEGER NOT NULL DEFAULT 0,
+          request_key TEXT,
+          deleted_at REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_staff_task_assignee
+          ON staff_task(tenant_id,assignee_user_id,status,due_at);
+        CREATE INDEX IF NOT EXISTS idx_staff_task_branch
+          ON staff_task(tenant_id,branch_id,status);
+        CREATE INDEX IF NOT EXISTS idx_staff_task_due
+          ON staff_task(tenant_id,status,due_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_task_request
+          ON staff_task(tenant_id,request_key)
+          WHERE request_key IS NOT NULL;
+
+        -- 店员交差照片。received_at 取服务器收到时间，作为拍摄时间证据。
+        CREATE TABLE IF NOT EXISTS staff_task_photo(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tenant_id INTEGER NOT NULL,
+          task_id INTEGER NOT NULL,
+          storage_key TEXT NOT NULL,
+          sha256 TEXT NOT NULL,
+          mime_type TEXT NOT NULL,
+          byte_size INTEGER NOT NULL,
+          width INTEGER,
+          height INTEGER,
+          received_at REAL NOT NULL,
+          watermark_text TEXT NOT NULL DEFAULT '',
+          created_by INTEGER,
+          created_at REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_staff_task_photo_task
+          ON staff_task_photo(tenant_id,task_id);
+
+        -- 任务审计轨迹 kind: created/assigned/submitted/approved/rejected/
+        -- reminded/escalated/cancelled/commented。
+        CREATE TABLE IF NOT EXISTS staff_task_event(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tenant_id INTEGER NOT NULL,
+          task_id INTEGER NOT NULL,
+          actor_user_id INTEGER,
+          kind TEXT NOT NULL,
+          note TEXT NOT NULL DEFAULT '',
+          created_at REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_staff_task_event_task
+          ON staff_task_event(tenant_id,task_id,id);
+
+        -- 开店/闭店/交班清单模板。items_json 每项 {key,text,require_photo}；
+        -- due_time 形如 '10:00'，北京时间。
+        CREATE TABLE IF NOT EXISTS checklist_template(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tenant_id INTEGER NOT NULL,
+          industry_key TEXT NOT NULL DEFAULT '',
+          kind TEXT NOT NULL
+            CHECK(kind IN ('open','close','handover','custom')),
+          name TEXT NOT NULL,
+          items_json TEXT NOT NULL DEFAULT '[]',
+          due_time TEXT NOT NULL DEFAULT '',
+          active INTEGER NOT NULL DEFAULT 1,
+          created_by INTEGER,
+          created_at REAL,
+          updated_at REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_checklist_template_active
+          ON checklist_template(tenant_id,active);
+
+        -- 某店某天(北京时间 run_date='YYYY-MM-DD')的一次清单。items_json 每项
+        -- {key,done,photo_ids,note,done_at,done_by}。
+        CREATE TABLE IF NOT EXISTS checklist_run(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tenant_id INTEGER NOT NULL,
+          branch_id INTEGER NOT NULL,
+          template_id INTEGER NOT NULL,
+          run_date TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'open'
+            CHECK(status IN ('open','done','missed')),
+          assignee_user_id INTEGER,
+          items_json TEXT NOT NULL DEFAULT '[]',
+          completed_at REAL,
+          completed_by INTEGER,
+          due_at REAL,
+          created_at REAL,
+          updated_at REAL,
+          UNIQUE(tenant_id,branch_id,template_id,run_date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_checklist_run_date
+          ON checklist_run(tenant_id,run_date,status);
+        CREATE INDEX IF NOT EXISTS idx_checklist_run_assignee
+          ON checklist_run(tenant_id,assignee_user_id,run_date);
+        """)
         # v53:行业决策员工目录版本化。新目录绝不复用 V1 idx；任务、线程和
         # 会议冻结员工身份，避免未来目录变更重写历史归因或重试语义。
         for col, typ in (
@@ -4013,6 +4425,60 @@ def _initialize_anchor_locked(path: str):
           ON employee_learning_artifact(run_id,status);
         """)
         _schema55_migrate(_conn, source_schema_version=found_version)
+        # v58:联网品牌资料先形成租户内版本化草稿。只有 confirmed 版本
+        # 是数字员工可读取的品牌事实；候选事实保留逐项网页引用或人工来源。
+        _execute_migration_script(_conn, """
+        CREATE TABLE IF NOT EXISTS brand_package(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tenant_id INTEGER NOT NULL,
+          version INTEGER NOT NULL CHECK(version >= 1),
+          brand_name TEXT NOT NULL CHECK(trim(brand_name) <> ''),
+          store_hint TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL CHECK(status IN ('draft','failed','confirmed','superseded')),
+          failure_reason TEXT,
+          created_by INTEGER,
+          confirmed_by INTEGER,
+          confirmed_at REAL,
+          created_at REAL NOT NULL,
+          updated_at REAL NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_brand_package_tenant_version
+          ON brand_package(tenant_id,version);
+        CREATE INDEX IF NOT EXISTS idx_brand_package_tenant_status
+          ON brand_package(tenant_id,status,created_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_brand_package_active
+          ON brand_package(tenant_id) WHERE status='confirmed';
+        CREATE TABLE IF NOT EXISTS brand_package_fact(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          package_id INTEGER NOT NULL,
+          fact_key TEXT NOT NULL,
+          value TEXT NOT NULL CHECK(trim(value) <> ''),
+          source_kind TEXT NOT NULL CHECK(source_kind IN ('web','manual')),
+          source_url TEXT,
+          source_title TEXT,
+          source_excerpt TEXT,
+          source_captured_at REAL NOT NULL,
+          source_sha256 TEXT,
+          created_at REAL NOT NULL,
+          updated_at REAL NOT NULL,
+          CHECK(source_kind='manual' OR (
+            source_url IS NOT NULL AND trim(source_url) <> '' AND
+            source_title IS NOT NULL AND trim(source_title) <> '' AND
+            source_excerpt IS NOT NULL AND trim(source_excerpt) <> ''
+          ))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_brand_package_fact_key
+          ON brand_package_fact(package_id,fact_key);
+        """)
+        # 早期 v58 预览库已建 brand_package，但尚无同名门店辨识提示。
+        # CREATE TABLE IF NOT EXISTS 不会补旧表列，需受控幂等迁移。
+        _add_column(_conn, "brand_package", "store_hint", "TEXT NOT NULL DEFAULT ''")
+        # v59:手机小队服务端持久编排与超级店长活动效果图附件。
+        # v60:候选图冻结必要文案并记录不可覆盖的人工复核历史。
+        # v61:候选图绑定计费操作；未结算图片不可见，重启可清理已退款候选图。
+        from . import brand_media_schema, teamrun_schema
+        teamrun_schema.install_schema(_conn)
+        brand_media_schema.install_schema(_conn)
         # 只把旧 tenants.industries_json 中显式列出的部门迁入规范化映射。
         # 非平台租户的空列表不再被老板看板解释为“全行业”。
         for tenant in _conn.execute(
@@ -4107,6 +4573,50 @@ def _initialize_anchor_locked(path: str):
         _conn.execute(
             "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
             "VALUES(57,'member-hierarchy-employee-allocation',?)",
+            (time.time(),),
+        )
+        # Keep the production 58–61 lineage canonical for fresh databases.
+        # An already-initialized offline v2 database may hold different 58–60
+        # names. INSERT OR IGNORE deliberately preserves that audit history;
+        # both feature sets have been installed and validated above regardless.
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(58,'reviewed-brand-knowledge-packages',?)",
+            (time.time(),),
+        )
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(59,'persistent-team-runs-and-activity-artwork',?)",
+            (time.time(),),
+        )
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(60,'activity-artwork-manual-review-audit',?)",
+            (time.time(),),
+        )
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(61,'activity-artwork-billing-link',?)",
+            (time.time(),),
+        )
+        # v62:成员-门店绑定。旧库升级不预置绑定，由老板分配门店。
+        # Keep existing bindings intact; migration must not delete user data.
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(62,'member-branch-scope',?)",
+            (time.time(),),
+        )
+        # v63:微信支付 Native 扫码订单；旧库升级不创建或回填订单。
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(63,'wxpay-native-pay-order',?)",
+            (time.time(),),
+        )
+        # v64:真人店员任务/拍照交差/审计/开闭店清单，以及 users.phone
+        # 和 inspection_action 的指派人与关闭原因。仅补缺失表、列与索引。
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(64,'staff-task-loop',?)",
             (time.time(),),
         )
         _conn.execute(f"PRAGMA user_version={LATEST_SCHEMA_VERSION}")

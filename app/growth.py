@@ -1034,8 +1034,19 @@ async def _public_lead_search(query: str, timeout: float = 12) -> list:
     return merged
 
 
-async def direct_lead_sources(industry: str, city: str, product: str) -> list:
-    """按四类意图并行检索，类别间轮询取样，避免单一查询占满结果。"""
+async def direct_lead_sources(industry: str, city: str, product: str,
+                              tenant_id: int = None, progress=None) -> list:
+    """按四类意图并行检索，类别间轮询取样，避免单一查询占满结果。
+
+    第 3 期:这一步直接抓 DuckDuckGo/必应搜索结果网页，受平台开关
+    lead_search_scrape 控制(默认关闭);关闭时不发任何抓取请求，说明原因后
+    返回空列表，由调用方改走正规联网检索服务。
+    """
+    from . import features
+    if not await db.arun(features.is_enabled, "lead_search_scrape", tenant_id):
+        if progress:
+            progress("search", features.off_hint("lead_search_scrape"))
+        return []
     sector = _lead_search_term(industry, fallback="通用行业", limit=120)
     place = _lead_search_term(city, fallback="全国", limit=80)
     offer = _lead_search_term(product, fallback=sector or "产品服务", limit=160)
@@ -1591,8 +1602,9 @@ async def leads_radar(tid: int, industry: str, city: str, product: str,
         product, fallback=safe_industry or "相关产品服务", limit=160
     )
     progress("search", "正在按四类购买信号检索公开原帖…")
+    # 平台关闭搜索引擎网页抓取时，这一步会说明原因并直接返回空，走下方正规联网检索
     direct_candidates = await direct_lead_sources(
-        safe_industry, safe_city, safe_product
+        safe_industry, safe_city, safe_product, tenant_id=tid, progress=progress
     )
     direct_sources = await verify_lead_sources(direct_candidates)
     if direct_sources:
@@ -1806,12 +1818,25 @@ async def bench_report(tid: int, save: bool = True) -> dict:
 
 # ---------------- ⑦ 口播矩阵:一稿裂变 N 变体 ----------------
 async def script_variants(tid: int, script: str, n: int, styles: str) -> dict:
+    from . import brand_package, textvideo
+    from .skills.registry import company_block
+
     n = max(2, min(int(n or 3), 6))
+    active_brand = await db.arun(brand_package.get_active, tid)
+    brand_review = textvideo.review_user_script_brand(
+        tid, "", script, active_brand=active_brand,
+    )
+    if brand_review["blocking"]:
+        raise textvideo.BrandCopyMismatch(brand_review["blocking"][0])
+    company_context = await db.arun(company_block, tid)
     r = await _call_toolbox_employee_json(
         4,
         f"""把下面这篇口播稿裂变成 {n} 个不同版本,用于多账号矩阵发布(平台查重不能撞车)。
+【已确认品牌知识包优先于原稿与旧企业资料】
+{company_context or '(暂无企业档案)'}
 【裂变硬性标准】
 - 先从原稿提炼"必须保留的核心信息清单"(观点/数字/行动号召),每个版本都要完整覆盖;
+- 原稿由老板提供，不要暗改品牌、店名、口号、理念、招牌；与已确认品牌事实冲突的说法不得扩散，不能凭空补价格或活动；
 - 每版换:开头钩子、叙事顺序、例子和说法;任意两版开头 20 字不得相似,句式结构不得雷同;
 - 钩子必须是完整的第一句话,用悬念/反差/数字/提问其中一种,禁止"今天给大家分享"式开头;
 - 口语化,短句为主,每版 150-250 字,结尾都要有一句行动号召(各版说法不同)。
@@ -1820,7 +1845,24 @@ async def script_variants(tid: int, script: str, n: int, styles: str) -> dict:
 {script[:2500]}
 只输出 JSON:{{"variants":[{{"style":"版本风格名","hook":"开头钩子一句","script":"完整口播稿"}}]}}""",
         timeout=600)
-    return {**r["data"], "cost_usd": r["cost_usd"], "tokens": r["tokens"]}
+    data = r["data"]
+    for item in data.get("variants") or []:
+        if not isinstance(item, dict):
+            continue
+        candidate = textvideo.review_user_script_brand(
+            tid, "", item.get("script") or "", active_brand=active_brand,
+        )
+        if candidate["blocking"]:
+            raise textvideo.BrandCopyMismatch(
+                "裂变结果中的品牌或店名与已确认品牌知识包不一致，请重试。"
+            )
+    return {
+        **data,
+        "brand_warnings": brand_review["warnings"],
+        "brand_version": brand_review["brand_version"],
+        "cost_usd": r["cost_usd"],
+        "tokens": r["tokens"],
+    }
 
 
 # ---------------- ⑬ 菜单/产品文案 + 产品图美化 ----------------

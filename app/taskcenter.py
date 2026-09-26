@@ -383,7 +383,7 @@ def _safe_json_search_sql(
 
 
 def _visible_header_query(tenant_id: int, allowed_modules: set[str],
-                          q: str = "") -> tuple[str, list]:
+                          q: str = "", viewer=None) -> tuple[str, list]:
     """构造只含排序/计数列的跨业务表 UNION，不触碰正文和结果 JSON。
 
     q 非空时每臂按各自的"标题字段"做参数化 LIKE:计数与分页天然同源,
@@ -436,16 +436,26 @@ def _visible_header_query(tenant_id: int, allowed_modules: set[str],
         if str(value).strip() not in {"", "unknown", "__denied__"}
     }
     if inspection_modules:
+        # 经理/员工只看绑定给自己的门店的巡店任务(与巡店页同一口径)。
+        branch_clause, branch_args = "", []
+        if viewer is not None and not inspection.sees_all_branches(viewer):
+            branch_clause = (
+                " AND iv.branch_id IN (SELECT ub.branch_id FROM user_branch ub "
+                "WHERE ub.tenant_id=task.tenant_id AND ub.user_id=?)"
+            )
+            branch_args = [int(viewer.get("id") or 0)]
         add(
             "expert", "task", "status",
             "tenant_id=? AND deleted_at IS NULL AND emp_idx=? AND EXISTS("
             "SELECT 1 FROM inspection_visit iv WHERE iv.task_id=task.id "
             "AND iv.tenant_id=task.tenant_id AND iv.deleted_at IS NULL "
-            "AND iv.industry_key IN (SELECT value FROM json_each(?)))",
+            "AND iv.industry_key IN (SELECT value FROM json_each(?))"
+            + branch_clause + ")",
             (
                 tenant_id,
                 inspection.EMPLOYEE_IDX,
                 _json_array(inspection_modules),
+                *branch_args,
             ),
             search_expr=_safe_json_search_sql(
                 "brief_json", "$.direction"
@@ -532,6 +542,7 @@ def list_items(
     q: str = "",
     status: str = "all",
     kind: str = "all",
+    viewer=None,
 ) -> dict:
     """返回当前租户可见的统一任务流。
 
@@ -552,7 +563,7 @@ def list_items(
     kind_counts: dict[str, int] = {}
 
     headers_sql, header_args = _visible_header_query(
-        tenant_id, allowed_modules, q=q
+        tenant_id, allowed_modules, q=q, viewer=viewer
     )
     if not headers_sql:
         counts["open"] = 0

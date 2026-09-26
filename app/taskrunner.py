@@ -6,17 +6,105 @@
 import asyncio
 import json
 import logging
+import math
 import re
+import threading
 import time
 
-from . import billing, db, departments, employeeidentity, employees, llm, providers
+from . import billing, bossbrief, db, departments, employeeidentity, employees, llm, providers
 
 log = logging.getLogger("taskrunner")
 
 RUNNING: set = set()   # task_id 正在执行
+WORKER_TASKS: dict[int, asyncio.Task] = {}
+_FOLLOW_ON_WORKERS: dict[int, tuple[asyncio.Task, object]] = {}
+_WORKER_LOCK = threading.RLock()
 MAX_FREE_RETRIES = 3
 _MEETING_DELIVERY_START = "<!-- execution-deliveries:start -->"
 _MEETING_DELIVERY_END = "<!-- execution-deliveries:end -->"
+
+
+def _spawn_worker_locked(task_id: int, broadcast) -> asyncio.Task:
+    task = asyncio.create_task(run_task(task_id, broadcast))
+    WORKER_TASKS[task_id] = task
+    task.add_done_callback(
+        lambda done: _worker_finished(task_id, done)
+    )
+    return task
+
+
+def _worker_finished(task_id: int, done: asyncio.Task) -> None:
+    """Release only this worker generation and hand a queued retry forward."""
+    with _WORKER_LOCK:
+        if WORKER_TASKS.get(task_id) is done:
+            WORKER_TASKS.pop(task_id, None)
+            # A cancellation can arrive during preparation, before run_task's
+            # provider-level finally exists.  Only the owning generation may
+            # clear this guard; a stale callback must not erase its successor.
+            RUNNING.discard(task_id)
+            follow_on = _FOLLOW_ON_WORKERS.get(task_id)
+            if follow_on is not None and follow_on[0] is done:
+                _FOLLOW_ON_WORKERS.pop(task_id, None)
+                if not done.cancelled():
+                    _spawn_worker_locked(task_id, follow_on[1])
+        else:
+            follow_on = _FOLLOW_ON_WORKERS.get(task_id)
+            if follow_on is not None and follow_on[0] is done:
+                _FOLLOW_ON_WORKERS.pop(task_id, None)
+    if done.cancelled():
+        return
+    try:
+        error = done.exception()
+    except asyncio.CancelledError:
+        return
+    if error is not None:
+        log.error(
+            "expert worker exited unexpectedly task=%s error_type=%s",
+            task_id,
+            type(error).__name__,
+        )
+
+
+def start_worker(task_id: int, broadcast) -> asyncio.Task:
+    """Start one worker, retaining one follow-on request during finalization."""
+    task_id = int(task_id)
+    with _WORKER_LOCK:
+        existing = WORKER_TASKS.get(task_id)
+        if existing is not None and not existing.done():
+            # A failed row can be re-queued from the error progress callback
+            # before its old worker has returned.  Remember one successor so
+            # that retry is not stranded in queued state.
+            _FOLLOW_ON_WORKERS[task_id] = (existing, broadcast)
+            return existing
+        if existing is not None:
+            pending = _FOLLOW_ON_WORKERS.get(task_id)
+            if pending is not None and pending[0] is existing:
+                _FOLLOW_ON_WORKERS.pop(task_id, None)
+            RUNNING.discard(task_id)
+        return _spawn_worker_locked(task_id, broadcast)
+
+
+def cancel_worker(task_id: int) -> bool:
+    """Thread-safe cancellation for workers waiting before subprocess spawn."""
+    task_id = int(task_id)
+    with _WORKER_LOCK:
+        task = WORKER_TASKS.get(task_id)
+        if task is None:
+            return False
+        pending = _FOLLOW_ON_WORKERS.get(task_id)
+        if pending is not None and pending[0] is task:
+            _FOLLOW_ON_WORKERS.pop(task_id, None)
+        if task.done():
+            return False
+    try:
+        loop = task.get_loop()
+        if loop.is_running():
+            loop.call_soon_threadsafe(task.cancel)
+        else:
+            task.cancel()
+    except RuntimeError:
+        task.cancel()
+    return True
 
 
 def _approved_effective_role_context(binding: dict) -> dict:
@@ -400,8 +488,11 @@ def _meeting_delivery_section(
         elif row["status"] == "done":
             delivered += 1
             state = "已交付"
-            body = (row["summary_md"] or row["output_md"] or "").strip()
-            detail = " ".join(body.split())[:500]
+            if (row["summary_md"] or "").strip():
+                # 速览是「结论 + 行动 + 留意」的结构化卡片，压成一行引用。
+                detail = bossbrief.one_line(row["summary_md"], 500)
+            else:
+                detail = " ".join((row["output_md"] or "").split())[:500]
         elif row["status"] == "failed":
             failed += 1
             state = "执行失败，可免费重试"
@@ -508,8 +599,6 @@ def prepare_retry(
             "output_md=NULL",
             "summary_md=NULL",
             "steps_json='[]'",
-            "cost_usd=0",
-            "tokens=0",
             "terminal_at=NULL",
             "retry_count=COALESCE(retry_count,0)+1",
             "updated_at=?",
@@ -540,7 +629,13 @@ def prepare_retry(
         return True
 
 
-def settle_failure(task_id: int, message: str) -> bool:
+def settle_failure(
+    task_id: int,
+    message: str,
+    *,
+    cost_usd: float | None = None,
+    tokens: int | None = None,
+) -> bool:
     """把专家任务收口；独立付费任务按实际金额幂等退款，会议内含任务不退款。"""
     row = db.one(
         "SELECT tenant_id,status,billing_status,billing_points,source_meeting_id "
@@ -550,6 +645,17 @@ def settle_failure(task_id: int, message: str) -> bool:
     if not row:
         return False
     text = (message or "执行失败")[:500]
+    try:
+        safe_cost = float(cost_usd) if cost_usd is not None else None
+    except (TypeError, ValueError, OverflowError):
+        safe_cost = None
+    if safe_cost is not None and (
+        not math.isfinite(safe_cost) or safe_cost < 0
+    ):
+        safe_cost = None
+    safe_tokens = (
+        llm.safe_usage_tokens(tokens) if tokens is not None else None
+    )
     if row.get("billing_status") == "charged":
         points = row.get("billing_points")
         if points is None:  # 仅兼容升级前已扣费、尚未收口的旧任务。
@@ -561,11 +667,22 @@ def settle_failure(task_id: int, message: str) -> bool:
             terminal_at = time.time()
             changed = connection.execute(
                 "UPDATE task SET status='failed',billing_status='refunded',"
-                "output_md=?,terminal_at=COALESCE(terminal_at,?),"
+                "output_md=?,cost_usd=COALESCE(cost_usd,0)+COALESCE(?,0),"
+                "tokens=MIN(COALESCE(tokens,0)+COALESCE(?,0),?),"
+                "terminal_at=COALESCE(terminal_at,?),"
                 "refunded_at=?,updated_at=? "
                 "WHERE id=? AND billing_status='charged' "
                 "AND status IN ('pending_charge','queued','running','failed')",
-                (text, terminal_at, terminal_at, terminal_at, task_id),
+                (
+                    text,
+                    safe_cost,
+                    safe_tokens,
+                    llm.MAX_RECORDED_TOKENS,
+                    terminal_at,
+                    terminal_at,
+                    terminal_at,
+                    task_id,
+                ),
             )
             if changed.rowcount == 1 and row.get("source_meeting_id"):
                 _sync_meeting_delivery(
@@ -585,10 +702,21 @@ def settle_failure(task_id: int, message: str) -> bool:
     with db.atomic() as connection:
         terminal_at = time.time()
         changed = connection.execute(
-            "UPDATE task SET status='failed',output_md=?,terminal_at=?,updated_at=? "
+            "UPDATE task SET status='failed',output_md=?,"
+            "cost_usd=COALESCE(cost_usd,0)+COALESCE(?,0),"
+            "tokens=MIN(COALESCE(tokens,0)+COALESCE(?,0),?),"
+            "terminal_at=?,updated_at=? "
             "WHERE id=? AND billing_status='included' "
             "AND status IN ('queued','running')",
-            (text, terminal_at, terminal_at, task_id),
+            (
+                text,
+                safe_cost,
+                safe_tokens,
+                llm.MAX_RECORDED_TOKENS,
+                terminal_at,
+                terminal_at,
+                task_id,
+            ),
         )
         if changed.rowcount == 1 and row.get("source_meeting_id"):
             _sync_meeting_delivery(
@@ -598,6 +726,159 @@ def settle_failure(task_id: int, message: str) -> bool:
                 int(task_id),
             )
         return changed.rowcount == 1
+
+
+async def _settle_failure_safely(
+    task_id: int, message: str, *, cost_usd: float | None = None,
+    tokens: int | None = None,
+) -> bool:
+    """失败结算的兜底:结算本身再出错时,至少把任务标成失败(保留 charged)。
+
+    保留 billing_status='charged' 是有意的:看门狗与启动对账会对
+    failed+charged 再补一次幂等退款,绝不让任务卡在排队中/执行中又已扣费。
+    """
+    try:
+        return bool(await db.arun(
+            settle_failure, task_id, message, cost_usd=cost_usd, tokens=tokens,
+        ))
+    except Exception as exc:
+        log.error(
+            "task %s failure settlement failed error_type=%s",
+            task_id,
+            type(exc).__name__,
+        )
+    try:
+        now = time.time()
+        await db.aexecute(
+            "UPDATE task SET status='failed',output_md=?,"
+            "terminal_at=COALESCE(terminal_at,?),updated_at=? "
+            "WHERE id=? AND status IN ('queued','running')",
+            ((message or "执行失败")[:500], now, now, task_id),
+        )
+    except Exception as exc:
+        log.error(
+            "task %s failure fallback failed error_type=%s",
+            task_id,
+            type(exc).__name__,
+        )
+    return False
+
+
+async def _fail_running_task(
+    task_id: int, public_error: str, progress, *,
+    cost_usd: float | None = None, tokens: int | None = None,
+) -> bool:
+    """先保存失败步骤并结算，再广播失败；立即重试能看到已退款状态。
+
+    进度写库条件是 status='running',必须在结算把状态改成 failed 之前
+    写入并冲刷,否则失败步骤会被条件更新静默丢掉。
+    """
+    emit_error = None
+    try:
+        emit_error = progress("error", public_error, defer_broadcast=True)
+        await db.adrain()
+    except Exception as exc:
+        log.warning(
+            "task %s error step persist failed error_type=%s",
+            task_id,
+            type(exc).__name__,
+        )
+    settled = await _settle_failure_safely(
+        task_id, public_error, cost_usd=cost_usd, tokens=tokens,
+    )
+    if settled:
+        await _notify_task_outcome_async(task_id, False)
+    if emit_error is not None:
+        emit_error()
+    return settled
+
+
+async def _claim_or_settle(task_id: int) -> dict | None:
+    """CAS 抢占任务;抢占本身出错时安全收口,不让已扣费任务停在排队中。"""
+    try:
+        return await db.arun(_claim_task, task_id)
+    except Exception as exc:
+        log.error(
+            "task %s claim failed error_type=%s",
+            task_id,
+            type(exc).__name__,
+        )
+    if await _settle_failure_safely(
+        task_id, "任务启动时出错，已安全停止，点数已自动退回，可以重新派一次"
+    ):
+        await _notify_task_outcome_async(task_id, False)
+    return None
+
+
+def _task_notice_meta(task_id: int) -> dict | None:
+    row = db.one(
+        "SELECT id,tenant_id,brief_json,employee_name_snapshot,billing_status,"
+        "source_meeting_id FROM task WHERE id=?",
+        (task_id,),
+    )
+    if not row:
+        return None
+    brief = db.jloads(row.get("brief_json"), {}) or {}
+    title = " ".join(str(
+        (brief.get("direction") if isinstance(brief, dict) else "") or "专家任务"
+    ).split())
+    if len(title) > 24:
+        title = title[:24] + "…"
+    name = str(row.get("employee_name_snapshot") or "").strip() or "专家"
+    return {**row, "title": title, "name": name}
+
+
+def notify_task_outcome(task_id: int, ok: bool, reason: str = "") -> bool:
+    """专家任务完成/失败通知老板(站内 + 企微)。任何故障只记日志,绝不影响任务状态。
+
+    会议派生的任务交付由会议统一通知,这里只在它失败时提醒(老板要去重试)。
+    """
+    try:
+        from . import notify
+        meta = _task_notice_meta(task_id)
+        if not meta:
+            return False
+        if ok and meta.get("source_meeting_id"):
+            return False
+        if ok:
+            report_name = "专家任务已完成"
+            summary = (
+                f"【{meta['name']}】帮你做的《{meta['title']}》已完成，点开看结论"
+            )
+        else:
+            report_name = "专家任务没做完"
+            refund = (
+                "点数已自动退回，"
+                if meta.get("billing_status") == "refunded" else ""
+            )
+            summary = (
+                f"【{meta['name']}】帮你做的《{meta['title']}》"
+                f"{reason or '没有做完'}，{refund}点开可以重新派一次"
+            )
+        notify.push(int(meta.get("tenant_id") or 1), "task_outcome", {
+            "report_name": report_name,
+            "summary": summary,
+            "link": f"#/tasks/{int(task_id)}",
+        })
+        return True
+    except Exception as exc:
+        log.warning(
+            "task %s outcome notify failed error_type=%s",
+            task_id,
+            type(exc).__name__,
+        )
+        return False
+
+
+async def _notify_task_outcome_async(task_id: int, ok: bool, reason: str = ""):
+    try:
+        await asyncio.to_thread(notify_task_outcome, task_id, ok, reason)
+    except Exception as exc:
+        log.warning(
+            "task %s outcome notify skipped error_type=%s",
+            task_id,
+            type(exc).__name__,
+        )
 
 
 def _context_text(tid: int, query: str = "", *, with_meta: bool = False):
@@ -610,75 +891,108 @@ async def run_task(task_id: int, broadcast):
     from .skills import registry
     if task_id in RUNNING:
         return
-    t = await db.aone(
-        "SELECT * FROM task WHERE id=? AND deleted_at IS NULL", (task_id,)
-    )
-    if not t or t["status"] != "queued":
-        return
-    idx = t["emp_idx"]
-    binding = await db.arun(employeeidentity.resolve_task_binding, t)
-    if not binding:
-        await db.arun(
-            settle_failure,
-            task_id,
-            "员工身份、岗位配置或能力包版本不匹配，已安全停止并退回点数",
-        )
-        return
+    # 从读库起就占住进程内运行集:看门狗据此判断「确实没人在跑」,
+    # 会议接力轮询重复拉起时也不会并发进入准备阶段。
+    RUNNING.add(task_id)
+    claimed = False
     try:
-        effective_role = _approved_effective_role_context(binding)
-    except (TypeError, ValueError) as exc:
-        await db.arun(
-            settle_failure,
-            task_id,
-            "员工已批准能力包无法验证，已安全停止并退回点数",
+        t = await db.aone(
+            "SELECT * FROM task WHERE id=? AND deleted_at IS NULL", (task_id,)
         )
-        log.warning(
-            "task %s role bundle rejected error_type=%s",
+        if not t or t["status"] != "queued":
+            return
+        idx = t["emp_idx"]
+        try:
+            binding = await db.arun(employeeidentity.resolve_task_binding, t)
+        except Exception as exc:
+            log.error(
+                "task %s binding resolution failed error_type=%s",
+                task_id,
+                type(exc).__name__,
+            )
+            binding = None
+        if not binding:
+            if await _settle_failure_safely(
+                task_id,
+                "员工身份、岗位配置或能力包版本不匹配，已安全停止并退回点数",
+            ):
+                await _notify_task_outcome_async(task_id, False)
+            return
+        try:
+            effective_role = _approved_effective_role_context(binding)
+        except (TypeError, ValueError) as exc:
+            log.warning(
+                "task %s role bundle rejected error_type=%s",
+                task_id,
+                type(exc).__name__,
+            )
+            if await _settle_failure_safely(
+                task_id,
+                "员工已批准能力包无法验证，已安全停止并退回点数",
+            ):
+                await _notify_task_outcome_async(task_id, False)
+            return
+        e = effective_role["employee"]
+        cfg = effective_role["config"]
+        role_bundle = effective_role["role_bundle"]
+        effective_profile = effective_role["effective_profile"]
+        workflow = effective_role["workflow"]
+        capabilities = effective_role["capabilities"]
+        skills = effective_role["skills"]
+        solo_content = e.get("dept_key") == "content"
+        if solo_content:
+            s = e
+            e = {**s, "name": s["name"], "dept_name": "内容生产部", "group": s["dept"]}
+        required_modules = (
+            (str(e.get("dept_key") or "content"),)
+            if e
+            else ("content",)
+        )
+        claimed_row = await _claim_or_settle(task_id)
+        if not claimed_row:
+            return
+        t = claimed_row
+        claimed = True
+    except Exception as exc:
+        # 抢占前任何意外(读库/身份解析以外的数据异常)都要收口,不能让
+        # 已扣费任务停在排队中。
+        log.error(
+            "task %s startup failed error_type=%s",
             task_id,
             type(exc).__name__,
         )
+        if await _settle_failure_safely(
+            task_id, "任务启动时出错，已安全停止，点数已自动退回，可以重新派一次"
+        ):
+            await _notify_task_outcome_async(task_id, False)
         return
-    e = effective_role["employee"]
-    cfg = effective_role["config"]
-    role_bundle = effective_role["role_bundle"]
-    effective_profile = effective_role["effective_profile"]
-    workflow = effective_role["workflow"]
-    capabilities = effective_role["capabilities"]
-    skills = effective_role["skills"]
-    solo_content = e.get("dept_key") == "content"
-    if solo_content:
-        s = e
-        e = {**s, "name": s["name"], "dept_name": "内容生产部", "group": s["dept"]}
-    required_modules = (
-        (str(e.get("dept_key") or "content"),)
-        if e
-        else ("content",)
-    )
-    t = await db.arun(_claim_task, task_id)
-    if not t:
-        return
-    RUNNING.add(task_id)
+    finally:
+        if not claimed:
+            RUNNING.discard(task_id)
     steps = []
     st = {"save": 0.0}
 
-    def progress(kind, label=""):
+    def progress(kind, label="", *, defer_broadcast=False):
         now = time.time()
         if kind == "typing" and steps and steps[-1]["k"] == "typing":
             steps[-1].update(l=str(label)[:300], ts=now)
         else:
             steps.append({"k": kind, "l": str(label)[:300], "ts": now})
-        _broadcast_safely(
-            broadcast,
-            {
-                "type": "task_step",
-                "tenant_id": t.get("tenant_id") or 1,
-                "_required_modules": required_modules,
-                "task_id": task_id,
-                "idx": t["emp_idx"],
-                "n": len(steps),
-                "step": steps[-1],
-            },
-        )
+        event = {
+            "type": "task_step",
+            "tenant_id": t.get("tenant_id") or 1,
+            "_required_modules": required_modules,
+            "task_id": task_id,
+            "idx": t["emp_idx"],
+            "n": len(steps),
+            "step": dict(steps[-1]),
+        }
+
+        def emit():
+            _broadcast_safely(broadcast, event)
+
+        if not defer_broadcast:
+            emit()
         if kind != "typing" or now - st["save"] > 3:
             # 事件循环上的进度落库进 db 线程池,避免写锁竞争冻结全部协程。
             db.submit_write(
@@ -688,6 +1002,7 @@ async def run_task(task_id: int, broadcast):
                 (json.dumps(steps, ensure_ascii=False), now, task_id),
             )
             st["save"] = now
+        return emit
 
     async def cleanup():
         RUNNING.discard(task_id)
@@ -758,9 +1073,20 @@ async def run_task(task_id: int, broadcast):
             caps = departments.capabilities_for(
                 idx, cfg.get("caps_off"), employee=e
             )
+            # 员工自动进化:老板历次验收采纳的实战心得,随岗位配置注入本次任务。
+            insights_text = await db.arun(
+                employees.adopted_insights_text,
+                int(t.get("tenant_id") or 1), idx,
+            )
+            if insights_text:
+                progress(
+                    "tool",
+                    f"已装载老板验收沉淀的实战心得 {insights_text.count(chr(10)) + 1} 条",
+                )
             prompt = departments.build_task_prompt(
                 e, brief, employees.skills_block(idx, config=cfg), ctx_text, caps,
                 private_template=cfg.get("prompt_template"),
+                insights_text=insights_text,
             )
             # 产品承诺「派活即联网核实」:所有产业专家都经能力网关先核实事实与数据。
             web = True
@@ -797,8 +1123,7 @@ async def run_task(task_id: int, broadcast):
         )
         public_error = providers.public_failure_message(exc)
         try:
-            await db.arun(settle_failure, task_id, public_error)
-            progress("error", public_error)
+            await _fail_running_task(task_id, public_error, progress)
         finally:
             await cleanup()
         return
@@ -838,7 +1163,9 @@ async def run_task(task_id: int, broadcast):
         def _commit_delivery():
             with db.atomic() as connection:
                 changed = connection.execute(
-                    "UPDATE task SET status='done',output_md=?,cost_usd=?,tokens=?,"
+                    "UPDATE task SET status='done',output_md=?,"
+                    "cost_usd=COALESCE(cost_usd,0)+?,"
+                    "tokens=MIN(COALESCE(tokens,0)+?,?),"
                     "steps_json=?,billing_status=CASE WHEN billing_status='charged' "
                     "THEN 'succeeded' ELSE billing_status END,terminal_at=?,updated_at=? "
                     "WHERE id=? AND status='running' "
@@ -847,7 +1174,8 @@ async def run_task(task_id: int, broadcast):
                     (
                         md,
                         r["cost_usd"] + extra_cost,
-                        r["tokens"],
+                        llm.safe_usage_tokens(r.get("tokens")),
+                        llm.MAX_RECORDED_TOKENS,
                         json.dumps(steps, ensure_ascii=False),
                         now,
                         now,
@@ -883,9 +1211,17 @@ async def run_task(task_id: int, broadcast):
         if md_done:
             progress("done", f"交付完成 · ${r['cost_usd']:.3f}")
     except llm.LLMError as ex:
+        log.warning(
+            "task %s model execution failed error_type=%s",
+            task_id,
+            type(ex).__name__,
+        )
         public_error = providers.public_failure_message(ex)
-        await db.arun(settle_failure, task_id, public_error)
-        progress("error", public_error)
+        await _fail_running_task(
+            task_id, public_error, progress,
+            cost_usd=getattr(ex, "cost_usd", None),
+            tokens=getattr(ex, "tokens", None),
+        )
     except Exception as exc:
         log.error(
             "task %s failed error_type=%s",
@@ -893,12 +1229,14 @@ async def run_task(task_id: int, broadcast):
             type(exc).__name__,
         )
         public_error = providers.public_failure_message(exc)
-        await db.arun(settle_failure, task_id, public_error)
-        progress("error", public_error)
+        await _fail_running_task(task_id, public_error, progress)
     finally:
         await cleanup()
-    # 任务已交付(done)后再补「老板速览」——绝不拖慢交付感知,失败也不回退状态
-    if md_done and len(md_done) > DIGEST_MIN_CHARS:
+    if md_done:
+        await _notify_task_outcome_async(task_id, True)
+    # 任务已交付(done)后再补「老板速览」——绝不拖慢交付感知,失败也不回退状态。
+    # 不论长短都生成:老板只看结论卡,全文默认折叠。
+    if md_done:
         await _gen_summary(
             task_id,
             md_done,
@@ -911,6 +1249,7 @@ async def run_task(task_id: int, broadcast):
         )
 
 
+# 历史常量:以前只有超过这个字数才生成速览;现在不论长短都生成,保留名字给旧引用。
 DIGEST_MIN_CHARS = 1500
 
 # 篇幅硬保障:提示词软约束压不住 6000 字岗位手册的输出惯性,超过容忍线就再走一道压缩。
@@ -968,7 +1307,11 @@ def _decision_summary_lines(
     employee: dict,
     decision_gate: dict | None = None,
 ) -> list[str]:
-    """从已门禁正文生成 V2 摘要，不再让二次模型改写安全字段。"""
+    """从已门禁正文生成 V2 速览，不再让二次模型改写安全字段。
+
+    结构与普通速览一致（一句话结论 + 3 条行动 + 要留意），结论和行动由门禁
+    状态决定；审批边界、禁止动作等把关信息用大白话放进「补充说明」。
+    """
     if decision_gate is not None:
         gate = decision_gate
     else:
@@ -990,30 +1333,57 @@ def _decision_summary_lines(
     gap_state = departments._decision_gap_state(gap_sections)
     gap_detail = " ".join(" ".join(str(item).split()) for item in gap_sections).strip()
     if gap_state == "none":
-        gap_line = "已声明无未闭合数据缺口（仍需人工复核）"
+        gap_line = "专家说资料已经齐了（仍需您人工复核）"
     elif gap_state == "present":
-        gap_line = f"存在未闭合数据缺口：{gap_detail[:320] or '见原始输出'}"
+        gap_line = f"还缺这些资料：{gap_detail[:320] or '见完整报告'}"
     else:
-        gap_line = "数据缺口声明缺失，必须补齐后重审"
+        gap_line = "专家没说明还缺哪些资料，需补齐后重新复核"
     approval = str(contract.get("approval_boundary") or "未加载有效审批边界；必须人工复核").strip()
     forbidden = "；".join(str(item).strip() for item in contract.get("forbidden_actions") or () if str(item).strip())
     if not forbidden:
         forbidden = "不得执行任何业务写操作"
-    lines = [
-        f"- 决策状态：{gate.get('status') or 'HOLD'}",
-        "- 人工审批语义：GO 仅表示可进入人工审批，不代表允许系统自动执行任何业务写操作。",
-        "- 用户提交覆盖：" + str(
+    status = str(gate.get("status") or "HOLD")
+    extra = [
+        f"决策状态：{status}",
+        "人工审批：GO 只代表可以进入人工审批，系统不会自动替您执行任何操作。",
+        "您提供的资料：" + str(
             gate.get("coverage_text")
-            or "覆盖状态不可用；内容未核验"
+            or "暂时统计不到；内容未核验"
         ),
-        f"- 数据缺口：{gap_line}",
-        f"- 审批边界：{approval}",
-        f"- 禁止动作：{forbidden}",
+        f"数据缺口：{gap_line}",
+        f"审批边界（哪些事必须您点头）：{approval}",
+        f"禁止动作：{forbidden}",
     ]
     reasons = [str(reason).strip() for reason in gate.get("reasons") or () if str(reason).strip()]
     if reasons:
-        lines.append(f"- 门禁原因：{'；'.join(dict.fromkeys(reasons))}")
-    return lines
+        extra.append(f"为什么先别动：{'；'.join(dict.fromkeys(reasons))}")
+    brief = bossbrief.decision_brief(
+        status, gap_detail if gap_state == "present" else ""
+    )
+    text = bossbrief.format_brief(
+        brief["verdict"], brief["actions"], brief["watch"], extra
+    )
+    return text.split("\n")
+
+
+def _summary_points(raw) -> list[str]:
+    """把模型给的 points 规整成 ≤5 条要点（字符串不逐字拆开）。"""
+    return bossbrief.as_items(raw, 5, 60)
+
+
+def _boss_brief_prompt(md: str) -> str:
+    return (
+        "你是给「很忙的实体店老板」做速览的助理。下面是数字员工刚交付的完整产出(Markdown)。\n"
+        "老板只看手机上的一张卡片,请压缩成:\n"
+        "1)verdict:一句话结论,不超过 40 字,直接说做不做/怎么判断;\n"
+        "2)actions:正好 3 条今天或本周就能做的具体动作,每条不超过 40 字,"
+        "写成「谁:做什么」(如「店长:周六前把引流品换到门口货架」),必须具体到人、动作、数字;\n"
+        "3)watch:一条最需要提防的风险(可选,没有就给空字符串)。\n"
+        "不要空话套话,不要专业术语。\n"
+        '只输出 JSON:{"verdict":"一句话结论","actions":["谁:做什么","谁:做什么","谁:做什么"],'
+        '"watch":"风险提醒"}\n\n'
+        "【完整产出】\n" + md[:8000]
+    )
 
 
 async def _gen_summary(
@@ -1026,10 +1396,11 @@ async def _gen_summary(
     decision_gate: dict | None = None,
     config: dict | None = None,
 ):
-    """给「很忙的老板」补一张十秒读完的速览卡:3-5 条要点 + 一句话行动建议。
+    """给「很忙的老板」补一张十秒读完的速览卡:一句话结论 + 3 条行动 + 风险提醒。
 
-    全程 try/except,失败静默(summary_md 留空),绝不影响已交付的产出;
-    走通用文本模型(非联网),不额外扣用户点数。
+    不论篇幅长短都生成。先走通用文本模型(非联网,不额外扣用户点数);
+    模型失败或结果不完整时从正文按规则兜底抽取,保证总有行动。
+    全程 try/except,绝不影响已交付的产出。
     """
     try:
         expert = employee or employeeidentity.any_employee(idx)
@@ -1058,31 +1429,31 @@ async def _gen_summary(
                 "idx": idx,
             })
             return
-        from . import providers
-        prompt = (
-            "你是给「很忙的老板」做速览的助理。下面是数字员工刚交付的完整产出(Markdown)。\n"
-            "请把它压缩成手机上十秒能读完的「老板速览」:\n"
-            "1)3-5 条要点,每条不超过 40 字,必须具体到数字 / 动作 / 结论,不要空话套话;\n"
-            "2)再单独给一句可直接落地的行动建议(告诉老板下一步该干什么)。\n"
-            '只输出 JSON:{"points":["要点", ...], "action":"一句话行动建议"}\n\n'
-            "【完整产出】\n" + md[:8000])
-        identity_args = ({
-            "identity_ref": config["identity_ref"],
-            "config_revision": config["config_revision"],
-            "config_sha256": config["config_sha256"],
-            "bundle_sha256": config["bundle_sha256"],
-        } if config else {})
-        r = await providers.call_text_json(
-            idx, prompt, web=False, timeout=240, **identity_args
+        data, model_cost = {}, 0.0
+        try:
+            from . import providers
+            identity_args = ({
+                "identity_ref": config["identity_ref"],
+                "config_revision": config["config_revision"],
+                "config_sha256": config["config_sha256"],
+                "bundle_sha256": config["bundle_sha256"],
+            } if config else {})
+            r = await providers.call_text_json(
+                idx, _boss_brief_prompt(md), web=False, timeout=240, **identity_args
+            )
+            data = r.get("data") or {}
+            model_cost = r.get("cost_usd") or 0
+        except Exception as exc:
+            # 模型通道失败不放弃:下面用正文规则兜底,老板照样拿到 3 条行动。
+            log.warning(
+                "老板速览生成失败 task=%s error_type=%s",
+                task_id,
+                type(exc).__name__,
+            )
+        brief, _used_model = bossbrief.merge_model_brief(data, md)
+        summary = bossbrief.format_brief(
+            brief["verdict"], brief["actions"], brief["watch"]
         )
-        data = r.get("data") or {}
-        points = [str(p).strip()[:60] for p in (data.get("points") or []) if str(p).strip()][:5]
-        action = str(data.get("action") or "").strip()[:80]
-        if not points:
-            return
-        lines = [f"- {p}" for p in points]
-        if action:
-            lines.append(f"- 👉 **一句话行动建议**:{action}")
         # 生成期间(~几十秒)老板可能已手动编辑过正文:重读比对,变了就放弃,不给编辑后的正文盖旧速览
         cur = await db.aone(
             "SELECT output_md, cost_usd FROM task WHERE id=?", (task_id,)
@@ -1093,10 +1464,8 @@ async def _gen_summary(
             "task",
             task_id,
             {
-                "summary_md": "\n".join(lines),
-                "cost_usd": (
-                    (cur.get("cost_usd") or 0) + (r.get("cost_usd") or 0)
-                ),
+                "summary_md": summary,
+                "cost_usd": (cur.get("cost_usd") or 0) + model_cost,
             },
         )
         await db.arun(sync_meeting_delivery_for_task, task_id)
@@ -1111,8 +1480,8 @@ async def _gen_summary(
             "idx": idx,
         })
     except Exception as exc:
-        log.debug(
-            "老板速览生成跳过 task=%s error_type=%s",
+        log.warning(
+            "老板速览生成失败 task=%s error_type=%s",
             task_id,
             type(exc).__name__,
         )
@@ -1136,4 +1505,4 @@ def resume_pending(broadcast):
         "AND emp_idx!=10"
     ):
         db.update("task", r["id"], {"status": "queued", "terminal_at": None})
-        asyncio.create_task(run_task(r["id"], broadcast))
+        start_worker(r["id"], broadcast)

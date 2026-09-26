@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import re
+import threading
 import time
 
 import httpx
@@ -31,6 +32,14 @@ def set_webhook(tid: int, url: str):
     db.set_setting(f"wechat_webhook:{tid}", url or None)
 
 
+# 第 2 期逐人通知的三个小类(权限统一见 PERSONAL_KINDS)
+STAFF_TASK_KINDS = frozenset({
+    "staff_task_assigned", "staff_task_submitted", "staff_task_reviewed",
+})
+REMIND_KINDS = frozenset({"staff_remind", "staff_escalate"})
+ASSIGN_KINDS = frozenset({"inspection_action_assigned"})
+
+
 def build_msg(kind: str, payload: dict) -> str:
     """事件 → 企微 markdown 消息(老板一眼能看懂,带直达链接)."""
     base = db.get_setting("site_base") or "https://paihuo.ai"
@@ -46,6 +55,9 @@ def build_msg(kind: str, payload: dict) -> str:
     if kind == "gate":
         return (f"**⛔ 派活 · 审查官拦截**\n工单 #{p.get('job_id')} 《{title}》被质检拦下\n"
                 f"[去处理]({base}/#/job/{p.get('job_id')})")
+    if kind == "job_failed":
+        return (f"**⚠️ 派活 · 工单没做成**\n工单 #{p.get('job_id')} {p.get('summary', '')}\n"
+                f"[看工单]({base}/#/job/{p.get('job_id')})")
     if kind == "retro_due":
         return (f"**📊 派活 · 该复盘了**\n《{title}》({p.get('platform', '')})发布已满 "
                 f"{p.get('day', '')} 天\n把后台数据丢给审查官,看看表现和限流风险\n"
@@ -86,9 +98,17 @@ def build_msg(kind: str, payload: dict) -> str:
             lines.append("⏰ 套餐:" + ("已到期,请尽快续费"
                          if expire_days < 0
                          else f"还有 {expire_days} 天到期,记得续费"))
+        # 第 2 期老板早报:门店清单/逾期/排行/等老板处理(有门店才有)
+        for line in (p.get("store_lines") or [])[:20]:
+            lines.append(str(line)[:200])
         lines.append(f"[看账单明细]({base}/#/billing)"
-                     + (f" · [去处理定时任务]({base}/#/schedules)" if p.get("paused") else ""))
+                     + (f" · [去处理定时任务]({base}/#/schedules)" if p.get("paused") else "")
+                     + (f" · [看门店清单]({base}/#/checklists)" if p.get("store_lines") else ""))
+        lines.append(f"📣 今天发什么?[点这里,照着发就行]({base}/#/tools/hot)")
         return "\n".join(lines)
+    if kind in REMIND_KINDS:
+        # 提醒/升级:企微群里用 text 消息发(才能 @ 手机号),这里只给 markdown 兜底
+        return f"**⏰ 派活 · {p.get('headline') or '提醒'}**\n{(p.get('text') or '')[:300]}"
     if kind == "member_reviewed":
         verdict = "通过" if p.get("approved") else "打回"
         return (f"**👤 派活 · 成员代拍板**\n"
@@ -105,12 +125,29 @@ def build_msg(kind: str, payload: dict) -> str:
             f"**💼 派活 · 套餐申请进展**\n{p.get('summary', '')}\n"
             f"[查看申请]({base}/#/billing)"
         )
+    if kind in {"task_outcome", "meeting_outcome"}:
+        return (f"**📋 派活 · {p.get('report_name', '任务有结果了')}**\n{(p.get('summary') or '')[:180]}\n"
+                f"[查看]({base}/{p.get('link') or '#/tasks'})")
+    if kind in ASSIGN_KINDS:
+        return (f"**🧾 派活 · {p.get('headline') or '有一件事派给了你'}**\n"
+                f"{(p.get('summary') or '')[:180]}\n"
+                f"[去处理]({base}/{p.get('link') or '#/'})")
     if kind == "report":
         return (f"**📰 派活 · {p.get('report_name', '报告出炉')}**\n{(p.get('summary') or '')[:180]}\n"
                 f"[查看]({base}/{p.get('link') or '#/knowledge'})")
     if kind == "video":
         return (f"**🎬 派活 · 视频成片**\n《{title}》已出片,可下载发布\n"
                 f"[查看]({base}{p.get('file', '')})")
+    if kind in STAFF_TASK_KINDS:
+        # 派给店员的活:群里只报事,不带照片;链接进老板端/店员手机版都能看
+        heads = {
+            "staff_task_assigned": "📌 派活 · 新活派给店员",
+            "staff_task_submitted": "📷 派活 · 店员交差了,等审核",
+            "staff_task_reviewed": "✅ 派活 · 交差已审核",
+        }
+        return (f"**{heads[kind]}**\n{(p.get('summary') or title)[:120]}"
+                + (f"\n截止:{p.get('due')}" if p.get("due") else "")
+                + f"\n[去看看]({base}/#/staff-tasks/{int(p.get('task_id') or 0)})")
     if kind == "pub":
         if p.get("ok"):
             return (f"**🚀 派活 · 矩阵发布成功**\n《{title}》已发到{p.get('platform', '')},"
@@ -127,13 +164,19 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
         "awaiting": "有工单等您拍板",
         "done": "内容工单已交付",
         "gate": "审查官拦截了一项内容",
+        "job_failed": "内容工单没做成",
         "retro_due": "发布内容该复盘了",
         "report": p.get("report_name") or "报告已出炉",
+        "task_outcome": p.get("report_name") or "派出去的任务有结果了",
+        "meeting_outcome": p.get("report_name") or "会议有结果了",
         "video": "视频成片已交付",
         "pub": "矩阵发布成功" if p.get("ok") else "矩阵发布失败",
         "learn_done": "员工进修完成",
         "learn_failed": "员工进修失败(已退点)",
         "daily_digest": f"昨日经营简报({p.get('date', '')})",
+        # 第 2 期:派给店员的活/开闭店清单/巡店整改 快到期、到期、逾期升级
+        "staff_remind": p.get("headline") or "有事快到截止时间了",
+        "staff_escalate": p.get("headline") or "有事超时没做完",
         "schedule_failed": "定时任务连续失败,可能断更",
         "schedule_paused": "定时任务因点数不足已暂停,内容会断更",
         "purchase_requested": "有新的套餐购买申请",
@@ -141,20 +184,29 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
         "purchase_lost": "套餐申请已结束",
         "purchase_paid": "套餐和点数已开通",
         # 副账号代老板拍板:标题直接说清谁、哪单、哪站、通过还是打回
+        "staff_task_assigned": "有新活派给你",
+        "staff_task_submitted": "店员交差了，等您审核",
+        "staff_task_reviewed": (
+            "你交的活通过了" if p.get("approved") else "你交的活被打回了，请重做"
+        ),
         "member_reviewed": (
             f"👤 {p.get('user', '')} 已代拍板 工单#{p.get('job_id')} "
             f"工位{p.get('station', '')}:"
             f"{'通过' if p.get('approved') else '打回'}"
         ),
+        # v60 逐人通知：标题由调用方给出(如"门店整改派给了你")。
+        "inspection_action_assigned": p.get("headline") or "有一条门店整改派给了你",
     }
     title = str(labels.get(kind) or "派活有新进展")[:80]
     body = str(
         p.get("summary")
+        or p.get("text")
         or p.get("title")
         or p.get("why")
         or ""
     ).strip()[:240]
-    if kind in {"awaiting", "gate", "member_reviewed"} and p.get("job_id"):
+    if kind in {"awaiting", "gate", "member_reviewed", "job_failed"} \
+            and p.get("job_id"):
         link = f"#/job/{int(p['job_id'])}"
     elif kind == "done" and p.get("job_id"):
         link = f"#/delivery/{int(p['job_id'])}"
@@ -164,8 +216,16 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
         link = "#/tasks"
     elif kind == "pub":
         link = "#/channels"
+    elif kind in {"task_outcome", "meeting_outcome"}:
+        link = str(p.get("link") or "#/tasks")
+    elif kind == "daily_digest" and p.get("store_lines"):
+        link = "#/checklists"
     elif kind == "daily_digest" or kind.startswith("purchase_"):
         link = "#/billing"
+    elif kind in STAFF_TASK_KINDS:
+        link = str(p.get("link") or f"#/staff-tasks/{int(p.get('task_id') or 0)}")
+    elif kind in REMIND_KINDS or kind in ASSIGN_KINDS:
+        link = str(p.get("link") or "#/")
     elif kind in {"schedule_paused", "schedule_failed"}:
         link = "#/schedules"
     else:
@@ -188,6 +248,9 @@ BOSS_ONLY_KINDS = {
     "daily_digest", "schedule_paused", "schedule_failed",
     "learn_done", "learn_failed",
     "member_reviewed",
+    # 专家任务/会议分属不同行业板块，通知行上没有板块列，
+    # 先只发给老板本人(逐人一行)，避免按板块广播时误投或漏投。
+    "task_outcome", "meeting_outcome",
 }
 
 # 购买申请的客户状态只精确定向给发起 owner/root。它不属于普通业务板块，
@@ -196,12 +259,22 @@ PURCHASE_CUSTOMER_KINDS = {
     "purchase_contacted", "purchase_lost", "purchase_paid",
 }
 
+# 第 2 期个人通知：只发给具体的人(每人一行，user_id=收件人)，绝不写 user_id=NULL 的广播行。
+# 任何角色(老板/总监/店长/店员)只要是收件人本人就能看；没有收件人时直接不落库。
+PERSONAL_KINDS = {
+    # 派给店员的任务：被指派的店员、派活人(系统派的活发给老板)
+    "staff_task_assigned", "staff_task_submitted", "staff_task_reviewed",
+    # 提醒与升级：被指派人 → 店长 → 老板
+    "staff_remind", "staff_escalate",
+}
+
 # 普通业务通知仍保留 schema48 的租户广播行，但读取和标记已读都必须经过
 # 同一份板块白名单。未知 kind 默认只允许 root，避免新增类型自动外泄。
 KIND_MODULES = {
     "awaiting": frozenset({"content"}),
     "done": frozenset({"content"}),
     "gate": frozenset({"content"}),
+    "job_failed": frozenset({"content"}),
     "retro_due": frozenset({"content"}),
     "report": frozenset({"content"}),
     "pub": frozenset({"content"}),
@@ -209,6 +282,16 @@ KIND_MODULES = {
     # 数字人摄影棚使用 avatar_job/SSE，不得把图文成片通知误投给 avatar-only 成员。
     "video": frozenset({"content"}),
 }
+
+# v60:逐人发送的通知。payload 必须带 user_id，只写 user_id 定向行，绝不做
+# 租户广播；任何在职账号(含店员)都能看到、且只能看到发给自己的那一行。
+# 新增“派给具体某个人”的通知类型登记在这里即可。
+PER_USER_KINDS = {
+    "inspection_action_assigned",
+}
+# 两套写法(target_user_id 参数 / payload.user_id)统一：逐人类型全部并入 PERSONAL_KINDS。
+PERSONAL_KINDS |= PER_USER_KINDS
+PER_USER_KINDS = PERSONAL_KINDS
 
 # 保留旧常量名供外部诊断脚本兼容；语义是“需要精确定向的管理通知”。
 OWNER_ONLY_KINDS = ROOT_ONLY_KINDS | BOSS_ONLY_KINDS
@@ -246,6 +329,7 @@ def _allowed_kinds(user: dict | None) -> tuple[str, ...] | None:
     if role == "owner":
         return tuple(sorted(
             set(KIND_MODULES) | BOSS_ONLY_KINDS | PURCHASE_CUSTOMER_KINDS
+            | PERSONAL_KINDS
         ))
     if role != "member":
         return ()
@@ -255,8 +339,10 @@ def _allowed_kinds(user: dict | None) -> tuple[str, ...] | None:
         if isinstance(module, str)
     }
     return tuple(sorted(
-        kind for kind, required in KIND_MODULES.items()
-        if required.intersection(modules)
+        {
+            kind for kind, required in KIND_MODULES.items()
+            if required.intersection(modules)
+        } | PERSONAL_KINDS
     ))
 
 
@@ -271,6 +357,8 @@ def can_view(user: dict | None, item: dict) -> bool:
     if uid <= 0:
         return False
     target = item.get("user_id")
+    if target is None and str(item.get("kind") or "") in PERSONAL_KINDS:
+        return False
     if target is not None:
         try:
             if int(target) != uid:
@@ -463,6 +551,14 @@ def record(
         except (TypeError, ValueError):
             job_id = None
         targets = [None]
+        if target_user_id is None and kind in PER_USER_KINDS:
+            # 逐人通知没有收件人就不发，绝不降级成全员广播。
+            try:
+                target_user_id = int((payload or {}).get("user_id") or 0) or None
+            except (TypeError, ValueError):
+                target_user_id = None
+            if target_user_id is None:
+                return None
         if target_user_id is not None:
             target = db.one(
                 "SELECT id FROM users WHERE id=? AND tenant_id=? "
@@ -472,6 +568,9 @@ def record(
             if not target:
                 return None
             targets = [int(target["id"])]
+        elif kind in PERSONAL_KINDS:
+            # 个人通知必须指定收件人；没有就丢弃，绝不降级为全员广播
+            return None
         elif kind in ROOT_ONLY_KINDS:
             targets = _root_uids(tid)
             if not targets:
@@ -532,6 +631,94 @@ def send_sync(tid: int, kind: str, payload: dict) -> bool:
         return False
 
 
+# ---------------- 企微群机器人 @ 手机号(第 2 期) ----------------
+# 群机器人只有 text 消息支持 mentioned_mobile_list;markdown 消息 @ 不了人。
+_MOBILE_RE = re.compile(r"^1[3-9]\d{9}$")
+TEXT_MAX_BYTES = 2000          # 企微 text 上限 2048 字节,留点余量
+MAX_MENTIONS = 50
+
+
+def clean_mobile(value) -> str:
+    """users.phone → 可 @ 的 11 位手机号;不合规返回空串(就不 @)。"""
+    digits = re.sub(r"[\s-]", "", str(value or ""))
+    if digits.startswith("+86"):
+        digits = digits[3:]
+    elif digits.startswith("86") and len(digits) == 13:
+        digits = digits[2:]
+    return digits if _MOBILE_RE.match(digits) else ""
+
+
+def mobiles_for_users(tid: int, user_ids) -> list[str]:
+    """按人取手机号(本租户、启用中、填了合规号码的),去重保序。"""
+    ids = []
+    for value in user_ids or ():
+        try:
+            uid = int(value)
+        except (TypeError, ValueError):
+            continue
+        if uid > 0 and uid not in ids:
+            ids.append(uid)
+    if not ids:
+        return []
+    marks = ",".join("?" for _ in ids)
+    phones = {
+        int(row["id"]): clean_mobile(row.get("phone"))
+        for row in db.q(
+            f"SELECT id,phone FROM users WHERE tenant_id=? AND id IN ({marks}) "
+            "AND COALESCE(enabled,1)=1",
+            (int(tid), *ids),
+        )
+    }
+    out: list[str] = []
+    for uid in ids:
+        mobile = phones.get(uid) or ""
+        if mobile and mobile not in out:
+            out.append(mobile)
+    return out[:MAX_MENTIONS]
+
+
+def text_message(content: str, mobiles=()) -> dict:
+    """企微群机器人 text 消息体;有手机号时带 mentioned_mobile_list。"""
+    text = str(content or "").strip() or "派活提醒"
+    raw = text.encode("utf-8")
+    if len(raw) > TEXT_MAX_BYTES:
+        text = raw[:TEXT_MAX_BYTES - 6].decode("utf-8", "ignore").rstrip() + "…"
+    body: dict = {"content": text}
+    clean = []
+    for mobile in mobiles or ():
+        value = clean_mobile(mobile)
+        if value and value not in clean:
+            clean.append(value)
+    if clean:
+        body["mentioned_mobile_list"] = clean[:MAX_MENTIONS]
+    return {"msgtype": "text", "text": body}
+
+
+def send_text_sync(tid: int, content: str, mobiles=()) -> bool:
+    """同步发一条 text 消息(可 @ 手机号);没配 webhook 静默跳过。"""
+    url = get_webhook(tid)
+    if not url:
+        return False
+    try:
+        r = httpx.post(url, json=text_message(content, mobiles), timeout=8)
+        d = r.json()
+        if d.get("errcode") != 0:
+            log.warning(
+                "企微提醒失败 tid=%s errcode=%s",
+                tid,
+                d.get("errcode"),
+            )
+            return False
+        return True
+    except Exception as exc:
+        log.warning(
+            "企微提醒异常 tid=%s error_type=%s",
+            tid,
+            type(exc).__name__,
+        )
+        return False
+
+
 def push(tid: int, kind: str, payload: dict):
     """站内必达；配置企微时再异步发送外部提醒。"""
     record(tid, kind, payload)
@@ -542,6 +729,50 @@ def push(tid: int, kind: str, payload: dict):
         loop.run_in_executor(None, send_sync, tid, kind, payload)
     except RuntimeError:
         send_sync(tid, kind, payload)
+
+
+def _run_detached(fn, *args) -> None:
+    """外发(企微)不能卡住调用方：有事件循环丢线程池，没有就起守护线程。"""
+    try:
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, fn, *args)
+    except RuntimeError:
+        # 同步路由跑在线程池里：企微最多等 8 秒，不能卡住店员的提交请求
+        threading.Thread(target=fn, args=args, daemon=True).start()
+
+
+def push_to_users(tid: int, kind: str, payload: dict, user_ids, *,
+                  mention: bool = True) -> list[int]:
+    """逐人发送：每个收件人一行站内通知(停用/别家账号自动跳过)，企微群只发一条。
+
+    企微消息：payload 带 ``text`` 或收件人有手机号时发 text 消息并 @ 这些人；
+    否则发普通 markdown 消息。返回实际写入的通知 id；没有有效收件人时都不发。
+    """
+    seen: list[int] = []
+    for raw in user_ids or ():
+        try:
+            uid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if uid > 0 and uid not in seen:
+            seen.append(uid)
+    written = []
+    for uid in seen:
+        row_id = record(tid, kind, payload, target_user_id=uid)
+        if row_id is not None:
+            written.append(int(row_id))
+    if not written or not get_webhook(tid):
+        return written
+    mobiles = mobiles_for_users(tid, seen) if mention else []
+    text = str((payload or {}).get("text") or "").strip()
+    if text or mobiles:
+        if not text:
+            title, body, _link = _inbox_item(kind, payload)
+            text = f"{title}\n{body}".strip()
+        _run_detached(send_text_sync, tid, text, mobiles)
+    else:
+        _run_detached(send_sync, tid, kind, payload)
+    return written
 
 
 async def push_async(tid: int, kind: str, payload: dict):

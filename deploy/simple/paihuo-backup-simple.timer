@@ -1,0 +1,11 @@
+# 每小时备份一次数据库；素材快照约每天一份（backup_db.py 自动判断），异地同步跟着数据库备份走。
+[Unit]
+Description=派活 每小时备份（简易通道）
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

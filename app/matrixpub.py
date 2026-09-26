@@ -8,6 +8,10 @@
 - 平台风控提示:同一账号发布频率建议 ≤ 5条/天,内容先过审查官。
 
 公众号走正规 API(wechat.py),不在此列。
+
+第 3 期合规:整块「代管 Cookie + 自动发帖」受平台开关 matrix_autopub 控制，默认关闭。
+关闭时绑定/验证/入队/执行全部拒绝(已有记录照常可看可删)，老板走「🪄 半自动发布」:
+一键复制文案 + 下载素材包 + 打开平台发布页。
 """
 import asyncio
 import json
@@ -18,7 +22,7 @@ import uuid
 
 import httpx
 
-from . import db, notify, pubtrack, secureconfig
+from . import db, features, notify, pubtrack, secureconfig
 
 log = logging.getLogger("matrixpub")
 _PUB_SEM = None
@@ -74,7 +78,13 @@ def _save(tid: int, accs: list):
     db.set_setting(f"matrix_accounts:{tid}", json.dumps(stored, ensure_ascii=False))
 
 
+def ensure_enabled(tid: int = None) -> None:
+    """平台关闭自动代发时抛 features.FeatureDisabled(接口层转 403)."""
+    features.require("matrix_autopub", tid)
+
+
 def add_account(tid: int, platform: str, name: str, cookie: str) -> dict:
+    ensure_enabled(tid)
     if platform not in PLATFORMS:
         raise ValueError("暂只支持小红书/抖音(公众号在上面单独配)")
     cookie = (cookie or "").strip().replace("\n", " ")
@@ -135,6 +145,7 @@ async def _probe_login(acc: dict):
 
 async def check_account(tid: int, acc_id: str) -> dict:
     """验证 Cookie 是否还活着(不发内容,只查登录态)."""
+    await db.arun(ensure_enabled, tid)
     accs = await db.arun(accounts, tid)
     acc = next((a for a in accs if a["id"] == acc_id), None)
     if not acc:
@@ -153,6 +164,7 @@ async def check_account(tid: int, acc_id: str) -> dict:
 
 # ---------------- 发布队列 ----------------
 def enqueue(tid: int, platform: str, acc_id: str, payload: dict) -> int:
+    ensure_enabled(tid)
     # 入队即校验:平台非法或与账号绑定的平台不一致时,发布协程会在 PLATFORMS[...]
     # 抛 KeyError,任务永久卡在 running。这里提前拒掉,报错也更像人话。
     if platform not in PLATFORMS:
@@ -291,6 +303,8 @@ FAIL_GUIDE = {
             "稍等几分钟点「🔁 重试」;还不行就用「🪄 半自动发布」"),
     "risk": ("疑似触发平台风控(操作频繁或环境异常)",
              "隔几小时再试,建议每账号每天 ≤5 条;这条稳妥起见用「🪄 半自动发布」发"),
+    "disabled": ("平台已关闭自动代发(代管登录态有封号和泄露风险)",
+                 "用「🪄 半自动发布」:一键复制标题正文、下载素材包、打开平台发布页自己点发布"),
     "unknown": ("自动发布没走通",
                 "点开失败截图看现场;这条可直接用「🪄 半自动发布」四步发出去"),
 }
@@ -355,7 +369,31 @@ async def run_task(pid: int, broadcast=None):
         row = await db.aone("SELECT * FROM pub_task WHERE id=?", (pid,))
         if not row:
             return
+        if not await db.arun(
+            features.is_enabled, "matrix_autopub", row.get("tenant_id")
+        ):
+            # 开关关闭前排进队列的任务:不再开浏览器，收口为失败并给半自动出路
+            await db.arun(_fail_disabled, pid, row.get("platform"))
+            if broadcast:
+                broadcast({"type": "pub_update", "task_id": pid})
+            return
         await _run_task_inner(pid, row, broadcast)
+
+
+def _fail_disabled(pid: int, platform: str = None) -> bool:
+    why, fix = FAIL_GUIDE["disabled"]
+    fail = {"kind": "disabled", "why": why, "fix": fix,
+            "err": "自动发布已被平台关闭，内容未发出；请用半自动发布",
+            "shot": "", "home": (PLATFORMS.get(platform) or {}).get("home", "")}
+    changed = db.execute(
+        "UPDATE pub_task SET status='failed',fail_json=?,updated_at=? "
+        "WHERE id=? AND status IN ('queued','running') "
+        "AND submission_state='not_submitted'",
+        (json.dumps(fail, ensure_ascii=False), time.time(), pid),
+    )
+    if changed == 1:
+        _log(pid, f"❌ {why} → {fix}")
+    return changed == 1
 
 
 async def _run_task_inner(pid: int, row: dict, broadcast=None):

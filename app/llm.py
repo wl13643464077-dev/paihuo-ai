@@ -3,9 +3,14 @@
 业务路由在 app/providers.py。本模块只接受调用方显式传入的云雾兼容
 base URL/token,绝不读取本地 Claude 登录态或历史 Anthropic Key 设置。
 网页正文由应用自己的逐跳 SSRF 防护网关读取，不把任意 URL 访问权交给 CLI。
+
+第 3 期起这里属于「旧通道」:后台把默认模型通道切到国内直连并配好搜索服务后,
+联网研究改走 app/cnmodels.py(搜索 API + netfetch 抓取 + 直连模型总结),
+不再启动本执行器;未切换的部署行为与之前完全一致。
 """
 import asyncio
 import json
+import math
 import os
 import re
 import signal
@@ -29,8 +34,34 @@ _PROVIDER_ENV_ALLOWLIST = {
 
 DEFAULT_MODEL = "claude-opus-4-8"
 
-# 并发闸门:全局最多同时 3 个 LLM 调用,防止把服务器打满
-_sem = asyncio.Semaphore(3)
+# Keep all recorded token values inside the SQLite INTEGER domain, including
+# malformed usage attached to failed executions.
+MAX_RECORDED_TOKENS = 1_000_000_000
+
+def _env_number(name: str, default: float, low: float, high: float) -> float:
+    """读取数字型环境变量;缺失/非法/越界一律回落默认值,绝不让配置错误拖垮启动."""
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if value != value or value < low or value > high:
+        return default
+    return value
+
+
+# 并发闸门:全局同时运行的 CLI 调用上限,防止把服务器打满。默认 6,
+# 可用 CONTENTCREW_LLM_CONCURRENCY 调整(1-64)。
+MAX_CONCURRENCY = int(_env_number("CONTENTCREW_LLM_CONCURRENCY", 6, 1, 64))
+# 排队等位的最长时间(秒):等不到位就按失败收口、走正常退款,不无限挂着。
+QUEUE_TIMEOUT = _env_number("CONTENTCREW_LLM_QUEUE_TIMEOUT", 900, 5, 6 * 3600)
+# 排队进度最多多久报一次(秒),避免把步骤列表刷屏。
+QUEUE_REPORT_INTERVAL = 30.0
+_sem = asyncio.Semaphore(MAX_CONCURRENCY)
+# 正在等位的调用(按到达顺序),用于告诉老板"前面还有几个"。
+_WAITERS: list = []
 
 # 运行中的 CLI 子进程注册表:token -> proc(供"老板打断"随时终止)
 RUNNING: dict = {}
@@ -47,7 +78,132 @@ def kill(token_prefix: str) -> int:
 
 
 class LLMError(Exception):
-    pass
+    """Stable model failure with optional non-sensitive scalar usage."""
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        cost_usd: float = 0.0,
+        tokens: int = 0,
+    ):
+        super().__init__(message)
+        try:
+            safe_cost = float(cost_usd)
+        except (TypeError, ValueError, OverflowError):
+            safe_cost = 0.0
+        if not math.isfinite(safe_cost) or safe_cost < 0:
+            safe_cost = 0.0
+        self.cost_usd = safe_cost
+        self.tokens = safe_usage_tokens(tokens)
+
+
+def safe_usage_tokens(value) -> int:
+    """Normalize untrusted usage into the application's bounded DB domain."""
+    if isinstance(value, bool):
+        return 0
+    try:
+        tokens = int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return min(MAX_RECORDED_TOKENS, max(0, tokens))
+
+
+class WebSearchRequiredError(LLMError):
+    """A web-enabled run completed without one verified WebSearch result.
+
+    This typed, stable failure lets the provider layer apply one bounded
+    recovery attempt without retrying timeouts, runner crashes, cancellation,
+    or other model failures.  It deliberately carries no query, result body,
+    stderr, or upstream error text.
+    """
+
+    def __init__(
+        self,
+        _message: str = "",
+        *,
+        cost_usd: float = 0.0,
+        tokens: int = 0,
+    ):
+        # The message is intentionally fixed.  Callers and test doubles may
+        # pass arbitrary upstream detail, but it must never become a public or
+        # persisted error surface.  Only bounded scalar usage accompanies the
+        # typed failure so a successful retry can account for the first call.
+        super().__init__(
+            "联网检索未返回有效结果，任务已阻断",
+            cost_usd=cost_usd,
+            tokens=tokens,
+        )
+
+
+class LLMQueueTimeout(LLMError):
+    """排队等位超时:调用方按普通 LLMError 失败结算(退款),日志里可按类型识别."""
+
+
+def queue_depth() -> int:
+    """当前排队等位的调用数(诊断/测试用)."""
+    return len(_WAITERS)
+
+
+async def _acquire_slot(progress, queue_timeout: float) -> asyncio.Semaphore:
+    """按到达顺序等一个并发位;等待期间回报排队位置,超时抛 LLMQueueTimeout.
+
+    不用 wait_for(acquire) 分段重试:取消后重新排队会丢掉 FIFO 位置。
+    这里只挂一个 acquire 任务,分段 wait 只为了定期汇报进度。
+    """
+    sem = _sem
+    if not sem.locked() and not _WAITERS:
+        await sem.acquire()
+        return sem
+    ticket = object()
+    _WAITERS.append(ticket)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, float(queue_timeout))
+    acquire = asyncio.ensure_future(sem.acquire())
+    last_ahead = None
+    last_report = 0.0
+    try:
+        while True:
+            if not acquire.done():
+                try:
+                    ahead = _WAITERS.index(ticket)
+                except ValueError:
+                    ahead = 0
+                now = loop.time()
+                if ahead != last_ahead and (
+                    last_ahead is None or now - last_report >= QUEUE_REPORT_INTERVAL
+                ):
+                    last_ahead, last_report = ahead, now
+                    try:
+                        progress(
+                            "queue",
+                            f"排队中，前面还有 {ahead} 个任务，轮到后自动开始"
+                            if ahead else "排队中，马上轮到你，轮到后自动开始",
+                        )
+                    except Exception:
+                        pass  # 进度上报绝不影响主流程
+            remaining = deadline - loop.time()
+            if acquire.done():
+                acquire.result()
+                return sem
+            if remaining <= 0:
+                raise LLMQueueTimeout(
+                    f"排队超过 {int(queue_timeout)} 秒仍未轮到，已停止等待"
+                )
+            await asyncio.wait(
+                {acquire}, timeout=min(remaining, QUEUE_REPORT_INTERVAL)
+            )
+    except BaseException:
+        if acquire.done() and not acquire.cancelled() and acquire.exception() is None:
+            sem.release()          # 已经拿到位却要放弃(超时/取消竞态):还回去
+        else:
+            acquire.cancel()       # Semaphore 自己会把被唤醒的位让给下一个
+        raise
+    finally:
+        try:
+            _WAITERS.remove(ticket)
+        except ValueError:
+            pass
 
 
 _STABLE_RUNNER_ERROR = "云雾能力网关执行失败，请稍后重试"
@@ -453,7 +609,12 @@ def _public_tool_usage(state: dict) -> dict:
     return {"WebSearch": usage}
 
 
-def _require_successful_websearch(tool_usage: dict):
+def _require_successful_websearch(
+    tool_usage: dict,
+    *,
+    cost_usd: float = 0.0,
+    tokens: int = 0,
+):
     """Fail closed when a web-enabled call produced no usable search result."""
     web = (tool_usage or {}).get("WebSearch")
     try:
@@ -461,13 +622,34 @@ def _require_successful_websearch(tool_usage: dict):
     except (TypeError, ValueError):
         success = 0
     if success < 1:
-        raise LLMError("联网检索未返回有效结果，任务已阻断")
+        raise WebSearchRequiredError(cost_usd=cost_usd, tokens=tokens)
+
+
+def _result_usage(result: dict) -> tuple[float, int]:
+    """Return safe scalar usage without reflecting any result content."""
+    usage = result.get("usage") if isinstance(result, dict) else None
+    usage = usage if isinstance(usage, dict) else {}
+    tokens = 0
+    for key in (
+        "input_tokens", "output_tokens", "cache_read_input_tokens",
+    ):
+        value = usage.get(key, 0)
+        tokens = safe_usage_tokens(tokens + safe_usage_tokens(value))
+    value = result.get("total_cost_usd", 0) if isinstance(result, dict) else 0
+    try:
+        cost_usd = float(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        cost_usd = 0.0
+    if not math.isfinite(cost_usd) or cost_usd < 0:
+        cost_usd = 0.0
+    return cost_usd, tokens
 
 
 async def call(prompt: str, model: str = DEFAULT_MODEL, web: bool = False,
                timeout: int = 600, progress=None, token: str = None,
                provider_env: dict = None, system_prompt: str = None,
-               capture_web_sources: bool = False) -> dict:
+               capture_web_sources: bool = False,
+               queue_timeout: float | None = None) -> dict:
     """调用 claude -p(流式),返回文本、计量与聚合工具使用数据。
 
     ``capture_web_sources`` 默认关闭。仅显式开启时，返回值才增加
@@ -475,7 +657,9 @@ async def call(prompt: str, model: str = DEFAULT_MODEL, web: bool = False,
     ``tool_use_result`` 元数据；不会解析模型文本或 tool_result.content。
 
     progress(kind, label) 可选回调:实时上报员工每一步动作(检索/阅读/撰写),
-    供引擎广播到前端做工位步骤可视化。
+    供引擎广播到前端做工位步骤可视化。并发已满时先排队(同样经 progress
+    报排队位置),排队超过 ``queue_timeout``(默认 QUEUE_TIMEOUT)抛
+    LLMQueueTimeout,排队时间不占用 ``timeout``。
     """
     if not provider_env or not provider_env.get("ANTHROPIC_BASE_URL") or not (
             provider_env.get("ANTHROPIC_AUTH_TOKEN") or provider_env.get("ANTHROPIC_API_KEY")):
@@ -510,7 +694,10 @@ async def call(prompt: str, model: str = DEFAULT_MODEL, web: bool = False,
             extra_env,
             cli_home=cli_home,
         )
-        async with _sem:
+        slot = await _acquire_slot(
+            progress, QUEUE_TIMEOUT if queue_timeout is None else queue_timeout
+        )
+        try:
             proc = None
             io_tasks = []
             err_buf = bytearray()
@@ -598,12 +785,9 @@ async def call(prompt: str, model: str = DEFAULT_MODEL, web: bool = False,
                         task.cancel()
                 if io_tasks:
                     await asyncio.gather(*io_tasks, return_exceptions=True)
+        finally:
+            slot.release()
     tool_usage = _public_tool_usage(state)
-    if web:
-        # A text result without an actual WebSearch tool_result is not a valid
-        # network-backed answer.  Enforce this before accepting the result,
-        # including when the CLI exits cleanly but skipped the tool.
-        _require_successful_websearch(tool_usage)
     if not result:
         # stderr 属于不可信供应商/CLI 输出；它可能回显 system prompt、请求体或
         # 凭据，绝不能进入异常文本、数据库、SSE 或 API 响应。
@@ -611,12 +795,20 @@ async def call(prompt: str, model: str = DEFAULT_MODEL, web: bool = False,
     if result.get("is_error"):
         # result.error 同样可能包含上游回显，失败面只暴露稳定文案。
         raise LLMError(_STABLE_RUNNER_ERROR)
-    usage = result.get("usage") or {}
-    tokens = (usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
-              + usage.get("cache_read_input_tokens", 0))
+    cost_usd, tokens = _result_usage(result)
+    if web:
+        # A valid text result without an actual correlated WebSearch
+        # tool_result is a distinct, recoverable provider behavior.  Keep the
+        # gate fail-closed, but classify it separately from runner failures so
+        # callers can apply one bounded retry.
+        _require_successful_websearch(
+            tool_usage,
+            cost_usd=cost_usd,
+            tokens=tokens,
+        )
     response = {
         "text": result.get("result") or "",
-        "cost_usd": result.get("total_cost_usd") or 0.0,
+        "cost_usd": cost_usd,
         "tokens": tokens,
         "tool_usage": tool_usage,
     }

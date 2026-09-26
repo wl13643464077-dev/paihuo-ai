@@ -76,6 +76,64 @@ def public_base() -> str:
     return (db.get_setting("public_base") or "https://paihuo.ai/pub").rstrip("/")
 
 
+# ---------------- 给视频厂商拉取的临时签名链接(第 3 期) ----------------
+# 以前 /pub/<uuid> 永久公开，谁拿到文件名谁就能下载老板的照片和声音。现在只发
+# /pub/s/<过期时间>/<签名>/<文件名>，过期或签名不对一律拒绝；目录本身不再静态公开。
+def _public_sig(name: str, expires: int) -> str:
+    import hashlib
+    import hmac
+    from . import auth
+    return hmac.new(auth._secret(), f"pub:v1:{int(expires)}:{name}".encode(),
+                    hashlib.sha256).hexdigest()
+
+
+def signed_public_url(name: str, now: float = None, ttl_hours: int = None) -> str:
+    from . import features
+    name = os.path.basename(str(name or ""))
+    if not _ASSET_NAME_RE.fullmatch(name):
+        raise ValueError("invalid public media name")
+    if ttl_hours is None:
+        ttl_hours = features.config_int("pub_link_ttl_hours")
+    now = time.time() if now is None else float(now)
+    expires = int(now) + max(1, int(ttl_hours)) * 3600
+    return f"{public_base()}/s/{expires}/{_public_sig(name, expires)}/{name}"
+
+
+def verify_public_token(expires, sig: str, name: str, now: float = None) -> bool:
+    import hmac
+    try:
+        expires = int(str(expires))
+    except (TypeError, ValueError):
+        return False
+    name = str(name or "")
+    if (not _ASSET_NAME_RE.fullmatch(name)
+            or not re.fullmatch(r"[0-9a-f]{64}", str(sig or ""))):
+        return False
+    if not hmac.compare_digest(str(sig), _public_sig(name, expires)):
+        return False
+    now = time.time() if now is None else float(now)
+    return now <= expires
+
+
+def resolve_signed_public(expires, sig: str, name: str, now: float = None):
+    """签名有效且文件确实在公开素材目录里 → 返回本地路径;否则 None."""
+    if not verify_public_token(expires, sig, name, now=now):
+        return None
+    return _public_file_path(name)
+
+
+# 宣传片等运营素材仍放在公开目录里、由 Caddy 直接伺服，文件名固定前缀，
+# 与 32 位随机名的用户素材区分开;清理任务和签名校验都不碰它们。
+PROMO_NAME_RE = re.compile(r"^paihuo-promo-[A-Za-z0-9._-]{1,80}\.(?:mp4|webm|jpg|jpeg|png|webp)$")
+
+
+def promo_file_path(name: str):
+    name = str(name or "")
+    if not PROMO_NAME_RE.fullmatch(name) or ".." in name:
+        return None
+    return _public_file_path(name)
+
+
 def rh_ready() -> bool:
     from . import runninghub
     return runninghub.ready()
@@ -637,7 +695,6 @@ def _write_public_bytes(
         name = reserved_name
     else:
         name = _reserved_public_name(ext)
-    base = public_base()
     os.makedirs(PUBLIC_DIR, mode=0o750, exist_ok=True)
     target = os.path.join(PUBLIC_DIR, name)
     descriptor, temporary = tempfile.mkstemp(
@@ -659,7 +716,7 @@ def _write_public_bytes(
         except FileNotFoundError:
             pass
         raise
-    return {"name": name, "url": f"{base}/{name}"}
+    return {"name": name, "url": signed_public_url(name)}
 
 
 def save_public(data: bytes, ext: str) -> dict:
@@ -1766,7 +1823,6 @@ def store_uploaded_asset(
             reserved_name,
         )):
             raise FileExistsError("public upload target already exists")
-        base = public_base()
         now = time.time()
         new_asset = {"name": reserved_name, "kind": kind, "ts": now}
         assets.append(new_asset)
@@ -1858,7 +1914,7 @@ def store_uploaded_asset(
                 cleanup_allowed = True
             return {
                 "name": reserved_name,
-                "url": f"{base}/{reserved_name}",
+                "url": signed_public_url(reserved_name),
             }
         finally:
             if cleanup_allowed:
@@ -2363,6 +2419,10 @@ async def run_job(job_id: int, broadcast):
                     progress("start", "尝试 HeyGen(若仍提示额度用完,请充值或改基础版/可灵)…")
                 else:
                     eng = "kling"
+        if eng == "heygen" and p.get("domestic_only"):
+            # 老板没同意传输到境外服务商:只用国内引擎
+            progress("start", "您选择只用国内服务商，本次改用可灵引擎…")
+            eng = "kling"
         photo_path = await db.arun(
             asset_path, p["photo_name"], {"photo"}, j.get("tenant_id") or 1
         )
@@ -2456,8 +2516,8 @@ async def run_job(job_id: int, broadcast):
                         j.get("tenant_id") or 1,
                     )
                 )
-                audio_url = (
-                    f"{await db.arun(public_base)}/{os.path.basename(audio_path)}"
+                audio_url = await db.arun(
+                    signed_public_url, os.path.basename(audio_path)
                 )
                 await db.aupdate(
                     "avatar_job",
@@ -2476,8 +2536,8 @@ async def run_job(job_id: int, broadcast):
                 audio_path = await cap_for_job(
                     os.path.join(PUBLIC_DIR, pub["name"])
                 )
-                audio_url = (
-                    f"{await db.arun(public_base)}/{os.path.basename(audio_path)}"
+                audio_url = await db.arun(
+                    signed_public_url, os.path.basename(audio_path)
                 )
                 await db.aupdate(
                     "avatar_job",
@@ -2485,7 +2545,8 @@ async def run_job(job_id: int, broadcast):
                     {"audio_file": f"/files/avatar-public/{pub['name']}"},
                 )
                 progress("done", "配音完成")
-            photo_url = f"{await db.arun(public_base)}/{p['photo_name']}"
+            # 给可灵的是带过期时间的签名链接，过期后照片/声音不再能被外部下载
+            photo_url = await db.arun(signed_public_url, p["photo_name"])
             # 2) 提交可灵数字人
             progress("start", "提交可灵数字人任务(照片+配音→对口型)…")
             tid = await kling_avatar(photo_url, audio_url, p.get("prompt", ""))
@@ -2504,6 +2565,13 @@ async def run_job(job_id: int, broadcast):
             )
         except (ValueError, httpx.HTTPError) as exc:
             raise providers.ProviderError("供应商成片下载失败，请稍后重试") from exc
+        from . import features
+        ai_label = await db.arun(
+            features.ai_label_for, j.get("tenant_id") or 1, None
+        )
+        if ai_label:
+            # 成片文件标题/注释写入「AI 辅助生成」显式标识(只改封装信息，不重新编码)
+            await asyncio.to_thread(stamp_video_label, out, ai_label)
         delivered = await db.aexecute(
             "UPDATE avatar_job SET status='done',"
             "billing_status=CASE WHEN billing_status='charged' "
@@ -2530,6 +2598,7 @@ async def run_job(job_id: int, broadcast):
                         "title": (p.get("script") or "")[:30],
                         "job_id": job_id,
                         "file": f"/files/avatar/avatar_{job_id}.mp4",
+                        "ai_label": ai_label,
                     },
                     ensure_ascii=False,
                 ),
@@ -2632,3 +2701,264 @@ def resume_pending(broadcast):
                     type(exc).__name__,
                 )
             broadcast({"type": "avatar_update", "job_id": r["id"]})
+
+
+# ---------------- AI 生成内容标识(第 3 期) ----------------
+def stamp_video_label(path: str, label: str) -> bool:
+    """把「本内容由 AI 辅助生成」写进成片的标题/注释元数据(只重新封装，不重新编码).
+
+    尽力而为:ffmpeg 不可用或失败时保留原片，不影响交付。
+    """
+    if not label or not path or not os.path.isfile(path):
+        return False
+    directory = os.path.dirname(path)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".label-", suffix=".mp4", dir=directory
+    )
+    os.close(descriptor)
+    try:
+        from . import textvideo
+
+        command = textvideo._render_command([
+            "-protocol_whitelist", "file,pipe",
+            "-i", path,
+            "-map", "0",
+            "-c", "copy",
+            "-metadata", f"title={label}",
+            "-metadata", f"comment={label}",
+            "-metadata", f"description={label}",
+            "-movflags", "+faststart",
+            temporary,
+        ])
+        result = subprocess.run(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=180,
+            check=False,
+            cwd=ROOT,
+        )
+        if (
+            result.returncode != 0
+            or not os.path.isfile(temporary)
+            or os.path.getsize(temporary) <= 0
+        ):
+            return False
+        os.replace(temporary, path)
+        temporary = ""
+        return True
+    except Exception as exc:
+        log.warning("avatar label stamp skipped error_type=%s", type(exc).__name__)
+        return False
+    finally:
+        if temporary:
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+
+
+# ---------------- 肖像/声音授权声明(第 3 期) ----------------
+CONSENT_VERSION = "2026-09-v1"
+CONSENT_TEXT = "我确认本人或已取得肖像/声音权利人的书面授权，同意用于生成数字人视频"
+OVERSEAS_TEXT = "HeyGen 是境外服务商:选择它时，照片和声音将传输至境外服务商处理"
+CONSENT_MISSING = "请先勾选肖像/声音授权声明:确认是本人，或已取得权利人的书面授权"
+OVERSEAS_MISSING = ("HeyGen 是境外服务商，照片和声音会传输至境外处理。"
+                    "请勾选同意，或改选可灵/基础版(国内服务商)")
+
+
+class ConsentRequired(ValueError):
+    """缺少授权声明;str(exc) 是给老板看的原因。"""
+
+
+def consent_given(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _consent_key(tid: int, name: str) -> str:
+    return f"avatar_consent:{int(tid)}:{name}"
+
+
+def record_consent(tid: int, name: str, kind: str, action: str,
+                   user: dict = None, overseas: bool = False,
+                   now: float = None) -> dict:
+    """记录一次授权声明:谁、何时、哪个素材、声明版本(存 app_setting,不改表)."""
+    raw = str(name or "")
+    name = os.path.basename(raw)
+    if not name or name != raw or len(name) > 100 or name.startswith("."):
+        raise ValueError("invalid avatar asset")
+    user = user or {}
+    entry = {
+        "user_id": int(user.get("id") or 0),
+        "username": str(user.get("username") or "")[:40],
+        "ts": float(now if now is not None else time.time()),
+        "asset": name,
+        "kind": str(kind or "")[:12],
+        "action": str(action or "")[:20],
+        "version": CONSENT_VERSION,
+        "text": CONSENT_TEXT,
+        "overseas": bool(overseas),
+    }
+    key = _consent_key(tid, name)
+    with db.atomic() as connection:
+        row = connection.execute(
+            "SELECT value FROM app_setting WHERE key=?", (key,)
+        ).fetchone()
+        items = db.jloads(row["value"] if row else None, []) or []
+        items = [item for item in items if isinstance(item, dict)][-49:]
+        items.append(entry)
+        connection.execute(
+            "INSERT INTO app_setting(key,value,updated_at) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
+            "updated_at=excluded.updated_at",
+            (key, json.dumps(items, ensure_ascii=False), time.time()),
+        )
+    return entry
+
+
+def consent_records(tid: int, name: str = None) -> list:
+    if name:
+        keys = [_consent_key(tid, os.path.basename(str(name)))]
+        rows = [{"value": db.get_setting(keys[0])}]
+    else:
+        prefix = f"avatar_consent:{int(tid)}:"
+        rows = db.q(
+            "SELECT value FROM app_setting WHERE key LIKE ? ESCAPE '\\'",
+            (prefix.replace("_", "\\_") + "%",),
+        )
+    out = []
+    for row in rows:
+        out += [item for item in (db.jloads(row.get("value"), []) or [])
+                if isinstance(item, dict)]
+    return sorted(out, key=lambda item: item.get("ts") or 0, reverse=True)
+
+
+def has_consent(tid: int, name: str) -> bool:
+    return any(
+        item.get("version") == CONSENT_VERSION
+        for item in consent_records(tid, name)
+    )
+
+
+def require_consent(tid: int, names, consent_value, action: str,
+                    user: dict = None, kinds: dict = None) -> list:
+    """素材没有当前版本授权记录时，本次请求必须勾选声明;勾选了就补记录."""
+    names = [os.path.basename(str(n)) for n in (names or []) if n]
+    missing = [name for name in names if not has_consent(tid, name)]
+    if not missing:
+        return []
+    if not consent_given(consent_value):
+        raise ConsentRequired(CONSENT_MISSING)
+    return [
+        record_consent(tid, name, (kinds or {}).get(name, ""), action, user=user)
+        for name in missing
+    ]
+
+
+def overseas_allowed(engine: str, overseas_value) -> bool:
+    """选 HeyGen(境外)必须明确同意;自动/可灵/基础版都不需要."""
+    if engine == "heygen" and not consent_given(overseas_value):
+        raise ConsentRequired(OVERSEAS_MISSING)
+    return consent_given(overseas_value)
+
+
+# ---------------- 公开素材定期清理(第 3 期) ----------------
+_ACTIVE_JOB_STATUSES = ("pending_charge", "queued", "running")
+
+
+def _active_job_names() -> set[str]:
+    names: set[str] = set()
+    placeholders = ",".join("?" for _ in _ACTIVE_JOB_STATUSES)
+    for row in db.q(
+        "SELECT params_json,audio_file FROM avatar_job "
+        f"WHERE status IN ({placeholders})",
+        _ACTIVE_JOB_STATUSES,
+    ):
+        params = db.jloads(row.get("params_json"), {}) or {}
+        if isinstance(params, dict):
+            for key in ("photo_name", "own_audio_name"):
+                name = os.path.basename(str(params.get(key) or ""))
+                if name:
+                    names.add(name)
+        audio_name = os.path.basename(str(row.get("audio_file") or ""))
+        if audio_name:
+            names.add(audio_name)
+    return names
+
+
+def _library_names() -> set[str]:
+    names: set[str] = set()
+    for row in db.q(
+        "SELECT value FROM app_setting "
+        "WHERE key LIKE 'avatar_assets:%' OR key LIKE 'avatar_photos:%'"
+    ):
+        for item in db.jloads(row.get("value"), []) or []:
+            if isinstance(item, dict) and item.get("name"):
+                names.add(str(item["name"]))
+    return names
+
+
+def cleanup_public_assets(now: float = None, days: int = None) -> dict:
+    """删除公开素材目录里超过 N 天的临时文件(配音、截断音频、孤儿文件).
+
+    不删:进行中(待扣点/排队/拍摄中)任务用到的文件、老板素材库里的照片和录音
+    (它们已经只能凭签名链接临时访问)、宣传片等运营文件、事务目录。
+    """
+    from . import features
+    now = time.time() if now is None else float(now)
+    if days is None:
+        days = features.config_int("pub_cleanup_days")
+    cutoff = now - max(1, int(days)) * 86400
+    temp_cutoff = now - 86400
+    removed, kept_active, kept_library = [], 0, 0
+    with _ASSET_STORE_LOCK:
+        protected_active = _active_job_names()
+        library = _library_names()
+        try:
+            entries = list(os.scandir(PUBLIC_DIR))
+        except FileNotFoundError:
+            return {"removed": [], "kept_active": 0, "kept_library": 0}
+        for entry in entries:
+            name = entry.name
+            try:
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                mtime = entry.stat(follow_symlinks=False).st_mtime
+            except OSError:
+                continue
+            stale_temp = (
+                name.startswith((".upload-", ".audio-cap-", ".label-"))
+                and mtime < temp_cutoff
+            )
+            if not stale_temp:
+                if not _ASSET_NAME_RE.fullmatch(name) or mtime >= cutoff:
+                    continue
+                if name in protected_active:
+                    kept_active += 1
+                    continue
+                if name in library:
+                    kept_library += 1
+                    continue
+            try:
+                os.remove(os.path.join(PUBLIC_DIR, name))
+                removed.append(name)
+            except OSError:
+                continue
+    if removed:
+        log.info("public asset cleanup removed=%d", len(removed))
+    return {"removed": removed, "kept_active": kept_active,
+            "kept_library": kept_library}
+
+
+async def public_cleanup_loop(interval: float = 6 * 3600):
+    """每 6 小时清理一次公开素材目录;异常只记日志，下一轮再来."""
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            await asyncio.to_thread(cleanup_public_assets)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.error("public asset cleanup failed error_type=%s", type(exc).__name__)

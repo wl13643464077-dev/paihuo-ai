@@ -22,6 +22,9 @@ class AssetFileIsolationCase(unittest.TestCase):
         assetfiles.ASSET_ROOT = os.path.join(self.tmp.name, "assets")
         os.makedirs(assetfiles.ASSET_ROOT)
         db.conn()
+        # 第3期起矩阵自动发布默认关闭；这里验证开启后发布素材的租户隔离。
+        from app import features
+        features.set_platform("matrix_autopub", True)
         db.insert("tenants", {"id": 2, "name": "租户甲"})
         db.insert("tenants", {"id": 3, "name": "租户乙"})
         self.own_job = db.insert(

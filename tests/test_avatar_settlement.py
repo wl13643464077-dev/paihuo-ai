@@ -339,6 +339,7 @@ class AvatarSettlementCase(unittest.TestCase):
         self._as_tenant(2)
         with self.assertRaises(HTTPException) as raised:
             asyncio.run(main.avatar_job_create({
+                "consent": True,
                 "photo_name": foreign,
                 "script": "跨租户素材不应被使用。",
                 "duration": 30,
@@ -360,6 +361,7 @@ class AvatarSettlementCase(unittest.TestCase):
                 HTTPException
             ) as raised:
                 asyncio.run(main.avatar_job_create({
+                    "consent": True,
                     "photo_name": photo,
                     "script": "正常口播",
                     "duration": duration,
@@ -368,6 +370,7 @@ class AvatarSettlementCase(unittest.TestCase):
 
         with self.assertRaises(HTTPException) as raised:
             asyncio.run(main.avatar_job_create({
+                "consent": True,
                 "photo_name": photo,
                 "script": "长" * 241,
                 "duration": 30,

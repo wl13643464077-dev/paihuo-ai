@@ -149,6 +149,11 @@ def file_access_scope(value: str) -> dict:
                 (row or {}).get("industry_key") or ""
             ).strip(),
         }
+    # 店员现场照片(派给店员的任务 / 开闭店清单)：按门店所属行业要板块权限。
+    from . import photoproof
+    staff_scope = photoproof.file_scope(path)
+    if staff_scope is not None:
+        return staff_scope
     return {
         "tenant_id": 0,
         "industry_key": None,

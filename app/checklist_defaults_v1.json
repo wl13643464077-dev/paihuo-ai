@@ -1,0 +1,339 @@
+{
+  "version": 1,
+  "note": "开店/闭店/交班清单行业默认模板。租户第一次用清单时按行业复制一份，老板可以再改。item.key 在同一份清单里唯一且不再改动；photo=true 表示这一项必须拍照。due_time 为北京时间 HH:MM。",
+  "industries": {
+    "restaurant": {
+      "open": {"name": "开店清单", "due_time": "10:30", "items": [
+        {"key": "o01", "text": "冷藏柜 0-8℃、冷冻柜 -18℃ 以下，拍一张温度计", "photo": true},
+        {"key": "o02", "text": "当天食材验收完，变质或过期的已清出，拍一张备料区", "photo": true},
+        {"key": "o03", "text": "后厨地面、灶台、操作台干净，没有油污积水，拍一张后厨", "photo": true},
+        {"key": "o04", "text": "员工晨检：身体没问题，工服、帽子、口罩穿戴整齐，晨检表已登记", "photo": false},
+        {"key": "o05", "text": "燃气灶点火、排烟风机正常，闻一下没有燃气味", "photo": false},
+        {"key": "o06", "text": "餐具已消毒并放进保洁柜，拍一张消毒柜", "photo": true},
+        {"key": "o07", "text": "前厅桌椅摆齐、桌面擦净，调料和纸巾补满，拍一张前厅", "photo": true},
+        {"key": "o08", "text": "收银机、点餐系统开机，外卖平台已上线，零钱备足", "photo": false},
+        {"key": "o09", "text": "门头灯箱亮、门口扫干净，营业牌翻到“营业中”，拍一张门口", "photo": true}
+      ]},
+      "close": {"name": "闭店清单", "due_time": "22:30", "items": [
+        {"key": "c01", "text": "剩余食材分类封好、贴上日期标签放进冷藏，拍一张冷藏柜里面", "photo": true},
+        {"key": "c02", "text": "灶台、油烟罩、操作台清洁完，拍一张后厨", "photo": true},
+        {"key": "c03", "text": "燃气总阀已关，拍一张阀门", "photo": true},
+        {"key": "c04", "text": "泔水、垃圾已清运，垃圾桶已冲洗", "photo": false},
+        {"key": "c05", "text": "冷库、冰箱门关严，温度正常", "photo": false},
+        {"key": "c06", "text": "今天营业款核对无误，交班表签字", "photo": false},
+        {"key": "c07", "text": "外卖平台已下线或调成休息", "photo": false},
+        {"key": "c08", "text": "除冷柜外水电已关，门窗锁好，拍一张锁好的大门", "photo": true}
+      ]},
+      "handover": {"name": "交班清单", "due_time": "15:00", "items": [
+        {"key": "h01", "text": "本班营业款、备用金当面点清，双方签字", "photo": false},
+        {"key": "h02", "text": "卖完的菜（沽清）和剩余备料数量告诉接班的人", "photo": false},
+        {"key": "h03", "text": "没处理完的预订、外卖单、客人投诉逐条交接", "photo": false},
+        {"key": "h04", "text": "冷柜温度再看一次，拍一张温度计", "photo": true},
+        {"key": "h05", "text": "前厅桌面、地面清理干净再交班，拍一张前厅", "photo": true},
+        {"key": "h06", "text": "设备有故障的已写进交班本", "photo": false}
+      ]}
+    },
+    "tea_coffee": {
+      "open": {"name": "开店清单", "due_time": "10:00", "items": [
+        {"key": "o01", "text": "制冰机出冰正常，拍一张冰桶", "photo": true},
+        {"key": "o02", "text": "当日小料（珍珠、芋圆、椰果等）已备好并贴好效期标签，拍照", "photo": true},
+        {"key": "o03", "text": "鲜奶、奶油、水果查过效期，过期的已清出，拍一张冷藏柜", "photo": true},
+        {"key": "o04", "text": "咖啡机、萃茶机预热完，试做一杯尝过口味", "photo": false},
+        {"key": "o05", "text": "封口机、果糖机、净水器正常，滤芯没过期", "photo": false},
+        {"key": "o06", "text": "操作台、水吧台、地面干净没积水，拍一张吧台", "photo": true},
+        {"key": "o07", "text": "收银机开机、零钱备足，外卖平台已上线", "photo": false},
+        {"key": "o08", "text": "菜单灯箱、点单屏已亮，门口干净，拍一张门口", "photo": true}
+      ]},
+      "close": {"name": "闭店清单", "due_time": "22:30", "items": [
+        {"key": "c01", "text": "过了时效的小料按规定倒掉并登记废弃量，拍一张废弃登记", "photo": true},
+        {"key": "c02", "text": "咖啡机冲洗（反冲）完，蒸汽棒擦干净", "photo": false},
+        {"key": "c03", "text": "制冰机、冰桶清洁，冰铲已消毒，拍一张冰桶", "photo": true},
+        {"key": "c04", "text": "鲜奶、水果封好放进冷藏，冷藏柜温度正常", "photo": false},
+        {"key": "c05", "text": "操作台、水槽、地面清洁完，垃圾已清运，拍一张吧台", "photo": true},
+        {"key": "c06", "text": "今天营业额核对无误，外卖平台已下线", "photo": false},
+        {"key": "c07", "text": "除冷柜外电器已断电，门窗锁好，拍一张锁好的大门", "photo": true}
+      ]},
+      "handover": {"name": "交班清单", "due_time": "15:00", "items": [
+        {"key": "h01", "text": "小料剩多少、下一锅什么时候煮，告诉接班的人", "photo": false},
+        {"key": "h02", "text": "营业款、备用金当面点清交接", "photo": false},
+        {"key": "h03", "text": "没出杯的订单、外卖异常单交接清楚", "photo": false},
+        {"key": "h04", "text": "冰、奶、杯子、吸管、封口膜余量拍一张给接班的人", "photo": true},
+        {"key": "h05", "text": "吧台台面清理干净再交班，拍一张吧台", "photo": true},
+        {"key": "h06", "text": "制冰机、封口机等设备有异常的已登记", "photo": false}
+      ]}
+    },
+    "convenience": {
+      "open": {"name": "开店清单", "due_time": "08:00", "items": [
+        {"key": "o01", "text": "收银机开机、零钱备足，扫码枪、电子秤正常", "photo": false},
+        {"key": "o02", "text": "鲜食（饭团、面包、牛奶）到货验收，临期的已下架，拍一张鲜食柜", "photo": true},
+        {"key": "o03", "text": "冷柜、冰柜温度正常，拍一张温度显示", "photo": true},
+        {"key": "o04", "text": "货架补满、商品正面朝外排齐，拍一张主货架", "photo": true},
+        {"key": "o05", "text": "关东煮、烤肠机开机并擦干净", "photo": false},
+        {"key": "o06", "text": "促销价签和收银系统价格一致，过期海报已撤下", "photo": false},
+        {"key": "o07", "text": "烟酒柜上锁，监控画面正常", "photo": false},
+        {"key": "o08", "text": "地面、门口、玻璃门干净，垃圾桶已换袋，拍一张门口", "photo": true}
+      ]},
+      "close": {"name": "闭店清单", "due_time": "23:00", "items": [
+        {"key": "c01", "text": "今天鲜食报损已登记，拍一张报损商品", "photo": true},
+        {"key": "c02", "text": "关东煮、烤肠机清洁并断电", "photo": false},
+        {"key": "c03", "text": "冷柜门关严、温度正常，拍一张温度显示", "photo": true},
+        {"key": "c04", "text": "营业款点清放进保险柜，交班表签字", "photo": false},
+        {"key": "c05", "text": "地面扫干净、拖干，垃圾已清运", "photo": false},
+        {"key": "c06", "text": "监控在录像，门窗锁好，拍一张锁好的大门", "photo": true}
+      ]},
+      "handover": {"name": "交班清单", "due_time": "15:00", "items": [
+        {"key": "h01", "text": "收银款、备用金当面点清交接", "photo": false},
+        {"key": "h02", "text": "缺货、要订的货告诉接班的人", "photo": false},
+        {"key": "h03", "text": "临期商品已下架，报损单交接", "photo": false},
+        {"key": "h04", "text": "快递代收、充值等代收业务台账对清", "photo": false},
+        {"key": "h05", "text": "货架排面整理好再交班，拍一张主货架", "photo": true},
+        {"key": "h06", "text": "冷柜、收银机等设备有异常的已登记", "photo": false}
+      ]}
+    },
+    "snack": {
+      "open": {"name": "开店清单", "due_time": "09:30", "items": [
+        {"key": "o01", "text": "收银机、电子秤开机，秤已归零", "photo": false},
+        {"key": "o02", "text": "散称区称重袋、试吃盒备足，散称标签清楚，拍一张散称区", "photo": true},
+        {"key": "o03", "text": "30 天内到期的商品已挑出放到临期专区，拍一张临期专区", "photo": true},
+        {"key": "o04", "text": "货架补满、爆款堆头摆整齐，拍一张堆头", "photo": true},
+        {"key": "o05", "text": "价签和系统价格一致，促销价签已到位", "photo": false},
+        {"key": "o06", "text": "地面、货架没有灰尘和撒落的零食", "photo": false},
+        {"key": "o07", "text": "门头灯箱、音乐、空调已开，门口干净，拍一张门口", "photo": true}
+      ]},
+      "close": {"name": "闭店清单", "due_time": "22:30", "items": [
+        {"key": "c01", "text": "散称区盖好防尘盖，撒落的零食已清理，拍一张散称区", "photo": true},
+        {"key": "c02", "text": "今天破损、过期商品已登记报损，拍一张报损商品", "photo": true},
+        {"key": "c03", "text": "营业款核对无误，交班表签字", "photo": false},
+        {"key": "c04", "text": "缺货商品已记下，明天订货", "photo": false},
+        {"key": "c05", "text": "地面扫干净，垃圾已清运", "photo": false},
+        {"key": "c06", "text": "除冷柜外电器已断电，门窗锁好，拍一张锁好的大门", "photo": true}
+      ]},
+      "handover": {"name": "交班清单", "due_time": "15:00", "items": [
+        {"key": "h01", "text": "收银款、备用金当面点清交接", "photo": false},
+        {"key": "h02", "text": "本班到货、退货单据交接", "photo": false},
+        {"key": "h03", "text": "顾客投诉、退换货交接", "photo": false},
+        {"key": "h04", "text": "散称区补满再交班，拍一张散称区", "photo": true},
+        {"key": "h05", "text": "货架整理好再交班，拍一张主货架", "photo": true},
+        {"key": "h06", "text": "设备有异常的已登记", "photo": false}
+      ]}
+    },
+    "grocery": {
+      "open": {"name": "开店清单", "due_time": "08:30", "items": [
+        {"key": "o01", "text": "生鲜到货已过秤验收，拍一张验收单", "photo": true},
+        {"key": "o02", "text": "果蔬挑拣完，烂果烂菜已剔除，堆头饱满，拍一张果蔬区", "photo": true},
+        {"key": "o03", "text": "冷藏柜、冷冻柜、风幕柜温度正常，拍一张温度显示", "photo": true},
+        {"key": "o04", "text": "肉类、水产价签已换成今天的价", "photo": false},
+        {"key": "o05", "text": "电子秤归零，收银机开机、零钱备足", "photo": false},
+        {"key": "o06", "text": "过期、临期商品已下架或打折，拍一张打折区", "photo": true},
+        {"key": "o07", "text": "地面干燥防滑，水产区没有积水和异味", "photo": false},
+        {"key": "o08", "text": "购物车、购物篮摆整齐，出入口干净，拍一张入口", "photo": true}
+      ]},
+      "close": {"name": "闭店清单", "due_time": "22:00", "items": [
+        {"key": "c01", "text": "叶菜、水果喷水保鲜，盖好保鲜膜或进冷库，拍一张果蔬区", "photo": true},
+        {"key": "c02", "text": "今天生鲜报损已登记，拍一张报损商品", "photo": true},
+        {"key": "c03", "text": "肉类水产已进冷库，案板刀具已清洗消毒", "photo": false},
+        {"key": "c04", "text": "风幕柜夜帘已拉下，冷柜温度正常，拍一张风幕柜", "photo": true},
+        {"key": "c05", "text": "营业款核对无误，放进保险柜", "photo": false},
+        {"key": "c06", "text": "地面已冲洗，垃圾已清运", "photo": false},
+        {"key": "c07", "text": "门窗、卷帘门锁好，监控正常，拍一张锁好的大门", "photo": true}
+      ]},
+      "handover": {"name": "交班清单", "due_time": "15:00", "items": [
+        {"key": "h01", "text": "收银款、备用金当面点清交接", "photo": false},
+        {"key": "h02", "text": "生鲜库存和下午到货安排告诉接班的人", "photo": false},
+        {"key": "h03", "text": "变价、打折商品交接清楚", "photo": false},
+        {"key": "h04", "text": "冷柜温度再看一次，拍一张温度显示", "photo": true},
+        {"key": "h05", "text": "堆头补满、排面整理好再交班，拍一张果蔬区", "photo": true},
+        {"key": "h06", "text": "设备有异常的已登记", "photo": false}
+      ]}
+    },
+    "pharmacy": {
+      "open": {"name": "开店清单", "due_time": "08:30", "items": [
+        {"key": "o01", "text": "店堂温湿度已记录（常温区、阴凉区），拍一张温湿度计", "photo": true},
+        {"key": "o02", "text": "冷藏药品冰箱在 2-8℃，拍一张温度显示", "photo": true},
+        {"key": "o03", "text": "执业药师到岗、戴好胸牌，在岗牌已挂出，拍一张在岗牌", "photo": true},
+        {"key": "o04", "text": "处方药和非处方药分区摆放，处方药不放开架自选", "photo": false},
+        {"key": "o05", "text": "近效期药品已检查，6 个月内到期的已登记", "photo": false},
+        {"key": "o06", "text": "收银机、医保刷卡设备开机正常", "photo": false},
+        {"key": "o07", "text": "店堂、货架干净整齐，门口干净，拍一张店堂", "photo": true}
+      ]},
+      "close": {"name": "闭店清单", "due_time": "22:00", "items": [
+        {"key": "c01", "text": "处方单、特殊药品销售登记本已整理归档", "photo": false},
+        {"key": "c02", "text": "冷藏药品冰箱温度再看一次并记录，拍一张温度显示", "photo": true},
+        {"key": "c03", "text": "下午的温湿度记录已填", "photo": false},
+        {"key": "c04", "text": "营业款、医保对账核对无误", "photo": false},
+        {"key": "c05", "text": "拆零药品已封好、标签清楚", "photo": false},
+        {"key": "c06", "text": "除药品冰箱外电器已断电，门窗锁好，拍一张锁好的大门", "photo": true}
+      ]},
+      "handover": {"name": "交班清单", "due_time": "15:00", "items": [
+        {"key": "h01", "text": "收银款、备用金当面点清交接", "photo": false},
+        {"key": "h02", "text": "执业药师在岗情况交接，不在岗时处方药暂停销售", "photo": false},
+        {"key": "h03", "text": "缺货药品、顾客预订的药交接", "photo": false},
+        {"key": "h04", "text": "近效期、不合格药品处理情况交接", "photo": false},
+        {"key": "h05", "text": "温湿度记录已填，拍一张温湿度计", "photo": true},
+        {"key": "h06", "text": "货架排面整理好再交班，拍一张店堂", "photo": true}
+      ]}
+    },
+    "hotel": {
+      "open": {"name": "早班开班清单", "due_time": "08:00", "items": [
+        {"key": "o01", "text": "前台电脑、房态系统、门卡机、POS 机正常", "photo": false},
+        {"key": "o02", "text": "和夜班核对房态、今天预抵预离名单", "photo": false},
+        {"key": "o03", "text": "大堂地面、前台台面、公共卫生间干净，拍一张大堂", "photo": true},
+        {"key": "o04", "text": "早餐已出品，餐具、保温炉就位，拍一张早餐区", "photo": true},
+        {"key": "o05", "text": "备用金点清无误", "photo": false},
+        {"key": "o06", "text": "员工工服、工牌整齐", "photo": false},
+        {"key": "o07", "text": "消防通道畅通、安全出口灯亮，拍一张消防通道", "photo": true}
+      ]},
+      "close": {"name": "夜班夜审清单", "due_time": "23:30", "items": [
+        {"key": "c01", "text": "今天房费、押金、杂项收入夜审核对", "photo": false},
+        {"key": "c02", "text": "在住客人身份登记已全部上传，和系统核对一致", "photo": false},
+        {"key": "c03", "text": "大堂、电梯厅、楼层走廊巡查一遍，拍一张走廊", "photo": true},
+        {"key": "c04", "text": "消防通道、安全出口畅通，拍一张消防通道", "photo": true},
+        {"key": "c05", "text": "大堂灯光已调成夜间模式，门口安全", "photo": false},
+        {"key": "c06", "text": "明天预抵客人的房间已排好", "photo": false},
+        {"key": "c07", "text": "客人遗留物品已登记入库", "photo": false}
+      ]},
+      "handover": {"name": "交班清单", "due_time": "15:00", "items": [
+        {"key": "h01", "text": "备用金、押金、营业款当面点清交接", "photo": false},
+        {"key": "h02", "text": "空房、脏房、维修房交接清楚", "photo": false},
+        {"key": "h03", "text": "没办完的客人需求和投诉逐条交接", "photo": false},
+        {"key": "h04", "text": "门卡、钥匙数量已清点", "photo": false},
+        {"key": "h05", "text": "工程报修单跟进情况交接", "photo": false},
+        {"key": "h06", "text": "前台台面整理干净再交班，拍一张前台", "photo": true}
+      ]}
+    },
+    "auto": {
+      "open": {"name": "开店清单", "due_time": "08:30", "items": [
+        {"key": "o01", "text": "工位地面干净没有油污，工具车归位，拍一张车间", "photo": true},
+        {"key": "o02", "text": "举升机、空压机、洗车机试运行正常", "photo": false},
+        {"key": "o03", "text": "今天预约的车和要用的配件已准备好", "photo": false},
+        {"key": "o04", "text": "灭火器在有效期内、放在原位，拍一张灭火器", "photo": true},
+        {"key": "o05", "text": "接待区、客户休息区干净，饮用水已备好，拍一张休息区", "photo": true},
+        {"key": "o06", "text": "收银、开单系统已开机", "photo": false},
+        {"key": "o07", "text": "员工工服、劳保鞋穿戴整齐", "photo": false}
+      ]},
+      "close": {"name": "闭店清单", "due_time": "19:30", "items": [
+        {"key": "c01", "text": "在店车辆钥匙已清点、登记放进钥匙柜，拍一张钥匙柜", "photo": true},
+        {"key": "c02", "text": "工位、地沟已清理，废机油和旧件分类存放，拍一张车间", "photo": true},
+        {"key": "c03", "text": "举升机已降到底，空压机已泄压断电", "photo": false},
+        {"key": "c04", "text": "今天工单、收款核对无误", "photo": false},
+        {"key": "c05", "text": "油漆、机油等危化品存放柜已上锁", "photo": false},
+        {"key": "c06", "text": "门窗、卷帘门锁好，监控正常，拍一张锁好的大门", "photo": true}
+      ]},
+      "handover": {"name": "交班清单", "due_time": "13:30", "items": [
+        {"key": "h01", "text": "在修车辆逐台交接：车牌、项目、预计交车时间", "photo": false},
+        {"key": "h02", "text": "车钥匙数量已清点", "photo": false},
+        {"key": "h03", "text": "等到货的配件、等客户回复的事项交接", "photo": false},
+        {"key": "h04", "text": "收款、挂账单据交接", "photo": false},
+        {"key": "h05", "text": "工位清理干净再交班，拍一张车间", "photo": true},
+        {"key": "h06", "text": "设备有异常的已登记", "photo": false}
+      ]}
+    },
+    "fitness": {
+      "open": {"name": "开店清单", "due_time": "08:00", "items": [
+        {"key": "o01", "text": "器械区巡检：器械没有松动、钢丝绳没有磨损，拍一张器械区", "photo": true},
+        {"key": "o02", "text": "团课教室、瑜伽垫、小器材摆放整齐，拍一张教室", "photo": true},
+        {"key": "o03", "text": "更衣室、淋浴间干净，热水正常，拍一张更衣室", "photo": true},
+        {"key": "o04", "text": "空调、新风、音响、灯光正常", "photo": false},
+        {"key": "o05", "text": "前台系统、门禁、储物柜正常", "photo": false},
+        {"key": "o06", "text": "饮水机、毛巾已备足", "photo": false},
+        {"key": "o07", "text": "AED、急救箱在原位，药品没过期", "photo": false}
+      ]},
+      "close": {"name": "闭店清单", "due_time": "22:30", "items": [
+        {"key": "c01", "text": "器械归位，哑铃、杠铃片已上架，拍一张器械区", "photo": true},
+        {"key": "c02", "text": "瑜伽垫、小器材已消毒擦拭", "photo": false},
+        {"key": "c03", "text": "更衣室、淋浴间已清洁，检查过有没有遗留物品，拍一张更衣室", "photo": true},
+        {"key": "c04", "text": "场馆里没有会员滞留，储物柜已清空", "photo": false},
+        {"key": "c05", "text": "今天会员签到、销售收款核对无误", "photo": false},
+        {"key": "c06", "text": "空调灯光已断电，门窗锁好，拍一张锁好的大门", "photo": true}
+      ]},
+      "handover": {"name": "交班清单", "due_time": "15:00", "items": [
+        {"key": "h01", "text": "本班新签、续费、体验课情况交接", "photo": false},
+        {"key": "h02", "text": "私教课、团课排课变动交接", "photo": false},
+        {"key": "h03", "text": "会员投诉、器械报修交接", "photo": false},
+        {"key": "h04", "text": "前台收款、备用金点清", "photo": false},
+        {"key": "h05", "text": "器械区归位整理好再交班，拍一张器械区", "photo": true},
+        {"key": "h06", "text": "淋浴间、卫生间巡查一次，拍一张淋浴间", "photo": true}
+      ]}
+    },
+    "beauty": {
+      "open": {"name": "开店清单", "due_time": "09:30", "items": [
+        {"key": "o01", "text": "剪刀、美甲工具、仪器探头已消毒放进消毒柜，拍一张消毒柜", "photo": true},
+        {"key": "o02", "text": "毛巾、床单一客一换，干净布草已备足，拍一张布草架", "photo": true},
+        {"key": "o03", "text": "产品查过效期，开封的已贴开封日期", "photo": false},
+        {"key": "o04", "text": "美容床、座椅、镜台干净，拍一张工位", "photo": true},
+        {"key": "o05", "text": "今天预约的客人已确认，提前提醒到店", "photo": false},
+        {"key": "o06", "text": "收银系统开机、零钱备足", "photo": false},
+        {"key": "o07", "text": "前台、等候区、门口干净，音乐香薰已开，拍一张前台", "photo": true}
+      ]},
+      "close": {"name": "闭店清单", "due_time": "21:30", "items": [
+        {"key": "c01", "text": "用过的工具已清洗消毒，拍一张消毒柜", "photo": true},
+        {"key": "c02", "text": "脏毛巾、床单已送洗并登记数量", "photo": false},
+        {"key": "c03", "text": "产品已归位，开封的产品盖紧", "photo": false},
+        {"key": "c04", "text": "今天消费、储值卡扣次核对无误", "photo": false},
+        {"key": "c05", "text": "地面已清洁，垃圾已清运", "photo": false},
+        {"key": "c06", "text": "美容仪、吹风机等电器已断电，门窗锁好，拍一张锁好的大门", "photo": true}
+      ]},
+      "handover": {"name": "交班清单", "due_time": "15:00", "items": [
+        {"key": "h01", "text": "下一时段预约的客人和项目交接", "photo": false},
+        {"key": "h02", "text": "本班收款、办卡情况交接", "photo": false},
+        {"key": "h03", "text": "客人的特殊要求、过敏情况交接", "photo": false},
+        {"key": "h04", "text": "产品和耗材余量告诉接班的人", "photo": false},
+        {"key": "h05", "text": "客人投诉情况交接", "photo": false},
+        {"key": "h06", "text": "工位整理好、工具消毒后再交班，拍一张工位", "photo": true}
+      ]}
+    },
+    "pet": {
+      "open": {"name": "开店清单", "due_time": "09:00", "items": [
+        {"key": "o01", "text": "寄养宠物逐只看过：精神、吃喝、大小便正常，拍一张寄养区", "photo": true},
+        {"key": "o02", "text": "笼舍已清理消毒、换好干净垫料，拍一张笼舍", "photo": true},
+        {"key": "o03", "text": "洗护台、吹水机、烘干箱检查正常", "photo": false},
+        {"key": "o04", "text": "洗护用品、消毒液已备足，查过效期", "photo": false},
+        {"key": "o05", "text": "店里已通风、没有异味，地面干净，拍一张店内", "photo": true},
+        {"key": "o06", "text": "今天洗护、美容预约已确认", "photo": false},
+        {"key": "o07", "text": "收银系统已开机，商品区整齐", "photo": false}
+      ]},
+      "close": {"name": "闭店清单", "due_time": "21:30", "items": [
+        {"key": "c01", "text": "寄养宠物已喂食喂水，记下吃喝情况，拍一张寄养区", "photo": true},
+        {"key": "c02", "text": "洗护区已清洁消毒、毛发已清理，拍一张洗护区", "photo": true},
+        {"key": "c03", "text": "笼门已锁好，寄养宠物逐只点过数", "photo": false},
+        {"key": "c04", "text": "今天收款、会员卡核对无误", "photo": false},
+        {"key": "c05", "text": "垃圾（含宠物粪便）已清运", "photo": false},
+        {"key": "c06", "text": "空调温度已调好（寄养宠物过夜），门窗锁好，拍一张锁好的大门", "photo": true}
+      ]},
+      "handover": {"name": "交班清单", "due_time": "15:00", "items": [
+        {"key": "h01", "text": "寄养宠物状态、喂药情况逐只交接", "photo": false},
+        {"key": "h02", "text": "正在洗护的宠物进度和主人电话交接", "photo": false},
+        {"key": "h03", "text": "本班收款、预约变动交接", "photo": false},
+        {"key": "h04", "text": "宠物有异常（呕吐、打架等）的已登记并告诉接班的人", "photo": false},
+        {"key": "h05", "text": "猫砂、粮、洗护用品余量告诉接班的人", "photo": false},
+        {"key": "h06", "text": "洗护台整理干净再交班，拍一张洗护区", "photo": true}
+      ]}
+    },
+    "_generic": {
+      "open": {"name": "开店清单", "due_time": "09:30", "items": [
+        {"key": "o01", "text": "门口、店内地面干净，拍一张店内", "photo": true},
+        {"key": "o02", "text": "收银机开机、零钱备足", "photo": false},
+        {"key": "o03", "text": "货品或物料已补齐，过期的已清出", "photo": false},
+        {"key": "o04", "text": "灯光、空调、音乐已打开", "photo": false},
+        {"key": "o05", "text": "员工着装整齐、按时到岗", "photo": false},
+        {"key": "o06", "text": "门头招牌亮、门口整洁，拍一张门口", "photo": true}
+      ]},
+      "close": {"name": "闭店清单", "due_time": "22:00", "items": [
+        {"key": "c01", "text": "今天营业款核对无误", "photo": false},
+        {"key": "c02", "text": "店内清扫干净，垃圾已清运", "photo": false},
+        {"key": "c03", "text": "货品、物料收好归位，拍一张店内", "photo": true},
+        {"key": "c04", "text": "要补的货、坏了的东西已记下", "photo": false},
+        {"key": "c05", "text": "不用的电器已断电", "photo": false},
+        {"key": "c06", "text": "门窗锁好，拍一张锁好的大门", "photo": true}
+      ]},
+      "handover": {"name": "交班清单", "due_time": "15:00", "items": [
+        {"key": "h01", "text": "营业款、备用金当面点清交接", "photo": false},
+        {"key": "h02", "text": "没办完的客人事项逐条交接", "photo": false},
+        {"key": "h03", "text": "缺货、要补的物料告诉接班的人", "photo": false},
+        {"key": "h04", "text": "设备有异常的已登记", "photo": false},
+        {"key": "h05", "text": "客人投诉情况交接", "photo": false},
+        {"key": "h06", "text": "台面、地面整理干净再交班，拍一张店内", "photo": true}
+      ]}
+    }
+  }
+}

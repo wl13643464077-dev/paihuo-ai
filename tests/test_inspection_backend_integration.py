@@ -20,6 +20,7 @@ from fastapi.responses import Response
 from starlette.requests import Request
 
 from app import assetfiles, auth, db, inspection, inspectionstandards, main, taskrunner
+from app.routes import inspection as inspection_routes
 from app.skills import registry
 
 
@@ -123,6 +124,9 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
         self.auto_branch = inspection.create_branch(
             2, 20, "auto", {"name": "测试车行", "region": "华北"}
         )
+        # v58：经理/员工只能操作老板分配给自己的门店。
+        inspection.set_member_branches(20, 21, [self.branch["id"]])
+        inspection.set_member_branches(20, 25, [self.auto_branch["id"]])
         main._persistent_upload_hits.clear()
         main._persistent_upload_active_tenants.clear()
 
@@ -184,6 +188,13 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
             "id": 21, "tenant_id": 2, "username": "u21",
             "role": "member", "modules": ["restaurant"],
         })
+        # v58：员工/经理不能建门店，总监可以。
+        with self.assertRaises(HTTPException) as staff_denied:
+            main.inspection_branch_create({
+                "name": "员工新建店", "industry_key": "restaurant",
+            })
+        self.assertEqual(403, staff_denied.exception.status_code)
+        db.execute("UPDATE users SET job_title='director' WHERE id=21")
         created = main.inspection_branch_create({
             "name": "成员新建店", "region": "华东",
             "industry_key": "restaurant",
@@ -356,10 +367,10 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
             {"text": json.dumps(audit, ensure_ascii=False), "tokens": 11},
         ])
         with mock.patch.object(
-            main, "_inspection_prompt_bundle",
+            inspection_routes, "_inspection_prompt_bundle",
             return_value=main.providers.PromptBundle(system="system", user="user"),
         ), mock.patch.object(
-            main, "_load_inspection_images",
+            inspection_routes, "_load_inspection_images",
             return_value=[({"photo_id": photo_id, "display_no": 1}, "image/jpeg", "eA==")],
         ), mock.patch.object(
             main.providers, "vision_model_for", return_value="gpt-5.5",
@@ -418,7 +429,8 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
         self.assertIn("expected_photo_review_count=2", bundle.system)
         self.assertIn('"enum":[73,88]', bundle.system)
         self.assertIn(
-            '"confidence":{"type":"number","minimum":0.8,"maximum":1}',
+            # 第 2 期：看不清的照片如实报低置信度(<0.8 由服务端标为"需补拍")，契约放开到 0–1
+            '"confidence":{"type":"number","minimum":0,"maximum":1}',
             bundle.system,
         )
         packet = json.loads(bundle.user.split("\n", 1)[1])
@@ -454,10 +466,10 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
             {"text": json.dumps(valid, ensure_ascii=False), "tokens": 11, "cost_usd": .2},
         ])
         with mock.patch.object(
-            main, "_inspection_prompt_bundle",
+            inspection_routes, "_inspection_prompt_bundle",
             return_value=main.providers.PromptBundle(system="system", user="user"),
         ), mock.patch.object(
-            main, "_load_inspection_images",
+            inspection_routes, "_load_inspection_images",
             return_value=[({"photo_id": photo_id, "display_no": 1}, "image/jpeg", "eA==")],
         ), mock.patch.object(
             main.providers, "vision_model_for", return_value="gpt-5.5",
@@ -525,10 +537,10 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
                 {"text": json.dumps(valid, ensure_ascii=False), "tokens": 3},
             ])
             with self.subTest(missing_field=missing_field), mock.patch.object(
-                main, "_inspection_prompt_bundle",
+                inspection_routes, "_inspection_prompt_bundle",
                 return_value=main.providers.PromptBundle(system="system", user="user"),
             ), mock.patch.object(
-                main, "_load_inspection_images",
+                inspection_routes, "_load_inspection_images",
                 return_value=[({"photo_id": photo_id, "display_no": 1}, "image/jpeg", "eA==")],
             ), mock.patch.object(
                 main.providers, "vision_model_for", return_value="gpt-5.5",
@@ -590,10 +602,10 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
             {"text": json.dumps(valid_audit, ensure_ascii=False), "tokens": 11, "cost_usd": .3},
         ])
         with mock.patch.object(
-            main, "_inspection_prompt_bundle",
+            inspection_routes, "_inspection_prompt_bundle",
             return_value=main.providers.PromptBundle(system="system", user="user"),
         ), mock.patch.object(
-            main, "_load_inspection_images",
+            inspection_routes, "_load_inspection_images",
             return_value=[({"photo_id": photo_id, "display_no": 1}, "image/jpeg", "eA==")],
         ), mock.patch.object(
             main.providers, "vision_model_for", return_value="gpt-5.5",
@@ -624,10 +636,10 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
             {"text": "{}", "tokens": 4, "cost_usd": .2},
         ])
         with mock.patch.object(
-            main, "_inspection_prompt_bundle",
+            inspection_routes, "_inspection_prompt_bundle",
             return_value=main.providers.PromptBundle(system="system", user="user"),
         ), mock.patch.object(
-            main, "_load_inspection_images",
+            inspection_routes, "_load_inspection_images",
             return_value=[({"photo_id": photo_id, "display_no": 1}, "image/jpeg", "eA==")],
         ), mock.patch.object(
             main.providers, "vision_model_for", return_value="gpt-5.5",
@@ -654,7 +666,9 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
             )["n"],
         )
 
-    def test_semantic_hard_gates_do_not_format_retry(self):
+    def test_unreadable_photo_waits_for_single_retake_without_format_retry(self):
+        # 第 2 期：看不清/低置信度不再让整次巡店失败退款，只让店员补拍这一张；
+        # 也不做格式重试（主模型 + 异模复核各调用一次）。
         for field, value in (("analyzable", False), ("confidence", .79)):
             task_id, visit = self._linked_task(
                 status="queued", billing_status="charged"
@@ -671,22 +685,29 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
                 "text": json.dumps(candidate, ensure_ascii=False), "tokens": 5,
             })
             with self.subTest(field=field), mock.patch.object(
-                main, "_inspection_prompt_bundle",
+                inspection_routes, "_inspection_prompt_bundle",
                 return_value=main.providers.PromptBundle(system="system", user="user"),
             ), mock.patch.object(
-                main, "_load_inspection_images",
+                inspection_routes, "_load_inspection_images",
                 return_value=[({"photo_id": photo_id, "display_no": 1}, "image/jpeg", "eA==")],
             ), mock.patch.object(
                 main.providers, "vision_model_for", return_value="gpt-5.5",
             ), mock.patch.object(main.providers, "call_vision", gateway):
                 asyncio.run(main._run_inspection_task(task_id))
-            gateway.assert_awaited_once()
+            self.assertEqual(2, gateway.await_count)
             self.assertEqual(
-                {"status": "failed", "billing_status": "refunded"},
+                {"status": "done", "billing_status": "succeeded"},
                 db.one(
                     "SELECT status,billing_status FROM task WHERE id=?",
                     (task_id,),
                 ),
+            )
+            self.assertEqual(
+                "needs_retake",
+                db.one(
+                    "SELECT status FROM inspection_visit WHERE id=?",
+                    (visit["id"],),
+                )["status"],
             )
 
     def test_leak_provider_error_and_cancellation_never_format_retry(self):
@@ -709,10 +730,10 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
                 await main._run_inspection_task(task_id)
 
             with self.subTest(name=name), mock.patch.object(
-                main, "_inspection_prompt_bundle",
+                inspection_routes, "_inspection_prompt_bundle",
                 return_value=main.providers.PromptBundle(system="system", user="user"),
             ), mock.patch.object(
-                main, "_load_inspection_images",
+                inspection_routes, "_load_inspection_images",
                 return_value=[({"photo_id": photo_id, "display_no": 1}, "image/jpeg", "eA==")],
             ), mock.patch.object(
                 main.providers, "vision_model_for", return_value="gpt-5.5",
@@ -746,15 +767,15 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
 
         started = time.monotonic()
         with mock.patch.object(
-            main, "_inspection_prompt_bundle",
+            inspection_routes, "_inspection_prompt_bundle",
             return_value=main.providers.PromptBundle(system="system", user="user"),
         ), mock.patch.object(
-            main, "_load_inspection_images",
+            inspection_routes, "_load_inspection_images",
             return_value=[({"photo_id": photo_id, "display_no": 1}, "image/jpeg", "eA==")],
         ), mock.patch.object(
             main.providers, "vision_model_for", return_value="gpt-5.5",
         ), mock.patch.object(
-            main, "_INSPECTION_ANALYSIS_MODEL_TIMEOUT_SECONDS", .12,
+            inspection_routes, "_INSPECTION_ANALYSIS_MODEL_TIMEOUT_SECONDS", .12,
         ), mock.patch.object(main.providers, "call_vision", side_effect=drifting_gateway):
             asyncio.run(main._run_inspection_task(task_id))
         elapsed = time.monotonic() - started
@@ -794,10 +815,10 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
             "tokens": 9,
         })
         with mock.patch.object(
-            main, "_inspection_prompt_bundle",
+            inspection_routes, "_inspection_prompt_bundle",
             return_value=main.providers.PromptBundle(system="system", user="user"),
         ), mock.patch.object(
-            main, "_load_inspection_images",
+            inspection_routes, "_load_inspection_images",
             return_value=[({"photo_id": photo_id, "display_no": 1}, "image/jpeg", "eA==")],
         ), mock.patch.object(
             main.providers, "vision_model_for", return_value="gpt-5.5",
@@ -843,10 +864,10 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
                 "text": json.dumps(value, ensure_ascii=False), "tokens": 5,
             })
         with mock.patch.object(
-            main, "_inspection_prompt_bundle",
+            inspection_routes, "_inspection_prompt_bundle",
             return_value=main.providers.PromptBundle(system="system", user="user"),
         ), mock.patch.object(
-            main, "_load_inspection_images",
+            inspection_routes, "_load_inspection_images",
             return_value=[({"photo_id": photo_id, "display_no": 1}, "image/jpeg", "eA==")],
         ), mock.patch.object(
             main.providers, "vision_model_for", return_value="gpt-5.5",
@@ -859,7 +880,13 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
             "SELECT score,model_json FROM inspection_visit WHERE id=?", (visit["id"],)
         )["model_json"], {})
         self.assertEqual("clean_verified", stored["analysis_status"])
+        # model_json 里保留模型分（AI 参考分）；门店得分按问题扣分，零问题为 100。
         self.assertEqual(96, stored["score"])
+        self.assertEqual(96, stored["ai_reference_score"])
+        self.assertEqual(
+            100,
+            db.one("SELECT score FROM inspection_visit WHERE id=?", (visit["id"],))["score"],
+        )
         self.assertTrue(stored["verification"]["both_clean"])
 
     def test_audit_failure_fails_visit_and_refunds_charged_task(self):
@@ -876,10 +903,10 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
             main.providers.ProviderError("视觉复核失败"),
         ])
         with mock.patch.object(
-            main, "_inspection_prompt_bundle",
+            inspection_routes, "_inspection_prompt_bundle",
             return_value=main.providers.PromptBundle(system="system", user="user"),
         ), mock.patch.object(
-            main, "_load_inspection_images",
+            inspection_routes, "_load_inspection_images",
             return_value=[({"photo_id": photo_id, "display_no": 1}, "image/jpeg", "eA==")],
         ), mock.patch.object(
             main.providers, "vision_model_for", return_value="gpt-5.5",
@@ -1048,12 +1075,12 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
             )
 
         with mock.patch.object(
-            main, "_prepare_inspection_uploads",
+            inspection_routes, "_prepare_inspection_uploads",
             new=mock.AsyncMock(return_value=prepared),
         ), mock.patch.object(
-            main, "_store_inspection_images", side_effect=stored
+            inspection_routes, "_store_inspection_images", side_effect=stored
         ), mock.patch.object(
-            main, "_load_inspection_images", return_value=[("image/jpeg", "eA==")]
+            inspection_routes, "_load_inspection_images", return_value=[("image/jpeg", "eA==")]
         ), mock.patch.object(
             main.providers,
             "call_vision",
@@ -1108,13 +1135,13 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
             )
 
         with mock.patch.object(
-            main,
+            inspection_routes,
             "_prepare_inspection_uploads",
             new=mock.AsyncMock(return_value=prepared),
         ), mock.patch.object(
-            main, "_store_inspection_images", side_effect=stored
+            inspection_routes, "_store_inspection_images", side_effect=stored
         ) as store, mock.patch.object(
-            main,
+            inspection_routes,
             "_inspection_recheck_bundle",
             side_effect=asyncio.CancelledError(),
         ) as bundle:
@@ -1195,13 +1222,13 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
             }, ensure_ascii=False),
         }
         with mock.patch.object(
-            main,
+            inspection_routes,
             "_prepare_inspection_uploads",
             new=mock.AsyncMock(return_value=prepared),
         ), mock.patch.object(
-            main, "_store_inspection_images", side_effect=stored
+            inspection_routes, "_store_inspection_images", side_effect=stored
         ) as store, mock.patch.object(
-            main, "_load_inspection_images", return_value=[("image/jpeg", "eA==")]
+            inspection_routes, "_load_inspection_images", return_value=[("image/jpeg", "eA==")]
         ), mock.patch.object(
             main.providers,
             "call_vision",
@@ -1266,15 +1293,15 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
             )
 
         with mock.patch.object(
-            main,
+            inspection_routes,
             "_prepare_inspection_uploads",
             new=mock.AsyncMock(return_value=prepared),
         ), mock.patch.object(
-            main, "_store_inspection_images", side_effect=stored
+            inspection_routes, "_store_inspection_images", side_effect=stored
         ), mock.patch.object(
-            main, "_load_inspection_images", return_value=[("image/jpeg", "eA==")]
+            inspection_routes, "_load_inspection_images", return_value=[("image/jpeg", "eA==")]
         ), mock.patch.object(
-            main, "_INSPECTION_RECHECK_MODEL_TIMEOUT_SECONDS", .001
+            inspection_routes, "_INSPECTION_RECHECK_MODEL_TIMEOUT_SECONDS", .001
         ), mock.patch.object(
             main.providers, "call_vision", side_effect=slow_vision
         ):
@@ -1313,10 +1340,10 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
             )
 
         with mock.patch.object(
-            main, "_prepare_inspection_uploads",
+            inspection_routes, "_prepare_inspection_uploads",
             new=mock.AsyncMock(return_value=[{"data": b"jpeg", **_photo("unused")}]),
         ), mock.patch.object(
-            main, "_store_inspection_images", side_effect=OSError("disk full")
+            inspection_routes, "_store_inspection_images", side_effect=OSError("disk full")
         ):
             with self.assertRaises(OSError):
                 asyncio.run(submit())
@@ -1343,7 +1370,7 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
         with mock.patch.object(
             assetfiles, "resolve_tenant_asset", return_value="/tmp/after.jpg"
         ) as resolve, mock.patch.object(
-            main, "_read_file_bytes", return_value=b"after"
+            inspection_routes, "_read_file_bytes", return_value=b"after"
         ):
             images = main._load_inspection_images(2, visit, phase="recheck")
         self.assertEqual(1, len(images))
@@ -1547,10 +1574,10 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
 
         before = db.one("SELECT balance FROM tenants WHERE id=2")["balance"]
         with mock.patch.object(
-            main, "_prepare_inspection_uploads", new=mock.AsyncMock(return_value=prepared)
+            inspection_routes, "_prepare_inspection_uploads", new=mock.AsyncMock(return_value=prepared)
         ), mock.patch.object(
-            main, "_store_inspection_images", side_effect=stored
-        ) as store, mock.patch.object(main, "_start_inspection_task"):
+            inspection_routes, "_store_inspection_images", side_effect=stored
+        ) as store, mock.patch.object(inspection_routes, "_start_inspection_task"):
             first = asyncio.run(create_once())
             replay = asyncio.run(create_once())
         self.assertTrue(first["created"])
@@ -1619,7 +1646,7 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
 
         with mock.patch.object(assetfiles, "ASSET_ROOT", asset_root), \
                 mock.patch.object(
-                    main,
+                    inspection_routes,
                     "_prepare_inspection_uploads",
                     new=mock.AsyncMock(return_value=prepared),
                 ):
@@ -1674,11 +1701,11 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
             )
 
         with mock.patch.object(
-            main,
+            inspection_routes,
             "_prepare_inspection_uploads",
             new=mock.AsyncMock(return_value=prepared),
         ), mock.patch.object(
-            main,
+            inspection_routes,
             "_store_inspection_images",
             side_effect=OSError("simulated disk failure"),
         ):
@@ -1702,14 +1729,14 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
             } for index, item in enumerate(items, start=1)]
 
         with mock.patch.object(
-            main,
+            inspection_routes,
             "_prepare_inspection_uploads",
             new=mock.AsyncMock(return_value=prepared),
         ), mock.patch.object(
-            main,
+            inspection_routes,
             "_store_inspection_images",
             side_effect=stored,
-        ), mock.patch.object(main, "_start_inspection_task"):
+        ), mock.patch.object(inspection_routes, "_start_inspection_task"):
             retried = asyncio.run(create_once())
         self.assertTrue(retried["created"])
         self.assertEqual(

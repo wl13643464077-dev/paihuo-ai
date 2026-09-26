@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#fff7e6">
+<title>派活 · 店员</title>
+<style>
+:root{--ink:#33291f;--bg:#fff7e6;--card:#fffdf7;--sub:#6f5f4c;--pri:#ffd166;--ok:#2f9e5b;--bad:#d9480f;--warn:#e8890c;--line:rgba(51,41,31,.18)}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);font:16px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;-webkit-text-size-adjust:100%}
+body{padding:0 0 calc(24px + env(safe-area-inset-bottom))}
+#app{max-width:640px;margin:0 auto;padding:0 14px}
+.top{position:sticky;top:0;z-index:5;background:var(--bg);padding:14px 0 10px;border-bottom:2px solid var(--line)}
+.top h1{margin:0;font-size:20px;line-height:1.4;word-break:break-all}
+.top .who{font-size:16px;color:var(--sub)}
+.net{display:none;margin:10px 0 0;padding:10px 12px;border-radius:12px;background:#ffe3e3;color:#8a1c1c;font-weight:700;font-size:16px}
+.net.show{display:block}
+h2{font-size:18px;margin:18px 0 8px}
+.sub{color:var(--sub);font-size:16px}
+.btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;min-height:52px;padding:10px 16px;border:2.5px solid var(--ink);border-radius:14px;background:#fff;color:var(--ink);font-size:17px;font-weight:800;cursor:pointer;text-decoration:none;font-family:inherit}
+.btn.pri{background:var(--pri)}
+.btn.ok{background:#c9f0d6}
+.btn.bad{background:#ffd8cc}
+.btn[disabled]{opacity:.55;cursor:default}
+.row{display:flex;gap:10px}
+.row>*{flex:1;min-width:0}
+.card{display:block;width:100%;text-align:left;background:var(--card);border:2.5px solid var(--ink);border-radius:16px;padding:14px;margin:10px 0;box-shadow:3px 3px 0 rgba(51,41,31,.12);font:inherit;color:inherit;min-height:64px;cursor:pointer}
+.card .t{font-size:18px;font-weight:900;line-height:1.45;word-break:break-word}
+.card .m{font-size:16px;color:var(--sub);margin-top:4px}
+.tag{display:inline-block;font-size:15px;font-weight:800;padding:2px 10px;border-radius:999px;border:2px solid var(--ink);margin-right:6px;background:#fff}
+.tag.overdue{background:#ffc9c9}
+.tag.today{background:#ffe8a3}
+.tag.waiting,.tag.done,.tag.submitted,.tag.awaiting_recheck{background:#e7f5ff}
+.tag.later{background:#fff}
+.empty{padding:28px 10px;text-align:center;color:var(--sub);font-size:17px}
+.panel{background:var(--card);border:2.5px solid var(--ink);border-radius:16px;padding:14px;margin:12px 0}
+.panel p{margin:6px 0}
+.back{background:none;border:none;font-size:17px;font-weight:800;color:var(--ink);padding:12px 0;min-height:48px;cursor:pointer;font-family:inherit}
+label{display:block;font-weight:800;margin:14px 0 6px;font-size:16px}
+input,select,textarea{width:100%;font-size:17px;padding:12px;border:2px solid var(--ink);border-radius:12px;background:#fff;color:var(--ink);font-family:inherit;min-height:52px}
+textarea{min-height:96px;resize:vertical}
+.check{display:flex;align-items:center;gap:10px;min-height:52px;font-weight:800}
+.check input{width:28px;height:28px;min-height:0}
+.thumbs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:10px 0}
+.thumb{position:relative;border:2px solid var(--ink);border-radius:10px;overflow:hidden;aspect-ratio:1/1;background:#eee}
+.thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.thumb button{position:absolute;top:4px;right:4px;width:40px;height:40px;border-radius:20px;border:2px solid var(--ink);background:#fff;font-size:18px;font-weight:900;cursor:pointer}
+.progress{height:14px;border:2px solid var(--ink);border-radius:8px;background:#fff;overflow:hidden;margin:10px 0}
+.progress i{display:block;height:100%;width:0;background:var(--ok);transition:width .2s}
+.msg{padding:10px 12px;border-radius:12px;margin:10px 0;font-weight:700;font-size:16px}
+.msg.err{background:#ffe3e3;color:#8a1c1c}
+.msg.ok{background:#d3f9d8;color:#1b5e2d}
+.msg.info{background:#fff1bd}
+.item{display:flex;gap:10px;align-items:center;border-top:2px dashed var(--line);padding:12px 0}
+.item:first-child{border-top:none}
+.item .tx{flex:1;min-width:0;font-size:17px;word-break:break-word}
+.item .tx.done{text-decoration:line-through;color:var(--sub)}
+.item .btn{width:auto;min-width:108px;flex:none}
+.ai{border-radius:12px;padding:10px 12px;margin:8px 0;font-weight:700}
+.ai.pass{background:#d3f9d8}.ai.doubt{background:#fff1bd}.ai.fail{background:#ffe3e3}.ai.none{background:#f1f3f5}
+.photos{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:8px 0}
+.photos a{display:block;border:2px solid var(--ink);border-radius:10px;overflow:hidden}
+.photos img{width:100%;display:block}
+.foot{display:flex;gap:10px;margin:26px 0 10px}
+.foot .btn{font-size:16px;min-height:48px;font-weight:700}
+.hidden{display:none!important}
+.spin{display:inline-block;width:18px;height:18px;border:3px solid var(--line);border-top-color:var(--ink);border-radius:50%;animation:sp 1s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div id="app">
+  <header class="top">
+    <h1 id="today">今天</h1>
+    <div class="who" id="who"></div>
+    <div class="net" id="net" role="alert">📶 网络断了，恢复后会自动刷新。拍好的照片不会丢，连上网再点提交。</div>
+  </header>
+  <main id="main" aria-live="polite"><div class="empty"><span class="spin"></span> 正在打开…</div></main>
+</div>
+<script src="/static/staff.js?v=1"></script>
+</body>
+</html>

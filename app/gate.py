@@ -9,12 +9,107 @@ import logging
 import os
 import stat
 import threading
-import time
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from . import llm, providers
 
 log = logging.getLogger("gate")
+
+try:
+    from zoneinfo import ZoneInfo
+    _BEIJING_TZ = ZoneInfo("Asia/Shanghai")
+except Exception:  # 精简镜像缺 tzdata 时退回固定 UTC+8(中国无夏令时,等价)
+    _BEIJING_TZ = timezone(timedelta(hours=8), "Asia/Shanghai")
+
+
+def beijing_today() -> str:
+    """按北京时间给出"今天"的日期;服务器可能跑在 UTC,不能用本地时间。"""
+    return datetime.now(_BEIJING_TZ).strftime("%Y-%m-%d")
+
+
+_SEVERITIES = ("高", "中", "低")
+
+
+def _normalize_issues(raw) -> list:
+    """AI 质检返回的 issues 逐项归一化为 {type,severity,detail} 字典。
+
+    模型可能返回 null、单个对象、纯字符串列表或混杂类型;任何一项格式不对
+    都不能让整个质检抛异常(那会把整单判失败)。
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, (dict, str)):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    issues = []
+    for item in raw:
+        if isinstance(item, str):
+            if item.strip():
+                issues.append({"type": "AI质检提示", "severity": "中",
+                               "detail": item.strip()[:500]})
+            continue
+        if not isinstance(item, dict):
+            continue
+        severity = str(item.get("severity") or "").strip()
+        issues.append({
+            **{k: v for k, v in item.items()
+               if k not in ("type", "severity", "detail")},
+            "type": str(item.get("type") or "AI质检提示"),
+            "severity": severity if severity in _SEVERITIES else (
+                "高" if severity.startswith("高") else "中"),
+            "detail": str(item.get("detail") or ""),
+        })
+    return issues
+
+
+def _text_items(raw) -> list:
+    """facts/data_points 归一化为字符串列表:容忍 null、单个字符串、对象项。"""
+    if raw is None:
+        return []
+    if isinstance(raw, (str, int, float)) and not isinstance(raw, bool):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for item in raw:
+        if isinstance(item, str):
+            text = item.strip()
+        elif isinstance(item, (int, float)) and not isinstance(item, bool):
+            text = str(item)
+        elif isinstance(item, dict):
+            text = " ".join(
+                str(v).strip() for v in item.values()
+                if isinstance(v, (str, int, float)) and not isinstance(v, bool)
+                and str(v).strip()
+            )
+        else:
+            continue
+        if text:
+            out.append(text)
+    return out
+
+
+def _source_labels(raw) -> list:
+    """sources 可能是 URL 字符串或 {title,url} 对象,统一取可读标签。"""
+    if raw is None:
+        return []
+    if isinstance(raw, (str, dict)):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for item in raw:
+        if isinstance(item, str):
+            label = item.strip()
+        elif isinstance(item, dict):
+            label = str(item.get("title") or item.get("url") or "").strip()
+        else:
+            continue
+        if label:
+            out.append(label)
+    return out
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SEED_RULES_PATH = os.path.join(_ROOT, "config", "gate_rules.default.json")
@@ -191,9 +286,10 @@ async def check(title: str, body: str, platforms: list,
     cost, tokens = 0.0, 0
     # 事实基准:上游情报员联网检索到的素材(质检员自己的知识可能过时,不能当事实标准)
     ref = ""
-    if research:
-        facts = (research.get("facts") or []) + (research.get("data_points") or [])
-        srcs = [s.get("title") or s.get("url") or "" for s in research.get("sources") or []]
+    if isinstance(research, dict) and research:
+        facts = (_text_items(research.get("facts"))
+                 + _text_items(research.get("data_points")))
+        srcs = _source_labels(research.get("sources"))
         if facts or srcs:
             ref = ("\n【情报员联网检索到的事实基准(判断事实问题以此为准)】\n"
                    + "\n".join(f"- {f}" for f in facts[:20])
@@ -201,7 +297,7 @@ async def check(title: str, body: str, platforms: list,
     progress("gate", "第 2 步:AI 质检(广告法/平台规则/事实抽检)…")
     gate_error = False
     try:
-        r = await providers.call_text_json(8, f"""你是内容质检员,今天是 {time.strftime('%Y-%m-%d')}。检查以下待发布内容,目标平台:{'、'.join(platforms)}。
+        r = await providers.call_text_json(8, f"""你是内容质检员,今天是 {beijing_today()}。检查以下待发布内容,目标平台:{'、'.join(platforms)}。
 检查维度:①违反广告法的绝对化/夸大用语 ②平台高危内容(医疗/金融承诺、导流、违禁品)
 ③事实错误:与下方"事实基准"矛盾、或正文内部自相矛盾的内容才算;你的训练知识可能已过时,
 **严禁**仅因为你不认识某个新产品/新模型/新事件就判为"虚构/不存在" ④诱导互动违规话术。
@@ -213,7 +309,9 @@ async def check(title: str, body: str, platforms: list,
 
 只输出 JSON:{{"issues":[{{"type":"类别","severity":"高/中/低","detail":"具体位置与问题"}}]}},没有问题输出 {{"issues":[]}}""",
                                 timeout=180, progress=progress, token=token)
-        issues += r["data"].get("issues", [])
+        data = r.get("data")
+        issues += _normalize_issues(
+            data.get("issues") if isinstance(data, dict) else data)
         cost, tokens = r["cost_usd"], r["tokens"]
     except (llm.LLMError, providers.ProviderError) as e:
         # fail-closed:发布前质检是对客户的合规承诺,供应商故障时绝不能"仅凭词库放行"。

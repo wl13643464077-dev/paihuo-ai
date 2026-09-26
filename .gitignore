@@ -57,3 +57,9 @@ release-artifacts/
 .openai/
 docs/private/
 docs/operations-private/
+
+# 运行期锁文件(迁移锁/单进程锁)不入库:权限必须是 600,入库会被检出成 644 导致启动失败
+*.migration.lock
+*.instance.lock
+.test-tmp/
+.agent-teams/

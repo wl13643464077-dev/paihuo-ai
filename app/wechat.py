@@ -11,6 +11,7 @@
 2) 同页「IP 白名单」加上服务器公网 IP;
 3) 未认证的个人订阅号没有草稿箱接口权限(errcode 48001),需要微信认证。
 """
+import asyncio
 import io
 import json
 import logging
@@ -148,7 +149,8 @@ def _to_jpg_under_1m(data: bytes) -> bytes:
 async def upload_content_img(tid: int, data: bytes, name: str = "img.jpg") -> str:
     """正文图 → 微信 CDN 链接(不占素材库额度)."""
     tok = await token(tid)
-    data = _to_jpg_under_1m(data)
+    # PIL 解码/重编码是 CPU 密集操作,放线程池,别卡住事件循环(SSE/其他请求)。
+    data = await asyncio.to_thread(_to_jpg_under_1m, data)
     async with httpx.AsyncClient(timeout=60) as cli:
         r = await cli.post(f"{API}/media/uploadimg?access_token={tok}",
                            files={"media": (name, data, "image/jpeg")})
@@ -160,7 +162,7 @@ async def upload_content_img(tid: int, data: bytes, name: str = "img.jpg") -> st
 async def upload_thumb(tid: int, data: bytes, name: str = "cover.jpg") -> str:
     """封面 → 永久素材,返回 thumb_media_id(draft 必填)."""
     tok = await token(tid)
-    data = _to_jpg_under_1m(data)
+    data = await asyncio.to_thread(_to_jpg_under_1m, data)
     async with httpx.AsyncClient(timeout=60) as cli:
         r = await cli.post(f"{API}/material/add_material?access_token={tok}&type=image",
                            files={"media": (name, data, "image/jpeg")})

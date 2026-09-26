@@ -506,6 +506,7 @@ class GrowthResearchBoundaryTests(unittest.IsolatedAsyncioTestCase):
     async def test_product_shot_provider_body_never_reaches_exception_or_api(self):
         from fastapi import HTTPException
         from app import main
+        from app.routes import tools as tools_routes
 
         secret = "INTERNAL-MANUAL-SECRET echoed in image provider body"
 
@@ -536,9 +537,9 @@ class GrowthResearchBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(secret, str(caught.exception))
 
         with (
-            patch.object(main, "_need_module"),
-            patch.object(main, "_read_limited", AsyncMock(return_value=b"image")),
-            patch.object(main, "_start_billed_operation", return_value="op"),
+            patch.object(tools_routes, "_need_module"),
+            patch.object(tools_routes, "_read_limited", AsyncMock(return_value=b"image")),
+            patch.object(tools_routes, "_start_billed_operation", return_value="op"),
             patch.object(
                 main.growth,
                 "product_shot",
@@ -623,6 +624,7 @@ class GrowthResearchBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_avatar_link_research_receives_url_not_private_persona(self):
         from app import linkgrab, main
+        from app.routes import avatar as avatar_routes
 
         fake = AsyncMock(return_value={
             "text": "这是一段足够长且可以直接使用的安全中文口播稿，包含开头钩子和结尾互动引导。",
@@ -633,7 +635,7 @@ class GrowthResearchBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "positioning": "SECRET-PERSONA-POSITION",
             "tone": "SECRET-PERSONA-TONE",
         }, ensure_ascii=False)
-        with patch.object(main, "TEN", return_value=2), \
+        with patch.object(avatar_routes, "TEN", return_value=2), \
                 patch.object(main.db, "one", return_value={"persona_json": persona}), \
                 patch.object(linkgrab, "is_video_link", return_value=False), \
                 patch.object(

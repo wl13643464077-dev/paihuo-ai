@@ -32,10 +32,36 @@ def status_cn(value) -> str:
 
 MAX_RETRY = 2
 LAST_IDX = 9
+WORKER_COUNT = 4           # 内容流水线常驻 worker 数；监管回调保证始终补满
+MAX_USER_RERUNS = 3        # 每个工单每个工位老板最多打回/重跑的次数
+RERUN_LIMIT_MSG = "这一步已经重跑 3 次了，如果还不满意，建议换个说法重新下单"
+# 工位 3/4(正文/文风)已形成的可用产出：有它就不按整单失败/取消全额退款。
+_USABLE_DELIVERY_SQL = (
+    "SELECT 1 FROM station_run WHERE job_id=? AND station_idx IN (3,4) "
+    "AND status IN ('done','awaiting_review') "
+    "AND output_json IS NOT NULL AND length(output_json)>2 LIMIT 1"
+)
+REPORT_REVISION_SKILL = f"{registry.BY_IDX[LAST_IDX]['skill']}#completed-revision"
 JOB_WORKING_STATUSES = (
     "pending_charge", "running", "awaiting_review", "gate_blocked", "paused",
 )
 JOB_EXECUTABLE_STATUSES = ("running", "awaiting_review", "gate_blocked")
+# 内容工单「您想管多少」。老板最怕被频繁打扰:新单缺省走全自动,
+# 只有发布前终审(强制审批工位)停下来等老板看一眼;已保存的偏好原样沿用。
+JOB_MODES = ("autopilot", "copilot", "manual", "fullauto")
+DEFAULT_JOB_MODE = "autopilot"
+JOB_MODE_LABELS = {
+    "autopilot": "全交给 AI，发之前我看一眼",
+    "copilot": "关键几步我把关",
+    "manual": "每一步我都看",
+    "fullauto": "全交给 AI，发之前我看一眼",
+}
+
+
+def job_mode_or_default(value) -> str | None:
+    """空值取缺省模式;非法值返回 None 由调用方拒绝。"""
+    mode = str(value or DEFAULT_JOB_MODE).strip()
+    return mode if mode in JOB_MODES else None
 
 
 class Engine:
@@ -46,6 +72,8 @@ class Engine:
         self._tid_cache: dict = {}     # (table, id) -> tenant_id 记忆,省得每条事件查库
         self._tid_waiting: dict = {}   # 首次解析期间按记录合并事件，避免高频进度重复查库
         self._loop = None              # 引擎所在事件循环,供线程池路由跨线程安全唤醒
+        self._workers: set = set()     # 存活的 worker task,由 done_callback 监管补建
+        self._last_respawn = 0.0
 
     # ---------- 跨线程安全投递 ----------
     def _dispatch(self, fn, *args):
@@ -348,9 +376,13 @@ class Engine:
 
         def _recover():
             # 断点恢复:被重启打断的 running 工位重跑,进行中的工单重新入队
-            for r in db.q("SELECT id FROM station_run WHERE status='running'"):
-                db.update("station_run", r["id"], {"status": "rejected",
-                                                   "review_comment": "服务重启,自动重跑"})
+            for r in db.q("SELECT id,skill_id FROM station_run WHERE status='running'"):
+                if r["skill_id"] == REPORT_REVISION_SKILL:
+                    # 完成后续改版复用同一 vN 行；意见不能被通用恢复文案覆盖。
+                    db.update("station_run", r["id"], {"status": "queued"})
+                else:
+                    db.update("station_run", r["id"], {"status": "rejected",
+                                                       "review_comment": "服务重启,自动重跑"})
             running = [j["id"] for j in db.q(
                 "SELECT id FROM job WHERE status IN ('running')")]
             # 兼容旧版本“先标失败、来不及退款”的窗口；CAS 保证多次启动也只退一次。
@@ -362,9 +394,57 @@ class Engine:
         # 恢复扫描含批量写与退款事务,放 db 线程池,启动期就不阻塞事件循环。
         for job_id in await db.arun(_recover):
             self.notify(job_id)
-        for _ in range(4):
-            asyncio.create_task(self._worker())
+        self._ensure_workers()
         log.info("engine started")
+
+    # ---------- worker 监管:任何意外退出都补建,保证常驻 WORKER_COUNT 个 ----------
+    def _ensure_workers(self):
+        loop = asyncio.get_running_loop()
+        # 丢掉已结束或属于旧事件循环(测试/重启)的记录,只按当前循环补满。
+        self._workers = {
+            t for t in self._workers
+            if not t.done() and t.get_loop() is loop
+        }
+        while len(self._workers) < WORKER_COUNT:
+            self._spawn_worker()
+
+    def _spawn_worker(self):
+        task = asyncio.get_running_loop().create_task(self._worker())
+        self._workers.add(task)
+        task.add_done_callback(self._on_worker_done)
+        return task
+
+    def _on_worker_done(self, task):
+        """worker 正常情况下永不退出；被取消(进程退出/测试收尾)才算正常结束。"""
+        self._workers.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None and not isinstance(exc, Exception):
+            return  # KeyboardInterrupt/SystemExit 之类:进程要退出了,不补建
+        log.error(
+            "content worker exited unexpectedly error_type=%s, respawning",
+            type(exc).__name__ if exc else "returned",
+        )
+        loop = task.get_loop()
+        if loop.is_closed():
+            return
+        now = time.monotonic()
+        # 连续秒退时退避 1 秒,避免异常路径把循环打满。
+        delay = 0 if now - self._last_respawn > 1 else 1.0
+        self._last_respawn = now
+
+        def _respawn():
+            if not loop.is_closed() and len(self._workers) < WORKER_COUNT:
+                self._spawn_worker()
+
+        try:
+            if delay:
+                loop.call_later(delay, _respawn)
+            else:
+                _respawn()
+        except RuntimeError:
+            pass  # 循环正在关闭
 
     def notify(self, job_id: int):
         self._dispatch(self.queue.put_nowait, job_id)
@@ -372,15 +452,33 @@ class Engine:
     async def _worker(self):
         while True:
             job_id = await self.queue.get()
-            lock = self.locks.setdefault(job_id, asyncio.Lock())
-            if lock.locked():
-                # 该工单正在推进,稍后重新入队,不丢通知
-                asyncio.create_task(self._renotify(job_id))
-                continue
-            async with lock:
+            try:
+                await self._process_job(job_id)
+            except Exception as exc:
+                # 循环体整体兜底:单个工单的任何意外(包括结算/查库失败)都不能
+                # 让 worker 退出,否则 4 个 worker 死光后所有工单永远"执行中"。
+                log.error(
+                    "content worker job %s crashed error_type=%s",
+                    job_id,
+                    type(exc).__name__,
+                )
+
+    async def _process_job(self, job_id):
+        lock = self.locks.setdefault(job_id, asyncio.Lock())
+        if lock.locked():
+            # 该工单正在推进,稍后重新入队,不丢通知
+            asyncio.create_task(self._renotify(job_id))
+            return
+        async with lock:
+            try:
+                await self._advance(job_id)
+            except Exception as e:
+                log.error(
+                    "advance job %s failed error_type=%s",
+                    job_id,
+                    type(e).__name__,
+                )
                 try:
-                    await self._advance(job_id)
-                except Exception as e:
                     # 失败结算含退款事务(写),放 db 线程池执行。
                     await db.arun(
                         self.settle_failure,
@@ -390,26 +488,97 @@ class Engine:
                             "内容流水线执行失败。未产出可用正文时整单点数自动退回(账单可查)；可复制 Brief 重新开单",
                         ),
                     )
+                except Exception as settle_exc:
+                    # 结算本身失败(如数据库短暂忙):稍后重新入队再推进/结算一次。
                     log.error(
-                        "advance job %s failed error_type=%s",
+                        "settle failure for job %s failed error_type=%s",
                         job_id,
-                        type(e).__name__,
+                        type(settle_exc).__name__,
                     )
-            # 工单进入终态后回收它的锁,别让 self.locks 随历史工单无限增长(内存泄漏)
+                    asyncio.create_task(self._renotify(job_id, delay=30))
+        # 工单进入终态后回收它的锁,别让 self.locks 随历史工单无限增长(内存泄漏)
+        try:
             j = await db.aone(
                 "SELECT status FROM job WHERE id=?", (job_id,)
             )
-            if (not j or j["status"] in ("done", "cancelled", "failed")) and not lock.locked():
-                self.locks.pop(job_id, None)
+        except Exception as exc:
+            log.warning(
+                "job %s lock cleanup lookup failed error_type=%s",
+                job_id,
+                type(exc).__name__,
+            )
+            return
+        if (not j or j["status"] in ("done", "cancelled", "failed")) and not lock.locked():
+            self.locks.pop(job_id, None)
 
-    async def _renotify(self, job_id):
-        await asyncio.sleep(2)
+    async def _renotify(self, job_id, delay: float = 2):
+        await asyncio.sleep(delay)
         self.notify(job_id)
 
     # ---------- 推进状态机 ----------
     def _latest_run(self, job_id, idx):
         return db.one("SELECT * FROM station_run WHERE job_id=? AND station_idx=? "
-                      "ORDER BY version DESC LIMIT 1", (job_id, idx))
+                      "ORDER BY version DESC,id DESC LIMIT 1", (job_id, idx))
+
+    @staticmethod
+    def _report_revision(row) -> bool:
+        return bool(row and row["station_idx"] == LAST_IDX
+                    and row["skill_id"] == REPORT_REVISION_SKILL)
+
+    def redo_completed_report(self, job_id: int, comment: str) -> int:
+        """对已交付的复盘报告续改一版，返回新版本号。
+
+        仅追加一个排队中的工位版本并重启同一已付费工单；旧版保持 done，
+        不发生新的整单扣费。其它已完成工位一律不能通过这个入口重跑。
+        """
+        note = str(comment or "").strip()
+        if not note:
+            raise ValueError("请写清报告需要修改的地方")
+        if len(note) > 2000:
+            raise ValueError("修改意见不能超过 2000 字")
+        with db.atomic() as c:
+            job = c.execute(
+                "SELECT status,billing_status FROM job WHERE id=? AND deleted_at IS NULL",
+                (job_id,),
+            ).fetchone()
+            if not job:
+                raise ValueError("工单不存在")
+            if job["status"] != "done" or job["billing_status"] != "charged":
+                raise ValueError("仅已完成且已结算的工单可继续修改复盘报告")
+            prior = c.execute(
+                "SELECT version,output_json FROM station_run "
+                "WHERE job_id=? AND station_idx=? AND status='done' "
+                "AND output_json IS NOT NULL "
+                "ORDER BY version DESC,id DESC LIMIT 1",
+                (job_id, LAST_IDX),
+            ).fetchone()
+            prior_report = (db.jloads(prior["output_json"], {}).get("report")
+                            if prior else None)
+            if not isinstance(prior_report, str) or not prior_report.strip():
+                raise ValueError("原复盘报告尚未交付，不能在原版上继续修改")
+            newest = c.execute(
+                "SELECT COALESCE(MAX(version),0) FROM station_run "
+                "WHERE job_id=? AND station_idx=?",
+                (job_id, LAST_IDX),
+            ).fetchone()[0]
+            version = int(newest) + 1
+            now = time.time()
+            c.execute(
+                "INSERT INTO station_run"
+                "(job_id,station_idx,skill_id,version,status,review_comment,created_at,updated_at) "
+                "VALUES(?,?,?,?,'queued',?,?,?)",
+                (job_id, LAST_IDX, REPORT_REVISION_SKILL, version, note, now, now),
+            )
+            changed = c.execute(
+                "UPDATE job SET status='running',current_idx=?,updated_at=? "
+                "WHERE id=? AND status='done' AND billing_status='charged'",
+                (LAST_IDX, now, job_id),
+            )
+            if changed.rowcount != 1:
+                raise ValueError("工单状态刚刚改变，请刷新后再试")
+        self.notify(job_id)
+        self.touch(job_id)
+        return version
 
     @staticmethod
     def _job_row_executable(row) -> bool:
@@ -437,12 +606,51 @@ class Engine:
 
     def _has_usable_delivery(self, job_id: int) -> bool:
         """正文/文风工位已形成可用产出时，不按整单失败全额退费。"""
-        return bool(db.one(
-            "SELECT id FROM station_run WHERE job_id=? AND station_idx IN (3,4) "
-            "AND status IN ('done','awaiting_review') "
-            "AND output_json IS NOT NULL AND length(output_json)>2 LIMIT 1",
-            (job_id,),
-        ))
+        return bool(db.one(_USABLE_DELIVERY_SQL, (job_id,)))
+
+    def _restore_completed_report_after_failure(self, job_id: int,
+                                                reason: str) -> bool:
+        """续改失败只收口新版，原整单交付与既有扣费保持不变。"""
+        with db.atomic() as c:
+            job = c.execute(
+                "SELECT status,billing_status FROM job WHERE id=?",
+                (job_id,),
+            ).fetchone()
+            if (not job or job["status"] in ("done", "cancelled")
+                    or job["billing_status"] != "charged"):
+                return False
+            latest = c.execute(
+                "SELECT * FROM station_run WHERE job_id=? AND station_idx=? "
+                "ORDER BY version DESC,id DESC LIMIT 1",
+                (job_id, LAST_IDX),
+            ).fetchone()
+            if not self._report_revision(latest):
+                return False
+            prior = c.execute(
+                "SELECT id FROM station_run WHERE job_id=? AND station_idx=? "
+                "AND status='done' AND version<? AND output_json IS NOT NULL "
+                "ORDER BY version DESC,id DESC LIMIT 1",
+                (job_id, LAST_IDX, latest["version"]),
+            ).fetchone()
+            if not prior:
+                return False
+            now = time.time()
+            if latest["status"] != "done":
+                original_note = str(latest["review_comment"] or "").split(
+                    "\n修订失败：", 1)[0]
+                c.execute(
+                    "UPDATE station_run SET status='failed',review_comment=?,"
+                    "output_json=NULL,updated_at=? WHERE id=? "
+                    "AND status IN ('queued','running','rejected','interrupted','failed')",
+                    ((original_note + "\n修订失败：" + reason)[:240],
+                     now, latest["id"]),
+                )
+            changed = c.execute(
+                "UPDATE job SET status='done',current_idx=?,updated_at=? "
+                "WHERE id=? AND status=? AND billing_status='charged'",
+                (LAST_IDX, now, job_id, job["status"]),
+            )
+            return changed.rowcount == 1
 
     def settle_failure(self, job_id: int, reason: str) -> bool:
         """收口工单与运行工位；无可用正文时按实际扣点金额幂等退款。"""
@@ -455,22 +663,22 @@ class Engine:
         if not job or job["status"] in ("done", "cancelled"):
             return False
         reason = (reason or "执行失败")[:240]
-        if self._has_usable_delivery(job_id) or job.get("billing_status") != "charged":
-            with db.atomic() as c:
-                now = time.time()
-                cur = c.execute(
-                    "UPDATE job SET status='failed',updated_at=? WHERE id=? "
-                    "AND status NOT IN ('done','cancelled')",
-                    (now, job_id),
-                )
-                if cur.rowcount == 1:
-                    c.execute(
-                        "UPDATE station_run "
-                        "SET status='failed',review_comment=?,updated_at=? "
-                        "WHERE job_id=? AND status IN ('running','queued')",
-                        (reason, now, job_id),
-                    )
+        if self._restore_completed_report_after_failure(job_id, reason):
             self.touch(job_id)
+            return False
+        tenant_id = int(job.get("tenant_id") or 1)
+        usable = self._has_usable_delivery(job_id)
+        if usable or job.get("billing_status") != "charged":
+            newly_failed = self._mark_failed_without_refund(job_id, reason)
+            self.touch(job_id)
+            if newly_failed:
+                if job.get("billing_status") == "charged":
+                    outcome = "kept"
+                elif job.get("billing_status") == "refunded":
+                    outcome = "already_refunded"
+                else:
+                    outcome = "not_charged"
+                self._record_failure_notice(job_id, tenant_id, outcome)
             return False
 
         amount = job.get("billing_points")
@@ -495,7 +703,7 @@ class Engine:
 
         try:
             refunded = billing.refund_amount_if_claimed(
-                int(job.get("tenant_id") or 1),
+                tenant_id,
                 float(amount or 0),
                 claim,
                 f"退回:内容流水线整单 · {reason[:120]}",
@@ -508,23 +716,82 @@ class Engine:
                 job_id,
                 type(exc).__name__,
             )
-            with db.atomic() as c:
-                now = time.time()
-                cur = c.execute(
-                    "UPDATE job SET status='failed',updated_at=? WHERE id=? "
-                    "AND status NOT IN ('done','cancelled')",
-                    (now, job_id),
-                )
-                if cur.rowcount == 1:
-                    c.execute(
-                        "UPDATE station_run "
-                        "SET status='failed',review_comment=?,updated_at=? "
-                        "WHERE job_id=? AND status IN ('running','queued')",
-                        (reason, now, job_id),
-                    )
-            refunded = False
+            newly_failed = self._mark_failed_without_refund(job_id, reason)
+            self.touch(job_id)
+            if newly_failed:
+                self._record_failure_notice(job_id, tenant_id, "refund_pending")
+            return False
         self.touch(job_id)
+        if refunded:
+            self._record_failure_notice(
+                job_id, tenant_id, "refunded", amount=float(amount or 0))
         return refunded
+
+    @staticmethod
+    def _mark_failed_without_refund(job_id: int, reason: str) -> bool:
+        """不退款地把工单收口为 failed；返回本次是否首次进入 failed(用于只通知一次)。"""
+        with db.atomic() as c:
+            row = c.execute(
+                "SELECT status FROM job WHERE id=?", (job_id,)).fetchone()
+            was_failed = bool(row and row["status"] == "failed")
+            now = time.time()
+            cur = c.execute(
+                "UPDATE job SET status='failed',updated_at=? WHERE id=? "
+                "AND status NOT IN ('done','cancelled')",
+                (now, job_id),
+            )
+            if cur.rowcount != 1:
+                return False
+            c.execute(
+                "UPDATE station_run "
+                "SET status='failed',review_comment=?,updated_at=? "
+                "WHERE job_id=? AND status IN ('running','queued')",
+                (reason, now, job_id),
+            )
+            return not was_failed
+
+    @staticmethod
+    def _record_failure_notice(job_id: int, tenant_id: int, outcome: str,
+                               amount: float = 0.0) -> None:
+        """工单失败写一条站内通知,老板关了页面也能看到"没做成、点数退没退"。
+
+        通知只是旁路提醒:任何异常只记日志,绝不影响已经落库的结算结果。
+        """
+        try:
+            from . import notify
+            row = db.one("SELECT brief_json FROM job WHERE id=?", (job_id,))
+            brief = db.jloads((row or {}).get("brief_json"), {}) or {}
+            direction = (
+                str(brief.get("direction") or "")
+                if isinstance(brief, dict) else ""
+            )
+            if outcome == "refunded":
+                summary = (
+                    f"这单没做成，{amount:g} 点已全部退回，可在账单里查看；"
+                    "换个说法重新下单就行。"
+                    if amount > 0 else "这单没做成，本单没有扣点。"
+                )
+            elif outcome == "kept":
+                summary = "这单中途出了问题，已经写好的正文还能在工单里查看，本单点数不退。"
+            elif outcome == "refund_pending":
+                summary = "这单没做成，退点正在处理，系统会自动补退，稍后可在账单里查看。"
+            elif outcome == "already_refunded":
+                summary = "这单没做成，本单点数此前已经退回。"
+            else:
+                summary = "这单没做成，本单没有扣点。"
+            if direction.strip():
+                summary = f"「{direction.strip()[:30]}」{summary}"
+            notify.record(int(tenant_id or 1), "job_failed", {
+                "job_id": int(job_id),
+                "title": direction[:40],
+                "summary": summary,
+            })
+        except Exception as exc:
+            log.warning(
+                "job %s failure notice failed error_type=%s",
+                job_id,
+                type(exc).__name__,
+            )
 
     @staticmethod
     def _cancel_station_runs(c, job_id: int, reason: str,
@@ -544,10 +811,38 @@ class Engine:
             (reason[:240], now, job_id),
         )
 
+    @staticmethod
+    def _purge_refunded_outputs(c, job_id: int, reason: str):
+        """全额退款取消的事务内调用:清空该工单全部工位产出与衍生资产。
+
+        工位 0-2(选题/联网研究/对标)最贵,若只清在途版本,已完成的研究在
+        退款后仍能在工单详情、版本历史和选题库里看到,等于白拿。这里把所有
+        版本的 output_json 置空,可见的已完成/待审批版本一并标记为已终止,
+        并删除由选题工位沉淀进资产库的备选选题。
+        """
+        now = time.time()
+        c.execute(
+            "UPDATE station_run SET status=CASE "
+            "WHEN status IN ('queued','running','rejected','stale',"
+            "'interrupted','done','awaiting_review') THEN 'cancelled' "
+            "ELSE status END,"
+            "review_comment=CASE "
+            "WHEN status IN ('queued','running','rejected','stale',"
+            "'interrupted','done','awaiting_review') THEN ? "
+            "ELSE review_comment END,"
+            "output_json=NULL,updated_at=? WHERE job_id=?",
+            (reason[:240], now, job_id),
+        )
+        c.execute(
+            "DELETE FROM asset WHERE job_id=? AND type='topic'",
+            (job_id,),
+        )
+
     def settle_cancel(self, job_id: int, reason: str = "老板取消工单") -> bool:
         """CAS 取消并按实际交付幂等结算。
 
-        - 未完成、没有工位 3/4 可用正文：整单按原扣点金额退回；
+        - 未完成、没有工位 3/4 可用正文：整单按原扣点金额退回，并清空全部
+          工位(含 0-2 研究类)产出，退了钱就拿不到东西；
         - 已有可用正文：取消但不退款，防止免费拿交付；
         - ``done``/``failed`` 不允许被改写为 cancelled；
         - 重复取消以及 worker/删除并发最多退款一次。
@@ -581,12 +876,7 @@ class Engine:
             status = row["status"]
             billed = row["billing_status"]
             usable = bool(c.execute(
-                "SELECT 1 FROM station_run "
-                "WHERE job_id=? AND station_idx IN (3,4) "
-                "AND status IN ('done','awaiting_review') "
-                "AND output_json IS NOT NULL AND length(output_json)>2 LIMIT 1",
-                (job_id,),
-            ).fetchone())
+                _USABLE_DELIVERY_SQL, (job_id,)).fetchone())
 
             if status == "done":
                 outcome["invalid"] = "已完成工单不能取消，也不会退款"
@@ -599,6 +889,35 @@ class Engine:
                     f"工单{status_cn(status)},不能取消；请新建工单")
                 return False
 
+            latest = c.execute(
+                "SELECT id,station_idx,skill_id,status,version FROM station_run "
+                "WHERE job_id=? AND station_idx=? "
+                "ORDER BY version DESC,id DESC LIMIT 1",
+                (job_id, LAST_IDX),
+            ).fetchone()
+            if (billed == "charged" and self._report_revision(latest)
+                    and latest["status"] in (
+                        "queued", "running", "rejected", "interrupted")):
+                prior = c.execute(
+                    "SELECT id FROM station_run WHERE job_id=? AND station_idx=? "
+                    "AND status='done' AND version<? LIMIT 1",
+                    (job_id, LAST_IDX, latest["version"]),
+                ).fetchone()
+                if prior:
+                    now = time.time()
+                    c.execute(
+                        "UPDATE station_run SET status='cancelled',output_json=NULL,"
+                        "updated_at=? WHERE id=?",
+                        (now, latest["id"]),
+                    )
+                    c.execute(
+                        "UPDATE job SET status='done',current_idx=?,updated_at=? "
+                        "WHERE id=? AND status=? AND billing_status='charged'",
+                        (LAST_IDX, now, job_id, status),
+                    )
+                    outcome["cancelled"] = True
+                    return False
+
             # 兼容升级前留下的 cancelled+charged：仅在确实没有可用交付时补退。
             if billed == "charged" and not usable:
                 cur = c.execute(
@@ -609,8 +928,9 @@ class Engine:
                 )
                 if cur.rowcount != 1:
                     return False
-                self._cancel_station_runs(
-                    c, job_id, reason, clear_unfinished_output=True)
+                # 全额退款:所有工位(含已完成的联网研究/选题)产出一并清空,
+                # 保证"退了钱就拿不到东西"。
+                self._purge_refunded_outputs(c, job_id, reason)
                 outcome["cancelled"] = True
                 outcome["refunded"] = True
                 return True
@@ -730,7 +1050,24 @@ class Engine:
             # 执行(全新 or 重跑)
             revision_note, prev_output = None, None
             version = 1
-            if run and run["status"] == "rejected":
+            pending_run_id = None
+            if (self._report_revision(run)
+                    and run["status"] in ("queued", "rejected")):
+                prior = await db.aone(
+                    "SELECT output_json FROM station_run "
+                    "WHERE job_id=? AND station_idx=? AND status='done' "
+                    "AND version<? ORDER BY version DESC,id DESC LIMIT 1",
+                    (job_id, LAST_IDX, run["version"]),
+                )
+                if not prior:
+                    await db.arun(self.settle_failure, job_id,
+                                  "原报告版本已丢失，无法继续修改")
+                    return True
+                revision_note = run["review_comment"]
+                prev_output = db.jloads(prior["output_json"], {})
+                version = run["version"]
+                pending_run_id = run["id"]
+            elif run and run["status"] == "rejected":
                 revision_note = run["review_comment"]
                 prev_output = db.jloads(run["output_json"], {})
                 version = run["version"] + 1
@@ -742,7 +1079,8 @@ class Engine:
                 revision_note = "此前执行被老板打断,请重新完整完成本工位。"
 
             res = await self._execute(job_id, idx, cfg, brief, profile, version,
-                                      revision_note, prev_output)
+                                      revision_note, prev_output,
+                                      pending_run_id=pending_run_id)
             if res in ("cancelled", "deleted"):
                 return True
             if res == "stale":
@@ -788,19 +1126,9 @@ class Engine:
                 if not transitioned:
                     return True
                 self.touch(job_id)
-                from . import notify
-                notice_tenant, notice_title = await db.arun(
-                    self._job_notification_meta, job_id
-                )
-                await asyncio.to_thread(
-                    notify.push,
-                    notice_tenant,
-                    "awaiting",
-                    {
-                        "job_id": job_id,
-                        "title": notice_title,
-                        "station": f"工位{idx + 1}·{cfg['name']}",
-                    },
+                await self._push_job_notice(
+                    job_id, "awaiting",
+                    {"station": f"工位{idx + 1}·{cfg['name']}"},
                 )
                 return True
             # 自动放行:挑选类工位自动取推荐首选
@@ -868,35 +1196,43 @@ class Engine:
                 )
                 if cur.rowcount != 1:
                     return False
-                c.execute(
-                    "INSERT INTO asset"
-                    "(type,job_id,tenant_id,payload_json,created_at,updated_at) "
-                    "VALUES('final',?,?,?,?,?)",
-                    (
-                        job_id,
-                        int(current["tenant_id"] or 1),
-                        json.dumps(
-                            {"title": title,
-                             "brief": brief.get("direction")},
-                            ensure_ascii=False,
+                existing_asset = c.execute(
+                    "SELECT id FROM asset WHERE type='final' AND job_id=? "
+                    "AND deleted_at IS NULL LIMIT 1",
+                    (job_id,),
+                ).fetchone()
+                if not existing_asset:
+                    c.execute(
+                        "INSERT INTO asset"
+                        "(type,job_id,tenant_id,payload_json,created_at,updated_at) "
+                        "VALUES('final',?,?,?,?,?)",
+                        (
+                            job_id,
+                            int(current["tenant_id"] or 1),
+                            json.dumps(
+                                {"title": title,
+                                 "brief": brief.get("direction")},
+                                ensure_ascii=False,
+                            ),
+                            now,
+                            now,
                         ),
-                        now,
-                        now,
-                    ),
-                )
+                    )
                 return int(current["tenant_id"] or 1)
 
         completed_tenant = await db.arun(_complete_tx)
         if not completed_tenant:
             return True
-        from . import notify
-        await asyncio.to_thread(
-            notify.push,
-            completed_tenant,
-            "done",
-            {"job_id": job_id, "title": title},
-        )
-        await db.arun(self._distill_knowledge, job_id, title)
+        await self._push_job_notice(
+            job_id, "done", tenant_id=completed_tenant, title=title)
+        try:
+            await db.arun(self._distill_knowledge, job_id, title)
+        except Exception as exc:
+            log.error(
+                "distill knowledge for job %s failed error_type=%s",
+                job_id,
+                type(exc).__name__,
+            )
         self.touch(job_id)
         return True
 
@@ -909,16 +1245,15 @@ class Engine:
                 ).fetchone()
                 if not job or job["status"] != "done":
                     return
-                if c.execute(
-                        "SELECT id FROM knowledge "
-                        "WHERE job_id=? AND source='auto' "
-                        "AND deleted_at IS NULL LIMIT 1",
-                        (job_id,)).fetchone():
-                    return
+                existing = c.execute(
+                    "SELECT id FROM knowledge WHERE job_id=? AND source='auto' "
+                    "AND deleted_at IS NULL LIMIT 1",
+                    (job_id,),
+                ).fetchone()
                 retro = c.execute(
                     "SELECT output_json FROM station_run "
-                    "WHERE job_id=? AND station_idx=? "
-                    "ORDER BY version DESC LIMIT 1",
+                    "WHERE job_id=? AND station_idx=? AND status='done' "
+                    "ORDER BY version DESC,id DESC LIMIT 1",
                     (job_id, LAST_IDX),
                 ).fetchone()
                 out = db.jloads(retro["output_json"], {}) if retro else {}
@@ -936,21 +1271,30 @@ class Engine:
                 for tip in out.get("profile_updates") or []:
                     parts.append(f"经验:{tip}")
                 now = time.time()
-                c.execute(
-                    "INSERT INTO knowledge"
-                    "(title,content,tags_json,source,job_id,tenant_id,"
-                    "created_at,updated_at) "
-                    "VALUES(?,?,?,'auto',?,?,?,?)",
-                    (
-                        f"《{title}》交付复盘",
-                        "\n".join(parts) or "(复盘官未产出要点)",
-                        json.dumps(["自动沉淀"], ensure_ascii=False),
-                        job_id,
-                        int(job["tenant_id"] or 1),
-                        now,
-                        now,
-                    ),
-                )
+                title_text = f"《{title}》交付复盘"
+                content_text = "\n".join(parts) or "(复盘官未产出要点)"
+                if existing:
+                    c.execute(
+                        "UPDATE knowledge SET title=?,content=?,updated_at=? "
+                        "WHERE id=?",
+                        (title_text, content_text, now, existing["id"]),
+                    )
+                else:
+                    c.execute(
+                        "INSERT INTO knowledge"
+                        "(title,content,tags_json,source,job_id,tenant_id,"
+                        "created_at,updated_at) "
+                        "VALUES(?,?,?,'auto',?,?,?,?)",
+                        (
+                            title_text,
+                            content_text,
+                            json.dumps(["自动沉淀"], ensure_ascii=False),
+                            job_id,
+                            int(job["tenant_id"] or 1),
+                            now,
+                            now,
+                        ),
+                    )
         except Exception as exc:
             log.error(
                 "distill knowledge for job %s failed error_type=%s",
@@ -967,14 +1311,49 @@ class Engine:
             r = self._latest_run(job_id, idx)
             if r and r["output_json"]:
                 o = db.jloads(r["output_json"])
+                if not isinstance(o, dict):
+                    continue
                 tc = o.get("title_candidates") or []
-                if tc:
-                    return tc[o.get("selected_title", 0) if o.get("selected_title", 0) < len(tc) else 0]
+                if isinstance(tc, list) and tc:
+                    # 历史数据/异常输入里 selected_title 可能不是整数,一律回退首选。
+                    sel = o.get("selected_title", 0)
+                    if (isinstance(sel, bool) or not isinstance(sel, int)
+                            or not 0 <= sel < len(tc)):
+                        sel = 0
+                    return str(tc[sel])
         return "(未产出标题)"
 
     def _job_notification_meta(self, job_id) -> tuple[int, str]:
         """通知所需 DB 数据一次在线程池读取，调用方再回事件循环发旁路通知。"""
         return self._job_tenant(job_id), self._job_title(job_id)
+
+    async def _push_job_notice(self, job_id, kind, extra=None, *,
+                               tenant_id=None, title=None) -> bool:
+        """等拍板/被拦截/已交付等通知一律 best-effort。
+
+        读库、企微 webhook 配置读取或发送的任何异常只记日志,绝不能反过来把
+        正常待审/已交付的工单判成失败。返回是否成功投递(仅供测试观察)。
+        """
+        try:
+            from . import notify
+            if tenant_id is None or title is None:
+                meta_tenant, meta_title = await db.arun(
+                    self._job_notification_meta, job_id
+                )
+                tenant_id = meta_tenant if tenant_id is None else tenant_id
+                title = meta_title if title is None else title
+            payload = {"job_id": job_id, "title": title}
+            payload.update(extra or {})
+            await asyncio.to_thread(notify.push, tenant_id, kind, payload)
+            return True
+        except Exception as exc:
+            log.warning(
+                "job %s notice %s failed error_type=%s",
+                job_id,
+                kind,
+                type(exc).__name__,
+            )
+            return False
 
     async def _run_gate(self, job_id, brief) -> bool:
         """质检;不通过则 gate_blocked 并返回 False."""
@@ -1028,20 +1407,11 @@ class Engine:
             return False
         self.touch(job_id)
         if not g["passed"]:
-            from . import notify
-            notice_tenant, notice_title = await db.arun(
-                self._job_notification_meta, job_id
-            )
-            await asyncio.to_thread(
-                notify.push,
-                notice_tenant,
-                "gate",
-                {"job_id": job_id, "title": notice_title},
-            )
+            await self._push_job_notice(job_id, "gate")
         return g["passed"]
 
     async def _execute(self, job_id, idx, cfg, brief, profile, version,
-                       revision_note, prev_output) -> bool:
+                       revision_note, prev_output, *, pending_run_id=None) -> bool:
         def _open_tx():
             with db.atomic() as c:
                 job = c.execute(
@@ -1050,13 +1420,26 @@ class Engine:
                     return ("deleted" if not job else "cancelled"), None, 1
                 tenant = int(job["tenant_id"] or 1)
                 now = time.time()
-                cur = c.execute(
-                    "INSERT INTO station_run"
-                    "(job_id,station_idx,skill_id,version,status,created_at,updated_at) "
-                    "VALUES(?,?,?,?, 'running',?,?)",
-                    (job_id, idx, cfg["skill"], version, now, now),
-                )
-                rid = cur.lastrowid
+                if pending_run_id is not None:
+                    cur = c.execute(
+                        "UPDATE station_run SET status='running',output_json=NULL,"
+                        "updated_at=? WHERE id=? AND job_id=? AND station_idx=? "
+                        "AND skill_id=? AND version=? "
+                        "AND status IN ('queued','rejected')",
+                        (now, pending_run_id, job_id, idx,
+                         REPORT_REVISION_SKILL, version),
+                    )
+                    if cur.rowcount != 1:
+                        return "cancelled", None, tenant
+                    rid = pending_run_id
+                else:
+                    cur = c.execute(
+                        "INSERT INTO station_run"
+                        "(job_id,station_idx,skill_id,version,status,created_at,updated_at) "
+                        "VALUES(?,?,?,?, 'running',?,?)",
+                        (job_id, idx, cfg["skill"], version, now, now),
+                    )
+                    rid = cur.lastrowid
                 changed = c.execute(
                     "UPDATE job SET status='running',current_idx=?,updated_at=? "
                     "WHERE id=? AND billing_status='charged' "
@@ -1082,7 +1465,7 @@ class Engine:
             "brief": brief, "profile": profile,
             "outputs": await db.arun(self.collect_outputs, job_id),
             "model": await db.arun(providers.text_model_for, idx),
-            "version": version, "today": time.strftime("%Y-%m-%d"),
+            "version": version, "today": gate.beijing_today(),
             "revision_note": revision_note, "prev_output": prev_output,
             "progress": progress, "token": f"job{job_id}:{idx}",
         }
@@ -1119,6 +1502,12 @@ class Engine:
                         (time.time(), run_id),
                     )
                     return "deleted" if not after_provider else "cancelled"
+
+                if pending_run_id is not None:
+                    data = r.get("data") if isinstance(r, dict) else None
+                    report = data.get("report") if isinstance(data, dict) else None
+                    if not isinstance(report, str) or not report.strip():
+                        raise ValueError("修订版复盘报告缺少正文")
 
                 progress("done", f"产出完成 · 用时 {int(time.time() - t0)}s · "
                                  f"{r['tokens']} tokens · ${r['cost_usd']:.3f}")
@@ -1240,7 +1629,10 @@ class Engine:
                     (
                         int((time.time() - t0) * 1000),
                         steps_snapshot,
-                        providers.public_failure_message(last_err),
+                        ((str(revision_note or "") + "\n修订失败："
+                          + providers.public_failure_message(last_err))[:240]
+                         if pending_run_id is not None
+                         else providers.public_failure_message(last_err)),
                         time.time(),
                         run_id,
                     ),
@@ -1318,13 +1710,68 @@ class Engine:
         )
 
     # ---------- 用户动作 ----------
+    @staticmethod
+    def _validate_action_payload(payload) -> dict:
+        """审批请求体的类型校验:非法输入给友好提示(ValueError),不让它进工单。"""
+        if payload is None:
+            return {}
+        if not isinstance(payload, dict):
+            raise ValueError("提交的内容格式不对，请刷新页面后重试")
+        comment = payload.get("comment")
+        if comment is not None and not isinstance(comment, str):
+            raise ValueError("修改意见格式不对，请重新填写后提交")
+        edits = payload.get("edits")
+        if edits is not None and not isinstance(edits, dict):
+            raise ValueError("修改的内容格式不对，请刷新页面后重试")
+        for key in ("topics", "title_candidates", "images", "covers",
+                    "next_topics"):
+            if key in (edits or {}) and not isinstance(edits[key], list):
+                raise ValueError("修改的内容格式不对，请刷新页面后重试")
+        return payload
+
+    @staticmethod
+    def _validate_choice(out: dict, key: str, options_keys: tuple, label: str):
+        """selected / selected_title 必须是候选列表内的非负整数下标。"""
+        if key not in out:
+            return
+        value = out[key]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"请从列表里选一个{label}再提交")
+        options = next(
+            (out[k] for k in options_keys
+             if isinstance(out.get(k), list) and out.get(k)),
+            None,
+        )
+        limit = len(options) if options else None
+        if value < 0 or (limit is not None and value >= limit):
+            raise ValueError(f"选中的{label}不存在，请刷新页面后重新选择")
+
+    @staticmethod
+    def _check_rerun_quota(c, job_id, idx):
+        """每个工单每个工位最多让老板打回/重跑 MAX_USER_RERUNS 次。
+
+        不改表结构:老板打回/重跑的版本会以 status='rejected' 且带拍板人
+        (reviewed_by)永久留在版本历史里;服务重启、打断恢复、免费重试等系统
+        路径产生的 rejected 版本不带拍板人,不计入次数。
+        """
+        used = c.execute(
+            "SELECT COUNT(*) AS n FROM station_run "
+            "WHERE job_id=? AND station_idx=? AND status='rejected' "
+            "AND reviewed_by IS NOT NULL",
+            (job_id, idx),
+        ).fetchone()["n"]
+        if int(used or 0) >= MAX_USER_RERUNS:
+            raise ValueError(RERUN_LIMIT_MSG)
+
     def user_action(self, job_id, idx, action, payload=None):
-        payload = payload or {}
         if action not in ("approve", "edit", "reject", "rerun"):
             raise ValueError(f"未知动作 {action}")
+        payload = self._validate_action_payload(payload)
         # 拍板人:HTTP 线程池会拷贝请求 contextvars,这里能拿到操作者;
         # 系统内部无会话路径(恢复/调度)不走本方法,拿不到时留空即可。
         reviewer_id = (auth.current() or {}).get("id")
+        # 打回/重跑必须留下拍板人标记才能计入重跑次数;拿不到会话时记 0(无此用户)。
+        rerun_reviewer = reviewer_id if reviewer_id is not None else 0
 
         with db.atomic() as c:
             job_row = c.execute(
@@ -1355,11 +1802,23 @@ class Engine:
                     raise ValueError(
                         f"该工位{status_cn(run['status'])},现在不需要审批；请刷新页面看最新状态")
                 edits = payload.get("edits") or {}
+                if not isinstance(out, dict):
+                    out = {}
                 out.update(edits)
                 if "selected" in payload:
                     out["selected"] = payload["selected"]
                 if "selected_title" in payload:
                     out["selected_title"] = payload["selected_title"]
+                # 只校验老板本次提交的选择(模型原始产出由 _job_title 等读取方容错)。
+                # 选题(0)/配图(5)/封面(6)共用 selected;撰稿/文风用 selected_title。
+                submitted = set(edits) | set(payload)
+                if "selected" in submitted:
+                    self._validate_choice(
+                        out, "selected", ("topics", "images", "covers"),
+                        "候选项")
+                if "selected_title" in submitted:
+                    self._validate_choice(
+                        out, "selected_title", ("title_candidates",), "标题")
                 changed = c.execute(
                     "UPDATE station_run SET status='done',output_json=?,"
                     "review_comment=?,reviewed_by=?,updated_at=? "
@@ -1390,11 +1849,12 @@ class Engine:
                 comment = (payload.get("comment") or "").strip()
                 if not comment:
                     raise ValueError("打回必须填写修改意见")
+                self._check_rerun_quota(c, job_id, idx)
                 changed = c.execute(
                     "UPDATE station_run SET status='rejected',review_comment=?,"
                     "reviewed_by=?,updated_at=? "
                     "WHERE id=? AND status='awaiting_review'",
-                    (comment, reviewer_id, now, run["id"]),
+                    (comment, rerun_reviewer, now, run["id"]),
                 )
                 if changed.rowcount != 1:
                     raise ValueError("这个工位的状态刚刚更新了(可能已自动推进或被他人操作),刷新页面看最新状态")
@@ -1405,11 +1865,12 @@ class Engine:
                     raise ValueError(
                         f"该工位{status_cn(run['status'])},不能重跑；失败的工单请重新开单")
                 comment = (payload.get("comment") or "").strip()
+                self._check_rerun_quota(c, job_id, idx)
                 changed = c.execute(
                     "UPDATE station_run SET status='rejected',review_comment=?,"
                     "reviewed_by=?,updated_at=? "
                     "WHERE id=? AND status IN ('done','awaiting_review')",
-                    (comment or "老板要求重跑", reviewer_id, now, run["id"]),
+                    (comment or "老板要求重跑", rerun_reviewer, now, run["id"]),
                 )
                 if changed.rowcount != 1:
                     raise ValueError("这个工位的状态刚刚更新了(可能已自动推进或被他人操作),刷新页面看最新状态")
@@ -1461,9 +1922,10 @@ class Engine:
                 raise ValueError("工单状态刚刚更新了(可能已被他人操作或已推进),刷新页面按最新状态处理")
             c.execute(
                 "UPDATE station_run SET status='interrupted',"
-                "review_comment='老板打断',updated_at=? "
+                "review_comment=CASE WHEN skill_id=? THEN review_comment "
+                "ELSE '老板打断' END,updated_at=? "
                 "WHERE job_id=? AND status='running'",
-                (now, job_id),
+                (REPORT_REVISION_SKILL, now, job_id),
             )
         killed = llm.kill(f"job{job_id}:")
         log.info("job%s 被老板打断,终止了 %s 个进行中的调用", job_id, killed)
@@ -1483,14 +1945,15 @@ class Engine:
             # 只改每个工位的最新版本，历史版本保留审计原貌。
             c.execute(
                 "UPDATE station_run SET status='rejected',"
-                "review_comment='此前执行被老板打断,恢复后重新完整完成本工位。',"
+                "review_comment=CASE WHEN skill_id=? THEN review_comment "
+                "ELSE '此前执行被老板打断,恢复后重新完整完成本工位。' END,"
                 "updated_at=? "
                 "WHERE job_id=? AND status='interrupted' "
                 "AND version=("
                 "SELECT MAX(s2.version) FROM station_run s2 "
                 "WHERE s2.job_id=station_run.job_id "
                 "AND s2.station_idx=station_run.station_idx)",
-                (now, job_id),
+                (REPORT_REVISION_SKILL, now, job_id),
             )
             changed = c.execute(
                 "UPDATE job SET status='running',updated_at=? "

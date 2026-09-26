@@ -592,6 +592,56 @@ class TaskThreadCase(unittest.TestCase):
             )
         self.assertEqual("free_retry_available", caught.exception.code)
 
+    def test_standalone_failed_task_exposes_failure_and_retry_recovery_contract(self):
+        failed = self._task(status="failed", output="")
+        db.execute(
+            "UPDATE task SET billing_status='refunded',retry_count=? WHERE id=?",
+            (0, failed),
+        )
+
+        retryable = taskthreads.thread_summary_for_task(failed, 2)
+        self.assertEqual(failed, retryable["failed_current_task_id"])
+        self.assertIsNone(retryable["resume_task_id"])
+        self.assertFalse(retryable["can_continue"])
+        self.assertFalse(retryable["can_accept"])
+        self.assertEqual(
+            "free_retry_available", retryable["continue_blocked_by"]
+        )
+
+        db.execute("UPDATE task SET retry_count=3 WHERE id=?", (failed,))
+        exhausted = taskthreads.thread_summary_for_task(failed, 2)
+        self.assertEqual(failed, exhausted["failed_current_task_id"])
+        self.assertIsNone(exhausted["resume_task_id"])
+        self.assertEqual(
+            "no_delivered_revision", exhausted["continue_blocked_by"]
+        )
+
+        db.execute(
+            "UPDATE task SET billing_status='charged',retry_count=0 WHERE id=?",
+            (failed,),
+        )
+        pending_refund = taskthreads.thread_summary_for_task(failed, 2)
+        self.assertEqual(
+            "refund_pending", pending_refund["continue_blocked_by"]
+        )
+
+    def test_standalone_done_and_active_states_keep_compatible_recovery_ids(self):
+        done = self._task(status="done")
+        delivered = taskthreads.thread_summary_for_task(done, 2)
+        self.assertEqual(done, delivered["resume_task_id"])
+        self.assertIsNone(delivered["failed_current_task_id"])
+        self.assertTrue(delivered["can_continue"])
+        self.assertTrue(delivered["can_accept"])
+
+        for status in ("queued", "running"):
+            task_id = self._task(status=status, output="")
+            with self.subTest(status=status):
+                active = taskthreads.thread_summary_for_task(task_id, 2)
+                self.assertIsNone(active["resume_task_id"])
+                self.assertIsNone(active["failed_current_task_id"])
+                self.assertFalse(active["can_continue"])
+                self.assertFalse(active["can_accept"])
+
     def test_summary_is_bounded_metadata_and_never_returns_historical_body(self):
         root = self._task(output="业务秘密正文")
         first = taskthreads.create_followup(

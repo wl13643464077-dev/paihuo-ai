@@ -1,4 +1,5 @@
 """员工级模型自由切换的聚焦回归测试。"""
+import asyncio
 import os
 import tempfile
 import unittest
@@ -298,6 +299,242 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         agent_mock.assert_awaited_once()
         self.assertEqual(chat_mock.await_args.kwargs["model"], "gpt-5.5")
         self.assertIn("证据包", chat_mock.await_args.args[0])
+
+    async def test_web_task_retries_once_when_gateway_returns_no_verified_search(self):
+        research = {
+            "text": "有效证据包:https://example.com",
+            "cost_usd": 0.2,
+            "tokens": 30,
+        }
+        final = {"text": "最终交付", "cost_usd": 0.3, "tokens": 40}
+        progress = []
+        with patch.object(providers, "text_model_for", return_value="gpt-5.5"), \
+                patch.object(
+                    providers, "yunwu_conf",
+                    return_value=("https://proxy.example", "key"),
+                ), \
+                patch.object(
+                    providers, "_controlled_webfetch_evidence",
+                    AsyncMock(return_value=""),
+                ), \
+                patch.object(
+                    providers, "chat", AsyncMock(return_value=final),
+                ) as chat_mock, \
+                patch(
+                    "app.llm.call",
+                    AsyncMock(side_effect=[
+                        providers.llm.WebSearchRequiredError(
+                            "first response skipped search",
+                            cost_usd=0.1,
+                            tokens=10,
+                        ),
+                        research,
+                    ]),
+                ) as agent_mock:
+            got = await providers.call_text(
+                0,
+                "查今天热点",
+                web=True,
+                token="task70:",
+                progress=lambda kind, label: progress.append((kind, label)),
+            )
+
+        self.assertEqual(2, agent_mock.await_count)
+        first = agent_mock.await_args_list[0]
+        second = agent_mock.await_args_list[1]
+        self.assertEqual(
+            first.kwargs["token"] + ":retry1",
+            second.kwargs["token"],
+        )
+        self.assertIn("必须先实际调用 WebSearch", second.args[0])
+        self.assertTrue(any(kind == "retry" for kind, _label in progress))
+        chat_mock.assert_awaited_once()
+        self.assertEqual("最终交付", got["text"])
+        self.assertAlmostEqual(0.6, got["cost_usd"])
+        self.assertEqual(80, got["tokens"])
+
+    async def test_web_task_stops_after_second_no_search_and_does_not_write(self):
+        no_search = providers.llm.WebSearchRequiredError(
+            "must never reach a public response"
+        )
+        with patch.object(providers, "text_model_for", return_value="gpt-5.5"), \
+                patch.object(
+                    providers, "yunwu_conf",
+                    return_value=("https://proxy.example", "key"),
+                ), \
+                patch.object(providers, "chat", AsyncMock()) as chat_mock, \
+                patch(
+                    "app.llm.call",
+                    AsyncMock(side_effect=[no_search, no_search]),
+                ) as agent_mock:
+            with self.assertRaises(providers.llm.WebSearchRequiredError):
+                await providers.call_text(0, "查今天热点", web=True)
+
+        self.assertEqual(2, agent_mock.await_count)
+        chat_mock.assert_not_awaited()
+
+    async def test_first_no_search_usage_survives_a_generic_second_failure(self):
+        first = providers.llm.WebSearchRequiredError(
+            "no verified search", cost_usd=0.125, tokens=9
+        )
+        second = providers.llm.LLMError("runner failed")
+        with patch(
+            "app.llm.call", AsyncMock(side_effect=[first, second])
+        ) as agent:
+            with self.assertRaises(providers.llm.LLMError) as caught:
+                await providers._call_websearch_gateway(
+                    "search now",
+                    base="https://proxy.example",
+                    key="key",
+                    timeout=30,
+                )
+
+        self.assertNotIsInstance(
+            caught.exception, providers.llm.WebSearchRequiredError
+        )
+        self.assertAlmostEqual(0.125, caught.exception.cost_usd)
+        self.assertEqual(9, caught.exception.tokens)
+        self.assertEqual(2, agent.await_count)
+
+    async def test_web_task_does_not_blind_retry_other_runner_errors(self):
+        with patch.object(providers, "text_model_for", return_value="gpt-5.5"), \
+                patch.object(
+                    providers, "yunwu_conf",
+                    return_value=("https://proxy.example", "key"),
+                ), \
+                patch(
+                    "app.llm.call",
+                    AsyncMock(side_effect=providers.llm.LLMError("runner failed")),
+                ) as agent_mock:
+            with self.assertRaises(providers.llm.LLMError):
+                await providers.call_text(0, "查今天热点", web=True)
+
+        self.assertEqual(1, agent_mock.await_count)
+
+    async def test_websearch_retry_shares_one_wall_clock_deadline(self):
+        no_search = providers.llm.WebSearchRequiredError("no verified search")
+        recovered = {
+            "text": "verified",
+            "cost_usd": 0.2,
+            "tokens": 20,
+            "tool_usage": {
+                "WebSearch": {"attempts": 1, "success": 1, "errors": 0}
+            },
+        }
+        with patch.object(
+                providers, "_monotonic", side_effect=[100.0, 100.0, 160.0]
+            ), patch(
+                "app.llm.call", AsyncMock(side_effect=[no_search, recovered])
+            ) as agent_mock:
+            got = await providers._call_websearch_gateway(
+                "search now",
+                base="https://proxy.example",
+                key="key",
+                timeout=100,
+                token="task70::research",
+            )
+
+        self.assertEqual("verified", got["text"])
+        self.assertEqual(100, agent_mock.await_args_list[0].kwargs["timeout"])
+        self.assertEqual(40, agent_mock.await_args_list[1].kwargs["timeout"])
+
+    async def test_websearch_deadline_bounds_gateway_queue_and_cleanup_wait(self):
+        async def delayed_gateway(*_args, **_kwargs):
+            await asyncio.sleep(0.08)
+            return {"text": "too late", "cost_usd": 0, "tokens": 0}
+
+        started = asyncio.get_running_loop().time()
+        with patch("app.llm.call", AsyncMock(side_effect=delayed_gateway)) as agent:
+            with self.assertRaises(providers.llm.LLMError) as caught:
+                await providers._call_websearch_gateway(
+                    "search now",
+                    base="https://proxy.example",
+                    key="key",
+                    timeout=0.02,
+                )
+        elapsed = asyncio.get_running_loop().time() - started
+
+        self.assertNotIsInstance(
+            caught.exception, providers.llm.WebSearchRequiredError
+        )
+        self.assertLess(elapsed, 0.07)
+        self.assertEqual(1, agent.await_count)
+
+    async def test_web_json_shares_one_no_search_retry_across_format_retries(self):
+        no_search = providers.llm.WebSearchRequiredError("no verified search")
+        malformed = {
+            "text": "not-json",
+            "cost_usd": 0.2,
+            "tokens": 20,
+            "web_sources": [],
+            "tool_usage": {
+                "WebSearch": {"attempts": 1, "success": 1, "errors": 0}
+            },
+        }
+        agent = AsyncMock(side_effect=[
+            no_search,
+            malformed,
+            no_search,
+            AssertionError("zero-search retry budget was reset"),
+        ])
+        with patch.object(
+                providers, "yunwu_conf",
+                return_value=("https://proxy.example", "key"),
+            ), patch("app.llm.call", agent):
+            with self.assertRaises(providers.llm.WebSearchRequiredError):
+                await providers.call_web_json(
+                    "return json", retries=1, repair_invalid=False
+                )
+
+        self.assertEqual(3, agent.await_count)
+
+    async def test_text_json_shares_one_no_search_retry_across_format_retries(self):
+        no_search = providers.llm.WebSearchRequiredError("no verified search")
+        research = {
+            "text": "verified evidence",
+            "cost_usd": 0.2,
+            "tokens": 20,
+        }
+        agent = AsyncMock(side_effect=[
+            no_search,
+            research,
+            no_search,
+            AssertionError("call_text_json reset zero-search retry budget"),
+        ])
+        writer = AsyncMock(return_value={
+            "text": "not-json",
+            "cost_usd": 0.3,
+            "tokens": 30,
+        })
+        with patch.object(providers, "text_model_for", return_value="gpt-5.5"), \
+                patch.object(
+                    providers, "yunwu_conf",
+                    return_value=("https://proxy.example", "key"),
+                ), \
+                patch.object(
+                    providers, "_controlled_webfetch_evidence",
+                    AsyncMock(return_value=""),
+                ), \
+                patch.object(providers, "chat", writer), \
+                patch("app.llm.call", agent):
+            with self.assertRaises(providers.llm.WebSearchRequiredError):
+                await providers.call_text_json(
+                    0, "return json", web=True, retries=1
+                )
+
+        self.assertEqual(3, agent.await_count)
+        self.assertEqual(1, writer.await_count)
+
+    def test_no_search_failure_has_an_accurate_non_reflective_public_message(self):
+        marker = "PRIVATE-UPSTREAM-DETAIL"
+        message = providers.public_failure_message(
+            providers.llm.WebSearchRequiredError(marker)
+        )
+
+        self.assertIn("联网检索未返回有效结果", message)
+        self.assertIn("免费重试", message)
+        self.assertNotIn("超时或繁忙", message)
+        self.assertNotIn(marker, message)
 
     async def test_claude_web_task_isolates_research_then_uses_api_for_final(self):
         research = {"text": "证据包", "cost_usd": 0.2, "tokens": 30}

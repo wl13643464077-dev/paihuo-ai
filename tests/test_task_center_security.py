@@ -180,6 +180,9 @@ class TaskCenterSecurityCase(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(db.one("SELECT id FROM schedule LIMIT 1"))
 
     async def test_matrix_publish_rejects_foreign_job_before_enqueue_or_async_run(self):
+        # 第 3 期起矩阵自动发布默认关闭；这里测的是打开后的跨租户校验
+        from app import features
+        features.set_platform("matrix_autopub", True)
         foreign_job = db.insert("job", {
             "tenant_id": 2,
             "brief_json": json.dumps({"direction": "别家素材"}, ensure_ascii=False),

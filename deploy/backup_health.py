@@ -14,7 +14,14 @@ import sys
 import tempfile
 from typing import Any, Sequence
 
-from deploy.backup_db import MANAGED_BACKUP_RE
+from deploy.backup_db import (
+    MANAGED_BACKUP_RE,
+    OFFSITE_STATUS_NAME,
+    REMOTE_ENV,
+    BackupError,
+    list_asset_snapshots,
+    parse_remote,
+)
 from deploy.verify_backup import VerificationError, verify_database
 
 
@@ -258,6 +265,72 @@ def record_backup_success(
     return report
 
 
+OFFSITE_NOT_CONFIGURED = (
+    "未配置异地备份(PAIHUO_BACKUP_REMOTE):本机备份挡不住整机损坏、误删或"
+    "勒索加密,请按 BACKUP_RECOVERY.md 配置对象存储或另一台主机"
+)
+
+
+def _parse_utc(value: Any) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(UTC)
+    except (TypeError, ValueError):
+        return None
+
+
+def backup_warnings(
+    *,
+    backup_dir: str | os.PathLike[str],
+    remote: str | None,
+    now: datetime,
+    offsite_max_age_hours: float = 48,
+    assets_max_age_hours: float = 48,
+    assets_dir: str | os.PathLike[str] | None = None,
+) -> list[str]:
+    """不致命、但运维必须知道的备份缺口:异地备份、素材快照是否跟上。"""
+    warnings: list[str] = []
+    directory = Path(backup_dir)
+    try:
+        parsed = parse_remote(remote)
+    except BackupError:
+        parsed = None
+        warnings.append(f"{REMOTE_ENV} 格式不对,异地备份没有生效")
+    else:
+        if parsed is None:
+            warnings.append(OFFSITE_NOT_CONFIGURED)
+    if parsed is not None:
+        status: dict[str, Any] = {}
+        status_path = directory / OFFSITE_STATUS_NAME
+        try:
+            if status_path.is_file() and not status_path.is_symlink():
+                loaded = json.loads(status_path.read_text(encoding="utf-8"))
+                status = loaded if isinstance(loaded, dict) else {}
+        except (OSError, ValueError):
+            status = {}
+        last_success = _parse_utc(status.get("last_success_at_utc"))
+        if last_success is None:
+            warnings.append("已配置异地备份,但还没有成功同步过")
+        elif now - last_success > timedelta(hours=offsite_max_age_hours):
+            warnings.append(
+                f"异地备份已超过 {offsite_max_age_hours:g} 小时没有成功同步"
+            )
+        if status.get("status") == "failed":
+            warnings.append("最近一次异地同步失败,详见 paihuo-backup.service 日志")
+    snapshot_root = Path(assets_dir) if assets_dir else directory / "assets"
+    try:
+        snapshots = list_asset_snapshots(snapshot_root)
+    except BackupError:
+        snapshots = []
+        warnings.append("素材快照目录里有异常条目,请人工检查")
+    if not snapshots:
+        warnings.append("没有找到素材文件快照(data/assets、/srv/paihuo-pub 未备份)")
+    elif now - snapshots[0][0] > timedelta(hours=assets_max_age_hours):
+        warnings.append(
+            f"最新素材快照已超过 {assets_max_age_hours:g} 小时"
+        )
+    return warnings
+
+
 def check_backup_health(
     *,
     database: str | os.PathLike[str],
@@ -266,6 +339,7 @@ def check_backup_health(
     attestation_path: str | os.PathLike[str] = DEFAULT_ATTESTATION,
     now: datetime | None = None,
     disk_only: bool = False,
+    remote: str | None = None,
 ) -> dict[str, Any]:
     if max_age_hours <= 0:
         raise BackupHealthError("max_age_hours must be positive")
@@ -331,6 +405,11 @@ def check_backup_health(
         "latest_backup_age_seconds": max(0, int(age.total_seconds())),
         "latest_backup_sha256": verification["sha256"],
         "integrity_check": verification["integrity_check"],
+        "warnings": backup_warnings(
+            backup_dir=directory,
+            remote=os.environ.get(REMOTE_ENV, "") if remote is None else remote,
+            now=current,
+        ),
     })
     return result
 
@@ -364,6 +443,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             attestation_path=args.attestation,
             disk_only=args.disk_only,
         )
+        for warning in report.get("warnings") or []:
+            print(f"WARNING: {warning}", file=sys.stderr)
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
         return 0
     except (BackupHealthError, OSError, ValueError) as exc:

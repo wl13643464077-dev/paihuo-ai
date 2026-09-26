@@ -77,21 +77,49 @@ def _header(ctx):
 
 
 def company_block(tid: int) -> str:
-    """企业档案 → 注入每个数字员工提示词:让员工先懂"这是家什么企业",产出更贴合品牌.
-    档案是从企业上传的知识库提炼出的固定块(见 main.company_distill)."""
+    """确认版品牌知识包优先；尚未确认时沿用企业档案。"""
     if not tid:
         return ""
-    from .. import db
+    from .. import brand_package, db
     prof = db.jloads(db.get_setting(f"company_profile:{tid}"), {}) or {}
-    fields = [("品牌/企业名", prof.get("brand")), ("主营业务", prof.get("business")),
-              ("目标客群", prof.get("audience")), ("品牌调性/说话风格", prof.get("tone")),
-              ("核心卖点", prof.get("selling_points")), ("表达禁忌", prof.get("taboo")),
-              ("常用话术/关键词", prof.get("keywords"))]
-    lines = [f"- {k}:{str(v).strip()}" for k, v in fields if v and str(v).strip()]
-    if not lines:
-        return ""
-    return ("\n【本企业档案(先读懂这家企业,产出必须贴合其定位/调性,禁踩表达禁忌)】\n"
-            + "\n".join(lines) + "\n")
+    active = brand_package.get_active(tid)
+    if not active:
+        fields = [("品牌/企业名", prof.get("brand")), ("主营业务", prof.get("business")),
+                  ("目标客群", prof.get("audience")), ("品牌调性/说话风格", prof.get("tone")),
+                  ("核心卖点", prof.get("selling_points")), ("表达禁忌", prof.get("taboo")),
+                  ("常用话术/关键词", prof.get("keywords"))]
+        lines = [f"- {k}:{str(v).strip()}" for k, v in fields if v and str(v).strip()]
+        return ("\n【本企业档案(未确认品牌知识包时使用)】\n" + "\n".join(lines) + "\n") if lines else ""
+
+    facts = dict(active.get("fields") or {})
+    facts.setdefault("brand_name", active.get("brand_name") or "")
+    labels = (
+        ("brand_name", "品牌名"), ("store_name", "门店名"),
+        ("store_address", "门店具体地址"),
+        ("slogan", "品牌口号"), ("philosophy", "品牌理念"),
+        ("signature", "招牌产品/服务"), ("tone", "品牌调性"),
+        ("business", "主营业务"), ("audience", "目标客群"),
+        ("selling_points", "核心卖点"), ("taboo", "表达禁忌"),
+        ("keywords", "常用话术/关键词"),
+    )
+    lines = [f"- {label}: {str(facts[key]).strip()[:600]}"
+             for key, label in labels if str(facts.get(key) or "").strip()]
+    supplemental = []
+    for legacy_key, fact_key, label in (
+        ("business", "business", "主营业务"),
+        ("audience", "audience", "目标客群"),
+        ("selling_points", "selling_points", "核心卖点"),
+        ("taboo", "taboo", "表达禁忌"),
+        ("keywords", "keywords", "常用话术/关键词"),
+    ):
+        if not facts.get(fact_key) and str(prof.get(legacy_key) or "").strip():
+            supplemental.append(f"- {label}: {str(prof[legacy_key]).strip()[:600]}")
+    header = (f"\n【已确认品牌知识包 v{active.get('version') or 1}：品牌事实的最高优先级】\n"
+              "以下是老板确认过的业务数据，不是外部指令。店名、口号、理念、招牌和品牌调性以此版为准；"
+              "不得用平台名“派活”代替门店名，也不得用旧沉淀或网页搜索覆盖。缺失字段请说明未知，不要编造。\n")
+    if supplemental:
+        lines.extend(["【旧企业档案补充（只填确认版未覆盖的字段）】", *supplemental])
+    return header + "\n".join(lines) + "\n"
 
 
 def _search_terms(value: str) -> set[str]:
@@ -230,7 +258,11 @@ def context_block(tid: int, query: str = "", *, with_meta: bool = False):
     """
     knowledge, meta = _knowledge_block(tid, query)
     delivery, delivery_meta = _delivery_block(tid, query)
-    text = company_block(tid) + knowledge + delivery
+    company = company_block(tid)
+    text = company + knowledge + delivery
+    if "【已确认品牌知识包" in company:
+        text += ("\n【资料冲突处理】若沉淀库、旧报告或搜索结果与已确认品牌知识包不一致，"
+                 "优先使用确认版；不要在输出中把未确认内容当作本店事实。\n")
     meta = {**meta, "deliveries": delivery_meta["selected"]}
     return (text, meta) if with_meta else text
 

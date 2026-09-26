@@ -11,10 +11,12 @@ import unittest
 from unittest import mock
 
 from fastapi import HTTPException, UploadFile
+from fastapi.routing import iter_route_contexts
 from starlette.requests import Request
 from starlette.responses import Response
 
 from app import auth, db, inspection, inspectionimport, inspectionstandards, main
+from app.routes import inspection as inspection_routes
 
 
 def _prepared_photo(seed: str = "a") -> dict:
@@ -121,7 +123,9 @@ class InspectionV52HTTPIntegrationTests(unittest.TestCase):
         return int(branch["id"])
 
     def test_specific_routes_precede_visit_id_and_upload_has_exact_transient_limit(self):
-        paths = [getattr(route, "path", "") for route in main.app.routes]
+        # Included routers are lazy in the pinned FastAPI version. Inspect
+        # effective paths in dispatch order, including their mounted prefixes.
+        paths = [route.path for route in iter_route_contexts(main.app.routes)]
         generic = paths.index("/api/inspections/{visit_id}")
         for path in (
             "/api/inspections/branches/search",
@@ -202,16 +206,27 @@ class InspectionV52HTTPIntegrationTests(unittest.TestCase):
         self.assertEqual({
             "can_import_branches": True,
             "can_create_branch": True,
+            "can_manage_branches": True,
             "can_review": True,
+            "can_assign_actions": True,
         }, result["permissions"])
+        self.assertTrue(result["branch_scope"]["all_branches"])
 
+        # v58：员工不能建门店/审核，未分配门店时拿到空列表和提示。
         auth.set_current(self.member)
         member = main.inspection_meta("restaurant")
         self.assertEqual({
             "can_import_branches": False,
-            "can_create_branch": True,
+            "can_create_branch": False,
+            "can_manage_branches": False,
             "can_review": False,
+            "can_assign_actions": False,
         }, member["permissions"])
+        self.assertEqual([], member["branches"])
+        self.assertEqual(0, member["branch_scope"]["assigned_branches"])
+        self.assertEqual(
+            "老板还没给你分配门店，请联系老板", member["branch_scope"]["notice"]
+        )
 
     def test_list_summary_is_bounded_for_fifty_thousand_branches(self):
         connection = db.conn()
@@ -415,7 +430,7 @@ class InspectionV52HTTPIntegrationTests(unittest.TestCase):
         }
         for code, expected in cases.items():
             with self.subTest(code=code), mock.patch.object(
-                main,
+                inspection_routes,
                 "_run_db_safely",
                 new=mock.AsyncMock(
                     side_effect=inspectionimport.ImportContractError(code, "安全错误")
@@ -446,7 +461,7 @@ class InspectionV52HTTPIntegrationTests(unittest.TestCase):
 
         runner = mock.AsyncMock(return_value={"import_id": 7, "status": "previewed"})
         upload = UploadFile(filename="branches.xlsx", file=io.BytesIO(b"xlsx"))
-        with mock.patch.object(main, "_run_db_safely", new=runner):
+        with mock.patch.object(inspection_routes, "_run_db_safely", new=runner):
             result = asyncio.run(main.inspection_branch_import_preview(
                 industry_key="restaurant",
                 request_key="owner-import-0002",
@@ -545,13 +560,13 @@ class InspectionV52HTTPIntegrationTests(unittest.TestCase):
             "checklist": [],
         }
         with mock.patch.object(
-            main, "_prepare_inspection_uploads", new=mock.AsyncMock(return_value=prepared)
+            inspection_routes, "_prepare_inspection_uploads", new=mock.AsyncMock(return_value=prepared)
         ), mock.patch.object(
-            main, "_run_db_safely", new=mock.AsyncMock(side_effect=db_runner)
+            inspection_routes, "_run_db_safely", new=mock.AsyncMock(side_effect=db_runner)
         ), mock.patch.object(
-            main, "_run_inspection_file_safely", new=mock.AsyncMock(side_effect=file_runner)
+            inspection_routes, "_run_inspection_file_safely", new=mock.AsyncMock(side_effect=file_runner)
         ), mock.patch.object(
-            main, "_run_db_then_start_worker_safely", new=mock.AsyncMock(side_effect=activate)
+            inspection_routes, "_run_db_then_start_worker_safely", new=mock.AsyncMock(side_effect=activate)
         ):
             result = asyncio.run(main.inspection_create(
                 branch_id=self.branch["id"],
@@ -584,15 +599,15 @@ class InspectionV52HTTPIntegrationTests(unittest.TestCase):
             "photos": [{"capture_slot": slot} for slot in slots],
         }
         with mock.patch.object(
-            main,
+            inspection_routes,
             "_prepare_inspection_uploads",
             new=mock.AsyncMock(return_value=[_prepared_photo() for _ in slots]),
         ), mock.patch.object(
-            main,
+            inspection_routes,
             "_run_db_safely",
             new=mock.AsyncMock(return_value=shell),
         ), mock.patch.object(
-            main,
+            inspection_routes,
             "_run_inspection_file_safely",
             new=mock.AsyncMock(side_effect=AssertionError("replay must not store files")),
         ):
@@ -653,14 +668,14 @@ class InspectionV52HTTPIntegrationTests(unittest.TestCase):
             }],
         }
         with mock.patch.object(
-            main,
+            inspection_routes,
             "_prepare_inspection_uploads",
             new=mock.AsyncMock(return_value=[
                 {key: value for key, value in item.items() if key != "capture_slot"}
                 for item in prepared
             ]),
         ), mock.patch.object(
-            main,
+            inspection_routes,
             "_run_inspection_file_safely",
             new=mock.AsyncMock(side_effect=AssertionError("conflict must not write files")),
         ):

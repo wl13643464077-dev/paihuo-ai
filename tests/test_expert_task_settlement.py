@@ -8,7 +8,16 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 
-from app import auth, billing, db, employeeidentity, employees, taskrunner, taskthreads
+from app import (
+    auth,
+    billing,
+    db,
+    employeeidentity,
+    employees,
+    llm,
+    taskrunner,
+    taskthreads,
+)
 
 
 def _core_task_binding(idx: int = 0) -> dict:
@@ -252,6 +261,194 @@ class ExpertTaskSettlementCase(unittest.TestCase):
         )
         self.assertEqual(5, billing.balance(2))
 
+    def test_no_search_failure_refunds_once_and_persists_accurate_safe_message(self):
+        from app import main, providers
+
+        task_id = main._create_charged_expert_task({
+            "emp_idx": 0,
+            "tenant_id": 2,
+            "brief_json": json.dumps({"direction": "联网核验一份经营方案"}),
+        })
+        marker = "PRIVATE-UPSTREAM-DETAIL"
+        gateway_error = llm.WebSearchRequiredError(
+            marker, cost_usd=0.3, tokens=30
+        )
+        with patch.object(
+            providers,
+            "call_text",
+            AsyncMock(side_effect=gateway_error),
+        ) as gateway:
+            asyncio.run(taskrunner.run_task(task_id, lambda _payload: None))
+
+        gateway.assert_awaited_once()
+        row = db.one(
+            "SELECT status,billing_status,output_md,cost_usd,tokens "
+            "FROM task WHERE id=?",
+            (task_id,),
+        )
+        self.assertEqual("failed", row["status"])
+        self.assertEqual("refunded", row["billing_status"])
+        self.assertIn("联网检索未返回有效结果", row["output_md"])
+        self.assertIn("免费重试", row["output_md"])
+        self.assertNotIn("超时或繁忙", row["output_md"])
+        self.assertNotIn(marker, row["output_md"])
+        self.assertAlmostEqual(0.3, row["cost_usd"])
+        self.assertEqual(30, row["tokens"])
+        self.assertEqual(5, billing.balance(2))
+        self.assertEqual(
+            1,
+            db.one(
+                "SELECT COUNT(*) AS n FROM billing_log "
+                "WHERE tenant_id=2 AND delta=1"
+            )["n"],
+        )
+
+    def test_oversized_failure_usage_cannot_block_refund_settlement(self):
+        from app import main, providers
+
+        task_id = main._create_charged_expert_task({
+            "emp_idx": 0,
+            "tenant_id": 2,
+            "brief_json": json.dumps({"direction": "联网核验异常用量边界"}),
+        })
+        gateway_error = llm.WebSearchRequiredError(
+            cost_usd=0.3,
+            tokens=10 ** 30,
+        )
+        with patch.object(
+            providers,
+            "call_text",
+            AsyncMock(side_effect=gateway_error),
+        ):
+            asyncio.run(taskrunner.run_task(task_id, lambda _payload: None))
+
+        row = db.one(
+            "SELECT status,billing_status,tokens FROM task WHERE id=?",
+            (task_id,),
+        )
+        self.assertEqual("failed", row["status"])
+        self.assertEqual("refunded", row["billing_status"])
+        self.assertLessEqual(row["tokens"], llm.MAX_RECORDED_TOKENS)
+        self.assertEqual(5, billing.balance(2))
+
+    def test_immediate_free_retry_gets_a_follow_on_worker(self):
+        from app import main, providers
+
+        task_id = main._create_charged_expert_task({
+            "emp_idx": 0,
+            "tenant_id": 2,
+            "brief_json": json.dumps({"direction": "失败后立即免费重试"}),
+        })
+        calls = AsyncMock(side_effect=[
+            llm.WebSearchRequiredError(cost_usd=0.1, tokens=10),
+            {"text": "# 重试成功\n正文", "cost_usd": 0.2, "tokens": 20},
+        ])
+        retry_results = []
+
+        def broadcast(payload):
+            step = payload.get("step") if isinstance(payload, dict) else None
+            if (
+                isinstance(step, dict)
+                and step.get("k") == "error"
+                and not retry_results
+            ):
+                retry_results.append(taskrunner.prepare_retry(task_id, 2))
+                taskrunner.start_worker(task_id, broadcast)
+
+        async def scenario():
+            # v2 also summarizes short deliveries; this test counts execution
+            # attempts only, so keep the post-delivery summary independent.
+            with patch.object(providers, "call_text", calls), \
+                    patch.object(taskrunner, "_gen_summary", AsyncMock()):
+                first = taskrunner.start_worker(task_id, broadcast)
+                await first
+                for _ in range(200):
+                    row = db.one(
+                        "SELECT status FROM task WHERE id=?", (task_id,)
+                    )
+                    if row and row["status"] == "done":
+                        break
+                    await asyncio.sleep(0.01)
+                current = taskrunner.WORKER_TASKS.get(task_id)
+                if current is not None:
+                    await asyncio.gather(current, return_exceptions=True)
+
+        asyncio.run(scenario())
+        row = db.one(
+            "SELECT status,billing_status,cost_usd,tokens FROM task WHERE id=?",
+            (task_id,),
+        )
+        self.assertEqual([True], retry_results)
+        self.assertEqual(2, calls.await_count)
+        self.assertEqual("done", row["status"])
+        self.assertEqual("included", row["billing_status"])
+        self.assertAlmostEqual(0.3, row["cost_usd"])
+        self.assertEqual(30, row["tokens"])
+        self.assertNotIn(task_id, taskrunner.WORKER_TASKS)
+        self.assertNotIn(task_id, taskrunner.RUNNING)
+
+    def test_free_retries_preserve_and_accumulate_real_provider_usage(self):
+        from app import main, providers
+
+        task_id = main._create_charged_expert_task({
+            "emp_idx": 0,
+            "tenant_id": 2,
+            "brief_json": json.dumps({"direction": "连续联网核验"}),
+        })
+        self.assertTrue(taskrunner.settle_failure(
+            task_id,
+            "第一次失败",
+            cost_usd=0.3,
+            tokens=30,
+        ))
+        self.assertTrue(taskrunner.prepare_retry(task_id, 2))
+        queued = db.one(
+            "SELECT cost_usd,tokens FROM task WHERE id=?", (task_id,)
+        )
+        self.assertAlmostEqual(0.3, queued["cost_usd"])
+        self.assertEqual(30, queued["tokens"])
+
+        self.assertTrue(taskrunner.settle_failure(
+            task_id,
+            "第二次失败",
+            cost_usd=0.2,
+            tokens=20,
+        ))
+        failed_again = db.one(
+            "SELECT cost_usd,tokens FROM task WHERE id=?", (task_id,)
+        )
+        self.assertAlmostEqual(0.5, failed_again["cost_usd"])
+        self.assertEqual(50, failed_again["tokens"])
+
+        self.assertTrue(taskrunner.prepare_retry(task_id, 2))
+        with patch.object(
+            providers,
+            "call_text",
+            AsyncMock(return_value={
+                "text": "# 最终交付\n正文",
+                "cost_usd": 0.4,
+                "tokens": 40,
+            }),
+        ):
+            asyncio.run(taskrunner.run_task(task_id, lambda _payload: None))
+
+        delivered = db.one(
+            "SELECT status,billing_status,cost_usd,tokens FROM task WHERE id=?",
+            (task_id,),
+        )
+        self.assertEqual("done", delivered["status"])
+        self.assertEqual("included", delivered["billing_status"])
+        self.assertAlmostEqual(0.9, delivered["cost_usd"])
+        self.assertEqual(90, delivered["tokens"])
+        self.assertEqual(5, billing.balance(2))
+        self.assertEqual(
+            1,
+            db.one(
+                "SELECT COUNT(*) AS n FROM billing_log "
+                "WHERE tenant_id=2 AND delta=1"
+            )["n"],
+        )
+
     def test_redo_rejects_oversized_feedback_before_charge_or_task_creation(self):
         from app import main
 
@@ -363,6 +560,113 @@ class ExpertTaskSettlementCase(unittest.TestCase):
             db.one(
                 "SELECT COUNT(*) AS n FROM billing_log "
                 "WHERE tenant_id=2 AND delta=1"
+            )["n"],
+        )
+
+    def test_delete_cancels_a_worker_waiting_before_provider_execution(self):
+        from app import main, providers
+
+        task_id = main._create_charged_expert_task({
+            "emp_idx": 0,
+            "tenant_id": 2,
+            "brief_json": json.dumps({"direction": "等待联网槽位"}),
+        })
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def blocked_provider(*_args, **_kwargs):
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            return {"text": "# 不应交付", "cost_usd": 1, "tokens": 100}
+
+        async def scenario():
+            with patch.object(providers, "call_text", side_effect=blocked_provider):
+                worker = taskrunner.start_worker(task_id, lambda _payload: None)
+                await asyncio.wait_for(entered.wait(), 5)
+                deleted = main.task_delete(task_id)
+                try:
+                    await asyncio.wait_for(cancelled.wait(), 0.2)
+                finally:
+                    release.set()
+                    await asyncio.gather(worker, return_exceptions=True)
+                return deleted
+
+        deleted = asyncio.run(scenario())
+        self.assertTrue(deleted.get("soft_deleted"))
+        self.assertNotIn(task_id, taskrunner.WORKER_TASKS)
+        self.assertNotIn(task_id, taskrunner.RUNNING)
+        self.assertEqual(5, billing.balance(2))
+
+    def test_delete_cancels_a_retry_worker_started_during_settlement(self):
+        from app import main, providers
+
+        task_id = main._create_charged_expert_task({
+            "emp_idx": 0,
+            "tenant_id": 2,
+            "brief_json": json.dumps({"direction": "删除与免费重试并发"}),
+        })
+        self.assertTrue(taskrunner.settle_failure(task_id, "第一次失败"))
+        original_settle = taskrunner.settle_failure
+        delete_in_settlement = threading.Event()
+        release_delete = threading.Event()
+        provider_entered = asyncio.Event()
+        provider_cancelled = asyncio.Event()
+        provider_release = asyncio.Event()
+
+        def gated_settle(*args, **kwargs):
+            if len(args) > 1 and args[1] == "老板删除未交付任务":
+                delete_in_settlement.set()
+                release_delete.wait(timeout=5)
+            return original_settle(*args, **kwargs)
+
+        async def blocked_provider(*_args, **_kwargs):
+            provider_entered.set()
+            try:
+                await provider_release.wait()
+            except asyncio.CancelledError:
+                provider_cancelled.set()
+                raise
+            return {"text": "# 不应交付", "cost_usd": 1, "tokens": 100}
+
+        async def scenario():
+            worker = None
+            was_cancelled = False
+            with patch.object(taskrunner, "settle_failure", side_effect=gated_settle), \
+                    patch.object(providers, "call_text", side_effect=blocked_provider):
+                deleting = asyncio.create_task(asyncio.to_thread(main.task_delete, task_id))
+                entered = await asyncio.to_thread(delete_in_settlement.wait, 5)
+                self.assertTrue(entered)
+                self.assertTrue(taskrunner.prepare_retry(task_id, 2))
+                worker = taskrunner.start_worker(task_id, lambda _payload: None)
+                await asyncio.wait_for(provider_entered.wait(), 5)
+                release_delete.set()
+                deleted = await deleting
+                try:
+                    await asyncio.wait_for(provider_cancelled.wait(), 0.5)
+                    was_cancelled = True
+                except asyncio.TimeoutError:
+                    pass
+                finally:
+                    provider_release.set()
+                    taskrunner.cancel_worker(task_id)
+                    await asyncio.gather(worker, return_exceptions=True)
+                return deleted, was_cancelled
+
+        deleted, was_cancelled = asyncio.run(scenario())
+        self.assertTrue(deleted.get("soft_deleted"))
+        self.assertTrue(was_cancelled)
+        self.assertNotIn(task_id, taskrunner.WORKER_TASKS)
+        self.assertNotIn(task_id, taskrunner.RUNNING)
+        self.assertEqual(
+            0,
+            db.one(
+                "SELECT COUNT(*) AS n FROM asset WHERE payload_json LIKE ?",
+                (f'%"task_id": {task_id}%',),
             )["n"],
         )
 

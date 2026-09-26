@@ -6,6 +6,8 @@
 - hunt_for_job():流水线多媒体师用——按配图点位生成检索词,抓回真实图存进工单素材。
 
 版权提示:抓取图仅作素材参考,商用请自行确认版权(前端有提示)。
+第 3 期:整块功能受平台开关 imagehunt 控制，默认关闭(版权风险);关闭时所有入口
+(搜图/下载/流水线自动抓图)都直接拒绝，只保留 AI 生图和老板自己上传的图。
 """
 import asyncio
 import html as _htmlmod
@@ -19,7 +21,7 @@ from urllib.parse import quote, urljoin
 
 import httpx
 
-from . import providers
+from . import db, features, providers
 from .linkgrab import _guard_url, _pinned_request
 
 log = logging.getLogger("imagehunt")
@@ -81,8 +83,14 @@ async def _so360(cli, q, n):
     return out
 
 
-async def search(query: str, n: int = 24) -> list:
+def ensure_enabled(tenant_id: int = None) -> None:
+    """平台关闭全网抓图时抛 features.FeatureDisabled(接口层转 403)."""
+    features.require("imagehunt", tenant_id)
+
+
+async def search(query: str, n: int = 24, tenant_id: int = None) -> list:
     """三路并行搜图,去重合并.每项 {img, thumb, page, from}."""
+    await db.arun(ensure_enabled, tenant_id)
     async with httpx.AsyncClient(timeout=20, follow_redirects=True,
                                  headers={"User-Agent": UA_DESKTOP,
                                           "Accept-Language": "zh-CN,zh;q=0.9"}) as cli:
@@ -111,7 +119,7 @@ def _decode_image(data: bytes, max_pixels: int = MAX_IMAGE_PIXELS):
     """先读图片头并限制像素/帧，再允许 PIL 解压像素数据。"""
     from PIL import Image
 
-    Image.MAX_IMAGE_PIXELS = max_pixels
+    # 不改 PIL 的全局像素上限(会影响全进程的其他图片处理)；下面按图片头自行判断。
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
@@ -216,8 +224,9 @@ async def fetch_public_bytes(url: str, headers: dict = None, max_bytes: int = MA
             await cli.aclose()
 
 
-async def fetch_image(url: str, referer: str = None) -> bytes:
+async def fetch_image(url: str, referer: str = None, tenant_id: int = None) -> bytes:
     """下载并校验一张图,返回统一处理后的 JPG 二进制;不合格抛 ValueError."""
+    await db.arun(ensure_enabled, tenant_id)
     headers = {"User-Agent": UA_DESKTOP}
     if referer:
         headers["Referer"] = referer
@@ -295,6 +304,11 @@ async def hunt_for_job(job_id: int, version: int, title: str, plan: list,
                        want: int, industry: str = "", progress=None) -> list:
     """流水线用:按配图点位全网抓真实图,存进工单素材,返回 images 列表."""
     progress = progress or (lambda *a: None)
+    row = await db.aone("SELECT tenant_id FROM job WHERE id=?", (job_id,))
+    tenant_id = int((row or {}).get("tenant_id") or 0) or None
+    if not await db.arun(features.is_enabled, "imagehunt", tenant_id):
+        progress("retry", features.off_hint("imagehunt"))
+        return []
     plan = (plan or [])[:max(1, want)]
     while len(plan) < want:
         plan = plan + [{"slot": f"配图{len(plan) + 1}", "desc": title}]

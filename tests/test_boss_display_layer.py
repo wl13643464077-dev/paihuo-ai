@@ -91,9 +91,11 @@ class HomeGuideCopyTests(unittest.TestCase):
 
     def test_howto_card_teaches_four_step_usage_and_resets_with_guide(self):
         self.assertIn("数字员工怎么用 · 四步用人法", APP_JS)
-        for kw in ("① 挑人", "② 派活", "③ 收活", "④ 沉淀"):
+        # 第 1 期去术语:「④ 沉淀」→「④ 攒经验」,「Agent 团队协作执行」→「多位专家接力完成」
+        for kw in ("① 挑人", "② 派活", "③ 收活", "④ 攒经验"):
             self.assertIn(kw, APP_JS)
-        self.assertIn("Agent 团队协作执行", APP_JS)
+        self.assertIn("多位专家接力完成", APP_JS)
+        self.assertNotIn("Agent 团队协作执行", APP_JS)
         # 「重看新手引导」必须能恢复教程卡
         self.assertIn('localStorage.removeItem("howto_hide_"', APP_JS)
         self.assertIn("howtoCard()", APP_JS)

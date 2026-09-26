@@ -331,6 +331,9 @@ class SecureConfigTests(unittest.TestCase):
             "feishu.py",
             "mailer.py",
             "runninghub.py",
+            # 第 3 期从 main.py 拆出的 Web 层也在检查范围内
+            "web_common.py",
+            *sorted(f"routes/{p.name}" for p in (root / "routes").glob("*.py")),
         ):
             source = (root / filename).read_text(encoding="utf-8")
             for name in secureconfig.SECRET_SETTING_KEYS:
