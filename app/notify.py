@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import re
+import threading
 import time
 
 import httpx
@@ -117,6 +118,16 @@ def build_msg(kind: str, payload: dict) -> str:
     if kind == "video":
         return (f"**🎬 派活 · 视频成片**\n《{title}》已出片,可下载发布\n"
                 f"[查看]({base}{p.get('file', '')})")
+    if kind in PERSONAL_KINDS:
+        # 派给店员的活:群里只报事,不带照片;链接进老板端/店员手机版都能看
+        heads = {
+            "staff_task_assigned": "📌 派活 · 新活派给店员",
+            "staff_task_submitted": "📷 派活 · 店员交差了,等审核",
+            "staff_task_reviewed": "✅ 派活 · 交差已审核",
+        }
+        return (f"**{heads[kind]}**\n{(p.get('summary') or title)[:120]}"
+                + (f"\n截止:{p.get('due')}" if p.get("due") else "")
+                + f"\n[去看看]({base}/#/staff-tasks/{int(p.get('task_id') or 0)})")
     if kind == "pub":
         if p.get("ok"):
             return (f"**🚀 派活 · 矩阵发布成功**\n《{title}》已发到{p.get('platform', '')},"
@@ -150,6 +161,11 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
         "purchase_lost": "套餐申请已结束",
         "purchase_paid": "套餐和点数已开通",
         # 副账号代老板拍板:标题直接说清谁、哪单、哪站、通过还是打回
+        "staff_task_assigned": "有新活派给你",
+        "staff_task_submitted": "店员交差了，等您审核",
+        "staff_task_reviewed": (
+            "你交的活通过了" if p.get("approved") else "你交的活被打回了，请重做"
+        ),
         "member_reviewed": (
             f"👤 {p.get('user', '')} 已代拍板 工单#{p.get('job_id')} "
             f"工位{p.get('station', '')}:"
@@ -180,6 +196,8 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
         link = "#/billing"
     elif kind in {"schedule_paused", "schedule_failed"}:
         link = "#/schedules"
+    elif kind in PERSONAL_KINDS:
+        link = f"#/staff-tasks/{int(p.get('task_id') or 0)}"
     else:
         link = str(p.get("link") or "#/knowledge")
     if not re.match(r"^#/[A-Za-z0-9_~.%/?=&:+-]*$", link):
@@ -209,6 +227,13 @@ BOSS_ONLY_KINDS = {
 # 也不能广播给企业成员。
 PURCHASE_CUSTOMER_KINDS = {
     "purchase_contacted", "purchase_lost", "purchase_paid",
+}
+
+# 派给真人店员的任务通知(第 2 期)：只发给具体的人——被指派的店员、派活人，
+# 系统派的活才发给老板——每人一行(user_id=收件人)，绝不写 user_id=NULL 的广播行。
+# 任何角色(老板/总监/店长/店员)只要是收件人本人就能看；不是本人看不到。
+PERSONAL_KINDS = {
+    "staff_task_assigned", "staff_task_submitted", "staff_task_reviewed",
 }
 
 # 普通业务通知仍保留 schema48 的租户广播行，但读取和标记已读都必须经过
@@ -262,6 +287,7 @@ def _allowed_kinds(user: dict | None) -> tuple[str, ...] | None:
     if role == "owner":
         return tuple(sorted(
             set(KIND_MODULES) | BOSS_ONLY_KINDS | PURCHASE_CUSTOMER_KINDS
+            | PERSONAL_KINDS
         ))
     if role != "member":
         return ()
@@ -271,8 +297,10 @@ def _allowed_kinds(user: dict | None) -> tuple[str, ...] | None:
         if isinstance(module, str)
     }
     return tuple(sorted(
-        kind for kind, required in KIND_MODULES.items()
-        if required.intersection(modules)
+        {
+            kind for kind, required in KIND_MODULES.items()
+            if required.intersection(modules)
+        } | PERSONAL_KINDS
     ))
 
 
@@ -488,6 +516,9 @@ def record(
             if not target:
                 return None
             targets = [int(target["id"])]
+        elif kind in PERSONAL_KINDS:
+            # 个人通知必须指定收件人；没有就丢弃，绝不降级为全员广播
+            return None
         elif kind in ROOT_ONLY_KINDS:
             targets = _root_uids(tid)
             if not targets:
@@ -558,6 +589,37 @@ def push(tid: int, kind: str, payload: dict):
         loop.run_in_executor(None, send_sync, tid, kind, payload)
     except RuntimeError:
         send_sync(tid, kind, payload)
+
+
+def push_to_users(tid: int, kind: str, payload: dict, user_ids) -> list[int]:
+    """逐人发送:每个收件人一行站内通知(停用/别家账号自动跳过)，企微群只发一条。
+
+    返回实际写入的通知 id。没有任何有效收件人时站内和企微都不发。
+    """
+    seen: list[int] = []
+    for raw in user_ids or ():
+        try:
+            uid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if uid > 0 and uid not in seen:
+            seen.append(uid)
+    written = []
+    for uid in seen:
+        row_id = record(tid, kind, payload, target_user_id=uid)
+        if row_id is not None:
+            written.append(int(row_id))
+    if not written or not get_webhook(tid):
+        return written
+    try:
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, send_sync, tid, kind, payload)
+    except RuntimeError:
+        # 同步路由跑在线程池里：企微最多等 8 秒，不能卡住店员的提交请求
+        threading.Thread(
+            target=send_sync, args=(tid, kind, payload), daemon=True,
+        ).start()
+    return written
 
 
 async def push_async(tid: int, kind: str, payload: dict):

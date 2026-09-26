@@ -1,4 +1,4 @@
-"""结论卡真浏览器回归：手机首屏看到结论与 3 条行动，全文默认折叠，派给店员可复制。"""
+"""结论卡真浏览器回归：手机首屏看到结论与 3 条行动，全文默认折叠，派给店员打开派活表单。"""
 from __future__ import annotations
 
 from functools import partial
@@ -141,12 +141,15 @@ class VerdictCardBrowserTests(unittest.IsolatedAsyncioTestCase):
             # 全文默认折叠。
             self.assertFalse(await page.locator("details.vc-full").evaluate("el => el.open"))
             self.assertFalse(await page.get_by_text("第 40 段分析正文。").is_visible())
-            await card.locator("button", has_text="派给店员").first.click()
-            await page.wait_for_function(
-                "document.body.innerText.includes('已复制，可以发给店员')", timeout=3000
-            )
             await page.locator("details.vc-full > summary").click()
             self.assertTrue(await page.get_by_text("第 40 段分析正文。").is_visible())
+            # 第 2 期:老板点「派给店员」直接打开派活表单,预填这条行动(去掉「店长：」称呼)
+            await card.locator("button", has_text="派给店员").first.click()
+            await page.wait_for_function(
+                "location.hash==='#/staff-tasks'"
+                " && document.querySelector('[data-sa-draft] input')?.value==='周五前约房东谈免租期'",
+                timeout=5000,
+            )
             self.assertEqual([], errors)
             await browser.close()
 

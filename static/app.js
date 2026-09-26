@@ -554,6 +554,7 @@ const NAV_GROUPS = [
       {route:"experts", icon:"🧑‍🔧", title:"找行业专家", desc:"您这一行的专家一人一岗，店里遇到的事直接问、直接派", show:()=>!!ME},
       {route:"meetings", icon:"🪑", title:"多位专家一起商量", desc:"大事拿不准，拉几位专家各出方案、互相挑错，最后给您结论", show:()=>!!ME},
       {route:"tasks", icon:"📦", title:"派出去的活", desc:"所有派出去的活都在这：谁在干、卡在哪、哪些等您看", show:()=>!!ME&&ME.role!=="tour"},
+      {route:"staff-tasks", icon:"🧑‍🍳", title:"派给店员", desc:"把活派给店里的人，店员拍照交差，AI 先帮您看照片", show:()=>!!window.PH_STAFF_ADMIN?.canDispatch()},
     ]},
   {key:"store", label:"门店", icon:"🏪", hub:"store", extra:[],
     title:"门店", intro:"各门店的巡店、整改和员工表现，一处看全。",
@@ -581,6 +582,7 @@ const NAV_GROUPS = [
         subs:[{route:"profiles", icon:"🎭", title:"品牌人设", desc:"品牌说话的口吻和往期文章，写出来才像您自己", show:()=>canWork("content")}]},
       {route:"assets", icon:"🗂️", title:"我的资料库", desc:"数字员工交付的成品都存在这，好内容可以存成经验反复用", show:()=>canWork("library"),
         subs:[{route:"knowledge", icon:"📚", title:"经验库", desc:"存下来的好经验，以后所有员工干活都会带上", show:()=>canWork("library")}]},
+      {action:"location.href='/staff'", icon:"📱", title:"店员手机版", desc:"店员每天在手机上看待办、拍照交差，您也能打开看看", show:()=>!!ME&&ME.role!=="tour"},
       {route:"notifications", icon:"🔔", title:"通知记录", desc:"看过的通知都能在这里翻到", show:()=>!!ME&&ME.role!=="tour"},
       {route:"trash", icon:"🗑", title:"回收站", desc:"误删的任务和资料可以在这里找回", show:()=>!!isAdmin()},
       // 引导卡只对 owner/root 展示,重看入口同样只给他们
@@ -2406,8 +2408,9 @@ function deliveryBrief(d){
   return {title:"⚡ 交付结论",verdict,actions:actions.slice(0,3),watch:vcShort(issue,80),extra:[]};
 }
 function verdictDispatch(btn){
-  // 第 2 期接真人派活;现在先复制这条行动,方便老板转给店员。
+  // 第 2 期:能派活的账号直接打开「派给店员」表单并预填这条行动;其他账号仍复制。
   const text=btn?.dataset?.text||""; if(!text) return;
+  if(window.PH_STAFF_ADMIN?.canDispatch()) return window.PH_STAFF_ADMIN.openDispatch({title:text,source:"ai_action"});
   const done=()=>toast("已复制，可以发给店员");
   const fallback=()=>{ const ta=document.createElement("textarea"); ta.value=text; document.body.appendChild(ta); ta.select();
     try{ document.execCommand("copy"); }catch(_){} ta.remove(); done(); };
