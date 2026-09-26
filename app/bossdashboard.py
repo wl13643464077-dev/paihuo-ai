@@ -857,6 +857,8 @@ def _inspection_schema() -> dict[str, Any] | None:
     return {
         "action_relation": action_relation,
         "branch_active": "active" in columns["store_branch"],
+        "false_positive": "close_reason" in action_columns
+        and "issue_id" in action_columns,
     }
 
 
@@ -915,6 +917,12 @@ def _inspection_aggregate(
         "AND sb.tenant_id=v.tenant_id AND sb.active=1)"
         if schema.get("branch_active") else ""
     )
+    # 老板/总监标记为"误报"的问题不算问题数、不算逾期(与巡店页口径一致)。
+    not_false_positive = (
+        " AND NOT EXISTS(SELECT 1 FROM inspection_action fa WHERE fa.issue_id=i.id "
+        "AND fa.tenant_id=v.tenant_id AND fa.close_reason='false_positive')"
+        if schema.get("false_positive") else ""
+    )
     issue = db.one(
         f"""
         WITH bounds(started_at,now_at) AS (VALUES(?,?))
@@ -943,7 +951,7 @@ def _inspection_aggregate(
         JOIN inspection_visit v ON v.id=i.visit_id
         CROSS JOIN bounds
         WHERE v.tenant_id=? AND v.industry_key=? AND v.deleted_at IS NULL
-        {active_branch}
+        {active_branch}{not_false_positive}
         """,
         (started_at, now, tenant_id, industry_key),
     ) or {}

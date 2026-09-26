@@ -657,3 +657,25 @@ class TaskCenterBranchScopeTests(_ScopeDbCase):
         self.assertIn(task_a, manager_ids)
         self.assertNotIn(task_b, manager_ids)
         self.assertFalse({task_a, task_b} & self._ids(23))   # 未分配门店的员工
+
+
+class FalsePositiveDashboardTests(_ScopeDbCase):
+    def test_dismissed_false_positive_leaves_boss_dashboard_counts(self):
+        self._visit(self.a)
+        self._visit(self.b)
+        now = time.time()
+        before, _, _ = bossdashboard._inspection_aggregate(
+            2, "restaurant", now - 30 * 86400, now,
+        )
+        self.assertEqual(2, before["issues"])
+        action = db.one(
+            "SELECT a.id FROM inspection_action a JOIN inspection_visit v "
+            "ON v.id=a.visit_id WHERE v.branch_id=? ORDER BY a.id LIMIT 1",
+            (self.b["id"],),
+        )
+        inspection.dismiss_action(2, 20, int(action["id"]), "AI 看错了，是临时放的")
+        after, _, _ = bossdashboard._inspection_aggregate(
+            2, "restaurant", now - 30 * 86400, time.time(),
+        )
+        self.assertEqual(1, after["issues"])
+        self.assertEqual(1, after["open_issues"])
