@@ -23,9 +23,14 @@ from app import auth, avatar, db, textvideo
 
 class PersistentUploadSecurityCase(unittest.TestCase):
     def setUp(self):
-        from app import main
+        from app import main, web_common
+        from app.routes import avatar as avatar_routes
 
         self.main = main
+        # 第 3 期拆分：数字人路由在 app.routes.avatar，共享上传闸门在 app.web_common，
+        # 要 patch 被测代码实际查找名字的模块。
+        self.web_common = web_common
+        self.avatar_routes = avatar_routes
         self.tmp = tempfile.TemporaryDirectory()
         self.old_db_path = db.DB_PATH
         self.old_public_dir = avatar.PUBLIC_DIR
@@ -257,9 +262,9 @@ class PersistentUploadSecurityCase(unittest.TestCase):
     def test_avatar_rate_limit_rejects_before_read_or_write(self):
         first = self._upload("face.jpg", self._jpeg_bytes(), "image/jpeg")
         with mock.patch.object(
-            self.main, "_PERSISTENT_UPLOAD_USER_LIMIT", 1
+            self.web_common, "_PERSISTENT_UPLOAD_USER_LIMIT", 1
         ), mock.patch.object(
-            self.main, "_PERSISTENT_UPLOAD_TENANT_LIMIT", 1
+            self.web_common, "_PERSISTENT_UPLOAD_TENANT_LIMIT", 1
         ):
             result = asyncio.run(self.main.avatar_upload(first, "photo", "1"))
             self.assertTrue(os.path.isfile(
@@ -269,7 +274,7 @@ class PersistentUploadSecurityCase(unittest.TestCase):
                 "second.jpg", self._jpeg_bytes(), "image/jpeg"
             )
             with mock.patch.object(
-                self.main,
+                self.avatar_routes,
                 "_read_limited",
                 new=mock.AsyncMock(
                     side_effect=AssertionError("rate limit must run before read")
@@ -1337,11 +1342,11 @@ class PersistentUploadSecurityCase(unittest.TestCase):
                 delete_done.set()
 
         with mock.patch.object(
-            self.main,
+            self.avatar_routes,
             "_create_charged_avatar_job",
             side_effect=delayed_create,
         ), mock.patch.object(
-            self.main,
+            self.avatar_routes,
             "_start_avatar_job_worker",
         ):
             creator = threading.Thread(
@@ -1404,7 +1409,7 @@ class PersistentUploadSecurityCase(unittest.TestCase):
         payload = b"x" * 32
         upload = self._upload("clip.mp4", payload, "video/mp4")
         with mock.patch.object(
-            self.main, "_PERSISTENT_UPLOAD_TENANT_BYTES", 16
+            self.web_common, "_PERSISTENT_UPLOAD_TENANT_BYTES", 16
         ), mock.patch.object(
             self.main,
             "_read_limited",

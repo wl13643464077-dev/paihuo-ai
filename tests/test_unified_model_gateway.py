@@ -546,13 +546,14 @@ class BusinessGatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_avatar_link_rewrite_uses_writer_employee_route(self):
         from app import linkgrab, main
+        from app.routes import avatar as avatar_routes
 
         result = {
             "text": "这是一段足够长并且可以直接使用的安全中文口播稿，包含钩子与结尾互动。",
             "cost_usd": 0,
             "tokens": 1,
         }
-        with patch.object(main, "TEN", return_value=2), patch.object(
+        with patch.object(avatar_routes, "TEN", return_value=2), patch.object(
             linkgrab, "is_video_link", return_value=False
         ), patch.object(
             linkgrab, "fetch_page_text", AsyncMock(return_value="公开页面正文")

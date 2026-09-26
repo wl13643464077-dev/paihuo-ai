@@ -135,24 +135,43 @@ class ReviewedP1RouteCallGraphTests(unittest.TestCase):
             return ".".join(reversed(parts))
         return ""
 
+    @staticmethod
+    def _web_layer_async_functions():
+        """main.py 与第 3 期从它拆出的 app/routes/*.py 里的全部 async 函数。"""
+        app_dir = os.path.dirname(main.__file__)
+        routes_dir = os.path.join(app_dir, "routes")
+        paths = [os.path.join(app_dir, "main.py")] + sorted(
+            os.path.join(routes_dir, name)
+            for name in os.listdir(routes_dir)
+            if name.endswith(".py")
+        )
+        found = []
+        for path in paths:
+            with open(path, encoding="utf-8") as handle:
+                tree = ast.parse(handle.read(), filename=path)
+            filename = os.path.relpath(path, app_dir)
+            found.extend(
+                (filename, node)
+                for node in ast.walk(tree)
+                if isinstance(node, ast.AsyncFunctionDef)
+            )
+        return found
+
     def test_reviewed_p1_routes_have_no_inline_blocking_edges(self):
-        path = os.path.join(os.path.dirname(main.__file__), "main.py")
-        with open(path, encoding="utf-8") as handle:
-            tree = ast.parse(handle.read(), filename=path)
+        functions = self._web_layer_async_functions()
         offenders = []
         for function_name, forbidden in self.TARGETS.items():
             matches = [
-                node
-                for node in ast.walk(tree)
-                if isinstance(node, ast.AsyncFunctionDef)
-                and node.name == function_name
+                (filename, node)
+                for filename, node in functions
+                if node.name == function_name
             ]
             self.assertEqual(
                 1,
                 len(matches),
-                f"main.py:{function_name} 不再是唯一 async 入口",
+                f"{function_name} 不再是 main.py/routes 里唯一的 async 入口",
             )
-            target = matches[0]
+            filename, target = matches[0]
 
             class DirectEdgeVisitor(ast.NodeVisitor):
                 def visit_AsyncFunctionDef(self, node):
@@ -169,7 +188,7 @@ class ReviewedP1RouteCallGraphTests(unittest.TestCase):
                     name = ReviewedP1RouteCallGraphTests._call_name(node)
                     if name in forbidden:
                         offenders.append(
-                            f"main.py:{node.lineno} {function_name}->{name}"
+                            f"{filename}:{node.lineno} {function_name}->{name}"
                         )
                     self.generic_visit(node)
 
@@ -181,13 +200,9 @@ class ReviewedP1RouteCallGraphTests(unittest.TestCase):
         )
 
     def test_durable_queue_routes_linearize_commit_and_worker_start(self):
-        path = os.path.join(os.path.dirname(main.__file__), "main.py")
-        with open(path, encoding="utf-8") as handle:
-            tree = ast.parse(handle.read(), filename=path)
         functions = {
             node.name: node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.AsyncFunctionDef)
+            for _filename, node in self._web_layer_async_functions()
         }
         actual = {}
         for name, expected in self.LINEARIZED_QUEUE_ROUTES.items():
@@ -202,7 +217,7 @@ class ReviewedP1RouteCallGraphTests(unittest.TestCase):
             self.assertEqual(
                 expected,
                 actual[name],
-                f"main.py:{name} 的持久队列提交与 worker 启动边界发生变化",
+                f"{name} 的持久队列提交与 worker 启动边界发生变化",
             )
 
 

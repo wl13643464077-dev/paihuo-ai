@@ -734,7 +734,7 @@ class ReviewedAsyncCallGraphTests(unittest.TestCase):
         ("main.py", "_create_task_followup"): {
             "_task_row_or_404", "_create_charged_expert_task",
         },
-        ("main.py", "avatar_job_create"): {
+        ("routes/avatar.py", "avatar_job_create"): {
             "avatar.cloned_voices", "_avatar_asset_name",
             "_create_charged_avatar_job",
         },

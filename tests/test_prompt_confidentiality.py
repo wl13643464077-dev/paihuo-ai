@@ -623,6 +623,7 @@ class GrowthResearchBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_avatar_link_research_receives_url_not_private_persona(self):
         from app import linkgrab, main
+        from app.routes import avatar as avatar_routes
 
         fake = AsyncMock(return_value={
             "text": "这是一段足够长且可以直接使用的安全中文口播稿，包含开头钩子和结尾互动引导。",
@@ -633,7 +634,7 @@ class GrowthResearchBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "positioning": "SECRET-PERSONA-POSITION",
             "tone": "SECRET-PERSONA-TONE",
         }, ensure_ascii=False)
-        with patch.object(main, "TEN", return_value=2), \
+        with patch.object(avatar_routes, "TEN", return_value=2), \
                 patch.object(main.db, "one", return_value={"persona_json": persona}), \
                 patch.object(linkgrab, "is_video_link", return_value=False), \
                 patch.object(

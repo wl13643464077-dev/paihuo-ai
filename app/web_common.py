@@ -9,6 +9,7 @@
 
 import asyncio
 import contextvars
+import logging
 import os
 import re
 import threading
@@ -17,7 +18,14 @@ from contextlib import asynccontextmanager as _asynccontextmanager
 
 from fastapi import HTTPException
 
-from . import assetfiles, auth, billing, db, departments, employeeidentity, employees, timeutil
+from . import (
+    assetfiles, auth, billing, db, departments, employeeidentity, employees, providers,
+    timeutil,
+)
+from .engine import engine
+
+
+log = logging.getLogger("main")  # 与拆分前同名，日志检索口径不变
 
 
 def _read_file_bytes(path: str) -> bytes:
@@ -26,6 +34,9 @@ def _read_file_bytes(path: str) -> bytes:
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+_AVATAR_UPLOAD_MAX_BYTES = 30 * 1024 * 1024
 
 
 _INSPECTION_UPLOAD_MAX_BYTES = 38 * 1024 * 1024
@@ -251,8 +262,53 @@ def _display_dept_name(dept_key, fallback="") -> str:
     return _INDUSTRY_DEPT_DISPLAY.get(str(dept_key or ""), str(fallback or ""))
 
 
+def _need_module(module: str):
+    if not auth.allowed(module):
+        raise HTTPException(403, "您的账号没有该板块权限,请联系企业主账号开通")
+
+
 def TEN() -> int:
     return auth.tenant_id()
+
+
+def _pagination(limit, offset: int, legacy_limit: int) -> tuple[int, int, bool]:
+    """未传 limit 时保持旧数组响应；显式传入时启用统一分页契约。"""
+    if limit is None:
+        if offset not in (0, None):
+            raise HTTPException(422, "offset 需要与 limit 一起使用")
+        return legacy_limit, 0, False
+    try:
+        page_limit = int(limit)
+        page_offset = int(offset or 0)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, "分页参数无效") from exc
+    if not 1 <= page_limit <= 100:
+        raise HTTPException(422, "limit 必须在 1 到 100 之间")
+    if not 0 <= page_offset <= 1_000_000:
+        raise HTTPException(422, "offset 必须在 0 到 1000000 之间")
+    return page_limit, page_offset, True
+
+
+def _page_result(rows: list, total: int, limit: int, offset: int, **extra) -> dict:
+    has_more = offset + len(rows) < total
+    return {
+        "items": rows,
+        "limit": limit,
+        "offset": offset,
+        "total": total,
+        "has_more": has_more,
+        "truncated": has_more,
+        "next_offset": offset + limit if has_more else None,
+        **extra,
+    }
+
+
+def _start_billed_operation(action: str, note: str = "") -> str:
+    """HTTP 入口统一使用可恢复操作账；不再靠易重复的“扣后手工退”。"""
+    try:
+        return billing.start_operation(action, tid=TEN(), note=note)
+    except billing.InsufficientPoints as exc:
+        raise HTTPException(402, str(exc)) from exc
 
 
 async def _drain_task_despite_cancellation(task: asyncio.Task):
@@ -321,6 +377,35 @@ async def _run_db_then_start_worker_safely(
     return result
 
 
+async def _start_billing_operation_safely(
+    fn,
+    *args,
+    cancel_reason: str,
+    **kwargs,
+) -> str:
+    """Start durable billing off-loop without leaving a cancelled charge."""
+    start_task = asyncio.create_task(db.arun(fn, *args, **kwargs))
+    try:
+        return await asyncio.shield(start_task)
+    except asyncio.CancelledError:
+        op_key = await _drain_task_despite_cancellation(start_task)
+        if op_key:
+            try:
+                await _run_db_safely(
+                    billing.fail_operation,
+                    op_key,
+                    cancel_reason,
+                )
+            except Exception as exc:
+                log.error(
+                    "cancelled billing start refund failed op=%s error_type=%s",
+                    op_key,
+                    type(exc).__name__,
+                )
+                raise
+        raise
+
+
 def _client_log_label(value, default: str, limit: int = 40) -> str:
     clean = re.sub(r"[^A-Za-z0-9_.:-]", "", str(value or ""))[:limit]
     return clean or default
@@ -333,6 +418,70 @@ def _industry_scope():
         {str(d["key"]): str(d.get("name") or "") for d in depts},
         depts,
     )
+
+
+def _profile_id_for_tenant(value):
+    """把可选人设档案收敛到当前租户，杜绝跨租户 ID 引用。"""
+    if value in (None, "", 0, "0"):
+        return None
+    if isinstance(value, bool):
+        raise HTTPException(400, "人设档案参数无效")
+    try:
+        profile_id = int(value)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "人设档案参数无效")
+    if not db.one("SELECT id FROM account_profile WHERE id=? AND tenant_id=? "
+                  "AND deleted_at IS NULL",
+                  (profile_id, TEN())):
+        raise HTTPException(400, "人设档案不存在或无权使用")
+    return profile_id
+
+
+def _public_failure_for_view(status, value, internal: bool):
+    """Hide legacy/raw diagnostics while preserving human review comments.
+
+    ``internal`` controls access to product materials, not to untrusted supplier
+    response bodies.  Historical failed rows therefore remain masked for every
+    role, including boss.
+    """
+    if str(status or "").lower() in {"failed", "error"}:
+        return providers.PUBLIC_TASK_FAILURE
+    return value
+
+
+def _steps_for_view(raw, internal: bool, status=None) -> list:
+    """Persisted steps follow SSE's confidentiality boundary.
+
+    Boss can inspect normal operational steps, but failed/error records and
+    explicit error steps are always reduced to stable state labels because
+    legacy supplier responses may contain prompts, credentials, or stack paths.
+    """
+    steps = raw if isinstance(raw, list) else db.jloads(raw, [])
+    steps = [step for step in (steps or []) if isinstance(step, dict)]
+    terminal_failure = str(status or "").lower() in {"failed", "error"}
+    if internal and not terminal_failure:
+        return [
+            (
+                engine._public_step({
+                    "k": "error",
+                    "ts": step.get("ts") or step.get("t"),
+                })
+                if str(step.get("k") or "").lower() == "error"
+                else step
+            )
+            for step in steps
+        ]
+    return [
+        engine._public_step({
+            "k": (
+                "error"
+                if terminal_failure
+                else step.get("k") or "working"
+            ),
+            "ts": step.get("ts") or step.get("t"),
+        })
+        for step in steps
+    ]
 
 
 def _create_charged_expert_task(task_data: dict, note: str = "") -> int:
