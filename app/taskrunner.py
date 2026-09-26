@@ -714,7 +714,7 @@ def notify_task_outcome(task_id: int, ok: bool, reason: str = "") -> bool:
                 f"【{meta['name']}】帮你做的《{meta['title']}》"
                 f"{reason or '没有做完'}，{refund}点开可以重新派一次"
             )
-        notify.push(int(meta.get("tenant_id") or 1), "report", {
+        notify.push(int(meta.get("tenant_id") or 1), "task_outcome", {
             "report_name": report_name,
             "summary": summary,
             "link": f"#/tasks/{int(task_id)}",

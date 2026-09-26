@@ -21,6 +21,7 @@ class TaskRunnerPhase0Case(unittest.IsolatedAsyncioTestCase):
         db.DB_PATH = os.path.join(self.tmp.name, "phase0-task.db")
         db.conn()
         db.insert("tenants", {"id": 2, "name": "企业", "balance": 10})
+        db.insert("users", {"tenant_id": 2, "username": "boss2", "password_hash": "x", "role": "owner", "enabled": 1})
         taskrunner.RUNNING.clear()
 
     def tearDown(self):

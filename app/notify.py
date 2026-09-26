@@ -108,6 +108,9 @@ def build_msg(kind: str, payload: dict) -> str:
             f"**💼 派活 · 套餐申请进展**\n{p.get('summary', '')}\n"
             f"[查看申请]({base}/#/billing)"
         )
+    if kind in {"task_outcome", "meeting_outcome"}:
+        return (f"**📋 派活 · {p.get('report_name', '任务有结果了')}**\n{(p.get('summary') or '')[:180]}\n"
+                f"[查看]({base}/{p.get('link') or '#/tasks'})")
     if kind == "report":
         return (f"**📰 派活 · {p.get('report_name', '报告出炉')}**\n{(p.get('summary') or '')[:180]}\n"
                 f"[查看]({base}/{p.get('link') or '#/knowledge'})")
@@ -133,6 +136,8 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
         "job_failed": "内容工单没做成",
         "retro_due": "发布内容该复盘了",
         "report": p.get("report_name") or "报告已出炉",
+        "task_outcome": p.get("report_name") or "派出去的任务有结果了",
+        "meeting_outcome": p.get("report_name") or "会议有结果了",
         "video": "视频成片已交付",
         "pub": "矩阵发布成功" if p.get("ok") else "矩阵发布失败",
         "learn_done": "员工进修完成",
@@ -169,6 +174,8 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
         link = "#/tasks"
     elif kind == "pub":
         link = "#/channels"
+    elif kind in {"task_outcome", "meeting_outcome"}:
+        link = str(p.get("link") or "#/tasks")
     elif kind == "daily_digest" or kind.startswith("purchase_"):
         link = "#/billing"
     elif kind in {"schedule_paused", "schedule_failed"}:
@@ -193,6 +200,9 @@ BOSS_ONLY_KINDS = {
     "daily_digest", "schedule_paused", "schedule_failed",
     "learn_done", "learn_failed",
     "member_reviewed",
+    # 专家任务/会议分属不同行业板块，通知行上没有板块列，
+    # 先只发给老板本人(逐人一行)，避免按板块广播时误投或漏投。
+    "task_outcome", "meeting_outcome",
 }
 
 # 购买申请的客户状态只精确定向给发起 owner/root。它不属于普通业务板块，

@@ -25,6 +25,7 @@ class WatchdogCase(unittest.IsolatedAsyncioTestCase):
         db.DB_PATH = os.path.join(self.tmp.name, "phase0-watchdog.db")
         db.conn()
         db.insert("tenants", {"id": 2, "name": "企业", "balance": 50})
+        db.insert("users", {"tenant_id": 2, "username": "boss2", "password_hash": "x", "role": "owner", "enabled": 1})
         self.now = time.time()
         self.old = self.now - 5 * HOUR
         taskrunner.RUNNING.clear()
@@ -282,6 +283,7 @@ class MeetingOutcomeNotifyCase(unittest.IsolatedAsyncioTestCase):
         db.DB_PATH = os.path.join(self.tmp.name, "phase0-meeting.db")
         db.conn()
         db.insert("tenants", {"id": 2, "name": "企业", "balance": 8})
+        db.insert("users", {"tenant_id": 2, "username": "boss2", "password_hash": "x", "role": "owner", "enabled": 1})
         meeting.ACTIVE.clear()
 
     def tearDown(self):

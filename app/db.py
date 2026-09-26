@@ -4143,7 +4143,8 @@ def _initialize_anchor_locked(path: str):
             "DELETE FROM user_branch WHERE user_id NOT IN (SELECT id FROM users) "
             "OR branch_id NOT IN (SELECT id FROM store_branch)"
         )
-        _validate_migrated_database(_conn)
+        # 表结构已在上面的 _validate_migrated_database 中校验(user_branch 随巡店 DDL 建好)，
+        # 这里只清数据，不再重复整库校验：每次校验约 0.8s，会拖慢每个进程首次连库。
         _conn.execute(
             "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
             "VALUES(58,'member-branch-scope',?)",

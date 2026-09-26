@@ -622,3 +622,38 @@ class InspectionLocalDateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TaskCenterBranchScopeTests(_ScopeDbCase):
+    """任务中心里的巡店任务与巡店页同一口径：经理/员工只看自己门店的。"""
+
+    def _inspection_task(self, branch: dict) -> int:
+        task_id = db.insert("task", {
+            "tenant_id": 2,
+            "emp_idx": inspection.EMPLOYEE_IDX,
+            "brief_json": '{"direction": "巡店"}',
+            "status": "done",
+            "created_at": time.time(),
+            "updated_at": time.time(),
+        })
+        self._visit(branch, task_id=task_id)
+        return task_id
+
+    def _ids(self, uid: int) -> set[int]:
+        from app import taskcenter
+        viewer = db.one("SELECT * FROM users WHERE id=?", (uid,))
+        result = taskcenter.list_items(2, {"restaurant"}, viewer=viewer)
+        return {
+            int(item.get("record_id") or item.get("id") or 0)
+            for item in result["items"]
+        }
+
+    def test_manager_only_sees_bound_branch_inspection_tasks(self):
+        task_a = self._inspection_task(self.a)
+        task_b = self._inspection_task(self.b)
+        self.assertTrue({task_a, task_b} <= self._ids(20))   # 老板
+        self.assertTrue({task_a, task_b} <= self._ids(21))   # 总监
+        manager_ids = self._ids(22)
+        self.assertIn(task_a, manager_ids)
+        self.assertNotIn(task_b, manager_ids)
+        self.assertFalse({task_a, task_b} & self._ids(23))   # 未分配门店的员工

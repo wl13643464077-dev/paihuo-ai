@@ -4325,6 +4325,7 @@ def task_center(
             q=(q or "").strip()[:100],
             status=status,
             kind=kind,
+            viewer=auth.current(),
         )
         items = []
         for raw in result.get("items") or []:

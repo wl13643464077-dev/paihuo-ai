@@ -251,20 +251,7 @@ def settle_stale_job(engine, row: dict) -> bool:
     if not current or current["status"] != "failed":
         return False
     log.warning("watchdog settled stale job %s", row["id"])
-    try:
-        from . import notify
-        tenant_id, title = engine._job_notification_meta(row["id"])
-        notify.push(int(tenant_id or 1), "report", {
-            "report_name": "内容工单没做完",
-            "summary": f"内容工单《{str(title or '')[:24]}》{message}",
-            "link": f"#/job/{int(row['id'])}",
-        })
-    except Exception as exc:
-        log.warning(
-            "watchdog job %s notify failed error_type=%s",
-            row["id"],
-            type(exc).__name__,
-        )
+    # 老板通知由 engine.settle_failure 统一写(job_failed)，这里不再重复推。
     return True
 
 

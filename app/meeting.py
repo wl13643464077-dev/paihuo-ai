@@ -98,7 +98,7 @@ def notify_outcome(meeting_id: int, ok: bool, detail: str = "") -> bool:
                 f"【AI 会议室】你发起的《{topic}》{detail or '没有开完'}，"
                 f"{refund}可以重新开一次"
             )
-        notify.push(int(row.get("tenant_id") or 1), "report", {
+        notify.push(int(row.get("tenant_id") or 1), "meeting_outcome", {
             "report_name": report_name,
             "summary": summary,
             "link": f"#/meetings/{int(meeting_id)}",
