@@ -429,7 +429,8 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
         self.assertIn("expected_photo_review_count=2", bundle.system)
         self.assertIn('"enum":[73,88]', bundle.system)
         self.assertIn(
-            '"confidence":{"type":"number","minimum":0.8,"maximum":1}',
+            # 第 2 期：看不清的照片如实报低置信度(<0.8 由服务端标为"需补拍")，契约放开到 0–1
+            '"confidence":{"type":"number","minimum":0,"maximum":1}',
             bundle.system,
         )
         packet = json.loads(bundle.user.split("\n", 1)[1])
