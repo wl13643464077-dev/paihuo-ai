@@ -3090,6 +3090,33 @@ def admin_sms_put(body: dict):
     return conf
 
 
+# ---------------- 第 3 期:国内已备案模型直连 + 联网研究新通道(平台后台) ----------------
+# 业务逻辑都在 app/cnmodels.py(可在无 fastapi 环境下测试),这里只做鉴权与错误码转换。
+@app.get("/api/admin/model-providers")
+def admin_model_providers_get():
+    _need_root()
+    from . import cnmodels
+    return cnmodels.public_config()
+
+
+@app.put("/api/admin/model-providers")
+def admin_model_providers_put(body: dict):
+    _need_root()
+    from . import cnmodels
+    try:
+        return cnmodels.save_config(body)
+    except ValueError as exc:
+        # save_config 的 ValueError 文案都是写死的大白话,不含密钥或上游原文
+        raise HTTPException(400, str(exc)) from None
+
+
+@app.post("/api/admin/model-providers/test")
+async def admin_model_providers_test(body: dict):
+    _need_root()
+    from . import cnmodels
+    return await cnmodels.test_connection(body)
+
+
 # ---------------- V6:管理者后台 ----------------
 @app.get("/api/admin/overview")
 def admin_overview():
@@ -3144,7 +3171,9 @@ def admin_overview():
                      "authcode_set": bool(secureconfig.get_secret("smtp_authcode"))},
             "routing": {"default_text_model": providers.default_text_model(),
                         "default_image_model": providers.default_image_model()},
-            "text_models": providers.TEXT_MODELS, "image_models": providers.IMAGE_MODELS,
+            # 第 3 期:目录里带上已启用的国内直连供应商(cn:xxx)
+            "text_models": providers.text_model_catalog(),
+            "image_models": providers.IMAGE_MODELS,
             "image_capable": [5, 6], "employees": rows}
 
 
