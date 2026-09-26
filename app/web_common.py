@@ -20,7 +20,7 @@ from fastapi import HTTPException
 
 from . import (
     assetfiles, auth, billing, db, departments, employeeidentity, employees, providers,
-    timeutil,
+    timeutil, textvideo,
 )
 from .engine import engine
 
@@ -31,6 +31,18 @@ log = logging.getLogger("main")  # 与拆分前同名，日志检索口径不变
 def _read_file_bytes(path: str) -> bytes:
     with open(path, "rb") as handle:
         return handle.read()
+
+
+async def _preflight_user_video_brand(title: str, script: str) -> dict:
+    """视频与矩阵工具共享品牌核对，必须在扣点和启动生成之前执行。"""
+    if not script:
+        return {"brand_version": None, "warnings": [], "blocking": []}
+    review = await db.arun(
+        textvideo.review_user_script_brand, TEN(), title, script,
+    )
+    if review["blocking"]:
+        raise HTTPException(400, review["blocking"][0])
+    return review
 
 
 INDUSTRIES = ["通用", "餐饮", "科技数码", "美妆个护", "教育培训", "母婴亲子", "家居生活",

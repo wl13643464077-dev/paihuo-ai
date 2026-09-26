@@ -115,13 +115,17 @@ class TaskRunnerPhase0Case(unittest.IsolatedAsyncioTestCase):
         task_id = self._task()
         with patch.object(
             taskrunner.providers, "call_text",
-            new=AsyncMock(side_effect=llm.LLMError("upstream")),
+            new=AsyncMock(side_effect=llm.LLMError(
+                "upstream", cost_usd=0.27, tokens=19,
+            )),
         ):
             await taskrunner.run_task(task_id, lambda _p: None)
         await db.adrain()
         row = self._row(task_id)
         self.assertEqual("failed", row["status"])
         self.assertEqual("refunded", row["billing_status"])
+        self.assertAlmostEqual(0.27, row["cost_usd"])
+        self.assertEqual(19, row["tokens"])
         steps = json.loads(row["steps_json"])
         self.assertEqual("error", steps[-1]["k"])
         self.assertEqual(row["output_md"], steps[-1]["l"])

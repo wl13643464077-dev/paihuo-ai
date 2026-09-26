@@ -20,6 +20,7 @@ from ..skills import registry
 from ..web_common import (
     INDUSTRIES, ROOT, TEN, _is_boss, _need_module, _page_result, _pagination,
     _public_failure_for_view, _public_progress_for_view, _read_limited, _run_db_safely,
+    _preflight_user_video_brand,
     _run_db_then_start_worker_safely, _start_billed_operation, _start_billing_operation_safely,
 )
 
@@ -945,6 +946,7 @@ async def variants_api(body: dict):
     script = (body.get("script") or "").strip()
     if len(script) < 30:
         raise HTTPException(400, "先贴一篇口播稿(至少30字)")
+    await _preflight_user_video_brand("", script[:2500])
     op_key = await _start_billing_operation_safely(
         _start_billed_operation,
         "matrix_variants",

@@ -6,7 +6,9 @@
 import asyncio
 import json
 import logging
+import math
 import re
+import threading
 import time
 
 from . import billing, bossbrief, db, departments, employeeidentity, employees, llm, providers
@@ -14,9 +16,95 @@ from . import billing, bossbrief, db, departments, employeeidentity, employees, 
 log = logging.getLogger("taskrunner")
 
 RUNNING: set = set()   # task_id 正在执行
+WORKER_TASKS: dict[int, asyncio.Task] = {}
+_FOLLOW_ON_WORKERS: dict[int, tuple[asyncio.Task, object]] = {}
+_WORKER_LOCK = threading.RLock()
 MAX_FREE_RETRIES = 3
 _MEETING_DELIVERY_START = "<!-- execution-deliveries:start -->"
 _MEETING_DELIVERY_END = "<!-- execution-deliveries:end -->"
+
+
+def _spawn_worker_locked(task_id: int, broadcast) -> asyncio.Task:
+    task = asyncio.create_task(run_task(task_id, broadcast))
+    WORKER_TASKS[task_id] = task
+    task.add_done_callback(
+        lambda done: _worker_finished(task_id, done)
+    )
+    return task
+
+
+def _worker_finished(task_id: int, done: asyncio.Task) -> None:
+    """Release only this worker generation and hand a queued retry forward."""
+    with _WORKER_LOCK:
+        if WORKER_TASKS.get(task_id) is done:
+            WORKER_TASKS.pop(task_id, None)
+            # A cancellation can arrive during preparation, before run_task's
+            # provider-level finally exists.  Only the owning generation may
+            # clear this guard; a stale callback must not erase its successor.
+            RUNNING.discard(task_id)
+            follow_on = _FOLLOW_ON_WORKERS.get(task_id)
+            if follow_on is not None and follow_on[0] is done:
+                _FOLLOW_ON_WORKERS.pop(task_id, None)
+                if not done.cancelled():
+                    _spawn_worker_locked(task_id, follow_on[1])
+        else:
+            follow_on = _FOLLOW_ON_WORKERS.get(task_id)
+            if follow_on is not None and follow_on[0] is done:
+                _FOLLOW_ON_WORKERS.pop(task_id, None)
+    if done.cancelled():
+        return
+    try:
+        error = done.exception()
+    except asyncio.CancelledError:
+        return
+    if error is not None:
+        log.error(
+            "expert worker exited unexpectedly task=%s error_type=%s",
+            task_id,
+            type(error).__name__,
+        )
+
+
+def start_worker(task_id: int, broadcast) -> asyncio.Task:
+    """Start one worker, retaining one follow-on request during finalization."""
+    task_id = int(task_id)
+    with _WORKER_LOCK:
+        existing = WORKER_TASKS.get(task_id)
+        if existing is not None and not existing.done():
+            # A failed row can be re-queued from the error progress callback
+            # before its old worker has returned.  Remember one successor so
+            # that retry is not stranded in queued state.
+            _FOLLOW_ON_WORKERS[task_id] = (existing, broadcast)
+            return existing
+        if existing is not None:
+            pending = _FOLLOW_ON_WORKERS.get(task_id)
+            if pending is not None and pending[0] is existing:
+                _FOLLOW_ON_WORKERS.pop(task_id, None)
+            RUNNING.discard(task_id)
+        return _spawn_worker_locked(task_id, broadcast)
+
+
+def cancel_worker(task_id: int) -> bool:
+    """Thread-safe cancellation for workers waiting before subprocess spawn."""
+    task_id = int(task_id)
+    with _WORKER_LOCK:
+        task = WORKER_TASKS.get(task_id)
+        if task is None:
+            return False
+        pending = _FOLLOW_ON_WORKERS.get(task_id)
+        if pending is not None and pending[0] is task:
+            _FOLLOW_ON_WORKERS.pop(task_id, None)
+        if task.done():
+            return False
+    try:
+        loop = task.get_loop()
+        if loop.is_running():
+            loop.call_soon_threadsafe(task.cancel)
+        else:
+            task.cancel()
+    except RuntimeError:
+        task.cancel()
+    return True
 
 
 def _approved_effective_role_context(binding: dict) -> dict:
@@ -511,8 +599,6 @@ def prepare_retry(
             "output_md=NULL",
             "summary_md=NULL",
             "steps_json='[]'",
-            "cost_usd=0",
-            "tokens=0",
             "terminal_at=NULL",
             "retry_count=COALESCE(retry_count,0)+1",
             "updated_at=?",
@@ -543,7 +629,13 @@ def prepare_retry(
         return True
 
 
-def settle_failure(task_id: int, message: str) -> bool:
+def settle_failure(
+    task_id: int,
+    message: str,
+    *,
+    cost_usd: float | None = None,
+    tokens: int | None = None,
+) -> bool:
     """把专家任务收口；独立付费任务按实际金额幂等退款，会议内含任务不退款。"""
     row = db.one(
         "SELECT tenant_id,status,billing_status,billing_points,source_meeting_id "
@@ -553,6 +645,17 @@ def settle_failure(task_id: int, message: str) -> bool:
     if not row:
         return False
     text = (message or "执行失败")[:500]
+    try:
+        safe_cost = float(cost_usd) if cost_usd is not None else None
+    except (TypeError, ValueError, OverflowError):
+        safe_cost = None
+    if safe_cost is not None and (
+        not math.isfinite(safe_cost) or safe_cost < 0
+    ):
+        safe_cost = None
+    safe_tokens = (
+        llm.safe_usage_tokens(tokens) if tokens is not None else None
+    )
     if row.get("billing_status") == "charged":
         points = row.get("billing_points")
         if points is None:  # 仅兼容升级前已扣费、尚未收口的旧任务。
@@ -564,11 +667,22 @@ def settle_failure(task_id: int, message: str) -> bool:
             terminal_at = time.time()
             changed = connection.execute(
                 "UPDATE task SET status='failed',billing_status='refunded',"
-                "output_md=?,terminal_at=COALESCE(terminal_at,?),"
+                "output_md=?,cost_usd=COALESCE(cost_usd,0)+COALESCE(?,0),"
+                "tokens=MIN(COALESCE(tokens,0)+COALESCE(?,0),?),"
+                "terminal_at=COALESCE(terminal_at,?),"
                 "refunded_at=?,updated_at=? "
                 "WHERE id=? AND billing_status='charged' "
                 "AND status IN ('pending_charge','queued','running','failed')",
-                (text, terminal_at, terminal_at, terminal_at, task_id),
+                (
+                    text,
+                    safe_cost,
+                    safe_tokens,
+                    llm.MAX_RECORDED_TOKENS,
+                    terminal_at,
+                    terminal_at,
+                    terminal_at,
+                    task_id,
+                ),
             )
             if changed.rowcount == 1 and row.get("source_meeting_id"):
                 _sync_meeting_delivery(
@@ -588,10 +702,21 @@ def settle_failure(task_id: int, message: str) -> bool:
     with db.atomic() as connection:
         terminal_at = time.time()
         changed = connection.execute(
-            "UPDATE task SET status='failed',output_md=?,terminal_at=?,updated_at=? "
+            "UPDATE task SET status='failed',output_md=?,"
+            "cost_usd=COALESCE(cost_usd,0)+COALESCE(?,0),"
+            "tokens=MIN(COALESCE(tokens,0)+COALESCE(?,0),?),"
+            "terminal_at=?,updated_at=? "
             "WHERE id=? AND billing_status='included' "
             "AND status IN ('queued','running')",
-            (text, terminal_at, terminal_at, task_id),
+            (
+                text,
+                safe_cost,
+                safe_tokens,
+                llm.MAX_RECORDED_TOKENS,
+                terminal_at,
+                terminal_at,
+                task_id,
+            ),
         )
         if changed.rowcount == 1 and row.get("source_meeting_id"):
             _sync_meeting_delivery(
@@ -603,14 +728,19 @@ def settle_failure(task_id: int, message: str) -> bool:
         return changed.rowcount == 1
 
 
-async def _settle_failure_safely(task_id: int, message: str) -> bool:
+async def _settle_failure_safely(
+    task_id: int, message: str, *, cost_usd: float | None = None,
+    tokens: int | None = None,
+) -> bool:
     """失败结算的兜底:结算本身再出错时,至少把任务标成失败(保留 charged)。
 
     保留 billing_status='charged' 是有意的:看门狗与启动对账会对
     failed+charged 再补一次幂等退款,绝不让任务卡在排队中/执行中又已扣费。
     """
     try:
-        return bool(await db.arun(settle_failure, task_id, message))
+        return bool(await db.arun(
+            settle_failure, task_id, message, cost_usd=cost_usd, tokens=tokens,
+        ))
     except Exception as exc:
         log.error(
             "task %s failure settlement failed error_type=%s",
@@ -634,14 +764,18 @@ async def _settle_failure_safely(task_id: int, message: str) -> bool:
     return False
 
 
-async def _fail_running_task(task_id: int, public_error: str, progress) -> bool:
-    """执行中失败:先把「失败」这一步落库,再结算退款并通知老板。
+async def _fail_running_task(
+    task_id: int, public_error: str, progress, *,
+    cost_usd: float | None = None, tokens: int | None = None,
+) -> bool:
+    """先保存失败步骤并结算，再广播失败；立即重试能看到已退款状态。
 
     进度写库条件是 status='running',必须在结算把状态改成 failed 之前
     写入并冲刷,否则失败步骤会被条件更新静默丢掉。
     """
+    emit_error = None
     try:
-        progress("error", public_error)
+        emit_error = progress("error", public_error, defer_broadcast=True)
         await db.adrain()
     except Exception as exc:
         log.warning(
@@ -649,9 +783,13 @@ async def _fail_running_task(task_id: int, public_error: str, progress) -> bool:
             task_id,
             type(exc).__name__,
         )
-    settled = await _settle_failure_safely(task_id, public_error)
+    settled = await _settle_failure_safely(
+        task_id, public_error, cost_usd=cost_usd, tokens=tokens,
+    )
     if settled:
         await _notify_task_outcome_async(task_id, False)
+    if emit_error is not None:
+        emit_error()
     return settled
 
 
@@ -834,24 +972,27 @@ async def run_task(task_id: int, broadcast):
     steps = []
     st = {"save": 0.0}
 
-    def progress(kind, label=""):
+    def progress(kind, label="", *, defer_broadcast=False):
         now = time.time()
         if kind == "typing" and steps and steps[-1]["k"] == "typing":
             steps[-1].update(l=str(label)[:300], ts=now)
         else:
             steps.append({"k": kind, "l": str(label)[:300], "ts": now})
-        _broadcast_safely(
-            broadcast,
-            {
-                "type": "task_step",
-                "tenant_id": t.get("tenant_id") or 1,
-                "_required_modules": required_modules,
-                "task_id": task_id,
-                "idx": t["emp_idx"],
-                "n": len(steps),
-                "step": steps[-1],
-            },
-        )
+        event = {
+            "type": "task_step",
+            "tenant_id": t.get("tenant_id") or 1,
+            "_required_modules": required_modules,
+            "task_id": task_id,
+            "idx": t["emp_idx"],
+            "n": len(steps),
+            "step": dict(steps[-1]),
+        }
+
+        def emit():
+            _broadcast_safely(broadcast, event)
+
+        if not defer_broadcast:
+            emit()
         if kind != "typing" or now - st["save"] > 3:
             # 事件循环上的进度落库进 db 线程池,避免写锁竞争冻结全部协程。
             db.submit_write(
@@ -861,6 +1002,7 @@ async def run_task(task_id: int, broadcast):
                 (json.dumps(steps, ensure_ascii=False), now, task_id),
             )
             st["save"] = now
+        return emit
 
     async def cleanup():
         RUNNING.discard(task_id)
@@ -931,9 +1073,20 @@ async def run_task(task_id: int, broadcast):
             caps = departments.capabilities_for(
                 idx, cfg.get("caps_off"), employee=e
             )
+            # 员工自动进化:老板历次验收采纳的实战心得,随岗位配置注入本次任务。
+            insights_text = await db.arun(
+                employees.adopted_insights_text,
+                int(t.get("tenant_id") or 1), idx,
+            )
+            if insights_text:
+                progress(
+                    "tool",
+                    f"已装载老板验收沉淀的实战心得 {insights_text.count(chr(10)) + 1} 条",
+                )
             prompt = departments.build_task_prompt(
                 e, brief, employees.skills_block(idx, config=cfg), ctx_text, caps,
                 private_template=cfg.get("prompt_template"),
+                insights_text=insights_text,
             )
             # 产品承诺「派活即联网核实」:所有产业专家都经能力网关先核实事实与数据。
             web = True
@@ -1010,7 +1163,9 @@ async def run_task(task_id: int, broadcast):
         def _commit_delivery():
             with db.atomic() as connection:
                 changed = connection.execute(
-                    "UPDATE task SET status='done',output_md=?,cost_usd=?,tokens=?,"
+                    "UPDATE task SET status='done',output_md=?,"
+                    "cost_usd=COALESCE(cost_usd,0)+?,"
+                    "tokens=MIN(COALESCE(tokens,0)+?,?),"
                     "steps_json=?,billing_status=CASE WHEN billing_status='charged' "
                     "THEN 'succeeded' ELSE billing_status END,terminal_at=?,updated_at=? "
                     "WHERE id=? AND status='running' "
@@ -1019,7 +1174,8 @@ async def run_task(task_id: int, broadcast):
                     (
                         md,
                         r["cost_usd"] + extra_cost,
-                        r["tokens"],
+                        llm.safe_usage_tokens(r.get("tokens")),
+                        llm.MAX_RECORDED_TOKENS,
                         json.dumps(steps, ensure_ascii=False),
                         now,
                         now,
@@ -1055,8 +1211,17 @@ async def run_task(task_id: int, broadcast):
         if md_done:
             progress("done", f"交付完成 · ${r['cost_usd']:.3f}")
     except llm.LLMError as ex:
+        log.warning(
+            "task %s model execution failed error_type=%s",
+            task_id,
+            type(ex).__name__,
+        )
         public_error = providers.public_failure_message(ex)
-        await _fail_running_task(task_id, public_error, progress)
+        await _fail_running_task(
+            task_id, public_error, progress,
+            cost_usd=getattr(ex, "cost_usd", None),
+            tokens=getattr(ex, "tokens", None),
+        )
     except Exception as exc:
         log.error(
             "task %s failed error_type=%s",
@@ -1340,4 +1505,4 @@ def resume_pending(broadcast):
         "AND emp_idx!=10"
     ):
         db.update("task", r["id"], {"status": "queued", "terminal_at": None})
-        asyncio.create_task(run_task(r["id"], broadcast))
+        start_worker(r["id"], broadcast)

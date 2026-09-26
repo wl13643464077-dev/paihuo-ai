@@ -1,6 +1,6 @@
-"""Schema v60:老板把活派给真人店员的闭环(派活任务/交差照片/审计轨迹/清单)。
+"""Schema v64:老板把活派给真人店员的闭环(派活任务/交差照片/审计轨迹/清单)。
 
-全部走临时 SQLite 真实迁移：新库直接建好、v59 旧库升级保数据、
+全部走临时 SQLite 真实迁移：新库直接建好、v63 旧库升级保数据、
 CHECK/唯一约束生效、关键约束或索引被改坏时拒绝启动。
 """
 
@@ -78,7 +78,7 @@ NEW_TABLES = (
 )
 
 
-class SchemaV60Tests(unittest.TestCase):
+class SchemaV64Tests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.old_path = db.DB_PATH
@@ -111,11 +111,11 @@ class SchemaV60Tests(unittest.TestCase):
     def _columns(table):
         return {row["name"] for row in db.q(f"PRAGMA table_info({table})")}
 
-    def _assert_v60_structure(self):
-        self.assertEqual(60, db.one("PRAGMA user_version")["user_version"])
+    def _assert_v64_structure(self):
+        self.assertEqual(64, db.one("PRAGMA user_version")["user_version"])
         self.assertEqual(
             "staff-task-loop",
-            db.one("SELECT name FROM schema_version WHERE version=60")["name"],
+            db.one("SELECT name FROM schema_version WHERE version=64")["name"],
         )
         for table, expected in (
             ("staff_task", STAFF_TASK_COLUMNS),
@@ -144,10 +144,10 @@ class SchemaV60Tests(unittest.TestCase):
                 name,
             )
 
-    def test_fresh_database_has_all_v60_tables_columns_and_indexes(self):
+    def test_fresh_database_has_all_v64_tables_columns_and_indexes(self):
         db.conn()
-        self.assertEqual(60, db.LATEST_SCHEMA_VERSION)
-        self._assert_v60_structure()
+        self.assertEqual(64, db.LATEST_SCHEMA_VERSION)
+        self._assert_v64_structure()
         # 默认值按约定落库，其他开发者照此写代码。
         task_id = db.insert("staff_task", {"tenant_id": 2, "title": "擦玻璃"})
         task = db.one("SELECT * FROM staff_task WHERE id=?", (task_id,))
@@ -169,7 +169,7 @@ class SchemaV60Tests(unittest.TestCase):
         run = db.one("SELECT status,items_json FROM checklist_run WHERE id=?", (run_id,))
         self.assertEqual(("open", "[]"), (run["status"], run["items_json"]))
 
-    def test_v59_database_upgrades_and_keeps_existing_data(self):
+    def test_v63_database_upgrades_and_keeps_existing_data(self):
         db.conn()
         db.insert("tenants", {"id": 2, "name": "企业", "industries_json": "[]"})
         db.insert("users", {
@@ -180,15 +180,15 @@ class SchemaV60Tests(unittest.TestCase):
             "id": 7, "tenant_id": 2, "visit_id": 3, "issue_id": 4,
             "status": "closed", "plan": "补货", "created_at": 1, "updated_at": 1,
         })
-        # 模拟 v59 旧库：没有新表、没有新列、账本/user_version 停在 59。
+        # 模拟 v63 旧库：已含现网品牌/媒体与门店/支付，尚无店员任务。
         self._raw(
             *(f"DROP TABLE {table}" for table in NEW_TABLES),
             "DROP INDEX idx_users_tenant_phone",
             "ALTER TABLE users DROP COLUMN phone",
             "ALTER TABLE inspection_action DROP COLUMN assignee_user_id",
             "ALTER TABLE inspection_action DROP COLUMN close_reason",
-            "DELETE FROM schema_version WHERE version>=60",
-            "PRAGMA user_version=59",
+            "DELETE FROM schema_version WHERE version>=64",
+            "PRAGMA user_version=63",
         )
         connection = sqlite3.connect(db.DB_PATH)
         try:
@@ -199,9 +199,9 @@ class SchemaV60Tests(unittest.TestCase):
             connection.close()
 
         db.conn()
-        self._assert_v60_structure()
+        self._assert_v64_structure()
         self.assertEqual(
-            1, db.one("SELECT COUNT(*) n FROM schema_version WHERE version=60")["n"],
+            1, db.one("SELECT COUNT(*) n FROM schema_version WHERE version=64")["n"],
         )
         user = db.one("SELECT username,phone FROM users WHERE id=22")
         self.assertEqual(("u22", None), (user["username"], user["phone"]))

@@ -43,6 +43,7 @@ SECRET_SETTING_KEYS = (
     "cn_moonshot_key",
     "cn_ark_key",
     "bocha_search_key",
+    "tinyfish_key",
 )
 _SECRET_SETTING_SET = frozenset(SECRET_SETTING_KEYS)
 

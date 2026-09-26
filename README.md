@@ -1,5 +1,7 @@
 # 派活 PaiHuo
 
+本版数据库为 v64，已整合 v2 门店执行闭环和线上 v61 品牌知识包、协同小队、多轮修改功能。
+
 **门店 AI 督导 + 获客助手。** 老板把活派给店员，AI 盯执行、验照片、催整改；
 每天把该发的获客内容递到老板手上。
 
@@ -75,19 +77,19 @@ CONTENTCREW_BOOTSTRAP_PASSWORD='换成你的本地密码1' ./run.sh
 ## 测试
 
 ```bash
-install -d -m 700 /tmp/paihuo-tests-$USER      # 自己独占的临时目录
-umask 077
-TMPDIR=/tmp/paihuo-tests-$USER .venv/bin/python -m unittest discover -s tests
+install -d -m 700 .test-tmp      # 项目目录及祖先目录不得允许其他用户写入
+umask 022
+TMPDIR="$PWD/.test-tmp" .venv/bin/python -m unittest discover -s tests
 .venv/bin/python -m compileall -q app deploy
 node --check static/app.js
 ```
 
 **两个容易踩的坑**（不照做会报 `unsafe migration lock`）：
 
-- 数据库迁移锁文件必须**归自己、权限 600**。测试会在临时目录里建很多临时数据库，
-  所以必须先 `umask 077`，并且用**自己独占**的 `TMPDIR`（共享的 `/tmp` 里可能有别人留下的同名文件）。
-- 如果仓库里的 `data/contentcrew.db.migration.lock` 已经存在且权限不是 600（比如被别的账号或
-  默认 umask 建出来的），先删掉它再跑。
+- 数据库迁移锁文件必须**归自己、权限 600**，应用创建时已显式设定该权限。部署测试还要校验
+  完整目录祖先链，所以使用项目下**自己独占**的 `TMPDIR`；CI 使用受控的 runner 临时目录。
+- 迁移锁不再纳入 Git。如果旧工作区仍有权限异常的锁，先确认没有进程使用对应数据库，
+  再处理该锁；不能删除正在使用的锁文件。发布制品测试需要 `umask 022` 的普通目录权限。
 
 只跑一个文件：`-p "test_simple_deploy.py"`。浏览器行为测试需要
 `.venv/bin/python -m playwright install chromium`。部署脚本的语法检查：
@@ -105,7 +107,7 @@ node --check static/app.js
    [deploy/DEPLOYMENT.md](deploy/DEPLOYMENT.md)。
 
 备份与恢复见 [deploy/BACKUP_RECOVERY.md](deploy/BACKUP_RECOVERY.md)。
-从旧版本（数据库 v57）升级到本版本前，务必先读
+从旧版本（数据库 v57 或已上线的 v61）升级到本版本前，务必先读
 [docs/UPGRADE_NOTES.md](docs/UPGRADE_NOTES.md)。
 
 ## 协作方式

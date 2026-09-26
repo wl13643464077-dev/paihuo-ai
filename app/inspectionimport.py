@@ -638,6 +638,13 @@ def _parse_isolated(data: bytes) -> dict:
             "PYTHONNOUSERSITE": "1",
             "PYTHONDONTWRITEBYTECODE": "1",
             "LANG": "C.UTF-8",
+            # openpyxl may import NumPy. Parser work is single-threaded; keep
+            # optional BLAS pools inside the worker's memory/process limits
+            # even on many-core CI runners and production hosts.
+            "OPENBLAS_NUM_THREADS": "1",
+            "OMP_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+            "NUMEXPR_NUM_THREADS": "1",
         }
         result = _run_worker_bounded(
             [sys.executable, "-I", worker, path],

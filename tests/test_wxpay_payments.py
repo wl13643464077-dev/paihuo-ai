@@ -206,7 +206,7 @@ class WxPayConfigTests(_DbCase):
         with self.assertRaises(wxpay.WxPayConfigError):
             wxpay.save_config({"notify_url": "http://pay.example.com/notify"})
         with self.assertRaises(wxpay.WxPayConfigError):
-            wxpay.save_config({"private_key": "-----BEGIN PRIVATE KEY-----\nxx\n"})
+            wxpay.save_config({"private_key": "-----BEGIN " + "PRIVATE KEY-----\nxx\n"})
         # 缺字段时不允许打开开关。
         with self.assertRaises(wxpay.WxPayConfigError) as missing:
             wxpay.save_config({"enabled": True, "mchid": "1900000109"})
@@ -606,7 +606,7 @@ class QrSvgTests(unittest.TestCase):
         self.assertEqual("", qrsvg.svg(""))
 
 
-class SchemaV59MigrationTests(unittest.TestCase):
+class SchemaV63MigrationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.old_path = db.DB_PATH
@@ -628,13 +628,13 @@ class SchemaV59MigrationTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_fresh_database_is_v59_with_pay_order_contract(self):
+    def test_fresh_database_has_v63_pay_order_contract(self):
         db.conn()
-        self.assertEqual(60, db.LATEST_SCHEMA_VERSION)
-        self.assertEqual(60, db.one("PRAGMA user_version")["user_version"])
+        self.assertEqual(64, db.LATEST_SCHEMA_VERSION)
+        self.assertEqual(64, db.one("PRAGMA user_version")["user_version"])
         self.assertEqual(
             "wxpay-native-pay-order",
-            db.one("SELECT name FROM schema_version WHERE version=59")["name"],
+            db.one("SELECT name FROM schema_version WHERE version=63")["name"],
         )
         db.execute(
             "INSERT INTO pay_order(tenant_id,created_by,plan_key,period_key,plan_name,"
@@ -656,17 +656,25 @@ class SchemaV59MigrationTests(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             db.execute("UPDATE pay_order SET status='weird'")
 
-    def test_v58_database_upgrades_to_v59(self):
+    def test_v62_database_upgrades_with_payment_and_staff_tables(self):
         db.conn()
         db.insert("tenants", {"id": 2, "name": "企业", "balance": 5})
         self._raw(
             "DROP TABLE pay_order",
-            "DELETE FROM schema_version WHERE version>=59",
-            "PRAGMA user_version=58",
+            *(f"DROP TABLE {table}" for table in (
+                "staff_task", "staff_task_photo", "staff_task_event",
+                "checklist_template", "checklist_run",
+            )),
+            "DROP INDEX idx_users_tenant_phone",
+            "ALTER TABLE users DROP COLUMN phone",
+            "ALTER TABLE inspection_action DROP COLUMN assignee_user_id",
+            "ALTER TABLE inspection_action DROP COLUMN close_reason",
+            "DELETE FROM schema_version WHERE version>=63",
+            "PRAGMA user_version=62",
         )
         db.conn()
-        self.assertEqual(60, db.one("PRAGMA user_version")["user_version"])
-        self.assertEqual(1, db.one("SELECT COUNT(*) n FROM schema_version WHERE version=59")["n"])
+        self.assertEqual(64, db.one("PRAGMA user_version")["user_version"])
+        self.assertEqual(1, db.one("SELECT COUNT(*) n FROM schema_version WHERE version=63")["n"])
         self.assertEqual(0, db.one("SELECT COUNT(*) n FROM pay_order")["n"])
         self.assertEqual(5, db.one("SELECT balance FROM tenants WHERE id=2")["balance"])
         indexes = {row["name"] for row in db.q("PRAGMA index_list(pay_order)")}

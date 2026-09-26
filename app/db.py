@@ -37,7 +37,11 @@ _all_connections: set[sqlite3.Connection] = set()
 # schema lock to finish.
 _generation_lock = threading.RLock()
 _generation_switching = threading.Event()
-LATEST_SCHEMA_VERSION = 60
+# Production already owns versions 58–61 (brand packages, teams and artwork).
+# The offline v2 bundle independently used 58–60 for branch access, payments
+# and staff tasks. Merge those additions at 62–64 without rewriting either
+# lineage's existing ledger rows or skipping DDL based on an ambiguous number.
+LATEST_SCHEMA_VERSION = 64
 MIGRATION_LOCK_SUFFIX = ".migration.lock"
 
 SCHEMA = """
@@ -2387,6 +2391,40 @@ def _validate_migrated_database(c) -> None:
             "id", "tenant_id", "name", "enabled", "fail_streak",
         },
         "knowledge": {"id", "tenant_id", "title", "content", "deleted_at"},
+        "brand_package": {
+            "id", "tenant_id", "version", "brand_name", "store_hint", "status",
+            "failure_reason", "created_by", "confirmed_by", "confirmed_at",
+            "created_at", "updated_at",
+        },
+        "brand_package_fact": {
+            "id", "package_id", "fact_key", "value", "source_kind",
+            "source_url", "source_title", "source_excerpt",
+            "source_captured_at", "source_sha256", "created_at", "updated_at",
+        },
+        "team_run": {
+            "id", "tenant_id", "actor_id", "request_key", "payload_sha256",
+            "query", "team_name", "team_summary", "mode", "depth",
+            "leader_emp_idx", "status", "summary_task_id", "summary_status",
+            "summary_attempt_no", "summary_claim_until", "summary_error",
+            "created_at", "updated_at",
+        },
+        "team_run_member": {
+            "id", "team_run_id", "tenant_id", "position", "emp_idx",
+            "name", "role", "role_in_team", "task_text", "depends_on_json",
+            "status", "approved", "approved_at", "attempt_no", "task_id",
+            "claim_until", "last_error", "created_at", "updated_at",
+        },
+        "task_activity_image": {
+            "id", "tenant_id", "task_id", "group_key", "file_path",
+            "status", "quality_json", "required_text_json", "billing_op_key",
+            "brand_package_id", "brand_version",
+            "created_at",
+        },
+        "task_activity_image_review": {
+            "id", "tenant_id", "task_id", "image_id", "reviewer_id",
+            "decision", "result_status", "note", "observed_text",
+            "logo_match", "no_extra_claims", "quality_json", "created_at",
+        },
         "avatar_job": {
             "id", "tenant_id", "params_json", "status", "billing_status",
             "retry_count", "deleted_at", "created_by",
@@ -2446,7 +2484,7 @@ def _validate_migrated_database(c) -> None:
             "activation_error", "receipt_json", "notify_digest",
             "created_at", "updated_at",
         },
-        # v60:派活给真人店员闭环。
+        # v64:派活给真人店员闭环。
         "staff_task": {
             "id", "tenant_id", "branch_id", "assignee_user_id", "title",
             "detail", "source", "source_ref", "require_photo", "due_at",
@@ -2563,7 +2601,7 @@ def _validate_migrated_database(c) -> None:
             "数据库迁移后结构不完整：inspection_branch_import "
             "状态约束不完整"
         )
-    # v60:状态/来源等枚举靠 CHECK 兜底；CREATE TABLE IF NOT EXISTS 修不了
+    # v64:状态/来源等枚举靠 CHECK 兜底；CREATE TABLE IF NOT EXISTS 修不了
     # 同名但约束不同的旧表，缺失时拒绝启动，而不是让脏状态写进库。
     for table, checks in {
         "staff_task": (
@@ -2632,6 +2670,16 @@ def _validate_migrated_database(c) -> None:
         "idx_checklist_template_active",
         "idx_checklist_run_date",
         "idx_checklist_run_assignee",
+        "idx_brand_package_tenant_version",
+        "idx_brand_package_tenant_status",
+        "idx_brand_package_active",
+        "idx_brand_package_fact_key",
+        "idx_team_run_tenant_recent",
+        "idx_team_run_active",
+        "idx_team_run_member_task",
+        "idx_task_activity_image_scope_group",
+        "idx_task_activity_image_billing_op",
+        "idx_task_activity_review_scope",
     }
     missing_indexes = sorted(required_indexes - indexes)
     if missing_indexes:
@@ -2639,6 +2687,48 @@ def _validate_migrated_database(c) -> None:
             "数据库迁移后结构不完整：purchase_intent 缺少索引 "
             + ",".join(missing_indexes)
         )
+    _require_index_contract(
+        c, "brand_package", "idx_brand_package_tenant_version",
+        ("tenant_id", "version"), unique=True, partial=False,
+    )
+    _require_index_contract(
+        c, "brand_package", "idx_brand_package_active",
+        ("tenant_id",), unique=True, partial=True,
+    )
+    active_index = c.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' "
+        "AND name='idx_brand_package_active'"
+    ).fetchone()
+    active_index_sql = "".join(
+        str(active_index["sql"] or "").lower().split()
+    ) if active_index else ""
+    if "wherestatus='confirmed'" not in active_index_sql:
+        raise RuntimeError("数据库迁移后结构不完整：品牌确认版唯一约束不完整")
+    _require_index_contract(
+        c, "brand_package", "idx_brand_package_tenant_status",
+        ("tenant_id", "status", "created_at"), unique=False, partial=False,
+    )
+    _require_index_contract(
+        c, "brand_package_fact", "idx_brand_package_fact_key",
+        ("package_id", "fact_key"), unique=True, partial=False,
+    )
+    for table, name, cols in (
+        ("team_run", "idx_team_run_tenant_recent", ("tenant_id", "updated_at")),
+        ("team_run", "idx_team_run_active", ("tenant_id", "status", "updated_at")),
+        ("team_run_member", "idx_team_run_member_task", ("tenant_id", "task_id")),
+        ("task_activity_image", "idx_task_activity_image_scope_group", ("tenant_id", "task_id", "group_key", "id")),
+        ("task_activity_image_review", "idx_task_activity_review_scope", ("tenant_id", "task_id", "image_id", "id")),
+    ):
+        _require_index_contract(c, table, name, cols, unique=False, partial=False)
+    _require_index_contract(
+        c, "task_activity_image", "idx_task_activity_image_billing_op",
+        ("billing_op_key",), unique=True, partial=True,
+    )
+    if c.execute(
+        "SELECT 1 FROM brand_package_fact f LEFT JOIN brand_package p "
+        "ON p.id=f.package_id WHERE p.id IS NULL LIMIT 1"
+    ).fetchone():
+        raise RuntimeError("数据库迁移后结构不完整：品牌事实存在孤儿记录")
     _require_index_contract(
         c,
         "store_branch",
@@ -2713,7 +2803,7 @@ def _validate_migrated_database(c) -> None:
         unique=False,
         partial=False,
     )
-    # v59:同一商户订单号只能对应一笔订单；回调/查单都按它幂等定位。
+    # v63:同一商户订单号只能对应一笔订单；回调/查单都按它幂等定位。
     _require_index_contract(
         c,
         "pay_order",
@@ -2730,7 +2820,7 @@ def _validate_migrated_database(c) -> None:
         unique=True,
         partial=True,
     )
-    # v60:派活闭环。request_key 防重复派单；清单按店+模板+日期唯一，
+    # v64:派活闭环。request_key 防重复派单；清单按店+模板+日期唯一，
     # 定时生成当天清单靠这个唯一键幂等。
     for table, name, columns, unique, partial in (
         ("users", "idx_users_tenant_phone", ("tenant_id", "phone"), False, False),
@@ -2968,7 +3058,7 @@ def _initialize_anchor_locked(path: str):
           modules_json TEXT NOT NULL DEFAULT '[]',
           job_title TEXT NOT NULL DEFAULT 'staff',  -- member职级:director/manager/staff
           allowed_emp_idxs_json TEXT,           -- NULL=行业内全部;JSON数组=数字员工白名单
-          phone TEXT,                           -- v60:企业微信群 @提醒/短信用,可空
+          phone TEXT,                           -- v64:企业微信群 @提醒/短信用,可空
           enabled INTEGER NOT NULL DEFAULT 1,
           must_change_password INTEGER NOT NULL DEFAULT 0,
           created_at REAL, updated_at REAL
@@ -3096,7 +3186,7 @@ def _initialize_anchor_locked(path: str):
         CREATE UNIQUE INDEX IF NOT EXISTS idx_purchase_intent_subscription_op
           ON purchase_intent(subscription_op_key)
           WHERE subscription_op_key IS NOT NULL;
-        -- v59:微信支付 Native 扫码订单。金额只存服务端报价(分)，
+        -- v63:微信支付 Native 扫码订单。金额只存服务端报价(分)，
         -- 商户订单号全局唯一；开通走与人工确认到账同一套幂等入账。
         CREATE TABLE IF NOT EXISTS pay_order(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3756,7 +3846,7 @@ def _initialize_anchor_locked(path: str):
           ON store_branch(tenant_id,industry_key,store_code)
           WHERE store_code IS NOT NULL AND trim(store_code)<>'';
 
-        -- v58:成员负责门店。经理/员工只能看、操作绑定给自己的门店；
+        -- v62:成员负责门店。经理/员工只能看、操作绑定给自己的门店；
         -- 老板/总监不依赖绑定。门店行业由 store_branch 反查，不在此冗余。
         CREATE TABLE IF NOT EXISTS user_branch(
           tenant_id INTEGER NOT NULL,
@@ -3953,7 +4043,7 @@ def _initialize_anchor_locked(path: str):
             _conn, "inspection_business_value", "row_version",
             "INTEGER NOT NULL DEFAULT 1",
         )
-        # v60:老板把活派给真人店员的闭环(派活任务/拍照交差/审计轨迹/开闭店清单)。
+        # v64:老板把活派给真人店员的闭环(派活任务/拍照交差/审计轨迹/开闭店清单)。
         # 表与索引在第一次 _validate_migrated_database 之前建好，由那次校验覆盖，
         # 不额外再整库校验一遍(每次约 0.8s)。旧库升级只加列/建表，无数据回填。
         _add_column(_conn, "inspection_action", "assignee_user_id", "INTEGER")
@@ -4335,6 +4425,60 @@ def _initialize_anchor_locked(path: str):
           ON employee_learning_artifact(run_id,status);
         """)
         _schema55_migrate(_conn, source_schema_version=found_version)
+        # v58:联网品牌资料先形成租户内版本化草稿。只有 confirmed 版本
+        # 是数字员工可读取的品牌事实；候选事实保留逐项网页引用或人工来源。
+        _execute_migration_script(_conn, """
+        CREATE TABLE IF NOT EXISTS brand_package(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tenant_id INTEGER NOT NULL,
+          version INTEGER NOT NULL CHECK(version >= 1),
+          brand_name TEXT NOT NULL CHECK(trim(brand_name) <> ''),
+          store_hint TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL CHECK(status IN ('draft','failed','confirmed','superseded')),
+          failure_reason TEXT,
+          created_by INTEGER,
+          confirmed_by INTEGER,
+          confirmed_at REAL,
+          created_at REAL NOT NULL,
+          updated_at REAL NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_brand_package_tenant_version
+          ON brand_package(tenant_id,version);
+        CREATE INDEX IF NOT EXISTS idx_brand_package_tenant_status
+          ON brand_package(tenant_id,status,created_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_brand_package_active
+          ON brand_package(tenant_id) WHERE status='confirmed';
+        CREATE TABLE IF NOT EXISTS brand_package_fact(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          package_id INTEGER NOT NULL,
+          fact_key TEXT NOT NULL,
+          value TEXT NOT NULL CHECK(trim(value) <> ''),
+          source_kind TEXT NOT NULL CHECK(source_kind IN ('web','manual')),
+          source_url TEXT,
+          source_title TEXT,
+          source_excerpt TEXT,
+          source_captured_at REAL NOT NULL,
+          source_sha256 TEXT,
+          created_at REAL NOT NULL,
+          updated_at REAL NOT NULL,
+          CHECK(source_kind='manual' OR (
+            source_url IS NOT NULL AND trim(source_url) <> '' AND
+            source_title IS NOT NULL AND trim(source_title) <> '' AND
+            source_excerpt IS NOT NULL AND trim(source_excerpt) <> ''
+          ))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_brand_package_fact_key
+          ON brand_package_fact(package_id,fact_key);
+        """)
+        # 早期 v58 预览库已建 brand_package，但尚无同名门店辨识提示。
+        # CREATE TABLE IF NOT EXISTS 不会补旧表列，需受控幂等迁移。
+        _add_column(_conn, "brand_package", "store_hint", "TEXT NOT NULL DEFAULT ''")
+        # v59:手机小队服务端持久编排与超级店长活动效果图附件。
+        # v60:候选图冻结必要文案并记录不可覆盖的人工复核历史。
+        # v61:候选图绑定计费操作；未结算图片不可见，重启可清理已退款候选图。
+        from . import brand_media_schema, teamrun_schema
+        teamrun_schema.install_schema(_conn)
+        brand_media_schema.install_schema(_conn)
         # 只把旧 tenants.industries_json 中显式列出的部门迁入规范化映射。
         # 非平台租户的空列表不再被老板看板解释为“全行业”。
         for tenant in _conn.execute(
@@ -4431,34 +4575,48 @@ def _initialize_anchor_locked(path: str):
             "VALUES(57,'member-hierarchy-employee-allocation',?)",
             (time.time(),),
         )
-        # v58:成员-门店绑定(user_branch，表与索引随巡店 DDL 一起建)。
-        # 旧库升级不预置任何绑定：经理/员工升级后看到空门店列表，
-        # 由老板在团队页分配；已被删除的成员/门店不留下悬空绑定。
-        _conn.execute(
-            "DELETE FROM user_branch WHERE user_id NOT IN (SELECT id FROM users) "
-            "OR branch_id NOT IN (SELECT id FROM store_branch)"
-        )
-        # 表结构已在上面的 _validate_migrated_database 中校验(user_branch 随巡店 DDL 建好)，
-        # 这里只清数据，不再重复整库校验：每次校验约 0.8s，会拖慢每个进程首次连库。
+        # Keep the production 58–61 lineage canonical for fresh databases.
+        # An already-initialized offline v2 database may hold different 58–60
+        # names. INSERT OR IGNORE deliberately preserves that audit history;
+        # both feature sets have been installed and validated above regardless.
         _conn.execute(
             "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
-            "VALUES(58,'member-branch-scope',?)",
+            "VALUES(58,'reviewed-brand-knowledge-packages',?)",
             (time.time(),),
         )
-        # v59:微信支付扫码订单(pay_order，表与索引随购买意向 DDL 一起建，
-        # 已由上面的 _validate_migrated_database 覆盖校验)。旧库升级无数据回填。
         _conn.execute(
             "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
-            "VALUES(59,'wxpay-native-pay-order',?)",
+            "VALUES(59,'persistent-team-runs-and-activity-artwork',?)",
             (time.time(),),
         )
-        # v60:派活给真人店员闭环(staff_task/staff_task_photo/staff_task_event/
-        # checklist_template/checklist_run，inspection_action 指派人与关闭原因，
-        # users.phone)。表/列/索引已在巡店 DDL 之后建好，并由上面的
-        # _validate_migrated_database 覆盖校验。旧库升级无数据回填。
         _conn.execute(
             "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
-            "VALUES(60,'staff-task-loop',?)",
+            "VALUES(60,'activity-artwork-manual-review-audit',?)",
+            (time.time(),),
+        )
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(61,'activity-artwork-billing-link',?)",
+            (time.time(),),
+        )
+        # v62:成员-门店绑定。旧库升级不预置绑定，由老板分配门店。
+        # Keep existing bindings intact; migration must not delete user data.
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(62,'member-branch-scope',?)",
+            (time.time(),),
+        )
+        # v63:微信支付 Native 扫码订单；旧库升级不创建或回填订单。
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(63,'wxpay-native-pay-order',?)",
+            (time.time(),),
+        )
+        # v64:真人店员任务/拍照交差/审计/开闭店清单，以及 users.phone
+        # 和 inspection_action 的指派人与关闭原因。仅补缺失表、列与索引。
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(64,'staff-task-loop',?)",
             (time.time(),),
         )
         _conn.execute(f"PRAGMA user_version={LATEST_SCHEMA_VERSION}")

@@ -491,7 +491,7 @@ class InspectionMetricFixTests(_ScopeDbCase):
         self.assertEqual(0, inspection.aggregate(2, 20, "restaurant")["overdue_actions"])
 
 
-class SchemaV58MigrationTests(unittest.TestCase):
+class SchemaV62MigrationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.old_path = db.DB_PATH
@@ -520,13 +520,13 @@ class SchemaV58MigrationTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_fresh_database_is_v58_with_user_branch_contract(self):
+    def test_fresh_database_has_v62_user_branch_contract(self):
         db.conn()
-        self.assertEqual(60, db.LATEST_SCHEMA_VERSION)
-        self.assertEqual(60, db.one("PRAGMA user_version")["user_version"])
+        self.assertEqual(64, db.LATEST_SCHEMA_VERSION)
+        self.assertEqual(64, db.one("PRAGMA user_version")["user_version"])
         self.assertEqual(
             "member-branch-scope",
-            db.one("SELECT name FROM schema_version WHERE version=58")["name"],
+            db.one("SELECT name FROM schema_version WHERE version=62")["name"],
         )
         columns = {row["name"] for row in db.q("PRAGMA table_info(user_branch)")}
         self.assertEqual(
@@ -542,7 +542,7 @@ class SchemaV58MigrationTests(unittest.TestCase):
                 "VALUES(2,5,7,1)"
             )
 
-    def test_v57_database_upgrades_and_drops_orphan_bindings(self):
+    def test_v57_database_upgrades_without_deleting_existing_bindings(self):
         db.conn()
         db.insert("tenants", {"id": 2, "name": "企业", "industries_json": "[]"})
         db.insert("users", {
@@ -560,11 +560,12 @@ class SchemaV58MigrationTests(unittest.TestCase):
             "PRAGMA user_version=57",
         )
         db.conn()
-        self.assertEqual(60, db.one("PRAGMA user_version")["user_version"])
+        self.assertEqual(64, db.one("PRAGMA user_version")["user_version"])
         self.assertEqual(
             0, db.one("SELECT COUNT(*) n FROM user_branch")["n"],
         )
-        # 已有表但带悬空绑定的库，升级时清理掉悬空行、保留有效绑定。
+        # 合并发布仅补结构，保留已有绑定；悬空绑定由业务层按成员/门店
+        # 关联过滤，不能在启动迁移里静默删除历史数据。
         self._raw(
             f"INSERT INTO user_branch VALUES(2,22,{branch_id},20,0)",
             "INSERT INTO user_branch VALUES(2,999,1,20,0)",
@@ -574,13 +575,13 @@ class SchemaV58MigrationTests(unittest.TestCase):
         )
         db.conn()
         self.assertEqual(
-            [(22, branch_id)],
+            [(22, branch_id), (22, branch_id + 100), (999, 1)],
             [(row["user_id"], row["branch_id"]) for row in db.q(
-                "SELECT user_id,branch_id FROM user_branch"
+                "SELECT user_id,branch_id FROM user_branch ORDER BY user_id,branch_id"
             )],
         )
         self.assertEqual(
-            1, db.one("SELECT COUNT(*) n FROM schema_version WHERE version=58")["n"],
+            1, db.one("SELECT COUNT(*) n FROM schema_version WHERE version=62")["n"],
         )
 
     def test_startup_rejects_user_branch_without_unique_key(self):

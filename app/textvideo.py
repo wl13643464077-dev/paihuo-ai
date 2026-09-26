@@ -116,6 +116,75 @@ _BUILD_SEM = asyncio.Semaphore(2)   # 全服并发合成上限:单机CPU保护,�
 _ACTIVE_LOCK = threading.Lock()
 _ACTIVE_COUNTS: dict[int, int] = {}
 _DELETE_REQUEST_ERROR = "删除在途任务"
+_BRAND_UNSET = object()
+
+
+class BrandCopyMismatch(providers.ProviderError):
+    """A high-confidence conflict with the owner-confirmed brand facts."""
+
+
+def _identity_text(value: str) -> str:
+    return re.sub(r"[\W_]+", "", str(value or "").casefold())
+
+
+def review_user_script_brand(
+    tid: int, title: str, script: str, *, active_brand=_BRAND_UNSET,
+) -> dict:
+    """Review copy without changing it; only explicit brand declarations can block.
+
+    A generic educational script may intentionally omit the brand.  Such copy
+    receives a warning, not an invented brand insert or an automatic failure.
+    """
+    if active_brand is _BRAND_UNSET:
+        from . import brand_package
+        active_brand = brand_package.get_active(tid)
+    if not active_brand:
+        return {"brand_version": None, "warnings": [], "blocking": []}
+
+    fields = active_brand.get("fields") or {}
+    brand = str(fields.get("brand_name") or active_brand.get("brand_name") or "").strip()
+    store = str(fields.get("store_name") or active_brand.get("store_name") or "").strip()
+    identity = [_identity_text(item) for item in (brand, store) if item]
+    copy = str(script or "")
+    combined = _identity_text(str(title or "") + copy)
+    blocking = []
+    for match in re.finditer(
+        r"(?m)^[ \t]*(品牌名|品牌|门店名|店名|本店)[ \t]*[:：][ \t]*([^\n]{1,80})",
+        copy,
+    ):
+        label, declared = match.groups()
+        declared = re.split(r"[，,。；;|]", declared, maxsplit=1)[0].strip(" \"'“”‘’")
+        given = _identity_text(declared)
+        expected = [_identity_text(brand)] if label.startswith("品牌") else [
+            _identity_text(store),
+        ]
+        expected = [value for value in expected if value]
+        if expected and given and not any(
+            given == value or (
+                min(len(given), len(value)) >= 2
+                and (given in value or value in given)
+            )
+            for value in expected
+        ):
+            blocking.append("口播稿中的品牌或店名声明与已确认品牌知识包不一致，请先修改文案。")
+            break
+    if (
+        not blocking
+        and not any("派活" in item for item in identity)
+        and re.search(r"派活(?:AI)?[ \t]*(?:出品|门店|旗舰店|官方店)", copy)
+    ):
+        blocking.append("口播稿把平台名称写成了门店或出品方，请按已确认品牌知识包修改。")
+
+    warnings = []
+    if identity and not any(value in combined for value in identity):
+        warnings.append(
+            "口播稿未提及已确认的品牌或门店名；视频会沿用文案，不会自动补写品牌。"
+        )
+    return {
+        "brand_version": int(active_brand.get("version") or 1),
+        "warnings": warnings,
+        "blocking": blocking,
+    }
 
 FONT = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
 ASSET_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "assets")
@@ -168,15 +237,20 @@ async def _call_textvideo_employee_vision(
     return result
 
 
-async def make_script(title: str, body: str) -> str:
+async def make_script(title: str, body: str, *, brand_context: str = "") -> str:
     """正文过长时压成 60-90 秒口播稿;短文直接用."""
     plain = _plain(body)
     if len(plain) <= 320:
         return plain
+    brand_prefix = (
+        "【本企业资料（确认版品牌优先）；保持店名、口号、招牌准确，不编造活动/价格】\n"
+        f"{brand_context[:2500]}\n\n"
+    ) if brand_context else ""
     r = await _call_textvideo_employee(
         3,
-        f"把下面这篇《{title}》压缩成一段 60-90 秒的短视频口播稿(200-280字):"
-        f"口语化、保留最抓人的钩子和核心信息、结尾一句号召;只输出口播稿正文,"
+        brand_prefix + f"把下面这篇《{title}》压缩成一段 60-90 秒的短视频口播稿(200-280字):"
+        f"口语化、保留最抓人的钩子和核心信息、结尾一句号召;"
+        f"若原文品牌事实与确认版冲突，以确认版为准，不得虚构新事实;只输出口播稿正文,"
         f"不要标题不要任何说明。\n\n{plain[:3500]}",
         timeout=180)
     s = r["text"].strip().strip("「」\"“”")
@@ -1681,17 +1755,47 @@ async def _run_job_inner(tvid: int, row: dict, p: dict, tid: int, broadcast):
     cancellation_watch = asyncio.create_task(watch_cancellation())
     produced_file = None
     try:
-        title = (p.get("title") or "").strip()[:40] or "派活出品"
+        from .skills.registry import company_block
+        brand_context = await db.arun(company_block, tid)
+        brand_prefix = (
+            "【本企业资料（确认版品牌优先）；保持店名、口号、招牌准确，不编造活动/价格】\n"
+            f"{brand_context[:2500]}\n\n"
+        ) if brand_context else ""
+        confirmed_store_name = ""
+        active_brand = None
+        try:
+            from . import brand_package
+            active_brand = await db.arun(brand_package.get_active, tid)
+            if isinstance(active_brand, dict):
+                fields = active_brand.get("fields") or {}
+                confirmed_store_name = str(
+                    fields.get("store_name") or active_brand.get("store_name") or ""
+                ).strip()[:40]
+        except (ValueError, TypeError):
+            active_brand = None
+        title = (p.get("title") or "").strip()[:40] or confirmed_store_name or "未命名视频"
         progress("开工:整理口播稿…")
         await checkpoint()
         if p.get("topic") and not p.get("script"):
             r = await _call_textvideo_employee(
                 3,
-                f"围绕主题「{p['topic']}」写一段 60-90 秒的短视频口播稿(200-280字):"
-                f"口语化、开头有钩子、结尾一句号召;只输出口播稿正文。",
+                brand_prefix + f"围绕主题「{p['topic']}」写一段 60-90 秒的短视频口播稿(200-280字):"
+                f"口语化、开头有钩子、结尾一句号召;确认版品牌事实优先，"
+                f"不编造优惠、价格、门店或招牌;只输出口播稿正文。",
                 timeout=180)
             p["script"] = r["text"].strip().strip("「」\"“”")
-        script = p.get("script") or await make_script(title, p.get("body") or "")
+        script = p.get("script") or await make_script(
+            title, p.get("body") or "", brand_context=brand_context,
+        )
+        brand_review = review_user_script_brand(
+            tid, title, script, active_brand=active_brand,
+        )
+        if brand_review["blocking"]:
+            raise BrandCopyMismatch(brand_review["blocking"][0])
+        if brand_review["brand_version"]:
+            progress(f"已核对已确认品牌知识包 v{brand_review['brand_version']}")
+        for warning in brand_review["warnings"]:
+            progress(warning)
         await checkpoint()
         # V25.3:混剪模式——用户自己的 vlog 片段当画面(原图文成片模式原样保留)
         if p.get("mode") == "clips":

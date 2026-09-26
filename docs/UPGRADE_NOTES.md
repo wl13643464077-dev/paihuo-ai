@@ -3,14 +3,19 @@
 给老板和运维看。本次把"数字员工写内容"的产品升级成**门店 AI 督导 + 获客助手**：
 老板把活派给店员，AI 盯执行、验照片、催整改；每天递上该发的获客内容。
 
-适用范围：从 R7（数据库 v57，提交 `304b2a0`）升级到本版本（数据库 v60）。
+适用范围：从 R7（数据库 v57，提交 `304b2a0`）或已上线的品牌知识包/协同小队版本（数据库 v61）升级到本版本（数据库 v64）。
 改动明细可以看 `git log --oneline 304b2a0..HEAD` 和 `tests/test_phase*.py`。
+
+本次整合保留已上线的品牌知识包、品牌活动图、协同小队和多轮修改功能。原离线升级包的
+v58/v59/v60 与线上迁移号重叠，现将成员门店分配、微信支付订单、店员任务分别续排到
+v62/v63/v64。迁移按实体幂等补齐，保留已有历史账本和业务数据；不要把原 v60 包直接部署到 v61 线上库。
+本次使用已有不可变发布体系（`contentcrew.service`）；不切换到简易部署服务。
 
 ---
 
 ## 一、先看这 3 条（不做会出事）
 
-1. **数据库从 v57 升到 v60，不能降级。** 新版本第一次启动就会自动迁移，迁移后旧版本程序会
+1. **数据库从 v57/v61 升到 v64，不能降级。** 新版本第一次启动就会自动迁移，迁移后旧版本程序会
    拒绝启动（"已拒绝降级启动"）。**上线前必须备份**；要退回旧版本只能"恢复备份 + 切回旧代码"，
    备份之后产生的数据会丢。用简易部署脚本 `deploy/simple/deploy.sh` 会自动在停服那一刻做快照，
    失败自动恢复。
@@ -28,7 +33,7 @@
 
 | 变化 | 影响 | 需要谁做什么 |
 | --- | --- | --- |
-| 数据库 v57 → v60（v58 成员负责门店、v59 支付订单、v60 店员任务/清单/整改指派/成员手机号） | 不可降级 | 运维：上线前备份，见第三节 |
+| 数据库 v57/v61 → v64（v62 成员负责门店、v63 支付订单、v64 店员任务/清单/整改指派/成员手机号） | 不可降级 | 运维：上线前备份，见第三节 |
 | 门店按成员分配 | 店长/员工升级后看不到任何门店 | 老板：团队页给每个人分配负责门店 |
 | 成员新增"手机号" | 企业微信群里 @ 人、短信登录都靠手机号 | 老板：在团队页补上店长、店员手机号 |
 | 数据保留期 | 每天凌晨 4:17（北京时间）自动删除：内容审查记录 180 天前的、已读通知 180 天前的、全员广播通知 365 天前的、前端报错 30 天前的。台账类（发布记录、巡店事件）不删 | 需要长期留存的，改环境变量 `CONTENTCREW_RETENTION_<规则>_DAYS` |
@@ -65,9 +70,9 @@
 - [ ] 更新 `/etc/caddy/Caddyfile` 为新版 `deploy/Caddyfile`（换成自己的域名），`caddy validate` 后 reload。
 - [ ] 新服务器或想换用简易通道的：按 `deploy/simple/README.md` 装好 `paihuo.service`；
       旧体系服务器切换时先 `systemctl disable --now contentcrew.service`。
-- [ ] 演练：`sudo bash deploy/simple/deploy.sh --dry-run --ref <本次提交>`，预检全部通过、
-      看到"数据库从 v57 升到 v60"。
-- [ ] 正式发布：`sudo bash deploy/simple/deploy.sh --ref <本次提交>`；看到"发布成功"。
+- [ ] 演练：在生产备份的独立副本上迁移至 v64，核对原表数据、点数和完整性，并重复启动验证幂等。
+- [ ] 正式发布：按 `deploy/DEPLOYMENT.md` 构建、校验、封印依赖并通过固定升级入口发布；
+      确认发布回执为 `status=succeeded, phase=complete`。保留停服最终快照及关联的旧制品。
 - [ ] 通知所有老板：① 去团队页给店长/店员分配负责门店、补手机号；② 高风险功能已默认关闭；
       ③ 数字人需要勾选授权；④ 内容默认带 AI 生成标识。
 
@@ -89,7 +94,7 @@
 
 - [ ] `curl -s http://127.0.0.1:8899/healthz` 返回 `{"status":"ok"}`。
 - [ ] `curl -s http://127.0.0.1:8899/healthz?deep=1` 返回 200，`loops` 里没有 `stale`/`stopped`/`never`。
-- [ ] 数据库版本是 60：`sudo python3 -c "import sqlite3;print(sqlite3.connect('file:/var/lib/paihuo/data/contentcrew.db?mode=ro',uri=True).execute('PRAGMA user_version').fetchone()[0])"`。
+- [ ] 数据库版本是 64：`sudo python3 -c "import sqlite3;print(sqlite3.connect('file:/var/lib/paihuo/data/contentcrew.db?mode=ro',uri=True).execute('PRAGMA user_version').fetchone()[0])"`。
 - [ ] `journalctl -u paihuo --since "10 min ago"` 里有 `single-process guard acquired`，没有报错堆栈。
 - [ ] 只有一个派活进程：`pgrep -af 'uvicorn app.main:app'` 只有一行。
 - [ ] 服务器时间按北京时间：`systemctl show paihuo -p Environment` 里有 `TZ=Asia/Shanghai`。

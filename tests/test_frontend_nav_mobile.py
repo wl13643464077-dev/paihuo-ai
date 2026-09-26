@@ -140,22 +140,22 @@ class FrontendNavMobileTests(unittest.IsolatedAsyncioTestCase):
             )
             mapping = await page.evaluate(
                 """() => Object.fromEntries(
-                    ["", "new", "job", "delivery", "tasks", "meetings", "experts",
+                    ["", "new", "job", "delivery", "tasks", "teamruns", "meetings", "experts",
                      "inspections", "boss", "production", "tools", "censor", "avatar",
                      "schedules", "channels", "billing", "team", "company", "profiles",
                      "assets", "knowledge", "notifications", "trash", "guide", "admin",
-                     "settings"].map(k => [k, navGroupOf(k)]))"""
+                     "settings", "brand"].map(k => [k, navGroupOf(k)]))"""
             )
             expected = {
                 "": "today",
                 "new": "dispatch", "job": "dispatch", "delivery": "dispatch",
-                "tasks": "dispatch", "meetings": "dispatch", "experts": "dispatch",
+                "tasks": "dispatch", "teamruns": "dispatch", "meetings": "dispatch", "experts": "dispatch",
                 "inspections": "store", "boss": "store", "production": "store",
                 "tools": "growth", "censor": "growth", "avatar": "growth",
                 "schedules": "growth", "channels": "growth",
                 "billing": "mine", "team": "mine", "company": "mine", "profiles": "mine",
                 "assets": "mine", "knowledge": "mine", "notifications": "mine",
-                "trash": "mine", "guide": "mine", "admin": "mine", "settings": "mine",
+                "trash": "mine", "guide": "mine", "admin": "mine", "settings": "mine", "brand": "mine",
             }
             self.assertEqual(expected, mapping)
             # 中转页上的每张卡片都指向一个真实存在的路由(链接/深链不断)
@@ -170,6 +170,25 @@ class FrontendNavMobileTests(unittest.IsolatedAsyncioTestCase):
             await page.wait_for_function(
                 "document.querySelector('#tabbar a.on')?.dataset.nav==='growth'"
             )
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_live_brand_and_team_features_are_reachable_from_five_entry_hubs(self):
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(playwright, hash_="#/dispatch")
+            await page.locator("#main .hubcard", has_text="协同小队").click()
+            await page.wait_for_function("location.hash==='#/teamruns'")
+            await page.wait_for_function(
+                "document.querySelector('#main h2')?.textContent.includes('协同小队')"
+            )
+            self.assertEqual("dispatch", await page.locator("#tabbar a.on").get_attribute("data-nav"))
+            await page.locator('#tabbar a[data-nav="mine"]').click()
+            await page.locator("#main .hubcard", has_text="品牌知识包").click()
+            await page.wait_for_function("location.hash==='#/brand'")
+            await page.wait_for_function(
+                "document.querySelector('#main h2')?.textContent.includes('品牌知识包')"
+            )
+            self.assertEqual("mine", await page.locator("#tabbar a.on").get_attribute("data-nav"))
             self._assert_no_browser_errors(errors)
             await browser.close()
 

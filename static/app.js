@@ -534,7 +534,7 @@ function charSVG(color, emoji, state, size=100){
 const routes = {"":dashboard,"new":newBrief,"job":jobView,"profiles":profilesView,"assets":assetsView,
   "delivery":deliveryView,"knowledge":knowledgeView,"schedules":schedulesView,"settings":settingsView,
   "avatar":avatarView,"admin":adminView,"team":teamView,"billing":billingView,"meetings":meetingsView,
-  "tasks":tasksView,"company":companyView,"production":productionView,"boss":bossDashboardView,
+  "tasks":tasksView,"teamruns":teamRunsView,"company":companyView,"brand":brandView,"production":productionView,"boss":bossDashboardView,
   "inspections":inspectionView,"censor":censorView,
   "channels":channelsView,"tools":toolsView,"trash":trashView,"guide":guideReset,
   "notifications":notificationsView,
@@ -554,6 +554,7 @@ const NAV_GROUPS = [
       {route:"experts", icon:"🧑‍🔧", title:"找行业专家", desc:"您这一行的专家一人一岗，店里遇到的事直接问、直接派", show:()=>!!ME},
       {route:"meetings", icon:"🪑", title:"多位专家一起商量", desc:"大事拿不准，拉几位专家各出方案、互相挑错，最后给您结论", show:()=>!!ME},
       {route:"tasks", icon:"📦", title:"派出去的活", desc:"所有派出去的活都在这：谁在干、卡在哪、哪些等您看", show:()=>!!ME&&ME.role!=="tour"},
+      {route:"teamruns", icon:"🤝", title:"协同小队", desc:"一句话拉起专业团队，可逐个确认或同时开工，队长拆解并汇总结果", show:()=>!!ME&&ME.role!=="tour"},
       {route:"staff-tasks", icon:"🧑‍🍳", title:"派给店员", desc:"把活派给店里的人，店员拍照交差，AI 先帮您看照片", show:()=>!!window.PH_STAFF_ADMIN?.canDispatch()},
     ]},
   {key:"store", label:"门店", icon:"🏪", hub:"store", extra:[],
@@ -580,6 +581,7 @@ const NAV_GROUPS = [
       {route:"billing", icon:"💎", title:"套餐", desc:"看余额、续费或升级套餐", show:()=>!!ME},
       {route:"team", icon:"👥", title:"团队与权限", desc:"给店长、店员开账号，分配能用哪些功能", show:isOwnerLike},
       {route:"team", icon:"👥", title:"团队分配", desc:"把同事分到对应门店和板块", show:()=>!isOwnerLike()&&!!ME?.can_allocate},
+      {route:"brand", icon:"🏷️", title:"品牌知识包", desc:"联网采集品牌资料，核对入库后所有数字员工统一使用这版品牌事实", show:()=>!!ME&&ME.role!=="tour"},
       {route:"company", icon:"🏢", title:"企业档案", desc:"企业介绍、主营产品和店铺信息，数字员工干活都会参考", show:isOwnerLike,
         subs:[{route:"profiles", icon:"🎭", title:"品牌人设", desc:"品牌说话的口吻和往期文章，写出来才像您自己", show:()=>canWork("content")}]},
       {route:"assets", icon:"🗂️", title:"我的资料库", desc:"数字员工交付的成品都存在这，好内容可以存成经验反复用", show:()=>canWork("library"),
@@ -717,7 +719,7 @@ async function forcedPasswordChange(){
   }catch(e){ toast(e.message); }
 }
 function routeLoading(page){
-  const labels={tasks:"派出去的活",new:"下达任务",avatar:"数字人视频",meetings:"专家商量室",
+  const labels={tasks:"派出去的活",teamruns:"协同小队",brand:"品牌知识包",new:"下达任务",avatar:"数字人视频",meetings:"专家商量室",
     tools:"获客工具",channels:"发布渠道",schedules:"定时发布",profiles:"品牌人设",
     assets:"资料库",knowledge:"经验库",production:"员工产出",boss:"老板看板",
     inspections:"巡店工作台",company:"企业档案",
@@ -1925,6 +1927,7 @@ async function tcRetry(kind,id,btn){
   if(btn){ btn.disabled=true; btn.innerHTML='<span class="spin"></span> 重新排队…'; }
   try{
     await api(`/task-center/${encodeURIComponent(kind)}/${id}/retry`,{method:"POST"});
+    if(kind==="expert") agentTeamMarkTaskRetrying(id);
     toast("已按原任务免费重试，不会再次扣点");
     SHELL_DIRTY=true;
     if(location.hash==="#/tasks") await tasksView();
@@ -1933,6 +1936,117 @@ async function tcRetry(kind,id,btn){
     toast(e.message);
     if(btn){ btn.disabled=false; btn.textContent="🔁 免费重试"; }
   }
+}
+function activityArtworkPanel(t){
+  if(Number(t?.emp_idx)!==160||t.status!=="done") return "";
+  const tid=Number(t.id), images=Array.isArray(t.activity_images)?t.activity_images:[];
+  const groups=new Map();
+  images.forEach(item=>{
+    const key=String(item.group_key||"未分组");
+    if(!groups.has(key)) groups.set(key,[]);
+    groups.get(key).push(item);
+  });
+  const labels={needs_manual_review:"待人工核对",failed_qa:"核对未通过",passed:"已审核通过"};
+  const grouped=[...groups.entries()].map(([name,items])=>`<div class="topic" style="margin-top:12px">
+    <b>📁 ${esc(name)} · ${items.length} 张</b>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr));gap:12px;margin-top:10px">${items.map(item=>{
+      const id=Number(item.id),quality=item.quality||{},snapshot=item.required_text||{};
+      const fileUrl=`/api/tasks/${tid}/activity-images/${id}/file`;
+      return `<div class="topic" style="margin:0;min-width:0">
+        <img src="${fileUrl}" loading="lazy" alt="${esc(name)}活动效果图候选稿" style="display:block;width:100%;max-height:360px;object-fit:contain;background:#eee8db;border-radius:9px">
+        <div class="actions"><span class="pill ${item.status==="passed"?"done":item.status==="failed_qa"?"failed":"running"}">${esc(labels[item.status]||item.status)}</span>
+          <a class="btn sm" href="${fileUrl}" target="_blank" rel="noopener noreferrer">查看原图</a>
+          ${item.status==="passed"?`<a class="btn sm" href="${fileUrl}" download>下载已审图</a>`:""}</div>
+        <div class="sub">使用品牌知识包 v${Number(item.brand_version)||1} · ${tcFmt(item.created_at)}</div>
+        ${quality.reasons?.length?`<div class="notice ${item.status==="failed_qa"?"red":""}">${quality.reasons.map(esc).join("；")}</div>`:""}
+        <details><summary>生成时冻结的品牌与活动文字</summary><div class="sub" style="white-space:pre-wrap">店名：${esc(snapshot.store_name||"—")}\n标题：${esc(snapshot.activity_title||"—")}\n内容：${esc(snapshot.activity_content||"—")}</div></details>
+        ${isAdmin()?`<details style="margin-top:8px"><summary>人工核对 / 审核记录</summary>
+          <div class="sub">请先对照原图，手工录入画面实际文字。只有 Logo、店名、活动文字及额外宣传均核实无误才会通过。</div>
+          <textarea id="activity-observed-${id}" maxlength="4000" style="min-height:70px" placeholder="照图录入实际看到的全部文字；不要直接复制预期文案"></textarea>
+          <label><input type="checkbox" id="activity-logo-${id}"> 原图 Logo 与本企业标志一致</label>
+          <label><input type="checkbox" id="activity-noextra-${id}"> 已逐字核对，无未提供的价格、日期、承诺或平台名</label>
+          <input id="activity-note-${id}" maxlength="1000" placeholder="审核备注；驳回时说明需要修改的地方">
+          <div class="actions"><button class="btn sm ok" onclick="activityReview(${tid},${id},'approve',this)">核对并通过</button>
+            <button class="btn sm bad" onclick="activityReview(${tid},${id},'reject',this)">驳回候选图</button>
+            <button class="btn sm" onclick="activityReviewsLoad(${tid},${id})">查看审核历史</button></div>
+          <div id="activity-reviews-${id}"></div></details>`:""}
+      </div>`;
+    }).join("")}</div></div>`).join("");
+  return `<div class="card" style="margin-top:14px"><h3 style="margin:0">🎨 活动效果图 · 按组查看</h3>
+    <div class="sub">超级店长先读取已确认的品牌知识包与 Logo，再以图生图制作。画面文字与标志由生成环节直接完成，不后期硬贴字。生成图先作为候选稿，审核通过前请勿对外发布。</div>
+    ${images.length?grouped:`<div class="empty">还没有活动效果图。先在品牌知识包确认店名、Logo 与品牌调性，再生成候选稿。</div>`}
+    <div class="topic" style="margin-top:14px"><b>生成一组活动图</b>
+      <div class="row"><div><label for="activity-title-${tid}">活动标题 *</label><input id="activity-title-${tid}" maxlength="120" placeholder="画面中需要出现的准确标题"></div>
+        <div><label for="activity-group-${tid}">分组名称 *</label><input id="activity-group-${tid}" maxlength="80" value="活动主视觉" placeholder="例：国庆活动 / 午市套餐"></div></div>
+      <label for="activity-content-${tid}">活动内容 *</label><textarea id="activity-content-${tid}" maxlength="500" style="min-height:72px" placeholder="写清画面要出现的真实活动内容、日期、价格；没有确认的内容不要写"></textarea>
+      <label for="activity-branch-search-${tid}">门店（多门店必须选；确认版店名需与门店主数据一致）</label>
+      <div class="row"><input id="activity-branch-search-${tid}" maxlength="80" placeholder="按店名或地区查找">
+        <button class="btn sm" onclick="activityLoadBranches(${tid},this)">查找门店</button></div>
+      <select id="activity-branch-${tid}"><option value="">未指定（仅单店可直接生成）</option></select>
+      <div class="actions"><button class="btn pri" onclick="activityGenerate(${tid},this)">以品牌 Logo 图生图（按产品图生图计费）</button></div>
+      <div class="sub">生成失败会自动退点；生成成功但画面待审仍属已消费的图像生成。请在费用账单核对当前单价。</div>
+    </div></div>`;
+}
+async function activityRefresh(tid){
+  if(SPEC_TASK&&Number(SPEC_TASK.id)===Number(tid)){
+    SPEC_TASK=await api(`/tasks/${tid}`,{routeScoped:false});drawSpec();return;
+  }
+  if(SOLO_TASK&&Number(SOLO_TASK.id)===Number(tid)){
+    SOLO_TASK=await api(`/tasks/${tid}`,{routeScoped:false});drawModal();return;
+  }
+  if(location.hash===`#/tasks/${tid}`){await taskDetailView(tid);return;}
+  render(true);
+}
+async function activityLoadBranches(tid,btn){
+  if(btn) btn.disabled=true;
+  try{
+    const q=$(`#activity-branch-search-${tid}`)?.value.trim()||"";
+    const result=await api(`/tasks/${tid}/activity-images/branches?q=${encodeURIComponent(q)}`);
+    const select=$(`#activity-branch-${tid}`);
+    if(!select) return;
+    select.innerHTML='<option value="">未指定（仅单店可直接生成）</option>'+(result.items||[]).map(row=>`<option value="${Number(row.id)}">${esc(row.name||"")} · ${esc(row.region||"未标地区")}</option>`).join("");
+    if(result.has_more) toast("门店较多，请输入更精确的店名或地区再查");
+    else if(!(result.items||[]).length) toast("未找到门店；可先补充品牌知识包和门店主数据");
+  }catch(e){toast(e.message);}finally{if(btn) btn.disabled=false;}
+}
+async function activityGenerate(tid,btn){
+  const title=$(`#activity-title-${tid}`)?.value.trim()||"";
+  const content=$(`#activity-content-${tid}`)?.value.trim()||"";
+  const group_key=$(`#activity-group-${tid}`)?.value.trim()||"";
+  const branch_id=$(`#activity-branch-${tid}`)?.value||null;
+  if(!title||!content||!group_key) return toast("活动标题、内容和分组名称都要填写");
+  if(!await uiConfirm("确认使用已确认品牌知识包与 Logo 生成活动候选图？成功生成会消耗点数，画面需人工核对后才可发布。",{confirmText:"确认生成"})) return;
+  btn.disabled=true;btn.innerHTML='<span class="spin"></span> 正在生成候选图…';
+  try{
+    const result=await api(`/tasks/${tid}/activity-images`,{method:"POST",body:{title,content,group_key,branch_id},timeout:360000,longRunning:true});
+    toast(`候选图已生成，消耗 ${result.charged_points} 点；请人工核对画面`);
+    await activityRefresh(tid);
+  }catch(e){toast(e.message);btn.disabled=false;btn.textContent="以品牌 Logo 图生图（按产品图生图计费）";}
+}
+async function activityReview(tid,id,decision,btn){
+  const observed_text=$(`#activity-observed-${id}`)?.value.trim()||"";
+  const logo_match=!!$(`#activity-logo-${id}`)?.checked;
+  const no_extra_claims=!!$(`#activity-noextra-${id}`)?.checked;
+  const note=$(`#activity-note-${id}`)?.value.trim()||"";
+  if(decision==="approve"&&(!observed_text||!logo_match||!no_extra_claims))
+    return toast("通过前请逐字录入实际画面文字，并确认 Logo 与额外宣传检查");
+  if(decision==="reject"&&!note) return toast("驳回时请写清楚需要修改的地方");
+  btn.disabled=true;
+  try{
+    const result=await api(`/tasks/${tid}/activity-images/${id}/review`,{method:"POST",body:{decision,observed_text,logo_match,no_extra_claims,note}});
+    toast(result.status==="passed"?"活动图已核对通过":result.status==="failed_qa"?"已记录审核：画面未通过":"已记录审核，仍需补充核对");
+    await activityRefresh(tid);
+  }catch(e){toast(e.message);btn.disabled=false;}
+}
+async function activityReviewsLoad(tid,id){
+  const box=$(`#activity-reviews-${id}`);if(!box)return;
+  try{
+    const result=await api(`/tasks/${tid}/activity-images/${id}/reviews`);
+    box.innerHTML=(result.items||[]).length?(result.items||[]).map(item=>`<div class="topic" style="margin-top:7px"><b>${item.decision==="approve"?"尝试通过":"驳回"} · ${esc(item.result_status)}</b>
+      <div class="sub">${tcFmt(item.created_at)} · 审核人 #${Number(item.reviewer_id)}</div>
+      ${item.note?`<div>${esc(item.note)}</div>`:""}
+      ${(item.quality?.reasons||[]).length?`<div class="sub">${item.quality.reasons.map(esc).join("；")}</div>`:""}</div>`).join(""):'<div class="sub">暂无审核记录</div>';
+  }catch(e){toast(e.message);}
 }
 async function taskDetailView(tid){
   if(!Number.isInteger(tid)||tid<1){ $("#main").innerHTML=`<div class="empty">任务编号无效</div>`; return; }
@@ -1963,12 +2077,49 @@ async function taskDetailView(tid){
       ${t.source?.detail?`<div class="sub" style="margin-top:3px">${esc(t.source.detail)}</div>`:""}</div>
     ${t.status==="done"?`<div class="actions"><button class="btn sm" onclick="copyText(${cp(t.output_md||"")})">📋 复制</button>
       <a class="btn sm" href="/api/tasks/${t.id}/export.pdf">⬇️ PDF</a><a class="btn sm" href="/api/tasks/${t.id}/export.docx">⬇️ Word</a>
-      <button class="btn sm" onclick="taskToKnow(${t.id})">📚 存入沉淀库</button></div>${taskFullHtml(t)}${taskRevisionPanel(t,"page")}`:""}
+      <button class="btn sm" onclick="taskToKnow(${t.id})">📚 存入沉淀库</button></div><div id="task-verdict-${t.id}"></div>${taskFullHtml(t)}${activityArtworkPanel(t)}${taskRevisionPanel(t,"page")}`:""}
     ${t.status==="failed"?`<div class="notice red">${esc(t.output_md||"任务执行失败")}
       <div class="actions">${t.retryable?`<button class="btn sm pri" onclick="retryExpertTask(${t.id},this)">🔁 免费重试</button>
         <span class="sub">沿用原任务，不会再次扣点 · 还可重试 ${t.free_retries_remaining} 次</span>`
         :`<span class="sub">${t.thread?.can_continue?"免费重试已用完，可从上一个已交付版本继续。":"免费重试次数已用完，请重新派一个任务"}</span>`}</div></div>${taskRevisionPanel(t,"page")}`:""}
   </div>`;
+  if(t.status==="done") taskVerdictLoad(t.id);
+}
+/* ---------- 任务验收(采纳/驳回+理由):每次验收都是员工进化的养料 ---------- */
+async function taskVerdictLoad(tid){
+  const box = document.getElementById("task-verdict-"+tid);
+  if(!box) return;
+  let saved = null;
+  try{ saved = (await api(`/tasks/${tid}/verdict`)).verdict; }catch(_){}
+  if(saved){
+    box.innerHTML = `<div class="notice green" style="margin-top:10px">${saved.verdict==="adopt"?"✅ 已验收:采纳":"❌ 已验收:驳回"}${saved.reason?` · 理由:${esc(saved.reason)}`:""}
+      <div class="sub" style="margin-top:3px">验收已转化为员工进化养料;到员工面板「派活」页可拍板生成的实战心得提案。</div></div>`;
+    return;
+  }
+  box.innerHTML = `<div class="notice" style="margin-top:10px"><b>🧠 验收这次交付</b>
+    <span class="sub">采纳/驳回和理由会被 AI 提炼成该员工的「实战心得」,员工越用越懂你</span>
+    <div class="actions" style="margin-top:8px">
+      <button class="btn sm ok" onclick="taskVerdictSubmit(${tid},'adopt',this,'')">✅ 采纳</button>
+      <button class="btn sm bad" onclick="taskVerdictRejectForm(${tid})">❌ 驳回(写理由)</button>
+    </div></div>`;
+}
+function taskVerdictRejectForm(tid){
+  const box = document.getElementById("task-verdict-"+tid);
+  if(!box) return;
+  box.innerHTML = `<div class="notice" style="margin-top:10px"><b>❌ 驳回理由(必填,一句话说清哪里不对)</b>
+    <textarea id="verdict-reason-${tid}" style="min-height:52px;margin-top:6px" placeholder="例:毛利口径不对,应按剔除包装费后的实收计算"></textarea>
+    <div class="actions" style="margin-top:6px">
+      <button class="btn sm bad" onclick="taskVerdictSubmit(${tid},'reject',this,document.getElementById('verdict-reason-${tid}').value.trim())">提交驳回</button>
+      <button class="btn sm" onclick="taskVerdictLoad(${tid})">取消</button></div></div>`;
+}
+async function taskVerdictSubmit(tid, verdict, btn, reason){
+  if(verdict==="reject"&&!reason) return toast("驳回时请写一句话理由,这会成为员工进化的养料");
+  btn.disabled = true;
+  try{
+    await api(`/tasks/${tid}/verdict`,{method:"POST",body:{verdict,reason:reason||""}});
+    toast("验收完成,AI 正在提炼实战心得提案");
+    taskVerdictLoad(tid);
+  }catch(e){ toast(e.message); btn.disabled = false; }
 }
 async function taskCenterRecordView(ref){
   const [kind,rawId]=ref.split(":"), rid=+rawId;
@@ -2017,6 +2168,7 @@ async function retryExpertTask(id,btn){
   if(btn){ btn.disabled=true; btn.innerHTML='<span class="spin"></span> 重新排队…'; }
   try{
     await api(`/tasks/${id}/retry`,{method:"POST"});
+    agentTeamMarkTaskRetrying(id);
     toast("已免费重试，任务重新排队");
     SHELL_DIRTY=true;
     if(SPEC_TASK&&SPEC_TASK.id===id) await specOpenTask(id,true);
@@ -2469,12 +2621,22 @@ function taskRevisionPanel(t, mode="page"){
   const current=Number(thread.current_task_id||t.id)===Number(t.id);
   if(!current) return `<div class="card" style="background:#f5f1e8;margin-top:12px"><b>版本时间线</b>${timeline}
     <div class="sub">这是历史版本。请打开最新一轮继续沟通，避免同时产生两份互相冲突的版本。</div></div>`;
-  const resumeTaskId=Number(thread.resume_task_id||t.id),failedLeaf=Number(thread.failed_current_task_id||0)===Number(t.id);
+  const resumeTaskId=Number(thread.resume_task_id||t.id);
+  // Standalone failed tasks do not always have failed_current_task_id.
+  const failedLeaf=current&&(
+    t.status==="failed"||Number(thread.failed_current_task_id||0)===Number(t.id)
+  );
   const resumeRevision=Number((revisions.find(r=>Number(r.task_id||r.id)===resumeTaskId)||{}).revision_no||Math.max(1,revision-1));
   const blockedText={employee_disabled:"该员工已停用，仍可确认现有交付；重新启用后可继续修改。",free_retry_available:"这一轮还有免费重试次数，请先使用免费重试。",refund_pending:"这一轮退点尚未安全收口，请稍后刷新。",no_delivered_revision:"这个会话还没有可恢复的已交付版本。"};
+  const blockedCode=thread.continue_blocked_by||thread.reason_code||"";
+  const blockedMessage=blockedText[blockedCode]||(
+    failedLeaf
+      ?"本轮未产出可用内容；如仍有免费重试次数，请先免费重试。"
+      :"当前任务状态更新中，稍后刷新即可继续。"
+  );
   const canContinue=thread.can_continue===true&&employeeCanContinue(t);
   if(!canContinue&&!thread.can_accept) return `<div class="card" style="background:#fff6dc;margin-top:12px"><b>${failedLeaf?`第 ${revision} 轮生成未成功`:`第 ${revision} 轮已交付`}</b>${timeline}
-    <div class="sub">${blockedText[thread.continue_blocked_by]||"当前任务状态更新中，稍后刷新即可继续。"}</div></div>`;
+    <div class="sub">${blockedMessage}</div></div>`;
   const acceptButton=thread.can_accept?`<button class="btn sm" onclick="taskAccept(${thread.thread_id||t.id},${resumeTaskId},${cp(mode)},this)">✅ 满意，结束</button>`:"";
   const evidenceRequirements=normalizeDecisionEvidenceRequirements(t.task_guide?.evidence_requirements);
   const evidencePanel=decisionEvidenceChecklist(evidenceRequirements,{panelId:`follow-evidence-${Number(t.id)}`,brief:t.brief});
@@ -2483,7 +2645,7 @@ function taskRevisionPanel(t, mode="page"){
     <label>补充材料（选填）</label><textarea id="follow-material-${t.id}" style="min-height:58px" placeholder="粘贴新数据、约束或参考材料"></textarea>
     ${evidencePanel}
     <div class="actions"><button class="btn pri" onclick="taskFollowup(${t.id},${cp(mode)},this,${cp(t.identity_ref||"")},${Number(t.config_revision)||0},${cp(t.config_sha256||"")},${cp(t.bundle_sha256||"")})">💬 生成第 ${revision+1} 轮（1点）</button>
-      <span class="sub">${failedLeaf?`将从第 ${resumeRevision} 轮可用交付继续，失败记录仍保留。`:`上一版与您的反馈会一起交给同一位员工。`}新一轮单独计 1 点，失败自动退回。</span></div>`:`<div class="sub" style="margin-top:8px">${blockedText[thread.continue_blocked_by]||"当前不能再开新一轮。"}</div>`;
+      <span class="sub">${failedLeaf?`将从第 ${resumeRevision} 轮可用交付继续，失败记录仍保留。`:`上一版与您的反馈会一起交给同一位员工。`}新一轮单独计 1 点，失败自动退回。</span></div>`:`<div class="sub" style="margin-top:8px">${blockedMessage||"当前不能再开新一轮。"}</div>`;
   return `<div class="card" style="background:linear-gradient(120deg,#fff3d6,#fffaf0);margin-top:12px">
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><b style="flex:1">${failedLeaf?`第 ${revision} 轮失败 · 回到第 ${resumeRevision} 轮继续`:`继续和 TA 沟通 · 当前第 ${revision} 轮`}</b>${acceptButton}</div>${continueForm}</div>`;
 }
@@ -2862,6 +3024,36 @@ function drawSpec(){
       </div>
     </div></div>`;
   const box = $("#spec-steps"); if(box) box.scrollTop = box.scrollHeight;
+  if(SPEC_TAB==="task"&&canAssign) specInsightsLoad(e.idx);
+}
+/* ---------- 员工自动进化:实战心得(验收提炼的提案,老板拍板后下次任务自动带上) ---------- */
+async function specInsightsLoad(idx){
+  const box = document.getElementById("spec-insights-"+Number(idx));
+  if(!box) return;
+  let data;
+  try{ data = await api(`/employees/${idx}/insights`); }catch(_){ return; }
+  const pending = data.pending||[], adopted = data.adopted||[];
+  if(!pending.length && !adopted.length){ box.innerHTML = ""; return; }
+  box.innerHTML = `<details class="insight-card"${pending.length?" open":""}>
+    <summary>🧠 实战心得(自动进化) <span class="sub">待拍板 ${pending.length} · 已生效 ${adopted.length}</span></summary>
+    ${pending.length?`<div class="sub" style="margin:6px 0 2px"><b>验收提炼的新提案,采纳后 TA 下次干活自动带上:</b></div>`:""}
+    ${pending.map((row,i)=>`<div class="topic" style="margin:6px 0;display:flex;gap:8px;align-items:flex-start">
+      <span style="flex:1;min-width:0">💡 ${esc(row.insight||"")} <span class="sub">来自任务 #${Number(row.task_id)||"-"}</span></span>
+      <button class="btn sm ok" onclick="specInsightDecide(${idx},${i},'adopt',this)">采纳</button>
+      <button class="btn sm" onclick="specInsightDecide(${idx},${i},'dismiss',this)">忽略</button></div>`).join("")}
+    ${adopted.length?`<div class="sub" style="margin:8px 0 2px"><b>已生效(每次任务自动注入):</b></div>`:""}
+    ${adopted.map((row,i)=>`<div class="topic" style="margin:6px 0;display:flex;gap:8px;align-items:flex-start">
+      <span style="flex:1;min-width:0">✅ ${esc(row.insight||"")}</span>
+      <button class="btn sm" onclick="specInsightDecide(${idx},${i},'remove',this)">移除</button></div>`).join("")}
+  </details>`;
+}
+async function specInsightDecide(idx, index, action, btn){
+  btn.disabled = true;
+  try{
+    await api(`/employees/${idx}/insights/decide`,{method:"POST",body:{index,action}});
+    toast(action==="adopt"?"已采纳,下次任务自动带上":action==="remove"?"已移除":"已忽略");
+    specInsightsLoad(idx);
+  }catch(e){ toast(e.message); btn.disabled = false; }
 }
 function specIntroTab(e){
   return `<div class="card" style="background:linear-gradient(120deg,#fff6dc,#fffaf0);margin-top:0">
@@ -2892,7 +3084,7 @@ function specTaskTab(e){
         <button class="btn sm" onclick="SPEC_TASK=null;drawSpec()">收起</button></div>
       <div class="sub">任务书:${esc(cur.brief?.direction||"")}</div>
       ${["queued","running"].includes(cur.status)?taskWaitHtml(cur,`<div class="steps" id="spec-steps" style="margin-top:8px">${(cur.steps||[]).map((s,i)=>stepRow(s,i+1)).join("")||`<div class="step"><span class="ic">⏳</span><span class="lb">专家上线中…</span></div>`}</div>`):""}
-      ${cur.status==="done"?`${taskBody(cur)}${taskRevisionPanel(cur,"spec")}`:""}
+      ${cur.status==="done"?`${taskBody(cur)}${activityArtworkPanel(cur)}${taskRevisionPanel(cur,"spec")}`:""}
       ${cur.status==="failed"?`<div class="notice red">${esc(cur.output_md||"执行失败")}
         <div class="actions">${cur.retryable?`<button class="btn sm pri" onclick="retryExpertTask(${cur.id},this)">🔁 免费重试</button>
           <span class="sub">沿用原任务，不再次扣点 · 还可重试 ${cur.free_retries_remaining} 次</span>`
@@ -2902,8 +3094,9 @@ function specTaskTab(e){
   const prefill = EXP_PREFILL; EXP_PREFILL = "";   // 从「帮我选/改派」带过来的一句话,一次性回填
   return `
   <div class="notice" style="margin-top:0">📋 <b>给「${esc(e.name)}」派活</b>:一句话说清要什么。TA 会核实关键信息并围绕实际业务交付可执行结果(自动进资产库)。</div>
+  <div id="spec-insights-${Number(e.idx)}"></div>
   ${taskGuideCard(guide)}
-  <label>任务内容 *</label>
+  <label style="display:flex;align-items:center;gap:8px">任务内容 * ${voiceBtn("spec-dir")}</label>
   <textarea id="spec-dir" placeholder="${esc(guide.task_placeholder)}">${esc(prefill)}</textarea>
   <div class="row">
     <div><label>细分业态/经营场景(选填)</label><input id="spec-industry" placeholder="${esc(guide.industry_placeholder)}"></div>
@@ -2975,19 +3168,75 @@ async function specRedo(tid){
   return taskFollowup(tid,"spec",null,task.identity_ref||"",task.config_revision||0,task.config_sha256||"",task.bundle_sha256||"");
 }
 
+/* ---------- 语音派活:连续听写不断句 + 餐饮语境同音纠错(不支持的浏览器自动隐藏) ---------- */
+let VOICE_ACTIVE = null;   // {rec, targetId, btn, base}
+function voiceSupported(){ return !!(window.SpeechRecognition||window.webkitSpeechRecognition); }
+function voiceBtn(targetId){
+  if(!voiceSupported()) return "";
+  return `<button type="button" class="btn sm voice-btn" onclick="voiceToggle(${cp(targetId)},this)" title="连续语音输入不断句,说完再点一次结束;AI 会按餐饮语境自动纠正同音错字">🎤 语音</button>`;
+}
+function voiceToggle(targetId, btn){
+  if(VOICE_ACTIVE){ voiceStop(); return; }
+  const input = document.getElementById(targetId);
+  if(!input) return;
+  const SR = window.SpeechRecognition||window.webkitSpeechRecognition;
+  let rec;
+  try{ rec = new SR(); }catch(_){ return toast("当前浏览器不支持语音输入"); }
+  rec.lang = "zh-CN"; rec.continuous = true; rec.interimResults = true;
+  const base = input.value ? input.value.replace(/\s+$/,"") + " " : "";
+  let finals = "";
+  rec.onresult = ev => {
+    let interim = "";
+    for(let i = ev.resultIndex; i < ev.results.length; i++){
+      const tr = ev.results[i][0].transcript;
+      if(ev.results[i].isFinal) finals += tr; else interim += tr;
+    }
+    input.value = base + finals + interim;
+  };
+  rec.onerror = ev => { if(ev.error === "not-allowed") toast("麦克风权限被拒绝,请在浏览器设置中允许"); };
+  rec.onend = () => { if(VOICE_ACTIVE && VOICE_ACTIVE.rec === rec) voiceFinish(); };
+  VOICE_ACTIVE = {rec, targetId, btn, base};
+  btn.classList.add("on"); btn.innerHTML = "🔴 说话中,点击结束";
+  try{ rec.start(); }catch(_){ voiceFinish(); }
+}
+function voiceStop(){
+  const v = VOICE_ACTIVE;
+  if(!v) return;
+  try{ v.rec.onend = null; v.rec.stop(); }catch(_){}
+  voiceFinish(v);
+}
+async function voiceFinish(v){
+  v = v || VOICE_ACTIVE;
+  if(!v) return;
+  VOICE_ACTIVE = null;
+  v.btn.classList.remove("on"); v.btn.innerHTML = "🎤 语音";
+  const input = document.getElementById(v.targetId);
+  if(!input) return;
+  const text = input.value.trim();
+  if(!text || text === v.base.trim()) return;
+  try{
+    const r = await api("/voice/normalize",{method:"POST", body:{text}, timeout:18000});
+    if(r.text && r.corrected){ input.value = r.text; toast("已按餐饮语境自动纠正同音错字"); }
+  }catch(_){ /* 纠错失败保留原文,不拦输入 */ }
+}
+
 /* ---------- V27:智能派活路由(大白话找专家 + 派单预检引导) ---------- */
 function expFinderCard(deptKey){
   return `<div class="card" style="background:linear-gradient(120deg,#eef6ff,#fffaf0);margin-top:10px">
-    <b>🎯 不知道找谁?</b> <span class="sub">一句话描述你要办的活,AI 帮你从本部门专家里挑最对口的,并按协同小队展示。</span>
+    <b>🎯 不知道找谁?</b> <span class="sub">一句话说要办的活,AI 读花名册自动组建协同小队:队长拆解分工、依赖排序,支持自动派发全队或逐人派活。</span>
     <div style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;flex-wrap:wrap">
       <textarea id="ef-text-${deptKey}" style="flex:1;min-width:min(100%,240px);min-height:46px"
         placeholder="例:我想给门店做一场周年庆活动,怎么策划引流"></textarea>
-      <button class="btn pri" onclick="expFind(${cp(deptKey)},this)">🎯 帮我选</button>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <button class="btn pri" onclick="expFind(${cp(deptKey)},this)">🎯 帮我选</button>
+        ${voiceBtn(`ef-text-${deptKey}`)}
+      </div>
     </div>
     <div id="ef-result-${deptKey}"></div></div>`;
 }
 let EXP_LAST_QUERY = "";   // 最近一次「帮我选」的那句话,「派给TA」时带进派活框
 let EXP_LAST_TEAM = null;  // 最近一次匹配到的协同小队(含形象字段)
+let EXP_LAST_SERVER_RUN_ID = 0;
 async function expFind(deptKey, btn){
   const text = $("#ef-text-"+deptKey).value.trim();
   if(!text) return toast("先用一句话说说要办什么活");
@@ -3055,66 +3304,109 @@ function agentTeamsBoard(team, query){
     <div class="at-dag">${dag}</div>
     <div id="at-focus">${focusHtml}</div>
     <div class="at-actions">
-      <button class="btn pri" onclick="agentTeamAutoDispatch(this)">🚀 自动派给全队（${members.length}人 · ${members.length}点）</button>
+      <label for="at-mode">开工方式</label><select id="at-mode" data-team-mode><option value="semi">逐人确认</option><option value="auto">全自动</option></select>
+      <label for="at-depth">输出深度</label><select id="at-depth" data-team-depth><option value="simple">简单</option><option value="comprehensive" selected>全面</option><option value="professional">专业</option></select>
+      <button class="btn pri" onclick="agentTeamStartRun(this)">组建并开工（预计 ${members.length+1} 项任务）</button>
       ${lead ? `<button class="btn" onclick="pickExpert(${lead.idx})">只派给队长统筹</button>` : ""}
     </div>
-    <div class="sub" style="margin-top:4px">自动模式：按分工一次派给全队，各岗位并行开工；跑完到任务中心统一验收即可。</div>
-    <div id="at-auto-log"></div>
+    <div class="sub" style="margin-top:4px">队长先拆解，其他成员按依赖并行执行，最后由队长收尾汇总。队长首轮计入成员任务，最终汇总另计 1 点；失败重试可能产生新的计费，请在确认前核对余额。</div>
   </div>`;
 }
-// 自动化完成模式:按依赖先队长后成员的顺序,把活一次派给整个小队;老板只需到任务中心验收。
-function agentTeamTopo(members){
-  const byIdx = Object.fromEntries(members.map(m => [m.idx, m]));
-  const seen = new Set(), out = [];
-  const visit = (m, stack) => {
-    if(seen.has(m.idx) || stack.has(m.idx)) return;
-    stack.add(m.idx);
-    (m.dependsOn||[]).forEach(id => { const dep = byIdx[id]; if(dep) visit(dep, stack); });
-    stack.delete(m.idx);
-    if(!seen.has(m.idx)){ seen.add(m.idx); out.push(m); }
-  };
-  members.forEach(m => visit(m, new Set()));
-  return out;
-}
-async function agentTeamAutoDispatch(btn, logId="at-auto-log"){
+async function agentTeamStartRun(btn){
   const st = agentTeamState();
+  if(Number(st?.serverRunId)||EXP_LAST_SERVER_RUN_ID)
+    return toast("这支小队已经建立，请到协同小队页面查看；若要重新组队，请再次使用“帮我选”");
   const team = (st && st.team) || EXP_LAST_TEAM;
   if(!team) return toast("先用「帮我选」组一支小队");
-  const members = agentTeamTopo(team.members||[]);
+  const members=team.members||[];
   if(!members.length) return toast("小队成员为空");
   const query = (st && st.query) || EXP_LAST_QUERY || "";
-  const teamName = team.teamName || "经营协同小队";
-  btn.disabled = true; const old = btn.innerHTML;
-  btn.innerHTML = `<span class="spin"></span> 正在按分工派给全队…`;
-  const log = document.getElementById(logId);
-  if(!log){ btn.disabled=false; btn.innerHTML=old; return; }
-  log.innerHTML = members.map(m => `<div class="topic" style="margin:6px 0" id="${logId}-${m.idx}">⏳ <b>${esc(m.name||m.role)}</b>（${esc(m.roleInTeam||"")}）等待派单…</div>`).join("");
-  let ok = 0, stopped = false;
-  for(const m of members){
-    const row = document.getElementById(`${logId}-${m.idx}`);
-    if(stopped){ if(row) row.innerHTML = `⏸ <b>${esc(m.name||m.role)}</b>：已跳过（点数不足中止）`; continue; }
-    if(row) row.innerHTML = `<span class="spin"></span> <b>${esc(m.name||m.role)}</b>（${esc(m.roleInTeam||"")}）派单中…`;
-    try{
-      const e = await api("/depts/emp/"+m.idx);
-      const direction = `【协同小队·${teamName}】老板原话：${query}\n本岗位分工（${m.roleInTeam||"执行"}）：${m.task||m.why||m.role||""}\n协同说明：小队共${members.length}人按各自分工产出，请聚焦本岗位、交付可直接使用的结果。`;
-      const brief = {direction, industry:"", material:"", length:"std"};
-      const binding = employeeIdentityMutationFields(e);
-      const requestKey = persistentMutationRequestKey("teamtask", String(m.idx), {emp_idx:m.idx, brief, ...binding});
-      const r = await api("/tasks",{method:"POST", body:{emp_idx:m.idx, brief, force:true, request_key:requestKey, ...binding}, timeout:20000});
-      const tid = Number(r.task_id||0);
-      if(!Number.isInteger(tid) || tid < 1) throw new Error("任务已接收但编号异常，请到任务中心核对");
-      clearPersistentMutationRequestKey("teamtask", String(m.idx), requestKey);
-      ok++;
-      if(row) row.innerHTML = `✅ <b>${esc(m.name||m.role)}</b>（${esc(m.roleInTeam||"")}）已开工 → <a href="#/tasks/${tid}" style="text-decoration:underline">任务 #${tid}</a>`;
-    }catch(err){
-      if(row) row.innerHTML = `❌ <b>${esc(m.name||m.role)}</b>：${esc(err.message||"派单失败")}`;
-      if(String(err.message||"").includes("点数")) stopped = true;
-    }
+  const panel=btn.closest(".agent-teams,.atf-panel");
+  const mode=panel?.querySelector("[data-team-mode]")?.value||"semi";
+  const depth=panel?.querySelector("[data-team-depth]")?.value||"comprehensive";
+  const payload={query,team,mode,depth};
+  const requestKey=persistentMutationRequestKey("teamrun",String(members[0].idx),payload);
+  btn.disabled=true;const old=btn.innerHTML;btn.innerHTML='<span class="spin"></span> 正在建立协同小队…';
+  try{
+    const r=await api("/team-runs",{method:"POST",body:{...payload,request_key:requestKey},timeout:30000});
+    const id=Number(r.run_id||r.id);
+    if(!Number.isInteger(id)||id<1) throw new Error("小队已提交但编号异常，请到协同小队列表核对");
+    clearPersistentMutationRequestKey("teamrun",String(members[0].idx),requestKey);
+    EXP_LAST_SERVER_RUN_ID=id;
+    agentTeamPatch(saved=>{saved.serverRunId=id;delete saved.dispatched;delete saved.summaryTaskId;});
+    agentTeamFloatRender(true);
+    toast(mode==="auto"?"小队已建立，队长先拆解后自动协同开工":"小队已建立，请逐人确认后开工");
+    location.hash=`#/teamruns/${id}`;
+  }catch(e){toast(e.uncertain?"请求超时，本次请求号已保留；重试不会重复建队":e.message);btn.disabled=false;btn.innerHTML=old;}
+}
+
+let TEAM_RUN_REFRESH_TIMER=null;
+const TEAM_RUN_STATUS={awaiting_approval:"待逐人确认",running:"协同进行中",summarizing:"队长收尾中",needs_attention:"需要处理失败项",done:"已完成",failed:"未完成"};
+const TEAM_MEMBER_STATUS={pending:"待开工",dispatching:"正在派单",queued:"已排队",running:"进行中",done:"已交付",failed:"失败",skipped:"已跳过"};
+async function teamRunsView(rawId){
+  if(TEAM_RUN_REFRESH_TIMER){clearTimeout(TEAM_RUN_REFRESH_TIMER);TEAM_RUN_REFRESH_TIMER=null;}
+  const id=Number(rawId);
+  if(!Number.isInteger(id)||id<1){
+    const r=await api("/team-runs");const items=r.items||[];
+    $("#main").innerHTML=`<div class="card"><h2>🤝 协同小队</h2>
+      <div class="sub">一句话选队，队长先拆解，成员按依赖协作，最后由队长汇总。重新打开页面也能从服务器恢复进度。</div>
+      ${items.length?items.map(run=>`<a class="topic" style="display:block;margin-top:12px;text-decoration:none" href="#/teamruns/${Number(run.id)}">
+        <b>${esc(run.team_name||"经营协同小队")}</b> · ${esc(TEAM_RUN_STATUS[run.status]||run.status)}
+        <div class="sub">${esc(String(run.query||"").slice(0,140))} · ${Number(run.members?.length||0)} 名成员</div></a>`).join("")
+        :`<div class="empty">还没有协同小队。去行业数字员工页面，在「不知道找谁」里说一句要办的事即可组队。</div>`}
+      <div class="actions"><a class="btn" href="#/tasks">查看全部任务</a></div></div>`;
+    return;
   }
-  btn.disabled = false; btn.innerHTML = old;
-  log.insertAdjacentHTML("beforeend",
-    `<div class="actions" style="margin-top:8px"><a class="btn pri" href="#/tasks">📋 去任务中心验收（成功 ${ok}/${members.length}）</a></div>`);
-  if(ok) toast(`已自动派给 ${ok} 位数字员工,完成后到任务中心统一验收`);
+  const r=await api(`/team-runs/${id}`);
+  const members=r.members||[];
+  const leaderReady=members.some(m=>Number(m.idx)===Number(r.leader_emp_idx)&&m.status==="done")&&!!r.leader_plan_md;
+  const depth={simple:"简单",comprehensive:"全面",professional:"专业"}[r.depth]||r.depth;
+  const memberHtml=members.map(m=>`<div class="topic" style="margin-top:10px">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><b>${esc(m.name||m.role||`成员 #${m.idx}`)}</b>
+      <span class="pill">${esc(m.roleInTeam||"")}</span><span class="sub">${esc(TEAM_MEMBER_STATUS[m.status]||m.status)}</span></div>
+    <div class="sub">分工：${esc(m.task||"")}</div>
+    ${m.dependsOn?.length?`<div class="sub">依赖成员：${m.dependsOn.map(x=>`#${Number(x)}`).join("、")}</div>`:""}
+    ${m.task_id?`<div class="actions"><a class="btn sm" href="#/tasks/${Number(m.task_id)}">查看任务 #${Number(m.task_id)}</a></div>`:""}
+    ${m.last_error?`<div class="notice red">${esc(m.last_error)}</div>`:""}
+    ${r.mode==="semi"&&!m.approved&&m.status==="pending"?(Number(m.idx)===Number(r.leader_emp_idx)||leaderReady
+      ?`<button class="btn sm pri" onclick="teamRunAction(${id},${Number(m.id)},'approve',this)">确认让 TA 开工</button>`
+      :`<div class="sub">先等队长拆解交付，再确认这位成员。</div>`):""}
+    ${m.status==="failed"?`<div class="actions"><button class="btn sm pri" onclick="teamRunAction(${id},${Number(m.id)},'retry',this)">重试这个分工</button>
+      ${m.roleInTeam!=="队长"?`<button class="btn sm" onclick="teamRunAction(${id},${Number(m.id)},'skip',this)">跳过并标明缺口</button>`:""}</div>`:""}
+  </div>`).join("");
+  $("#main").innerHTML=`<div class="actions" style="margin-bottom:12px"><a class="btn sm" href="#/teamruns">← 返回小队列表</a>
+    <button class="btn sm" onclick="teamRunsView(${id})">刷新进度</button></div>
+    <div class="card"><h2>🤝 ${esc(r.team_name||"经营协同小队")}</h2>
+      <div class="notice"><b>${esc(TEAM_RUN_STATUS[r.status]||r.status)}</b> · ${r.mode==="auto"?"全自动":"逐人确认"} · ${esc(depth)}深度
+        <div>预计 ${Number(r.estimated_tasks)||members.length+1} 项任务 / ${Number(r.estimated_points)||0} 点，已实际扣费 ${Number(r.charged_points)||0} 点。任务失败及重试按现有计费与退款规则处理。</div></div>
+      <div class="sub">老板原话：${esc(r.query||"")}</div>
+      ${r.team_summary?`<div class="sub">组队说明：${esc(r.team_summary)}</div>`:""}
+      <h3>队长拆解</h3>
+      ${r.leader_plan_md?`<pre style="white-space:pre-wrap;word-break:break-word">${esc(r.leader_plan_md)}</pre>`:
+        `<div class="sub">${members.find(m=>m.roleInTeam==="队长")?.status==="done"?"拆解结果读取中":"队长首轮任务交付后显示计划。其他成员会等前置计划与依赖完成后开工。"}</div>`}
+      <h3>成员执行</h3>${memberHtml||'<div class="empty">小队没有有效成员。</div>'}
+      <h3>队长收尾汇总</h3>
+      ${r.summary_output_md?`<pre style="white-space:pre-wrap;word-break:break-word">${esc(r.summary_output_md)}</pre>`:
+        `<div class="sub">${r.summary_error?esc(r.summary_error):"成员交付后，队长会依据真实结果做收尾汇总；失败或跳过的分工会明确标出。"}</div>`}
+      ${r.summary_task_id?`<a class="btn sm" href="#/tasks/${Number(r.summary_task_id)}">查看队长汇总任务 #${Number(r.summary_task_id)}</a>`:""}
+      ${r.summary_status==="failed"?`<button class="btn sm pri" onclick="teamRunSummaryRetry(${id},this)">重试队长汇总</button>`:""}
+      ${r.summary_stale?`<div class="notice">成员交付已有更新版，当前汇总还是旧版快照。旧汇总会保留在原任务中。</div>
+        <button class="btn sm pri" onclick="teamRunSummaryRetry(${id},this)">依据更新版重新汇总</button>`:""}
+    </div>`;
+  if(["running","summarizing"].includes(r.status)&&location.hash===`#/teamruns/${id}`){
+    TEAM_RUN_REFRESH_TIMER=setTimeout(()=>{if(location.hash===`#/teamruns/${id}`) teamRunsView(String(id)).catch(e=>toast(e.message));},6000);
+  }
+}
+async function teamRunAction(runId,memberId,action,btn){
+  if(action==="skip"&&!await uiConfirm("跳过该成员后，队长汇总会明确标注这项没有交付。确定跳过？",{okText:"跳过"})) return;
+  btn.disabled=true;
+  try{await api(`/team-runs/${runId}/members/${memberId}/${action}`,{method:"POST"});toast(action==="approve"?"已确认，满足依赖后开工":action==="retry"?"已安排重试":"已跳过并保留缺口记录");teamRunsView(String(runId));}
+  catch(e){toast(e.message);btn.disabled=false;}
+}
+async function teamRunSummaryRetry(runId,btn){
+  btn.disabled=true;
+  try{await api(`/team-runs/${runId}/summary/retry`,{method:"POST"});toast("已重新安排队长收尾");teamRunsView(String(runId));}
+  catch(e){toast(e.message);btn.disabled=false;}
 }
 
 /* ---------- 协同小队常驻浮窗:挂在 body 上不随路由重绘消失,localStorage 固化,只有用户点关闭才清除 ---------- */
@@ -3133,6 +3425,7 @@ function agentTeamState(){
 }
 function agentTeamSave(team, query){
   EXP_LAST_TEAM = team;
+  EXP_LAST_SERVER_RUN_ID = 0;
   if(query) EXP_LAST_QUERY = query;
   try{
     localStorage.setItem(AGENT_TEAM_STORE, JSON.stringify({team, query:query||EXP_LAST_QUERY||"", at:Date.now(), collapsed:false}));
@@ -3149,12 +3442,14 @@ function agentTeamFloatRestore(){
   const st = agentTeamState();
   if(!st) return;
   EXP_LAST_TEAM = st.team;
+  EXP_LAST_SERVER_RUN_ID = Number(st.serverRunId)||0;
   if(st.query) EXP_LAST_QUERY = st.query;
   agentTeamFloatRender(!st.collapsed);
 }
 function agentTeamFloatRender(expanded){
   const st = agentTeamState();
   const team = (st && st.team) || EXP_LAST_TEAM;
+  const serverRunId=Number(st?.serverRunId)||EXP_LAST_SERVER_RUN_ID;
   if(!team) return;
   const members = team.members||[];
   if(!members.length) return;
@@ -3180,16 +3475,121 @@ function agentTeamFloatRender(expanded){
         <button type="button" class="btn sm pri" onclick="pickExpert(${m.idx})">派给TA</button>
       </div>`).join("")}</div>
     <div class="actions" style="margin-top:8px">
-      <button type="button" class="btn sm pri" onclick="agentTeamAutoDispatch(this,'atf-auto-log')">🚀 自动派给全队（${members.length}点）</button>
-      <a class="btn sm" href="#/tasks">📋 任务中心</a>
+      <label for="atf-mode">方式</label><select id="atf-mode" data-team-mode><option value="semi">逐人确认</option><option value="auto">全自动</option></select>
+      <label for="atf-depth">深度</label><select id="atf-depth" data-team-depth><option value="simple">简单</option><option value="comprehensive" selected>全面</option><option value="professional">专业</option></select>
+      ${serverRunId?`<a class="btn sm pri" href="#/teamruns/${serverRunId}">查看已建立的小队 #${serverRunId}</a>`:
+        `<button type="button" class="btn sm pri" onclick="agentTeamStartRun(this)">建立小队（预计 ${members.length+1} 项任务）</button>`}
+      <a class="btn sm" href="#/teamruns">查看进行中的小队</a>
     </div>
-    <div id="atf-auto-log"></div>
+    ${agentTeamProgressHtml(st,serverRunId)}
   </div>`;
 }
 async function agentTeamFloatClose(){
   if(!await uiConfirm("关闭并清除当前协同小队面板？之后需要重新「帮我选」组队。",{title:"关闭小队面板",confirmText:"关闭"})) return;
   try{ localStorage.removeItem(AGENT_TEAM_STORE); }catch(_){}
+  EXP_LAST_TEAM=null;
+  EXP_LAST_QUERY="";
+  EXP_LAST_SERVER_RUN_ID=0;
   document.getElementById("agent-team-float")?.remove();
+}
+/* ---------- 队长收尾汇总:跟踪小队任务,干完自动派队长出总结+下一步行动计划 ---------- */
+function agentTeamPatch(mutate){
+  try{
+    const saved = JSON.parse(localStorage.getItem(AGENT_TEAM_STORE)||"null");
+    if(!saved) return;
+    mutate(saved);
+    localStorage.setItem(AGENT_TEAM_STORE, JSON.stringify(saved));
+  }catch(_){}
+}
+function agentTeamMarkTaskRetrying(taskId){
+  const tid=Number(taskId);
+  if(!Number.isInteger(tid)||tid<1) return false;
+  let changed=false, collapsed=false;
+  agentTeamPatch(saved => {
+    if(saved.serverRunId) return;
+    collapsed=!!saved.collapsed;
+    const row=(saved.dispatched||[]).find(item=>Number(item.tid)===tid);
+    if(!row) return;
+    row.status="queued";
+    changed=true;
+  });
+  if(changed) agentTeamFloatRender(!collapsed);
+  return changed;
+}
+function agentTeamProgressHtml(st,serverRunId=0){
+  if(serverRunId) return '<div class="sub" style="margin-top:6px">小队进度以服务端记录为准，点击上方按钮查看队长拆解与最终汇总。</div>';
+  const dispatched = (st && st.dispatched)||[];
+  if(!dispatched.length) return "";
+  const icon = s => s==="done"?"✅":s==="failed"?"❌":"⚙️";
+  const rows = dispatched.map(row =>
+    `<div class="atf-taskrow">${icon(row.status)} <a href="#/tasks/${Number(row.tid)}">#${Number(row.tid)}</a> ${esc(row.name||"")}<i>${esc(row.role||"")}</i></div>`
+  ).join("");
+  const doneCount = dispatched.filter(row => row.status==="done").length;
+  const failedCount = dispatched.filter(row => row.status==="failed").length;
+  const activeCount = dispatched.length-doneCount-failedCount;
+  let summaryHtml = "";
+  if(st.summaryTaskId){
+    summaryHtml = `<div class="atf-summary">📊 队长收尾汇总 → <a href="#/tasks/${Number(st.summaryTaskId)}">任务 #${Number(st.summaryTaskId)}</a></div>`;
+  }else if(doneCount === dispatched.length){
+    summaryHtml = `<div class="actions" style="margin-top:6px"><button type="button" class="btn sm pri" onclick="agentTeamSummarize(false,this)">📊 让队长收尾汇总（1点）</button></div>`;
+  }else if(activeCount===0&&failedCount>0){
+    summaryHtml = `<div class="sub" style="margin-top:4px">旧版小队本轮已结束：已交付 ${doneCount}/${dispatched.length} · 失败 ${failedCount}。请先免费重试失败任务；全部交付后可手动让队长收尾。新建小队由服务端自动汇总。</div>`;
+  }else{
+    summaryHtml = `<div class="sub" style="margin-top:4px">旧版小队进度：已交付 ${doneCount}/${dispatched.length} · 失败 ${failedCount} · 进行中 ${activeCount}。${failedCount?"失败任务可免费重试；":""}全部交付后可手动让队长收尾。新建小队由服务端自动汇总。</div>`;
+  }
+  return `<div class="atf-progress"><div class="atf-p-label">小队任务</div>${rows}${summaryHtml}</div>`;
+}
+let AGENT_TEAM_SUMMARIZING = false;
+async function agentTeamPollTick(){
+  const st = agentTeamState();
+  if(!st || st.serverRunId || !(st.dispatched||[]).length || st.summaryTaskId) return;
+  if(!ME) return;
+  let changed = false;
+  for(const row of st.dispatched){
+    if(["done","failed"].includes(row.status)) continue;
+    try{
+      const t = await api(`/tasks/${Number(row.tid)}`, {timeout: 12000});
+      if(t.status !== row.status){ row.status = t.status; changed = true; }
+    }catch(_){ /* 旧版浮窗只是进度展示，不参与派单 */ }
+  }
+  if(changed) agentTeamPatch(saved => { saved.dispatched = st.dispatched; });
+  const expandedPanel = document.querySelector("#agent-team-float .atf-panel");
+  if(changed && expandedPanel) agentTeamFloatRender(true);
+  // 旧版仅保留只读进度和手动收尾；新小队的自动汇总由服务端负责，
+  // 不再由浏览器的历史 localStorage 擅自创建付费汇总任务。
+}
+async function agentTeamSummarize(auto, btn){
+  if(AGENT_TEAM_SUMMARIZING) return;
+  const st = agentTeamState();
+  if(!st || st.serverRunId || EXP_LAST_SERVER_RUN_ID || st.summaryTaskId) return;
+  const dispatched = (st.dispatched||[]).filter(row => row.status === "done");
+  if(!dispatched.length) return toast("小队还没有已完成的任务");
+  const team = st.team||{};
+  const members = team.members||[];
+  const lead = members.find(m => m.roleInTeam === "队长") || members[0];
+  if(!lead) return;
+  AGENT_TEAM_SUMMARIZING = true;
+  if(btn){ btn.disabled = true; btn.innerHTML = `<span class="spin"></span> 队长汇总中…`; }
+  try{
+    const payload = {leader_idx: lead.idx,
+      task_ids: dispatched.map(row => Number(row.tid)),
+      query: st.query||"", team_name: team.teamName||"经营协同小队"};
+    payload.request_key = persistentMutationRequestKey("teamsummary", String(lead.idx), payload);
+    const r = await api("/experts/team-summary",{method:"POST", body: payload, timeout: 25000});
+    const tid = Number(r.task_id||0);
+    if(Number.isInteger(tid) && tid > 0){
+      clearPersistentMutationRequestKey("teamsummary", String(lead.idx), payload.request_key);
+      agentTeamPatch(saved => { saved.summaryTaskId = tid; });
+      const latestTeamState=agentTeamState();
+      agentTeamFloatRender(!(latestTeamState&&latestTeamState.collapsed));
+      toast(auto ? "小队全部交付,队长已自动开始收尾汇总" : "队长已开始收尾汇总");
+    }
+  }catch(e){
+    if(!auto) toast(e.message||"汇总派单失败");
+  }finally{
+    AGENT_TEAM_SUMMARIZING = false;
+    if(btn){ btn.disabled = false; btn.innerHTML = "📊 让队长收尾汇总（1点）"; }
+  }
 }
 function agentTeamsDag(members){
   if(!members.length) return "";
@@ -3678,7 +4078,7 @@ async function jobView(id){
       ${j.status==="paused"?`<button class="btn sm ok" onclick="resumeJob(${j.id})">▶️ 恢复开工</button>`:""}
       ${j.status==="done"?`<a class="btn pri" href="#/delivery/${j.id}">📦 查看交付包</a>`:""}
       ${["failed","cancelled"].includes(j.status)?`<button class="btn pri sm" onclick="rebrief(${j.id})">🔁 复制 Brief 重新开单</button>`:""}
-      ${!["done","cancelled"].includes(j.status)?`<button class="btn bad sm" onclick="cancelWholeJob(${j.id})">终止工单</button>`:""}
+      ${!["done","cancelled"].includes(j.status)?`<button class="btn bad sm" onclick="cancelWholeJob(${j.id})">${j.report_revision_running?"取消本次改版":"终止工单"}</button>`:""}
       ${isAdmin()?`<button class="btn bad sm" onclick="deleteJob(${j.id})" title="移入回收站,可恢复">🗑 删除</button>`:""}
     </div>
     <div class="kv"><span>Brief:${esc(j.brief.direction)}</span><span>模式:${esc(MODE_LABEL[j.mode]||j.mode)}</span>
@@ -3721,7 +4121,11 @@ function stationPanel(j, idx){
       ${stepsLog(idx, r.steps, true)}</div></div>`;
   if(r.status==="failed")
     return `<div class="card">${head}<div class="out"><div class="notice red">${esc(r.review_comment||"执行失败")}</div>
-      <div class="actions"><button class="btn pri" onclick="act(${j.id},${idx},'rerun')">🔄 重试本工位</button></div>
+      ${j.status==="done"&&idx===9?`<div class="notice">本次改版没有成功，上一版报告仍保留在交付包里。</div>
+        <div class="actions"><button class="btn pri" onclick="redoCompletedReport(${j.id})">按意见再改一版</button>
+          <button class="btn" onclick="showVersions(${j.id},9)">查看历史版本</button>
+          <a class="btn" href="#/delivery/${j.id}">查看上一版交付包</a></div>`:
+      `<div class="actions"><button class="btn pri" onclick="act(${j.id},${idx},'rerun')">🔄 重试本工位</button></div>`}
       ${stepsLog(idx, r.steps, true)}</div></div>`;
   if(r.status==="skipped")
     return `<div class="card">${head}<div class="out sub">本工位按配置跳过(演绎师默认关闭,可在 Brief 勾选启用)。</div></div>`;
@@ -3744,10 +4148,25 @@ function actionsBar(j, idx, r){
       ${isPublish?`<span class="sub">发布是不可逆动作,永远需要老板终审</span>`:""}</div>`;
   }
   if(r.status==="done")
-    return `<div class="actions"><button class="btn" onclick="rejectStation(${j.id},${idx},true)">🔄 携带意见重跑</button>
-      ${r.versions>1?`<button class="btn sm" onclick="showVersions(${j.id},${idx})">历史版本</button>`:""}
-      <span class="sub">重跑后下游工位将自动重算</span></div>`;
+    return j.status==="done"
+      ?(idx===9?`<div class="actions"><button class="btn pri" onclick="redoCompletedReport(${j.id})">按意见改一版复盘报告</button>
+          ${r.versions>1?`<button class="btn sm" onclick="showVersions(${j.id},${idx})">历史版本</button>`:""}
+          <span class="sub">旧报告保留，新版不重复扣整单点数。</span></div>`:
+        `<div class="sub">整单已完成；其他工位的重做请复制 Brief 新开工单。</div>`)
+      :`<div class="actions"><button class="btn" onclick="rejectStation(${j.id},${idx},true)">🔄 携带意见重跑</button>
+          ${r.versions>1?`<button class="btn sm" onclick="showVersions(${j.id},${idx})">历史版本</button>`:""}
+          <span class="sub">重跑后下游工位将自动重算</span></div>`;
   return "";
+}
+async function redoCompletedReport(jobId){
+  const comment=await uiPrompt({title:"在原复盘报告上改一版",message:"写清要保留什么、修改什么、补充什么。旧版会保留，成功后交付包更新为新版。",label:"修改意见",multiline:true,requiredMessage:"请填写修改意见",confirmText:"生成新版报告"});
+  if(comment===null) return;
+  if(!comment.trim()||comment.length>2000) return toast("修改意见不能为空且不能超过 2000 字");
+  try{
+    const result=await api(`/jobs/${jobId}/report/revise`,{method:"POST",body:{comment:comment.trim()}});
+    toast(`复盘报告 v${result.version} 已开始改版；旧版仍可查看`);
+    location.hash=`#/job/${jobId}`; render(true);
+  }catch(e){toast(e.message);}
 }
 async function act(jobId, idx, action, payload){
   try{ await api(`/jobs/${jobId}/stations/${idx}/action`,{method:"POST",body:{action,payload:payload||{}}});
@@ -3916,6 +4335,7 @@ async function deliveryView(id){
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <h2 style="flex:1;margin:0;min-width:min(100%,220px)">📦 交付包 · ${esc(d.title)}</h2>
       <a class="btn" href="#/job/${id}">← 回工单</a>
+      ${d.retro?.report?`<button class="btn" onclick="redoCompletedReport(${id})">✏️ 按意见改一版报告</button>`:""}
       <button class="btn pri" onclick="tvCreate(${id},this)">🎬 一键成片 3点</button>
       <a class="btn" href="/api/jobs/${id}/export.md" download>⬇️ 纯文本</a>
       <a class="btn" href="/api/jobs/${id}/export.pdf" download>⬇️ PDF</a>
@@ -5454,12 +5874,170 @@ async function prodDetail(idx,identityRef,btn){
     row.style.display=""; btn.textContent="收起";
   }catch(e){ toast(e.message); } btn.disabled=false; if(btn.textContent.includes("spin")) btn.textContent="看产出";
 }
+const BRAND_FACT_LABELS = {
+  brand_name:"品牌名",store_name:"门店名",store_address:"门店完整地址（含城市）",slogan:"品牌口号",philosophy:"品牌理念",
+  signature:"招牌产品 / 服务",logo_url:"Logo 图片链接",tone:"品牌调性",
+  business:"主营业务",audience:"目标客群",selling_points:"核心卖点",
+  taboo:"表达禁忌",keywords:"常用话术"
+};
+function brandSourceHtml(source){
+  if(!source) return '<span class="sub">未附来源</span>';
+  if(source.kind==="manual") return '<span class="sub">✍️ 老板手工确认</span>';
+  const url=String(source.url||"");
+  const link=/^https?:\/\//i.test(url)?`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">查看原始网页 ↗</a>`:"";
+  return `<div class="sub">来源：${esc(source.title||"公开网页")} ${link}</div>
+    ${source.excerpt?`<div class="sub" style="white-space:pre-wrap">证据片段：${esc(source.excerpt)}</div>`:""}`;
+}
+async function brandView(packageId){
+  const listed=await api("/brand-packages");
+  const items=listed.items||[];
+  const selectedId=Number(packageId)||Number(items.find(p=>p.status==="draft")?.id)||Number(listed.active_id)||Number(items[0]?.id)||0;
+  const p=selectedId?await api(`/brand-packages/${selectedId}`):null;
+  const facts=p?.facts||[];
+  const editing=isAdmin()&&["draft","failed"].includes(p?.status);
+  const status={draft:"待审阅",failed:"采集失败",confirmed:"已生效",superseded:"历史版本",collecting:"采集中"};
+  const options=items.map(item=>`<option value="${Number(item.id)}" ${Number(item.id)===selectedId?"selected":""}>${esc(item.brand_name||"未命名品牌")} · v${Number(item.version)||1} · ${status[item.status]||item.status}</option>`).join("");
+  const factRows=facts.map(f=>{
+    const fid=Number(f.id); const key=String(f.key||"");
+    const localLogo=key==="logo_url"?safeAssetUrl(f.value):"";
+    const externalLogo=key==="logo_url"&&String(f.value||"").startsWith("https://")?safeExternalUrl(f.value):"";
+    return `<div class="topic" style="margin:10px 0" data-brand-fact="${fid}">
+      <label for="bp-value-${fid}"><b>${esc(BRAND_FACT_LABELS[key]||key)}</b></label>
+      ${editing?`<textarea id="bp-value-${fid}" style="min-height:56px" maxlength="1200">${esc(f.value||"")}</textarea>`
+        :`<div style="white-space:pre-wrap">${esc(f.value||"—")}</div>`}
+      ${localLogo?`<a href="${esc(localLogo)}" target="_blank" rel="noopener noreferrer" style="display:inline-block;margin-top:8px"><img src="${esc(localLogo)}" alt="当前品牌 Logo 预览" loading="lazy" style="display:block;max-width:180px;max-height:120px;object-fit:contain;background:#fff;border:1px solid #d8cfbe;border-radius:8px;padding:8px"><span class="sub">点击放大核对 Logo</span></a>`:""}
+      ${externalLogo?`<div class="sub" style="margin-top:6px">这是外部图片地址，请先<a href="${esc(externalLogo)}" target="_blank" rel="noopener noreferrer">打开原图核对 ↗</a>，确认权属与图样后再入库。</div>`:""}
+      ${brandSourceHtml(f.source)}
+      ${editing?`<div class="actions"><button class="btn sm" onclick="brandSaveFact(${selectedId},${fid},this)">保存修改</button>
+        <button class="btn sm bad" onclick="brandRemoveFact(${selectedId},${fid},this)">去掉这项</button></div>
+        <label for="bp-correction-${fid}">如果这项有误，指出错在哪里并重抓</label>
+        <textarea id="bp-correction-${fid}" style="min-height:46px" placeholder="例：同名品牌不是我这家；官网的门店名应是……"></textarea>
+        <button class="btn sm" onclick="brandRecrawl(${selectedId},${fid},this)">按纠错说明重抓</button>`:""}
+    </div>`;
+  }).join("");
+  $("#main").innerHTML=`<div class="card"><h2>🏷️ 品牌知识包</h2>
+    <div class="sub">公开资料先供你逐项审阅。<b>只有点击“确认入库”后</b>，数字员工才会以该版门店名、口号、理念、招牌和品牌调性为准；检索结果不会自动生效。</div>
+    ${isAdmin()?`<div class="row" style="margin-top:16px"><div><label for="bp-name">输入品牌名，采集公开资料</label>
+      <input id="bp-name" maxlength="120" placeholder="例：完整品牌名；同名品牌可加城市"></div>
+      <div><label for="bp-store-hint">门店 / 城市（可选，帮助区分同名品牌）</label>
+      <input id="bp-store-hint" maxlength="120" placeholder="例：杭州滨江店"></div></div>
+      <div class="actions"><button class="btn pri" onclick="brandCollect(this)">联网采集，先生成待审阅草稿</button></div>`:""}
+    ${items.length?`<div style="margin-top:16px"><label for="bp-select">查看知识包版本</label>
+      <select id="bp-select" onchange="location.hash='#/brand/'+this.value">${options}</select></div>`
+      :`<div class="empty">还没有品牌知识包。${isAdmin()?"输入品牌名开始采集；也可以继续使用原有企业档案。":"请企业主先采集并确认。"}</div>`}
+    ${p?`<div class="notice" style="margin-top:16px"><b>${esc(p.brand_name||"品牌")}</b> · v${Number(p.version)||1} · ${status[p.status]||esc(p.status)}
+      ${Number(listed.active_id)===selectedId?" · 当前员工生效版":""}
+      ${p.status==="failed"?`<div>${esc(p.failure_reason||"没有找到足以核验的公开资料。可换更完整的品牌名重试，或补充官网线索。")}</div>`:""}</div>
+      ${facts.length?factRows:p.status==="draft"?`<div class="empty">草稿没有有效事实，不能确认入库。</div>`:""}
+      ${editing?`<div class="topic" style="margin-top:12px"><b>手工补一项</b>
+        <div class="row"><div><label for="bp-add-key">资料类型</label><select id="bp-add-key">${Object.entries(BRAND_FACT_LABELS).map(([k,v])=>`<option value="${esc(k)}">${esc(v)}</option>`).join("")}</select></div>
+          <div><label for="bp-add-value">已确认的内容</label><input id="bp-add-value" maxlength="1200" placeholder="请填你确认准确的品牌资料"></div></div>
+        <div class="actions"><button class="btn" onclick="brandAddFact(${selectedId},this)">补充到待审阅草稿</button></div></div>
+        <div class="topic" style="margin-top:12px"><b>上传本企业 Logo</b>
+          <div class="sub">PNG、JPG、WebP，最大 8MB；上传后记为手工确认资料，仅本企业可用。确认入库后活动效果图才会读取它。</div>
+          <input id="bp-logo-file" type="file" accept="image/png,image/jpeg,image/webp" style="margin-top:8px">
+          <div class="actions"><button class="btn" onclick="brandUploadLogo(${selectedId},this)">上传到当前草稿</button></div></div>
+        ${p.status==="draft"?`<div class="actions"><button class="btn pri" onclick="brandConfirm(${selectedId},this)">确认入库，作为全部员工的品牌依据</button></div>`:""}`:""}
+      ${p.status==="confirmed"?`<div class="sub" style="margin-top:12px">此版已锁定。需要修正时，请重新采集或创建新草稿；历史版本仍可查看。</div>`:""}`:""}
+  </div>`;
+}
+async function brandCollect(btn){
+  const brand_name=$("#bp-name")?.value.trim()||"";
+  const store_hint=$("#bp-store-hint")?.value.trim()||"";
+  if(!brand_name) return toast("请先填写品牌名");
+  if(brandHasUnsubmittedEdits()) return toast("当前知识包还有未保存的修改，请先保存或清空后再采集新版本");
+  btn.disabled=true;btn.innerHTML='<span class="spin"></span> 正在采集与核对来源…';
+  try{
+    const r=await api("/brand-packages/collect",{method:"POST",body:{brand_name,store_hint},timeout:390000,longRunning:true});
+    const p=r.package||r;
+    if(p.status==="failed") toast("未找到可核验资料，已标记采集失败；可以补充品牌线索再试");
+    else if(p.facts?.length===1&&p.facts[0]?.key==="brand_name") toast("只采集到可核验品牌名；其他资料请补充或重抓后再确认");
+    else toast("采集完成，请先逐项审阅，确认后才会同步给员工");
+    location.hash=`#/brand/${Number(p.id)}`;
+    render(true);
+  }catch(e){toast(e.message);btn.disabled=false;btn.textContent="联网采集，先生成待审阅草稿";}
+}
+function brandHasUnsubmittedEdits(){
+  if([...document.querySelectorAll('[data-brand-fact] textarea[id^="bp-value-"]')]
+      .some(field=>field.value.trim()!==field.defaultValue.trim())) return true;
+  if([...document.querySelectorAll('[id^="bp-correction-"]')]
+      .some(field=>field.value.trim())) return true;
+  return !!($("#bp-add-value")?.value.trim()||$("#bp-logo-file")?.files?.length);
+}
+function brandLogoPendingBlocksMutation(){
+  if(!$("#bp-logo-file")?.files?.length) return false;
+  toast("已选择 Logo 但尚未上传，请先上传或清空文件选择");
+  return true;
+}
+async function brandRenderKeepingDrafts(excludedIds=[]){
+  const excluded=new Set(excludedIds);
+  const drafts=[...document.querySelectorAll('#main [id^="bp-"]')]
+    .filter(field=>["INPUT","TEXTAREA"].includes(field.tagName)
+      && field.type!=="file" && !excluded.has(field.id)
+      && field.value!==field.defaultValue)
+    .map(field=>[field.id,field.value]);
+  const addKey=$("#bp-add-key")?.value||"";
+  await render(true);
+  for(const [id,value] of drafts){const field=document.getElementById(id);if(field)field.value=value;}
+  if(addKey&&$("#bp-add-key"))$("#bp-add-key").value=addKey;
+}
+async function brandSaveFact(pid,fid,btn){
+  const value=$(`#bp-value-${fid}`)?.value.trim()||"";
+  if(!value) return toast("内容不能留空；不要这项可点“去掉这项”");
+  if(brandLogoPendingBlocksMutation()) return;
+  btn.disabled=true;
+  try{await api(`/brand-packages/${pid}/facts/${fid}`,{method:"PUT",body:{value}});toast("已保存到草稿，尚未同步给员工");await brandRenderKeepingDrafts([`bp-value-${fid}`]);}
+  catch(e){toast(e.message);btn.disabled=false;}
+}
+async function brandRemoveFact(pid,fid,btn){
+  if(brandLogoPendingBlocksMutation()) return;
+  if(!await uiConfirm("确定从当前草稿去掉这项资料？不会影响已生效的版本。",{okText:"去掉"})) return;
+  btn.disabled=true;
+  try{await api(`/brand-packages/${pid}/facts/${fid}`,{method:"DELETE"});toast("已从草稿去掉");await brandRenderKeepingDrafts([`bp-value-${fid}`,`bp-correction-${fid}`]);}
+  catch(e){toast(e.message);btn.disabled=false;}
+}
+async function brandRecrawl(pid,fid,btn){
+  const correction=$(`#bp-correction-${fid}`)?.value.trim()||"";
+  if(correction.length<6) return toast("请写清楚哪里错了，至少 6 个字");
+  if(brandLogoPendingBlocksMutation()) return;
+  btn.disabled=true;btn.innerHTML='<span class="spin"></span> 正在按纠错说明重抓…';
+  try{await api(`/brand-packages/${pid}/facts/${fid}/recrawl`,{method:"POST",body:{correction},timeout:390000,longRunning:true});toast("已更新这项，请检查来源和内容后再确认");await brandRenderKeepingDrafts([`bp-value-${fid}`,`bp-correction-${fid}`]);}
+  catch(e){toast(e.message);btn.disabled=false;btn.textContent="按纠错说明重抓";}
+}
+async function brandAddFact(pid,btn){
+  const key=$("#bp-add-key")?.value||"",value=$("#bp-add-value")?.value.trim()||"";
+  if(!value) return toast("请填写已确认的内容");
+  if(brandLogoPendingBlocksMutation()) return;
+  btn.disabled=true;
+  try{await api(`/brand-packages/${pid}/facts`,{method:"POST",body:{key,value}});toast("已加到草稿，来源标记为老板手工确认");await brandRenderKeepingDrafts(["bp-add-value"]);}
+  catch(e){toast(e.message);btn.disabled=false;}
+}
+async function brandUploadLogo(pid,btn){
+  const input=$("#bp-logo-file"), file=input?.files?.[0];
+  if(!file) return toast("先选择本企业 Logo 图片");
+  if(file.size>8*1024*1024) return toast("Logo 不得超过 8MB");
+  btn.disabled=true;
+  const fd=new FormData(); fd.append("file",file,file.name);
+  try{
+    const uploaded=await xhrUpload(`/api/brand-packages/${pid}/logo`,fd,input);
+    const logoFact=(uploaded.package?.facts||[]).find(f=>f.key==="logo_url");
+    toast("Logo 已存入当前草稿；核对后再确认入库");
+    await brandRenderKeepingDrafts(logoFact?[`bp-value-${Number(logoFact.id)}`]:[]);
+  }catch(e){toast(e.message);btn.disabled=false;}
+}
+async function brandConfirm(pid,btn){
+  if(brandHasUnsubmittedEdits()) return toast("还有未保存、未重抓、未补充或未上传的品牌资料，请逐项完成后再确认入库");
+  if(!await uiConfirm("确认这版品牌知识包准确并同步给全部数字员工？生效后本版锁定，后续修正要创建新版本。",{okText:"确认入库",okClass:"pri"})) return;
+  btn.disabled=true;
+  try{await api(`/brand-packages/${pid}/confirm`,{method:"POST"});toast("品牌知识包已生效，数字员工将优先使用这一版");render(true);}
+  catch(e){toast(e.message);btn.disabled=false;}
+}
 async function companyView(){
   const c = await api("/company");
   const p = c.profile || {};
   const f = (k,label,ph)=>`<label>${esc(label)}</label><input id="cp-${k}" value="${esc(p[k]||"")}" placeholder="${esc(ph)}">`;
   $("#main").innerHTML = `<div class="card"><h2>🏢 企业档案</h2>
-    <div class="sub">把企业介绍/品牌手册/产品说明/话术规范粘进来,点「提炼并同步」——AI 会压成一份固定档案,<b>自动注入每一个数字员工</b>(内容团队 / 行业专家 / 专家商量),让他们产出更懂你的企业、更贴品牌调性、不踩表达禁忌。也会自动带上经验库里的企业知识。</div>
+    <div class="sub">把企业介绍/品牌手册/产品说明/话术规范粘进来,点「提炼并同步」——AI 会压成一份企业档案,供数字员工参考。若已有<a href="#/brand">已确认的品牌知识包</a>，店名、口号、理念、招牌等品牌事实以知识包为准；本页资料只补充知识包未覆盖的部分。也会带上经验库里的相关企业知识。</div>
     ${c.injected?(c.filled>=(c.total_fields||7)
       ?`<div class="notice" style="background:#e7f6ec;border-color:#8fd3a6">✅ 企业档案已生效(7/7 项齐全),正注入全部数字员工</div>`
       :`<div class="notice" style="background:#fff3d6">🟡 企业档案部分生效:已填 ${c.filled}/${c.total_fields||7} 项。员工只知道已填的部分——<b>空着的字段(如调性/禁忌)不会凭空生效</b>,建议补全后重新保存。</div>`)
@@ -6125,6 +6703,12 @@ async function adminView(){
       <div><label>API Key ${ADM.provider.yunwu_key?`<span class="tag">当前:${esc(ADM.provider.yunwu_key)}</span>`:`<span class="tag">未配置</span>`}</label>
         <input id="adm-key" type="password" placeholder="sk-…(留空不改)"></div>
     </div>
+    <h3>🐟 TinyFish 免费联网情报(选配)</h3>
+    <div class="sub" style="margin-bottom:6px">配置后老板参谋、工具箱、员工调研优先走 <a href="https://docs.tinyfish.ai/" target="_blank" rel="noreferrer">TinyFish</a> 真浏览器搜索与抓取(Search/Fetch 免费,动态页也抓得到);失败自动回退原联网通道。</div>
+    <div class="row">
+      <div><label>TinyFish API Key ${ADM.provider.tinyfish_key?`<span class="tag">当前:${esc(ADM.provider.tinyfish_key)}</span>`:`<span class="tag">未配置</span>`}</label>
+        <input id="adm-tinyfish" type="password" placeholder="tf-…(留空不改)"></div>
+    </div>
     <div class="actions"><button class="btn pri" onclick="admSaveProvider()">💾 保存供应商</button>
       <span class="sub">所有数字员工与工具能力统一使用此 API,不依赖服务器本地模型登录态。</span></div></div>
   <div class="card"><h2>🎥 数字人引擎</h2>
@@ -6293,6 +6877,7 @@ async function admComplianceSave(keys){
 async function admSaveProvider(){
   const body = {yunwu_base:$("#adm-base").value.trim()};
   const k = $("#adm-key").value.trim(); if(k) body.yunwu_key = k;
+  const tf = $("#adm-tinyfish")?.value.trim(); if(tf) body.tinyfish_key = tf;
   try{ await api("/settings",{method:"PUT",body}); toast("供应商已保存"); render(); }catch(e){ toast(e.message); }
 }
 async function admSaveMail(){
@@ -8686,9 +9271,10 @@ async function remixGo(btn){
   if(!topic&&!script) return toast("主题和文案至少填一个");
   btn.disabled=true; btn.textContent="排队…";
   try{
-    await api("/text-video",{method:"POST",body:{mode:"clips", clips:sel, topic, script,
+    const result=await api("/text-video",{method:"POST",body:{mode:"clips", clips:sel, topic, script,
       title:(topic||script).slice(0,20), voice_id:$("#rm-voice").value, bgm:$("#rm-bgm")?.value||"warm"}});
     toast("🎞️ 已开工:看画面→写稿→配音→混剪,约3-6分钟,完成推微信"); varsTvs();
+    (result.brand_warnings||[]).forEach(toast);
   }catch(e){ toast(e.message); }
   btn.disabled=false; btn.textContent="🎞️ 开始混剪(3点)";
 }
@@ -8939,7 +9525,8 @@ async function menuGo(btn){
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="✍️ 开始写"; }
 }
 function varsHtml(V){
-  return (V.variants||[]).map((v,i)=>`<div class="topic"><span class="tag">${esc(v.style||("版本"+(i+1)))}</span>
+  return (V.brand_warnings||[]).map(w=>`<div class="notice">${esc(w)}</div>`).join("")
+    +(V.variants||[]).map((v,i)=>`<div class="topic"><span class="tag">${esc(v.style||("版本"+(i+1)))}</span>
     <b>${esc(v.hook||"")}</b>
     <div class="sub" style="margin-top:4px;white-space:pre-wrap">${esc(v.script||"")}</div>
     <div class="actions" style="margin-top:6px">
@@ -8956,10 +9543,11 @@ async function varTv(i, btn){
   const v = (TS.vars?.variants||[])[i]; if(!v) return;
   btn.disabled=true; btn.textContent="排队…";
   try{
-    await api("/text-video",{method:"POST",body:{title:(v.hook||v.style||"").slice(0,20), script:v.script,
+    const result=await api("/text-video",{method:"POST",body:{title:(v.hook||v.style||"").slice(0,20), script:v.script,
       voice_id:$("#vr-voice")?.value||"", image_query:$("#vr-imgq")?.value||v.style||"",
       bgm:$("#vr-bgm")?.value||"warm"}});
     toast("🎬 已开工,约2-4分钟,下方可看进度"); varsTvs();
+    (result.brand_warnings||[]).forEach(toast);
   }catch(e){ toast(e.message); }
   btn.disabled=false; btn.textContent="🎬 图文成片(3点)";
 }
@@ -8988,3 +9576,4 @@ async function tvDel(id){
 }
 
 sse(); render(); agentTeamFloatRestore();
+setInterval(()=>{ if(document.visibilityState==="visible") agentTeamPollTick().catch(()=>{}); }, 30000);

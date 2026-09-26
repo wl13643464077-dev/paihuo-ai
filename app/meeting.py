@@ -1539,7 +1539,7 @@ async def execute_actions(meeting_id: int, broadcast) -> list[int]:
     if scope_row:
         _emit_meeting_update(broadcast, meeting_id, scope_row)
     for tid in started:
-        asyncio.create_task(taskrunner.run_task(tid, broadcast))
+        taskrunner.start_worker(tid, broadcast)
     return task_ids
 
 
@@ -1714,7 +1714,7 @@ async def _await_task_terminal(
         if row["status"] in ("done", "failed"):
             return row
         if row["status"] == "queued":
-            asyncio.create_task(taskrunner.run_task(task_id, broadcast))
+            taskrunner.start_worker(task_id, broadcast)
         await asyncio.sleep(TEAM_POLL_SECONDS)
     return None
 

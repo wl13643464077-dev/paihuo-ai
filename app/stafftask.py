@@ -241,13 +241,23 @@ def _branch(tid: int, branch_id: int, *, active_only: bool = True) -> dict:
 
 
 def _industry_ok(user: Mapping[str, Any], branch: Mapping[str, Any]) -> bool:
-    """成员要开通了门店所在行业的板块，否则连照片都看不了。"""
-    if str(user.get("role") or "") in ("root", "owner"):
+    """与照片权限一致：先校验当前租户行业，再校验成员的行业模块。"""
+    role = str(user.get("role") or "")
+    industry = str(branch.get("industry_key") or "")
+    tid = int(user.get("tenant_id") or 0)
+    if not industry or (tid != 1 and role != "root" and not db.one(
+        "SELECT 1 AS ok FROM tenant_industry WHERE tenant_id=? AND industry_key=?",
+        (tid, industry),
+    )):
+        return False
+    if role in ("root", "owner"):
         return True
-    return str(branch.get("industry_key") or "") in (user.get("modules") or [])
+    return industry in (user.get("modules") or [])
 
 
 def _branch_visible(user: Mapping[str, Any], branch: Mapping[str, Any]) -> bool:
+    if int(user.get("tenant_id") or 0) != int(branch.get("tenant_id") or 0):
+        return False
     if sees_all_branches(user):
         return _industry_ok(user, branch)
     return int(branch["id"]) in _bound_branch_ids(
@@ -588,23 +598,31 @@ def _task_row(tid: int, task_id: Any) -> dict:
     return row
 
 
+def _task_scope_visible(actor: Mapping[str, Any], row: Mapping[str, Any]) -> bool:
+    """历史指派/创建记录不授予权限，门店任务始终受当前权限约束。"""
+    if int(actor.get("tenant_id") or 0) != int(row.get("tenant_id") or 0):
+        return False
+    branch_id = int(row.get("branch_id") or 0)
+    if not branch_id:
+        return True
+    try:
+        branch = _branch(int(row["tenant_id"]), branch_id, active_only=False)
+    except StaffTaskNotFound:
+        return False
+    return _branch_visible(actor, branch)
+
+
 def _can_view(actor: Mapping[str, Any], row: Mapping[str, Any]) -> bool:
+    if not _task_scope_visible(actor, row):
+        return False
     uid = int(actor["id"])
     if int(row.get("assignee_user_id") or 0) == uid:
         return True
-    branch_id = int(row.get("branch_id") or 0)
-    if branch_id and str(actor.get("role") or "") == "member":
-        branch = db.one(
-            "SELECT id,industry_key FROM store_branch WHERE id=? AND tenant_id=?",
-            (branch_id, int(row["tenant_id"])),
-        )
-        if not branch or not _industry_ok(actor, branch):
-            return False
     if sees_all_branches(actor):
         return True
     if int(row.get("created_by") or 0) == uid:
         return True
-    if not branch_id or branch_id not in _bound_branch_ids(int(row["tenant_id"]), uid):
+    if not row.get("branch_id"):
         return False
     if _member_title(actor) == "manager":
         return True
@@ -673,8 +691,18 @@ def list_tasks(
     """老板看全部(可按门店/状态/负责人筛)；店长只看自己门店；店员只看自己的。"""
     actor = _actor(tid, actor_user)
     uid = int(actor["id"])
-    where = ["t.tenant_id=?", "t.deleted_at IS NULL"]
+    where = [
+        "t.tenant_id=?", "t.deleted_at IS NULL",
+        "(t.branch_id IS NULL OR EXISTS (SELECT 1 FROM store_branch sb "
+        "WHERE sb.id=t.branch_id AND sb.tenant_id=t.tenant_id))",
+    ]
     params: list[Any] = [int(tid)]
+    if int(tid) != 1 and str(actor.get("role") or "") != "root":
+        where.append(
+            "(t.branch_id IS NULL OR t.branch_id IN (SELECT sb.id FROM store_branch sb "
+            "JOIN tenant_industry ti ON ti.tenant_id=sb.tenant_id "
+            "AND ti.industry_key=sb.industry_key WHERE sb.tenant_id=t.tenant_id))"
+        )
     if str(actor.get("role") or "") == "member":
         # 成员(含总监)只看自己开通了行业板块的门店的活；不挂门店的活不受限
         where.append(
@@ -686,6 +714,8 @@ def list_tasks(
     if not sees_all_branches(actor):
         bound = "t.branch_id IN (SELECT ub.branch_id FROM user_branch ub " \
                 "WHERE ub.tenant_id=? AND ub.user_id=?)"
+        where.append(f"(t.branch_id IS NULL OR {bound})")
+        params += [int(tid), uid]
         if can_dispatch(actor):   # 店长
             where.append(f"(t.assignee_user_id=? OR t.created_by=? OR {bound})")
             params += [uid, uid, int(tid), uid]
@@ -852,8 +882,7 @@ def create_task(
 
 
 def _replay(tid: int, actor: Mapping[str, Any] | None, row: Mapping[str, Any]) -> dict:
-    if actor is not None and not _can_view(actor, row) \
-            and int(row.get("created_by") or 0) != int(actor["id"]):
+    if actor is not None and not _can_view(actor, row):
         # 别人的请求编号撞上了：不泄露那条任务
         raise StaffTaskConflict("请求编号已被使用，请刷新后重试")
     item = _public(tid, [row])[0]
@@ -904,7 +933,7 @@ def assign_task(
 
 
 def _can_submit(actor: Mapping[str, Any], row: Mapping[str, Any]) -> bool:
-    if row.get("status") != "todo":
+    if row.get("status") != "todo" or not _task_scope_visible(actor, row):
         return False
     assignee = row.get("assignee_user_id")
     if assignee is not None:
@@ -974,6 +1003,14 @@ def submit_task(
         raise
     try:
         with db.atomic() as connection:
+            # 图片处理可能较慢，提交事务内再读当前权限，避免处理中撤权后
+            # 仍凭请求开始时的指派/门店快照写入；失败会清理刚保存的图片。
+            current_actor = _actor(tid, actor_user)
+            current = _visible_task(tid, current_actor, row["id"])
+            if current["status"] != "todo":
+                raise _Lost()
+            if not _can_submit(current_actor, current):
+                raise StaffTaskForbidden("这件事没派给你，不能替别人交")
             changed = connection.execute(
                 "UPDATE staff_task SET status='submitted',assignee_user_id=?,"
                 "submitted_at=?,submit_note=?,ai_check_json=NULL,updated_at=? "
@@ -1000,7 +1037,7 @@ def submit_task(
             _event(connection, tid, int(row["id"]), uid, "submitted", summary, ts)
     except _Lost:
         _discard(stored, asset_root)
-        latest = _task_row(tid, row["id"])
+        latest = _visible_task(tid, _actor(tid, actor_user), row["id"])
         if latest["status"] == "submitted" and int(latest.get("assignee_user_id") or 0) == uid:
             item = _public(tid, [latest], with_photos=True)[0]
             item["replayed"] = True
@@ -1224,7 +1261,15 @@ def todo_for_user(tid: int, uid: int, *, now: float | None = None) -> dict:
         raise StaffTaskForbidden("账号不存在或已停用")
     ts = time.time() if now is None else float(now)
     today = timeutil.today_cn(ts)
-    bound = sorted(_bound_branch_ids(tid, uid))
+    bound = sorted(
+        int(branch["id"])
+        for branch in db.q(
+            "SELECT sb.id,sb.tenant_id,sb.industry_key FROM store_branch sb "
+            "JOIN user_branch ub ON ub.branch_id=sb.id AND ub.tenant_id=sb.tenant_id "
+            "WHERE sb.tenant_id=? AND ub.user_id=?", (tid, uid),
+        )
+        if _industry_ok(user, branch)
+    )
     rows = db.q(
         "SELECT * FROM staff_task WHERE tenant_id=? AND deleted_at IS NULL "
         "AND (status='todo' OR (status='submitted' AND submitted_at>=?)) "
@@ -1234,7 +1279,7 @@ def todo_for_user(tid: int, uid: int, *, now: float | None = None) -> dict:
         (tid, ts - 3 * 86400, uid, tid, uid),
     )
     tasks = [
-        t for t in _public(tid, rows, now=ts)
+        t for t in _public(tid, [r for r in rows if _can_view(user, r)], now=ts)
         if t["status"] == "todo" or t["assignee_user_id"] == uid
     ]
     for task in tasks:

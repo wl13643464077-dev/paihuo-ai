@@ -485,6 +485,23 @@ class ResearchChannelTests(Phase3Base):
                       if b["messages"][0]["content"] == cnmodels.JSON_SYSTEM]
         self.assertEqual(2, len(json_calls))
 
+    async def test_configured_direct_research_precedes_tinyfish(self):
+        self.configure_research()
+        with patch("app.tinyfish.available", return_value=True), \
+                patch.object(providers, "_tinyfish_web_json", AsyncMock()) as tinyfish:
+            got = await providers.call_web_json("核验品牌公开资料", retries=0)
+        self.assertEqual("https://news.example.com/a", got["web_sources"][0]["source_url"])
+        tinyfish.assert_not_awaited()
+
+    async def test_tinyfish_kept_when_no_direct_research_configured(self):
+        evidence = {"data": {"ok": True}, "cost_usd": 0, "tokens": 3,
+                    "web_sources": [{"source_url": "https://news.example.com/a"}]}
+        with patch("app.tinyfish.available", return_value=True), \
+                patch.object(providers, "_tinyfish_web_json", AsyncMock(return_value=evidence)), \
+                patch("app.llm.call", AsyncMock(side_effect=AssertionError("已有真实证据，无需回退"))):
+            got = await providers.call_web_json("核验品牌公开资料", retries=0)
+        self.assertEqual(evidence, got)
+
     async def test_builtin_search_uses_enable_search_and_verifies_urls(self):
         self.enable("dashscope", channel="dashscope", search={"provider": "vendor_builtin"})
         route = cnmodels.research_route()
