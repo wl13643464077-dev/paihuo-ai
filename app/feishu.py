@@ -8,11 +8,10 @@
 import json
 import logging
 import re
-import time
 
 import httpx
 
-from . import auth, db, secureconfig
+from . import auth, db, secureconfig, timeutil
 
 log = logging.getLogger("feishu")
 BASE = "https://open.feishu.cn/open-apis"
@@ -228,7 +227,7 @@ def _know_record(r):
             "复用度": str(m.get("reuse") or ""), "时效性": m.get("timeliness") or "",
             "情绪": m.get("sentiment") or "", "摘要": m.get("summary") or "",
             "来源": "自动沉淀" if r.get("source") == "auto" else "老板手记",
-            "创建时间": time.strftime("%Y-%m-%d %H:%M", time.localtime(r.get("created_at") or 0))}
+            "创建时间": timeutil.format_cn(r.get("created_at"))}
 
 
 def _asset_record(r):
@@ -242,7 +241,7 @@ def _asset_record(r):
             "质量分": str(m.get("quality") or ""), "匹配度": str(m.get("match") or ""),
             "复用度": str(m.get("reuse") or ""), "时效性": m.get("timeliness") or "",
             "摘要": m.get("summary") or "",
-            "创建时间": time.strftime("%Y-%m-%d %H:%M", time.localtime(r.get("created_at") or 0))}
+            "创建时间": timeutil.format_cn(r.get("created_at"))}
 
 
 async def sync_rows(name: str, fields: list, recs: list) -> dict:

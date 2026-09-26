@@ -15,6 +15,8 @@
 """
 from __future__ import annotations
 
+import hmac
+import ipaddress
 import threading
 import time
 
@@ -36,6 +38,10 @@ _ring: list = [{"minute": -1, "n": 0, "err5": 0, "ms_sum": 0.0}
 _counters: dict = {}
 # 量规回调: name -> fn() -> number(读取时惰性求值,注册方无需推数据)
 _gauges: dict = {}
+# 后台循环心跳: name -> {"last": 最后心跳时间, "max_silence": 允许静默秒数,
+#                        "task": 只能在外部观察的协程任务(可空)}
+_loops: dict = {}
+_MAX_LOOPS = 50
 
 
 def _hist_index(ms: float) -> int:
@@ -155,12 +161,104 @@ def snapshot(top: int = 30) -> dict:
     }
 
 
+def register_loop(name: str, max_silence_seconds: float) -> None:
+    """登记一个后台循环:超过 max_silence_seconds 没心跳就算"卡住"。"""
+    name = str(name)[:80]
+    with _lock:
+        if name not in _loops and len(_loops) >= _MAX_LOOPS:
+            return
+        entry = _loops.setdefault(name, {"last": None, "task": None})
+        entry["max_silence"] = max(1.0, float(max_silence_seconds))
+
+
+def beat(name: str, now: float = None) -> None:
+    """后台循环每轮调用一次,登记"我还活着"。未登记的名字按 10 分钟阈值自动登记。"""
+    name = str(name)[:80]
+    ts = time.time() if now is None else float(now)
+    with _lock:
+        entry = _loops.get(name)
+        if entry is None:
+            if len(_loops) >= _MAX_LOOPS:
+                return
+            entry = _loops[name] = {"last": None, "task": None,
+                                    "max_silence": 600.0}
+        entry["last"] = ts
+
+
+def watch_task(name: str, task, now: float = None) -> None:
+    """循环本体不归我们改时(如 scheduler/analyzer),在外面看协程任务是否还活着。
+
+    任务活着就视为健康;任务结束(异常退出/被取消)即判定停止。
+    """
+    name = str(name)[:80]
+    ts = time.time() if now is None else float(now)
+    with _lock:
+        if name not in _loops and len(_loops) >= _MAX_LOOPS:
+            return
+        entry = _loops.setdefault(name, {"max_silence": 600.0})
+        entry["task"] = task
+        entry["last"] = ts
+
+
+def loop_status(now: float = None) -> dict:
+    """各后台循环是否按时心跳。ok=False 表示至少一个循环卡住、停止或从未启动。"""
+    ts = time.time() if now is None else float(now)
+    with _lock:
+        entries = {name: dict(entry) for name, entry in _loops.items()}
+    loops = {}
+    healthy = True
+    for name, entry in sorted(entries.items()):
+        task = entry.get("task")
+        last = entry.get("last")
+        age = None if last is None else max(0.0, ts - last)
+        if task is not None:
+            try:
+                done = bool(task.done())
+            except Exception:
+                done = True
+            status = "stopped" if done else "ok"
+        elif last is None:
+            status = "never"
+        elif age > entry.get("max_silence", 600.0):
+            status = "stale"
+        else:
+            status = "ok"
+        if status != "ok":
+            healthy = False
+        loops[name] = {
+            "status": status,
+            "seconds_since_beat": None if age is None else round(age, 1),
+            "max_silence_seconds": entry.get("max_silence", 600.0),
+        }
+    return {"ok": healthy, "loops": loops}
+
+
+def deep_health_allowed(client_ip: str, supplied_token: str = "",
+                        configured_token: str = "") -> bool:
+    """详细健康检查只给本机直连或持有内部令牌的调用方。
+
+    client_ip 必须是已按受信代理规则解析后的真实来源;经 Caddy 转发的公网
+    请求来源不是回环地址,不会被当成本机。
+    """
+    configured = (configured_token or "").strip()
+    supplied = (supplied_token or "").strip()
+    if configured and len(configured) >= 16 and supplied:
+        if hmac.compare_digest(supplied.encode("utf-8"),
+                               configured.encode("utf-8")):
+            return True
+    try:
+        return ipaddress.ip_address((client_ip or "").strip()).is_loopback
+    except ValueError:
+        return False
+
+
 def reset_for_tests() -> None:
     global _started_at
     with _lock:
         _routes.clear()
         _counters.clear()
         _gauges.clear()
+        _loops.clear()
         for slot in _ring:
             slot["minute"] = -1
             slot["n"] = 0

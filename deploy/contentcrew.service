@@ -27,6 +27,9 @@ Environment=CONTENTCREW_PORT=8899
 Environment=CONTENTCREW_FORWARDED_ALLOW_IPS=127.0.0.1
 Environment=CONTENTCREW_TRUSTED_PROXIES=127.0.0.1/32,::1/128
 Environment=HOME=/var/lib/paihuo
+# 老板们按北京时间过日子:定时任务、日报、"今天"的额度都以北京时间为准。
+Environment=TZ=Asia/Shanghai
+# 硬约束:单进程单 worker(run.sh 固定 --workers 1,应用启动时对数据目录加独占实例锁)。
 Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStartPre=+/usr/bin/python3 /usr/local/lib/paihuo-ops/deploy/start_guard.py --mode application --control-dir /var/lib/paihuo-upgrade --permit /run/paihuo-upgrade/start.permit
 # This check lives in fixed root-owned ops, not the selected release.  A failed
