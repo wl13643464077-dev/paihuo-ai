@@ -46,6 +46,9 @@ def build_msg(kind: str, payload: dict) -> str:
     if kind == "gate":
         return (f"**⛔ 派活 · 审查官拦截**\n工单 #{p.get('job_id')} 《{title}》被质检拦下\n"
                 f"[去处理]({base}/#/job/{p.get('job_id')})")
+    if kind == "job_failed":
+        return (f"**⚠️ 派活 · 工单没做成**\n工单 #{p.get('job_id')} {p.get('summary', '')}\n"
+                f"[看工单]({base}/#/job/{p.get('job_id')})")
     if kind == "retro_due":
         return (f"**📊 派活 · 该复盘了**\n《{title}》({p.get('platform', '')})发布已满 "
                 f"{p.get('day', '')} 天\n把后台数据丢给审查官,看看表现和限流风险\n"
@@ -127,6 +130,7 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
         "awaiting": "有工单等您拍板",
         "done": "内容工单已交付",
         "gate": "审查官拦截了一项内容",
+        "job_failed": "内容工单没做成",
         "retro_due": "发布内容该复盘了",
         "report": p.get("report_name") or "报告已出炉",
         "video": "视频成片已交付",
@@ -154,7 +158,8 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
         or p.get("why")
         or ""
     ).strip()[:240]
-    if kind in {"awaiting", "gate", "member_reviewed"} and p.get("job_id"):
+    if kind in {"awaiting", "gate", "member_reviewed", "job_failed"} \
+            and p.get("job_id"):
         link = f"#/job/{int(p['job_id'])}"
     elif kind == "done" and p.get("job_id"):
         link = f"#/delivery/{int(p['job_id'])}"
@@ -202,6 +207,7 @@ KIND_MODULES = {
     "awaiting": frozenset({"content"}),
     "done": frozenset({"content"}),
     "gate": frozenset({"content"}),
+    "job_failed": frozenset({"content"}),
     "retro_due": frozenset({"content"}),
     "report": frozenset({"content"}),
     "pub": frozenset({"content"}),
