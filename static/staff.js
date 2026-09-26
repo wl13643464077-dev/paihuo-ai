@@ -181,7 +181,7 @@
   }
   function aiHtml(t){
     const a = t.ai_check;
-    if(!a) return t.status==="submitted"&&t.photos&&t.photos.length ? `<div class="ai none">🤖 AI 正在看照片…（只是建议，最后由人来定）</div>` : "";
+    if(!a) return t.status==="submitted"&&t.photos&&t.photos.length ? `<div class="ai none">暂无 AI 验照片建议，等待负责人核对照片</div>` : "";
     if(a.error || !a.verdict) return `<div class="ai none">🤖 ${esc(a.reason||"AI 这次没看成，请直接看照片")}</div>`;
     const label = {pass:"像是做好了", doubt:"拿不准，建议再看看", fail:"像是没做好"}[a.verdict]||"";
     return `<div class="ai ${esc(a.verdict)}">🤖 AI 建议：${esc(label)}${a.reason?`。${esc(a.reason)}`:""}<div class="sub">只是建议，最后由人来定</div></div>`;

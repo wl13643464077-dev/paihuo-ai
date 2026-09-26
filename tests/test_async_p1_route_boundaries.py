@@ -96,6 +96,7 @@ class ReviewedP1RouteCallGraphTests(unittest.TestCase):
         },
         "matrix_publish": {
             "_need_module",
+            "_require_feature",
             "_job_or_404",
             "assetfiles.resolve_tenant_asset",
             "matrixpub.enqueue",
@@ -737,7 +738,15 @@ class CancellationLinearizationTests(unittest.IsolatedAsyncioTestCase):
                 return 42
             return fn(*args, **kwargs)
 
+        def feature_enabled(key, tenant_id=None):
+            # This test exercises cancellation after an authorized enqueue.
+            # Keep the real feature guard in the route; explicitly grant only
+            # the platform feature needed to reach the mocked queue boundary.
+            self.assertEqual("matrix_autopub", key)
+            return True
+
         with mock.patch.object(main.db, "arun", side_effect=fake_arun), \
+                mock.patch.object(main.features, "is_enabled", side_effect=feature_enabled) as feature_check, \
                 mock.patch.object(main.matrixpub, "enqueue", new=enqueue), \
                 mock.patch.object(main.matrixpub, "run_task", new=run_task):
             request = asyncio.create_task(
@@ -750,12 +759,29 @@ class CancellationLinearizationTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
             )
-            await entered.wait()
-            request.cancel()
-            release.set()
-            with self.assertRaises(asyncio.CancelledError):
-                await request
-            await asyncio.wait_for(worker_started.wait(), timeout=1)
+            gate = asyncio.create_task(entered.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    {gate, request}, timeout=5, return_when=asyncio.FIRST_COMPLETED,
+                )
+                if request in done:
+                    # Surface an early route error instead of hanging forever
+                    # waiting for an enqueue that will never be entered.
+                    await request
+                    self.fail("matrix request returned before reaching enqueue")
+                self.assertIn(gate, done, "matrix request did not reach enqueue within 5 seconds")
+                request.cancel()
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await request
+                await asyncio.wait_for(worker_started.wait(), timeout=1)
+            finally:
+                release.set()
+                gate.cancel()
+                if not request.done():
+                    request.cancel()
+                await asyncio.gather(gate, request, return_exceptions=True)
+            feature_check.assert_called_once_with("matrix_autopub", None)
 
         self.assertEqual([42], worker_ids)
 

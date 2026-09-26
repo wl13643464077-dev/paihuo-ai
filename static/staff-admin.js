@@ -156,7 +156,7 @@
   /* ---------- 列表 ---------- */
   function aiHtml(t){
     const a = t.ai_check;
-    if(!a){ return t.status==="submitted"&&(t.photos||[]).length ? `<div class="sa-ai none">🤖 AI 正在看照片…</div>` : ""; }
+    if(!a){ return t.status==="submitted"&&(t.photos||[]).length ? `<div class="sa-ai none">${SA.meta?.ai_check_enabled===false?"AI 验照片已关闭，请人工核对照片":"暂无 AI 验照片建议，可先人工核对照片"}</div>` : ""; }
     if(a.error||!a.verdict) return `<div class="sa-ai none">🤖 ${h(a.reason||"AI 这次没看成,请直接看照片")}</div>`;
     const label = {pass:"像是做好了", doubt:"拿不准,建议细看", fail:"像是没做好"}[a.verdict]||"";
     return `<div class="sa-ai ${h(a.verdict)}">🤖 AI 建议:${h(label)}${a.reason?`。${h(a.reason)}`:""}
