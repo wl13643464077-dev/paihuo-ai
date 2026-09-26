@@ -507,15 +507,29 @@ class OnboardingCardBrowserCase(unittest.IsolatedAsyncioTestCase):
                 options["executable_path"] = executable
             browser = await playwright.chromium.launch(**options)
             page = await browser.new_page()
-            await page.route("**/api/**", lambda route: route.fulfill(
-                status=200, content_type="application/json", body="{}"))
-            await page.goto(f"{self.base}/static/onboarding.js")
-            await page.set_content("<div id='main'></div>")
-            await page.add_script_tag(url=f"{self.base}/static/onboarding.js")
-            html = await page.evaluate(
-                "(()=>{window.ME={role:'member'};return PH_ONBOARDING.card();})()")
-            self.assertEqual("", html)
-            await browser.close()
+            errors = []
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            try:
+                await page.route("**/api/**", lambda route: route.fulfill(
+                    status=200, content_type="application/json", body="{}"))
+                # Navigating to .js creates a JavaScript text document;
+                # set_content() does not change its MIME type into HTML.
+                # Use a same-origin HTML fixture without app.js or its ME state.
+                fixture_url = f"{self.base}/__test_fixtures__/onboarding-member.html"
+                await page.route(fixture_url, lambda route: route.fulfill(
+                    status=200, content_type="text/html; charset=utf-8",
+                    body="<!doctype html><meta charset='utf-8'><div id='main'></div>"))
+                await page.goto(fixture_url)
+                self.assertEqual("text/html", await page.evaluate("document.contentType"))
+                await page.add_script_tag(url=f"{self.base}/static/onboarding.js")
+                self.assertTrue(await page.evaluate(
+                    "typeof window.PH_ONBOARDING?.card==='function'"))
+                html = await page.evaluate(
+                    "(()=>{window.ME={role:'member'};return PH_ONBOARDING.card();})()")
+                self.assertEqual("", html)
+                self.assertEqual([], errors)
+            finally:
+                await browser.close()
 
 
 if __name__ == "__main__":

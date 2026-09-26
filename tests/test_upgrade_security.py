@@ -80,6 +80,14 @@ class UpgradeSecurityCase(unittest.TestCase):
     def test_inspection_file_keeps_industry_scope_inside_same_tenant(self):
         from app import assetfiles, main
 
+        # The file gate reads the current account and store assignment from DB,
+        # not just the session payload.
+        db.insert("users", {
+            "id": 20, "tenant_id": 2, "username": "restaurant-member",
+            "password_hash": "x", "role": "member", "enabled": 1,
+            "must_change_password": 0,
+            "modules_json": json.dumps(["restaurant"]),
+        })
         db.conn().executemany(
             "INSERT INTO tenant_industry(tenant_id,industry_key,is_primary,created_at) "
             "VALUES(2,?,?,0)",
@@ -107,6 +115,10 @@ class UpgradeSecurityCase(unittest.TestCase):
         self.assertEqual("auto", assetfiles.file_required_module(path))
 
         async def request_as(user):
+            db.execute(
+                "UPDATE users SET role=?,modules_json=? WHERE id=?",
+                (user["role"], json.dumps(user["modules"]), user["id"]),
+            )
             request = Request({
                 "type": "http",
                 "http_version": "1.1",
@@ -123,8 +135,7 @@ class UpgradeSecurityCase(unittest.TestCase):
             async def next_handler(_request):
                 return Response(status_code=200)
 
-            with patch.object(auth, "parse_session", return_value=user["id"]), \
-                    patch.object(auth, "get_user", return_value=user):
+            with patch.object(auth, "parse_session", return_value=user["id"]):
                 return await main._auth_mw(request, next_handler)
 
         member = {
@@ -134,8 +145,19 @@ class UpgradeSecurityCase(unittest.TestCase):
         }
         denied = asyncio.run(request_as(member))
         self.assertEqual(403, denied.status_code)
-        allowed = asyncio.run(request_as({**member, "modules": ["restaurant", "auto"]}))
+        member_with_industry = {**member, "modules": ["restaurant", "auto"]}
+        unbound = asyncio.run(request_as(member_with_industry))
+        self.assertEqual(403, unbound.status_code)
+        db.execute(
+            "INSERT INTO user_branch(tenant_id,user_id,branch_id,created_by,created_at) "
+            "VALUES(?,?,?,?,0)",
+            (2, member["id"], branch, member["id"]),
+        )
+        allowed = asyncio.run(request_as(member_with_industry))
         self.assertEqual(200, allowed.status_code)
+        db.execute("DELETE FROM user_branch WHERE user_id=?", (member["id"],))
+        revoked_binding = asyncio.run(request_as(member_with_industry))
+        self.assertEqual(403, revoked_binding.status_code)
         owner = asyncio.run(request_as({**member, "role": "owner", "modules": []}))
         self.assertEqual(200, owner.status_code)
         db.execute(
