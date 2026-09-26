@@ -367,3 +367,59 @@ def bootstrap() -> dict:
     log.warning("bootstrap root account created from %s; password was not logged",
                 BOOTSTRAP_PASSWORD_ENV)
     return {"username": "boss"}
+
+
+# ---------------- 开户与首登改密策略 ----------------
+# 系统生成的初始密码是高强度随机串，老板不用先被拦在「改密码」页；
+# 管理员手工设定的初始密码（团队页建成员/重置密码、root 手工开企业）仍强制首登改密。
+AUTOGEN_PASSWORD_HINT_KEY = "pw_autogen:{uid}"
+_INITIAL_PW_LETTERS = "abcdefghjkmnpqrstuvwxyz"
+_INITIAL_PW_DIGITS = "23456789"
+
+
+def generate_initial_password(length: int = 16) -> str:
+    """16 位随机强密码：至少 1 个字母 + 1 个数字，去掉易混淆的 0/1/i/l/o。"""
+    length = max(PASSWORD_MIN_LENGTH, int(length))
+    alphabet = _INITIAL_PW_LETTERS + _INITIAL_PW_DIGITS
+    chars = [secrets.choice(_INITIAL_PW_LETTERS), secrets.choice(_INITIAL_PW_DIGITS)]
+    chars += [secrets.choice(alphabet) for _ in range(length - 2)]
+    # 打乱位置，不固定「第 1 位字母、第 2 位数字」这种可预测结构。
+    for index in range(len(chars) - 1, 0, -1):
+        swap = secrets.randbelow(index + 1)
+        chars[index], chars[swap] = chars[swap], chars[index]
+    return "".join(chars)
+
+
+def create_owner_account(tid: int, username: str, password: str, *,
+                         system_generated: bool) -> int:
+    """建企业主账号。system_generated=True 表示密码由系统随机生成（自助开户/一键开通），
+    不强制首登改密，只在首页温和提示；否则（管理员手工设的密码）首登必须改密。
+
+    可在外层 db.atomic() 事务里调用，不会提前提交。"""
+    uid = db.insert("users", {
+        "tenant_id": int(tid),
+        "username": username,
+        "password_hash": hash_pw(password),
+        "role": "owner",
+        "modules_json": "[]",
+        "enabled": 1,
+        "must_change_password": 0 if system_generated else 1,
+    })
+    if system_generated:
+        db.set_setting(AUTOGEN_PASSWORD_HINT_KEY.format(uid=int(uid)), "1")
+    return uid
+
+
+def password_hint_pending(uid) -> bool:
+    """该账号还在用系统生成的初始密码（首页提示「建议改成你好记的密码」）。"""
+    try:
+        return db.get_setting(AUTOGEN_PASSWORD_HINT_KEY.format(uid=int(uid))) == "1"
+    except (TypeError, ValueError):
+        return False
+
+
+def clear_password_hint(uid) -> None:
+    try:
+        db.set_setting(AUTOGEN_PASSWORD_HINT_KEY.format(uid=int(uid)), None)
+    except (TypeError, ValueError):
+        pass

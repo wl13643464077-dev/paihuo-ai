@@ -31,6 +31,9 @@ SECRET_SETTING_KEYS = (
     "feishu_app_secret",
     "smtp_authcode",
     "runninghub_key",
+    # 阿里云短信验证码登录(可选,默认关闭)
+    "aliyun_sms_key_id",
+    "aliyun_sms_key_secret",
 )
 _SECRET_SETTING_SET = frozenset(SECRET_SETTING_KEYS)
 

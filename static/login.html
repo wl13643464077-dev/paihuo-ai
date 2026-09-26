@@ -45,6 +45,14 @@ button:active{transform:translateY(1px);box-shadow:2px 2px 0 rgba(51,41,31,.2)}
 .applycard{display:none;margin-top:14px}
 .purchase-choice{display:none;margin-top:10px;padding:10px 12px;border:2px solid var(--ink);border-radius:11px;background:#fff3c4;font-size:13px;line-height:1.6}
 .applycard textarea{width:100%;border:2.5px solid var(--ink);border-radius:12px;padding:10px 14px;font-size:14px;background:#fff;outline:none;min-height:64px;resize:vertical;font-family:inherit}
+.tabs{display:none;gap:8px;margin-bottom:6px}
+.tabs button{margin-top:0;padding:9px 6px;font-size:14px;letter-spacing:1px;background:#fffdf7;box-shadow:none;border-width:2.5px}
+.tabs button.on{background:var(--gold);box-shadow:3px 3px 0 rgba(51,41,31,.18)}
+.codeline{display:flex;gap:8px}
+.codeline input{flex:1;min-width:0}
+.codeline button{width:auto;flex:0 0 auto;margin-top:0;padding:0 12px;font-size:13.5px;letter-spacing:0;min-height:44px;box-shadow:none}
+.codeline button:disabled{opacity:.6;cursor:default;transform:none}
+#sms-pane{display:none}
 .ok{color:#2c8a4b;font-size:13.5px;text-align:center;margin-top:12px;font-weight:800;min-height:18px}
 @media(max-width:640px){
   body{padding:24px 0}
@@ -67,12 +75,29 @@ button:active{transform:translateY(1px);box-shadow:2px 2px 0 rgba(51,41,31,.2)}
   <div class="logo"><span class="bulb"></span><h1>派 活</h1><span class="bulb"></span></div>
   <div class="slogan"><b>老板会派活，数字员工去干活</b> · 11 大连锁行业·专属决策员工听您调遣</div>
   <div class="card">
-    <label>账号</label>
-    <input id="u" placeholder="您的账号" autocomplete="username">
-    <label>密码</label>
-    <input id="p" type="password" placeholder="您的密码" autocomplete="current-password" onkeydown="if(event.key==='Enter')go()">
-    <button onclick="go()">进 入 集 团</button>
+    <div class="tabs" id="login-tabs" role="tablist">
+      <button type="button" id="tab-pw" class="on" role="tab" aria-selected="true" onclick="switchMode('pw')">账号密码登录</button>
+      <button type="button" id="tab-sms" role="tab" aria-selected="false" onclick="switchMode('sms')">手机验证码登录</button>
+    </div>
+    <div id="pw-pane">
+      <label for="u">账号</label>
+      <input id="u" placeholder="您的账号" autocomplete="username">
+      <label for="p">密码</label>
+      <input id="p" type="password" placeholder="您的密码" autocomplete="current-password" onkeydown="if(event.key==='Enter')go()">
+      <button id="login-btn" onclick="go()">进 入 集 团</button>
+    </div>
+    <div id="sms-pane">
+      <label for="sms-phone">手机号</label>
+      <input id="sms-phone" type="tel" inputmode="numeric" maxlength="11" placeholder="开通账号时用的手机号" autocomplete="tel">
+      <label for="sms-code">验证码</label>
+      <div class="codeline">
+        <input id="sms-code" inputmode="numeric" maxlength="6" placeholder="6 位验证码" autocomplete="one-time-code" onkeydown="if(event.key==='Enter')smsLogin()">
+        <button type="button" id="sms-send" onclick="smsSend()">获取验证码</button>
+      </div>
+      <button id="sms-login-btn" onclick="smsLogin()">进 入 集 团</button>
+    </div>
     <div class="err" id="err" role="status" aria-live="polite"></div>
+    <div class="ok" id="sms-ok" role="status" aria-live="polite" style="margin-top:0"></div>
     <div class="alt">
       <button onclick="toggleApply()">📝 申请开通账号</button>
       <button class="tour" onclick="goTour(this)">👀 游客参观(只看不用)</button>
@@ -155,7 +180,7 @@ fetch("/api/support-contact").then(r=>r.json()).then(d=>{
 }).catch(()=>{});
 
 async function go(){
-  const _b=document.querySelector('button'); if(_b){ if(_b.disabled) return; _b.disabled=true; const _t=_b.textContent; _b.textContent='登录中…'; setTimeout(()=>{_b.disabled=false;_b.textContent=_t;}, 8000); }
+  const _b=document.getElementById('login-btn'); if(_b){ if(_b.disabled) return; _b.disabled=true; const _t=_b.textContent; _b.textContent='登录中…'; setTimeout(()=>{_b.disabled=false;_b.textContent=_t;}, 8000); }
   const err = document.getElementById('err'); err.textContent = '';
   try{
     const r = await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -163,6 +188,70 @@ async function go(){
     if(!r.ok){ const j = await r.json().catch(()=>({})); err.textContent = errText(j.detail,'登录失败'); return; }
     location.href = selectedPurchase() ? '/#/billing' : '/';
   }catch(e){ err.textContent = '网络异常,稍后再试'; }
+}
+// 第 1 期:短信验证码登录。后台没配置/没打开时接口回 enabled:false,页面保持只有密码登录。
+fetch("/api/auth/login/sms/config").then(r=>r.ok?r.json():null).then(d=>{
+  if(d&&d.enabled) document.getElementById("login-tabs").style.display="flex";
+}).catch(()=>{});
+function switchMode(mode){
+  const sms = mode==='sms';
+  document.getElementById('pw-pane').style.display = sms ? 'none' : 'block';
+  document.getElementById('sms-pane').style.display = sms ? 'block' : 'none';
+  document.getElementById('tab-pw').classList.toggle('on', !sms);
+  document.getElementById('tab-sms').classList.toggle('on', sms);
+  document.getElementById('tab-pw').setAttribute('aria-selected', String(!sms));
+  document.getElementById('tab-sms').setAttribute('aria-selected', String(sms));
+  document.getElementById('err').textContent='';
+  document.getElementById('sms-ok').textContent='';
+  document.getElementById(sms ? 'sms-phone' : 'u').focus();
+}
+let smsTimer=null;
+function smsCountdown(seconds){
+  const btn=document.getElementById('sms-send');
+  let left=Math.max(1, Number(seconds)||60);
+  clearInterval(smsTimer);
+  btn.disabled=true; btn.textContent=left+' 秒后重发';
+  smsTimer=setInterval(()=>{
+    left-=1;
+    if(left<=0){ clearInterval(smsTimer); btn.disabled=false; btn.textContent='重新获取'; return; }
+    btn.textContent=left+' 秒后重发';
+  },1000);
+}
+async function smsSend(){
+  const err=document.getElementById('err'), ok=document.getElementById('sms-ok');
+  err.textContent=''; ok.textContent='';
+  const phone=document.getElementById('sms-phone').value.trim();
+  if(!/^1\d{10}$/.test(phone)){ err.textContent='请填 11 位手机号'; return; }
+  const btn=document.getElementById('sms-send'); btn.disabled=true;
+  try{
+    const r=await fetch('/api/auth/login/sms/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok){
+      err.textContent=errText(j.detail,'获取验证码失败,稍后再试');
+      const wait=Number(r.headers.get('Retry-After')||0);
+      if(r.status===429&&wait>0&&wait<=120) smsCountdown(wait); else btn.disabled=false;
+      return;
+    }
+    ok.textContent=j.msg||'验证码已发送';
+    smsCountdown(j.cooldown||60);
+    document.getElementById('sms-code').focus();
+  }catch(e){ err.textContent='网络异常,稍后再试'; btn.disabled=false; }
+}
+async function smsLogin(){
+  const err=document.getElementById('err'); err.textContent='';
+  const phone=document.getElementById('sms-phone').value.trim();
+  const code=document.getElementById('sms-code').value.trim();
+  if(!/^1\d{10}$/.test(phone)){ err.textContent='请填 11 位手机号'; return; }
+  if(!/^\d{6}$/.test(code)){ err.textContent='请填 6 位验证码'; return; }
+  const btn=document.getElementById('sms-login-btn');
+  if(btn.disabled) return;
+  btn.disabled=true; const t=btn.textContent; btn.textContent='登录中…';
+  try{
+    const r=await fetch('/api/auth/login/sms/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone,code})});
+    if(!r.ok){ const j=await r.json().catch(()=>({})); err.textContent=errText(j.detail,'登录失败'); return; }
+    location.href = selectedPurchase() ? '/#/billing' : '/';
+  }catch(e){ err.textContent='网络异常,稍后再试'; }
+  finally{ btn.disabled=false; btn.textContent=t; }
 }
 function toggleApply(){
   const c = document.getElementById('applycard');
@@ -193,6 +282,7 @@ async function applyGo(btn){
       line([['🎉 ' + (j.msg||'体验账号已开通')]]);
       line([['账号:'],[j.account.username,true],[' 初始密码:'],[j.account.password,true]]);
       line([['👉 已帮您填进上面登录框,截图保存好密码,点「进入集团」开工!']]);
+      if(document.getElementById('pw-pane').style.display==='none') switchMode('pw');
       document.getElementById('u').value = j.account.username;
       document.getElementById('p').value = j.account.password;
       document.getElementById('u').scrollIntoView({behavior:'smooth',block:'center'});
