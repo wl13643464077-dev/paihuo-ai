@@ -62,3 +62,4 @@ docs/operations-private/
 *.migration.lock
 *.instance.lock
 .test-tmp/
+.agent-teams/

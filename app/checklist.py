@@ -1,7 +1,7 @@
 """开店 / 闭店 / 交班清单（第 2 期「真人派活闭环」）。
 
 - 行业默认模板在 ``checklist_defaults_v1.json``：11 个行业各三套（开店/闭店/交班），
-  另有一套通用兜底。租户第一次用清单时，按它开通的行业和门店行业各复制一份到
+  另有一套通用兜底。租户第一次用清单时，按它当前开通的行业各复制一份到
   ``checklist_template``，之后老板可以增删改项、改截止时间、停用，互不影响别家。
 - 每天（北京时间）给每家启用门店 × 同行业的启用模板生成一份 ``checklist_run``。
   库里有 UNIQUE(tenant_id,branch_id,template_id,run_date)，用 INSERT OR IGNORE 幂等。
@@ -209,18 +209,19 @@ def normalize_items(raw: Any) -> list[dict]:
 # ---------------- 账号与门店范围 ----------------
 def _user(tid: int, uid: int) -> dict:
     row = db.one(
-        "SELECT id,tenant_id,username,role,job_title,enabled FROM users "
-        "WHERE id=?",
+        "SELECT u.id,u.tenant_id,u.username,u.role,u.job_title,u.enabled,u.modules_json "
+        "FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE u.id=? AND t.enabled=1",
         (int(uid),),
     )
     if not row or not int(row.get("enabled") or 0):
         raise ChecklistForbidden("账号不存在或已停用")
     role = str(row.get("role") or "")
-    platform_root = role == "root" and int(row["tenant_id"]) == 1
-    if int(row["tenant_id"]) != int(tid) and not platform_root:
+    if int(row["tenant_id"]) != int(tid):
         raise ChecklistForbidden("不能查看其他企业的清单")
     if role not in {"root", "owner", "member"}:
         raise ChecklistForbidden("当前账号不能使用清单")
+    modules = db.jloads(row.pop("modules_json", None), [])
+    row["modules"] = modules if isinstance(modules, list) else []
     return row
 
 
@@ -236,17 +237,33 @@ def can_manage(user: Mapping[str, Any]) -> bool:
 
 
 def visible_branch_ids(tid: int, user: Mapping[str, Any]) -> list[int] | None:
-    """None 表示全部门店；否则是绑定给这个账号的门店 id。"""
-    if sees_all(user):
-        return None
-    return [int(row["branch_id"]) for row in db.q(
-        "SELECT branch_id FROM user_branch WHERE tenant_id=? AND user_id=? "
-        "ORDER BY branch_id",
-        (int(tid), int(user["id"])),
-    )]
+    """返回当前可见门店；总监也受当前行业模块约束，不能用 None 绕过。"""
+    return [int(row["id"]) for row in db.q(
+        "SELECT id FROM store_branch WHERE tenant_id=? AND active=1 ORDER BY id",
+        (int(tid),),
+    ) if _branch_visible(tid, user, int(row["id"]))]
+
+
+def _industry_visible(tid: int, user: Mapping[str, Any], industry: str) -> bool:
+    if int(user.get("tenant_id") or 0) != int(tid):
+        return False
+    role = str(user.get("role") or "")
+    entitled = set(_tenant_industries(tid))
+    if industry and int(tid) != 1 and role != "root" and industry not in entitled:
+        return False
+    if role in {"owner", "root"}:
+        return True
+    modules = set(user.get("modules") or [])
+    return industry in modules if industry else bool(modules & entitled)
 
 
 def _branch_visible(tid: int, user: Mapping[str, Any], branch_id: int) -> bool:
+    branch = db.one(
+        "SELECT industry_key FROM store_branch WHERE id=? AND tenant_id=? AND active=1",
+        (int(branch_id), int(tid)),
+    )
+    if not branch or not _industry_visible(tid, user, str(branch["industry_key"] or "")):
+        return False
     if sees_all(user):
         return True
     return bool(db.one(
@@ -257,19 +274,11 @@ def _branch_visible(tid: int, user: Mapping[str, Any], branch_id: int) -> bool:
 
 
 def _tenant_industries(tid: int) -> list[str]:
-    """租户开通的行业 + 启用门店的行业（去重、稳定排序）。"""
+    """当前显式行业授权；已有门店不能恢复已撤销的授权。"""
     keys: list[str] = []
     for row in db.q(
         "SELECT industry_key FROM tenant_industry WHERE tenant_id=? "
         "ORDER BY is_primary DESC,industry_key",
-        (int(tid),),
-    ):
-        key = str(row.get("industry_key") or "")
-        if key and key not in keys:
-            keys.append(key)
-    for row in db.q(
-        "SELECT DISTINCT industry_key FROM store_branch WHERE tenant_id=? "
-        "AND active=1 ORDER BY industry_key",
         (int(tid),),
     ):
         key = str(row.get("industry_key") or "")
@@ -355,7 +364,8 @@ def list_templates(tid: int, uid: int, *, now: float | None = None) -> list[dict
         "WHEN 'handover' THEN 1 WHEN 'close' THEN 2 ELSE 3 END,id",
         (int(tid),),
     )
-    return [_template_public(row) for row in rows]
+    return [_template_public(row) for row in rows
+            if _industry_visible(tid, user, str(row.get("industry_key") or ""))]
 
 
 def create_template(tid: int, uid: int, body: Mapping[str, Any], *,
@@ -371,6 +381,8 @@ def create_template(tid: int, uid: int, body: Mapping[str, Any], *,
     industry = str(body.get("industry_key") or "").strip()
     if industry and industry not in _tenant_industries(tid):
         raise ChecklistError("这个行业还没有开通")
+    if not _industry_visible(tid, user, industry):
+        raise ChecklistForbidden("当前账号未开通这个行业")
     name = _clean_text(body.get("name") or KIND_LABELS[kind], field="清单名称",
                        limit=NAME_MAX)
     items = normalize_items(body.get("items"))
@@ -398,7 +410,7 @@ def update_template(tid: int, uid: int, template_id: int,
         "SELECT * FROM checklist_template WHERE id=? AND tenant_id=?",
         (int(template_id), int(tid)),
     )
-    if not row:
+    if not row or not _industry_visible(tid, user, str(row.get("industry_key") or "")):
         raise ChecklistNotFound("清单模板不存在")
     changes: dict[str, Any] = {}
     if "name" in patch:
@@ -448,7 +460,7 @@ def set_duty_user(tid: int, actor_uid: int, branch_id: int,
         "SELECT id FROM store_branch WHERE id=? AND tenant_id=?",
         (int(branch_id), int(tid)),
     )
-    if not branch:
+    if not branch or not _branch_visible(tid, actor, int(branch_id)):
         raise ChecklistNotFound("门店不存在")
     duties = duty_map(tid)
     if user_id in (None, "", 0):
@@ -460,7 +472,7 @@ def set_duty_user(tid: int, actor_uid: int, branch_id: int,
             "AND ub.user_id=? AND u.enabled=1",
             (int(tid), int(branch_id), int(user_id)),
         )
-        if not bound:
+        if not bound or not _branch_visible(tid, _user(tid, int(user_id)), int(branch_id)):
             raise ChecklistError("值班人要先在团队页绑定到这家门店")
         duties[int(branch_id)] = int(user_id)
     db.set_setting(
@@ -735,6 +747,8 @@ def runs_for_user(tid: int, uid: int, date: str | None = None, *,
         (int(tid), run_date, int(user["id"]), int(tid), int(user["id"]),
          int(tid), int(user["id"])),
     )
+    visible = set(visible_branch_ids(tid, user))
+    rows = [row for row in rows if int(row["branch_id"]) in visible]
     return _public_rows(tid, rows, viewer_id=int(user["id"]), now=now)
 
 
@@ -743,18 +757,11 @@ def runs_overview(tid: int, uid: int, date: str | None = None, *,
     """老板端「今天各店完成情况」：按门店分组，经理 / 员工只看绑定门店。"""
     user = _user(tid, uid)
     run_date = _clean_date(date, now)
-    visible = visible_branch_ids(tid, user)
-    params: list = [int(tid)]
-    scope = ""
-    if visible is not None:
-        scope = (" AND id IN (SELECT branch_id FROM user_branch "
-                 "WHERE tenant_id=? AND user_id=?)")
-        params += [int(tid), int(user["id"])]
-    branches = db.q(
-        "SELECT id,name,region FROM store_branch WHERE tenant_id=? AND active=1"
-        + scope + " ORDER BY region,name,id",
-        tuple(params),
-    )
+    visible = set(visible_branch_ids(tid, user))
+    branches = [row for row in db.q(
+        "SELECT id,name,region FROM store_branch WHERE tenant_id=? AND active=1 "
+        "ORDER BY region,name,id", (int(tid),),
+    ) if int(row["id"]) in visible]
     if not branches:
         return {"date": run_date, "stores": [], "summary": {
             "total": 0, "done": 0, "missed": 0, "open": 0, "rate": None}}
@@ -865,12 +872,15 @@ def complete_item(tid: int, uid: int, run_id: int, item_key: str, *,
     replaced_key = ""
     try:
         with db.atomic() as connection:
+            user = _user(tid, uid)
             current = connection.execute(
-                "SELECT status,items_json FROM checklist_run WHERE id=? AND tenant_id=?",
+                "SELECT status,items_json,branch_id FROM checklist_run WHERE id=? AND tenant_id=?",
                 (int(run_id), int(tid)),
             ).fetchone()
-            if not current:
+            if not current or not _branch_visible(tid, user, int(current["branch_id"])):
                 raise ChecklistNotFound("清单不存在或不是你负责的门店")
+            if int(current["branch_id"]) != int(run["branch_id"]):
+                raise ChecklistConflict("清单所属门店刚刚改变，请刷新重试")
             if str(current["status"]) == "done":
                 raise ChecklistConflict("这份清单已经全部做完了")
             fresh_items = db.jloads(current["items_json"], []) or []

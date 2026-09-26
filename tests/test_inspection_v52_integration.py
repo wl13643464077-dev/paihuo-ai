@@ -11,6 +11,7 @@ import unittest
 from unittest import mock
 
 from fastapi import HTTPException, UploadFile
+from fastapi.routing import iter_route_contexts
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -122,7 +123,9 @@ class InspectionV52HTTPIntegrationTests(unittest.TestCase):
         return int(branch["id"])
 
     def test_specific_routes_precede_visit_id_and_upload_has_exact_transient_limit(self):
-        paths = [getattr(route, "path", "") for route in main.app.routes]
+        # Included routers are lazy in the pinned FastAPI version. Inspect
+        # effective paths in dispatch order, including their mounted prefixes.
+        paths = [route.path for route in iter_route_contexts(main.app.routes)]
         generic = paths.index("/api/inspections/{visit_id}")
         for path in (
             "/api/inspections/branches/search",
