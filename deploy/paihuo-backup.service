@@ -12,24 +12,33 @@ Group=root
 WorkingDirectory=/usr/local/lib/paihuo-ops
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONPATH=/usr/local/lib/paihuo-ops
+# 可选:异地备份目标与凭据位置(root:root 0600),见 BACKUP_RECOVERY.md。
+# 例如 PAIHUO_BACKUP_REMOTE=rclone:paihuo-oss:paihuo-backup/prod
+#      RCLONE_CONFIG=/etc/paihuo/rclone.conf
+EnvironmentFile=-/etc/paihuo/backup.env
+Environment=RCLONE_CACHE_DIR=/tmp/paihuo-rclone-cache
 ExecStartPre=/usr/bin/python3 /usr/local/lib/paihuo-ops/deploy/start_guard.py --mode backup --control-dir /var/lib/paihuo-upgrade --permit /run/paihuo-upgrade/start.permit
 ExecStartPre=/usr/bin/python3 -m deploy.backup_health --database /var/lib/paihuo/data/contentcrew.db --backup-dir /var/backups/paihuo --disk-only
-ExecStart=/usr/bin/python3 -m deploy.backup_db --database /var/lib/paihuo/data/contentcrew.db --backup-dir /var/backups/paihuo --keep-days 14 --keep-minimum 24 --restore-drill --success-attestation /var/lib/paihuo-upgrade/latest-periodic-backup.json
-TimeoutStartSec=15min
+ExecStart=/usr/bin/python3 -m deploy.backup_db --database /var/lib/paihuo/data/contentcrew.db --backup-dir /var/backups/paihuo --keep-days 14 --keep-minimum 24 --restore-drill --success-attestation /var/lib/paihuo-upgrade/latest-periodic-backup.json --asset-source assets=/var/lib/paihuo/data/assets --asset-source pub=/srv/paihuo-pub --assets-keep-days 14 --assets-keep-minimum 3 --remote-timeout-seconds 1200
+# 75 = 数据库备份已成功,但素材快照或异地同步失败:已主动拉起
+# paihuo-failure-alert@paihuo-backup-{assets,offsite}.service 告警;
+# unit 仍按成功处理,避免升级流程同步等待本 unit 时被附加步骤卡死。
+SuccessExitStatus=75
+TimeoutStartSec=30min
 UMask=0077
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
 
-# 备份不需要联网，也不应写入源码或线上主库。
+# 不应写入源码或线上主库；素材目录只读。联网仅用于可选的异地同步(rclone/rsync)。
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadOnlyPaths=/usr/local/lib/paihuo-ops /var/lib/paihuo/data
+ReadOnlyPaths=/usr/local/lib/paihuo-ops /var/lib/paihuo/data -/srv/paihuo-pub
 ReadWritePaths=/var/backups/paihuo /var/lib/paihuo-upgrade
-RestrictAddressFamilies=AF_UNIX
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=CAP_DAC_READ_SEARCH
 AmbientCapabilities=CAP_DAC_READ_SEARCH
 LockPersonality=yes

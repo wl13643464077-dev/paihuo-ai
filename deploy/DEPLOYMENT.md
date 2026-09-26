@@ -22,6 +22,15 @@ console script。候选代码只有在完整证明、停服最终快照和低权
 - 低权限依赖构建账号：`paihuo-build`，无登录 shell、无生产 state 权限。
 - 应用账号：`paihuo`；只读 smoke 账号：`paihuo-smoke`。
 - 环境密钥：`/etc/paihuo/paihuo.env`，`root:root 0600`。
+- 可选异地备份配置：`/etc/paihuo/backup.env`（`PAIHUO_BACKUP_REMOTE` 等），
+  `root:root 0600`，详见 `BACKUP_RECOVERY.md`。
+
+> **硬约束：应用只能单进程、单 worker 运行。** 引擎队列、任务锁和实时推送都在
+> 进程内存里；`run.sh` 固定 `--workers 1`，应用启动时还会对
+> `/var/lib/paihuo/data/contentcrew.db.instance.lock` 加非阻塞独占锁，第二个进程
+> 会记录"已有另一个派活进程……拒绝启动"并退出。不要设置 `WEB_CONCURRENCY`、
+> 不要多开 `contentcrew.service` 实例或在同一数据目录上另起 uvicorn；要扩容只能
+> 换更大的单机。服务时区固定 `TZ=Asia/Shanghai`（北京时间）。
 
 初始化受控目录和低权限账号：
 

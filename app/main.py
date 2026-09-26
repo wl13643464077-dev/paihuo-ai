@@ -29,6 +29,7 @@ from . import (analyzer, assetfiles, auth, billing, bossdashboard, db, departmen
                inspection, inspectionimport, inspectionoverrides, inspectionstandards,
                learningevidence, purchases, secureconfig,
                taskcenter, taskrunner, taskthreads)
+from . import instancelock, retention, timeutil  # 单进程锁 / 数据保留期 / 北京时间
 from .engine import engine
 from .skills import registry
 
@@ -238,8 +239,13 @@ async def _metrics_mw(request: Request, call_next):
 
 
 @app.get("/healthz", include_in_schema=False)
-def healthz():
-    """供反向代理/守护进程探活；响应不暴露版本、路径、配置或异常内容。"""
+def healthz(request: Request = None, deep: str = ""):
+    """供反向代理/守护进程探活；响应不暴露版本、路径、配置或异常内容。
+
+    ``?deep=1`` 额外返回各后台循环的心跳是否超时,只对本机直连或带
+    ``X-Health-Token``(等于环境变量 CONTENTCREW_HEALTH_TOKEN)的请求开放;
+    不带 deep 参数时行为与原来完全一致。
+    """
     try:
         row = db.one("SELECT 1 AS ok")
         if not row or row.get("ok") != 1:
@@ -247,7 +253,18 @@ def healthz():
     except Exception:
         log.warning("health check failed")
         return JSONResponse({"status": "unavailable"}, status_code=503)
-    return {"status": "ok"}
+    if deep not in ("1", "true", "yes"):
+        return {"status": "ok"}
+    headers = request.headers if request is not None else {}
+    if not obs.deep_health_allowed(
+        _client_ip(request) if request is not None else "",
+        headers.get("x-health-token") or "",
+        os.environ.get("CONTENTCREW_HEALTH_TOKEN") or "",
+    ):
+        return JSONResponse({"status": "forbidden"}, status_code=403)
+    loops = obs.loop_status()
+    body = {"status": "ok" if loops["ok"] else "degraded", "loops": loops["loops"]}
+    return JSONResponse(body, status_code=200 if loops["ok"] else 503)
 
 
 @app.get("/api/ops/health")
@@ -337,6 +354,14 @@ def ops_metrics():
 @app.on_event("startup")
 async def _startup():
     app.state.learning_batch_shutting_down = False
+    # 引擎队列/任务锁/实时推送都在进程内存里,只能跑 1 个 worker:
+    # 对数据目录下的实例锁拿非阻塞独占锁,拿不到就明确报错并拒绝启动。
+    try:
+        lock_path = instancelock.acquire(db.DB_PATH)
+    except instancelock.InstanceLockError as exc:
+        log.critical("single-process guard refused startup: %s", exc)
+        raise
+    log.info("single-process guard acquired lock=%s pid=%d", lock_path, os.getpid())
     await asyncio.to_thread(db.conn)
     # Close the lifecycle gap for idle tenants before serving traffic.  The
     # sweep is deliberately bounded and cross-tenant; request paths retain a
@@ -470,10 +495,13 @@ async def _startup():
             orphaned_learning_batches,
         )
     await engine.start()
-    asyncio.create_task(scheduler.loop(engine))
+    # 循环本体归各自模块,这里只在外面看协程是否还活着(供 /healthz?deep=1)。
+    obs.watch_task("scheduler", asyncio.create_task(scheduler.loop(engine)))
     from . import watchdog as _watchdog          # 看门狗:卡住的任务/会议/工单超时收口退款
-    asyncio.create_task(_watchdog.loop(engine))
-    asyncio.create_task(analyzer.loop())
+    obs.watch_task("watchdog", asyncio.create_task(_watchdog.loop(engine)))
+    obs.watch_task("analyzer", asyncio.create_task(analyzer.loop()))
+    # 数据保留期:每天北京时间凌晨分批清理过期日志;循环内部兜住所有异常并自报心跳。
+    app.state.retention_task = asyncio.create_task(retention.loop())
     taskrunner.resume_pending(engine.broadcast)
     await _resume_inspection_tasks()
     avatar.resume_pending(engine.broadcast)      # 数字人:queued重开/running退点
@@ -4232,7 +4260,7 @@ _MATCH_DAILY = 60
 
 
 def _match_over_limit(tid: int) -> bool:
-    today = int(time.time() // 86400)
+    today = timeutil.cn_day_index()     # 按北京时间零点换日,不是 UTC 早 8 点
     key = f"{tid}|{today}"
     cnt = _match_uses.get(key, 0) + 1
     _match_uses[key] = cnt
@@ -13717,7 +13745,7 @@ async def _free_ai_slot(action: str):
     current = auth.current() or {}
     tid = TEN()
     uid = int(current.get("id") or 0)
-    day = int(time.time() // 86400)
+    day = timeutil.cn_day_index()       # 免费额度按北京时间零点换日
     tenant_key = ("tenant", day, tid)
     user_key = ("user", day, tid, uid)
     action_key = ("action", day, tid, uid, action)

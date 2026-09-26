@@ -10,6 +10,8 @@ Group=root
 WorkingDirectory=/usr/local/lib/paihuo-ops
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONPATH=/usr/local/lib/paihuo-ops
+# 读取 PAIHUO_BACKUP_REMOTE,未配置时巡检输出"未配置异地备份"警告。
+EnvironmentFile=-/etc/paihuo/backup.env
 ExecStart=/usr/bin/python3 -m deploy.backup_health --database /var/lib/paihuo/data/contentcrew.db --backup-dir /var/backups/paihuo --max-age-hours 24 --attestation /var/lib/paihuo-upgrade/latest-periodic-backup.json
 UMask=0077
 

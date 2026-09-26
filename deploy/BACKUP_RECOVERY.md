@@ -1,8 +1,19 @@
-# 派活 AI SQLite 备份与恢复手册
+# 派活 AI 备份与恢复手册（数据库 + 素材文件 + 异地）
 
 线上主库是 `/var/lib/paihuo/data/contentcrew.db`。周期备份固定写入
 `/var/backups/paihuo`，目录和文件均由 root 控制；应用账号 `paihuo` 只能读写
 主库和运行数据，不能伪造“最近一次成功备份”。
+
+每小时一次的 `paihuo-backup.service` 依次做三件事：
+
+1. SQLite 在线备份 + 校验 + 恢复演练 + attestation（失败 = unit 失败并告警）；
+2. 素材文件快照：`/var/lib/paihuo/data/assets` 和 `/srv/paihuo-pub`，写到
+   `/var/backups/paihuo/assets/`（见下文）；
+3. 可选异地同步：配置了 `PAIHUO_BACKUP_REMOTE` 才执行。
+
+第 2、3 步失败时进程退出码为 75，unit 仍按成功处理（升级流程会同步等这个
+unit），但会主动拉起 `paihuo-failure-alert@paihuo-backup-assets.service` /
+`paihuo-failure-alert@paihuo-backup-offsite.service`，走同一个企业微信告警。
 
 ## 不可破坏的边界
 
@@ -16,7 +27,8 @@
 - 备份目录必须是 `root:root 0700`；控制目录必须是 `root:root 0700`。
 - 发布切换期间 `paihuo-backup.timer` 会停止，backup start guard 会拒绝为尚未
   commit 的候选留快照。接受候选或恢复旧版后，升级器先生成新备份，再重开公网。
-- 本机备份不能替代异地备份。复制到对象存储或另一台主机后必须重新核对 SHA。
+- 本机备份不能替代异地备份。复制到对象存储或另一台主机后必须重新核对 SHA
+  （异地同步会随每份数据库备份上传 `.sha256`，恢复时 `sha256sum -c`）。
 - schema47-r6 的数据库只保存供应商认证密文；数据库备份与对应的配置包装密钥
   必须作为一对恢复。只拿到其中一个不能证明供应商能力可恢复。
 
@@ -114,6 +126,151 @@ sudo env PYTHONPATH=/usr/local/lib/paihuo-ops \
 
 任何一个条件都必须告警：24 小时内没有成功 attestation、SHA/schema/行数不匹配、
 SQLite 完整性失败、恢复演练失败、磁盘不足、timer 未运行或 unit 非零退出。
+
+## 素材文件快照
+
+- 位置：`/var/backups/paihuo/assets/assets-YYYY-MM-DDTHHMMSSZ/{assets,pub}/`，
+  每个快照是一棵完整目录树，可单独拿来恢复。
+- 增量方式：与上一个快照相比大小和修改时间都没变的文件直接**硬链接**
+  （等同 `rsync --link-dest`），只有新增/改动的文件真正复制，所以多个快照
+  只占“变化量”的空间。
+- 频率：备份每小时跑，但距上次素材快照不满 23 小时就跳过，约每天一份。
+- 保留：14 天内全部保留，且无论多旧至少保留最新 3 份
+  （`--assets-keep-days` / `--assets-keep-minimum`）。
+- 路径可配置：unit 里的 `--asset-source 标签=绝对路径`（可多次），或环境变量
+  `PAIHUO_BACKUP_ASSET_SOURCES=assets=/path,pub=/path`；快照根目录用
+  `--assets-backup-dir` 改。
+- 安全：源目录归应用账号可写，备份以 root 运行，所以全程目录 fd + `O_NOFOLLOW`
+  逐级打开，符号链接和管道等特殊文件一律跳过（快照的 `.snapshot.json` 里有计数）。
+
+从本机快照恢复单个文件或整个目录（先停应用，避免边写边恢复）：
+
+```bash
+snap=/var/backups/paihuo/assets/assets-YYYY-MM-DDTHHMMSSZ
+sudo cat "$snap/.snapshot.json"
+sudo rsync -a "$snap/assets/" /var/lib/paihuo/data/assets/
+sudo chown -R paihuo:paihuo /var/lib/paihuo/data/assets
+sudo rsync -a "$snap/pub/" /srv/paihuo-pub/
+sudo chown -R --reference=/srv/paihuo-pub /srv/paihuo-pub
+```
+
+不要带 `--delete`，除非确认要把线上多出来的文件也删掉。
+
+## 异地备份（可选，强烈建议）
+
+没配置时 `deploy.backup_health` 每次都会输出
+`WARNING: 未配置异地备份(PAIHUO_BACKUP_REMOTE)……`。配置方法：
+在 `/etc/paihuo/backup.env`（`root:root 0600`，两个备份 unit 都会读取）写：
+
+```bash
+# 二选一
+PAIHUO_BACKUP_REMOTE=rclone:paihuo-oss:paihuo-backup/prod
+# PAIHUO_BACKUP_REMOTE=rsync:backup@10.0.0.8:/srv/paihuo-offsite
+RCLONE_CONFIG=/etc/paihuo/rclone.conf
+# rsync 走 SSH 时（unit 开了 ProtectHome，不能用 /root/.ssh）：
+# PAIHUO_BACKUP_SSH_KEY=/etc/paihuo/backup_ed25519
+# PAIHUO_BACKUP_SSH_KNOWN_HOSTS=/etc/paihuo/backup_known_hosts
+```
+
+每次数据库备份成功后上传：`<目标>/db/db-….db` 和同名 `.sha256`；素材快照有
+新的才同步到 `<目标>/assets/current/`。只增不删（`rclone copy` / 不带
+`--delete` 的 rsync），本机被误删或勒索加密不会连带删掉异地副本；异地保留期
+用对象存储的**生命周期规则**控制（建议 `db/` 前缀 30 天后删除）。同步只传数据库
+备份和素材，**不会上传** `/etc/paihuo/paihuo.env` 等密钥；密钥异地备份仍需另行
+授权处理。单次同步预算 20 分钟（`--remote-timeout-seconds`），超时算失败并告警，
+下次会接着传。
+
+### 阿里云 OSS
+
+1. 建私有 Bucket（如 `paihuo-backup`，与服务器不同地域更稳），开启版本控制；
+   建一个 RAM 子账号，只授予该 Bucket 的 `oss:PutObject`、`oss:GetObject`、
+   `oss:ListObjects`（不给删除权限，服务器被黑也删不掉异地备份）。
+2. 安装 rclone（`sudo apt install rclone` 或官方包），用编辑器写配置，不要把
+   密钥放在命令行里：
+
+```bash
+sudo install -o root -g root -m 0600 /dev/null /etc/paihuo/rclone.conf
+sudoedit /etc/paihuo/rclone.conf
+```
+
+```ini
+[paihuo-oss]
+type = s3
+provider = Alibaba
+access_key_id = <RAM 子账号 AccessKey ID>
+secret_access_key = <RAM 子账号 AccessKey Secret>
+endpoint = oss-cn-shanghai.aliyuncs.com
+acl = private
+```
+
+### 腾讯云 COS
+
+同样建私有存储桶、开版本控制、用只有上传/读取/列举权限的子账号：
+
+```ini
+[paihuo-cos]
+type = s3
+provider = TencentCOS
+access_key_id = <SecretId>
+secret_access_key = <SecretKey>
+endpoint = cos.ap-guangzhou.myqcloud.com
+acl = private
+```
+
+此时 `PAIHUO_BACKUP_REMOTE=rclone:paihuo-cos:paihuo-backup-1250000000/prod`
+（COS 的桶名带 APPID）。
+
+### 首次验收
+
+素材量大时第一次同步可能超过 20 分钟，建议先手动传一次：
+
+```bash
+sudo env RCLONE_CONFIG=/etc/paihuo/rclone.conf rclone lsd paihuo-oss:
+sudo systemctl start paihuo-backup.service
+sudo systemctl show paihuo-backup.service -p ExecMainStatus --no-pager
+sudo cat /var/backups/paihuo/.offsite-status.json
+sudo env PYTHONPATH=/usr/local/lib/paihuo-ops \
+  /usr/bin/python3 -m deploy.backup_health \
+  --database /var/lib/paihuo/data/contentcrew.db \
+  --backup-dir /var/backups/paihuo \
+  --max-age-hours 24 \
+  --attestation /var/lib/paihuo-upgrade/latest-periodic-backup.json
+```
+
+`ExecMainStatus=75` 表示本地备份成功但素材/异地步骤失败，看
+`journalctl -u paihuo-backup.service` 里的 `offsite sync failed` / `asset backup failed`。
+
+## 从异地恢复
+
+整机损坏时，先在新机器按 `DEPLOYMENT.md` 装好系统、固定运维代码和 rclone 配置，
+保持应用、Caddy 和备份 timer 停止，然后把异地副本取回并**重新核对 SHA**：
+
+```bash
+set -euo pipefail
+remote=paihuo-oss:paihuo-backup/prod
+export RCLONE_CONFIG=/etc/paihuo/rclone.conf
+sudo -E rclone lsf "$remote/db/" | sort | tail -n 5
+name=db-YYYY-MM-DDTHHMMSSZ.db
+work=/var/lib/paihuo-upgrade/offsite-restore
+sudo install -d -o root -g root -m 0700 "$work"
+sudo -E rclone copyto "$remote/db/$name" "$work/$name"
+sudo -E rclone copyto "$remote/db/$name.sha256" "$work/$name.sha256"
+(cd "$work" && sudo sha256sum -c "$name.sha256")
+sudo env PYTHONPATH=/usr/local/lib/paihuo-ops \
+  /usr/bin/python3 -m deploy.verify_backup "$work/$name" --restore-drill
+```
+
+校验通过后，把 `backup="$work/$name"` 代入下面“生产恢复”的流程。素材文件：
+
+```bash
+sudo -E rclone copy "$remote/assets/current/assets/" /var/lib/paihuo/data/assets/
+sudo chown -R paihuo:paihuo /var/lib/paihuo/data/assets
+sudo -E rclone copy "$remote/assets/current/pub/" /srv/paihuo-pub/
+sudo chown -R --reference=/srv/paihuo-pub /srv/paihuo-pub
+```
+
+rsync 目标同理：`rsync -t <目标>/db/<name>* "$work/"` 后同样 `sha256sum -c`。
+（用 rsync 做异地时，目标主机上要预先建好 `db/` 和 `assets/current/` 两个目录。）
 
 ## 无停机恢复演练
 
