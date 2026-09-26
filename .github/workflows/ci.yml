@@ -44,6 +44,12 @@ jobs:
       - name: Install browser runtime
         run: python -m playwright install --with-deps chromium
 
+      - name: Install media runtime
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version
+
       - name: Prepare owner-controlled test temp root
         run: |
           install -d -m 700 "$RUNNER_TEMP/paihuo-tests"
