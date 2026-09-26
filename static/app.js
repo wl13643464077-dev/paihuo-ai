@@ -1357,7 +1357,8 @@ async function dashboard(){
     <h2>📣 获客</h2>
     <a class="btn pri today-post" href="#/tools/hot">🔥 今天发什么<span class="sub">每天挑好今天该发的内容,照着发就行</span></a></div>` : "";
   $("#main").innerHTML = onboarding + tourBanner + hello
-    + (await industryPickCard())
+    // 上手卡片第 1 步已含"选行业"，有它时不再重复出单独的选行业卡
+    + (onboarding.trim() ? "" : await industryPickCard())
     + todoCard + storeCard + growthCard
     + guideFold();
 }
