@@ -174,6 +174,8 @@ CLOSED_ISSUE_STATUSES = frozenset(
 CRITICAL_SEVERITIES = frozenset(
     {"critical", "high", "urgent", "严重", "高", "紧急"}
 )
+# 已提交复查、等老板审核的整改不算逾期：店里已经做完，球在老板手里。
+AWAITING_REVIEW_STATUSES = frozenset({"awaiting_recheck"})
 
 _INSPECTION_CORE_COLUMNS = {
     "store_branch": {"id", "tenant_id", "industry_key"},
@@ -852,7 +854,10 @@ def _inspection_schema() -> dict[str, Any] | None:
         action_relation = "visit"
     else:
         return None
-    return {"action_relation": action_relation}
+    return {
+        "action_relation": action_relation,
+        "branch_active": "active" in columns["store_branch"],
+    }
 
 
 def _inspection_aggregate(
@@ -902,6 +907,14 @@ def _inspection_aggregate(
 
     closed = _quoted(CLOSED_ISSUE_STATUSES)
     critical = _quoted(CRITICAL_SEVERITIES)
+    not_overdue = _quoted(CLOSED_ISSUE_STATUSES | AWAITING_REVIEW_STATUSES)
+    # 停用门店的问题/整改单已无法推进，统一不计入问题与逾期 KPI，
+    # 与巡店页 aggregate 的口径一致。
+    active_branch = (
+        " AND EXISTS(SELECT 1 FROM store_branch sb WHERE sb.id=v.branch_id "
+        "AND sb.tenant_id=v.tenant_id AND sb.active=1)"
+        if schema.get("branch_active") else ""
+    )
     issue = db.one(
         f"""
         WITH bounds(started_at,now_at) AS (VALUES(?,?))
@@ -915,7 +928,7 @@ def _inspection_aggregate(
             AND LOWER(i.status) NOT IN ({closed})
             AND LOWER(i.severity) IN ({critical}) THEN 1 ELSE 0 END),0) AS critical_issues,
           COALESCE(SUM(CASE WHEN v.created_at>=bounds.started_at
-            AND LOWER(i.status) NOT IN ({closed})
+            AND LOWER(i.status) NOT IN ({not_overdue})
             AND i.due_at IS NOT NULL AND i.due_at<bounds.now_at
             THEN 1 ELSE 0 END),0) AS overdue_issues,
           COALESCE(SUM(CASE WHEN LOWER(i.status) NOT IN ({closed})
@@ -923,13 +936,14 @@ def _inspection_aggregate(
           COALESCE(SUM(CASE WHEN LOWER(i.status) NOT IN ({closed})
             AND LOWER(i.severity) IN ({critical})
             THEN 1 ELSE 0 END),0) AS backlog_critical_issues,
-          COALESCE(SUM(CASE WHEN LOWER(i.status) NOT IN ({closed})
+          COALESCE(SUM(CASE WHEN LOWER(i.status) NOT IN ({not_overdue})
             AND i.due_at IS NOT NULL AND i.due_at<bounds.now_at
             THEN 1 ELSE 0 END),0) AS backlog_overdue_issues
         FROM inspection_issue i
         JOIN inspection_visit v ON v.id=i.visit_id
         CROSS JOIN bounds
         WHERE v.tenant_id=? AND v.industry_key=? AND v.deleted_at IS NULL
+        {active_branch}
         """,
         (started_at, now, tenant_id, industry_key),
     ) or {}
@@ -955,17 +969,18 @@ def _inspection_aggregate(
             AND LOWER(a.status) NOT IN ({closed})
             AND a.closed_at IS NULL THEN 1 ELSE 0 END),0) AS open_actions,
           COALESCE(SUM(CASE WHEN v.created_at>=bounds.started_at
-            AND LOWER(a.status) NOT IN ({closed})
+            AND LOWER(a.status) NOT IN ({not_overdue})
             AND a.closed_at IS NULL AND a.due_at IS NOT NULL
             AND a.due_at<bounds.now_at THEN 1 ELSE 0 END),0) AS overdue_actions,
           COALESCE(SUM(CASE WHEN LOWER(a.status) NOT IN ({closed})
             AND a.closed_at IS NULL THEN 1 ELSE 0 END),0) AS backlog_open_actions,
-          COALESCE(SUM(CASE WHEN LOWER(a.status) NOT IN ({closed})
+          COALESCE(SUM(CASE WHEN LOWER(a.status) NOT IN ({not_overdue})
             AND a.closed_at IS NULL AND a.due_at IS NOT NULL
             AND a.due_at<bounds.now_at THEN 1 ELSE 0 END),0) AS backlog_overdue_actions
         FROM {action_from}
         CROSS JOIN bounds
         WHERE v.tenant_id=? AND v.industry_key=? AND v.deleted_at IS NULL
+        {active_branch}
         """,
         (started_at, now, tenant_id, industry_key),
     ) or {}

@@ -37,7 +37,7 @@ _all_connections: set[sqlite3.Connection] = set()
 # schema lock to finish.
 _generation_lock = threading.RLock()
 _generation_switching = threading.Event()
-LATEST_SCHEMA_VERSION = 57
+LATEST_SCHEMA_VERSION = 58
 MIGRATION_LOCK_SUFFIX = ".migration.lock"
 
 SCHEMA = """
@@ -2302,6 +2302,9 @@ def _validate_migrated_database(c) -> None:
             "area_sqm", "seat_count", "longitude", "latitude", "remark",
             "row_version",
         },
+        "user_branch": {
+            "tenant_id", "user_id", "branch_id", "created_by", "created_at",
+        },
         "inspection_branch_import": {
             "id", "tenant_id", "industry_key", "request_key", "source_sha256",
             "filename", "status", "total_rows", "create_count", "update_count",
@@ -2556,6 +2559,7 @@ def _validate_migrated_database(c) -> None:
         "idx_inspection_business_value_natural",
         "idx_inspection_business_value_period",
         "idx_inspection_standard_override_scope",
+        "idx_user_branch_branch",
     }
     missing_indexes = sorted(required_indexes - indexes)
     if missing_indexes:
@@ -2624,6 +2628,16 @@ def _validate_migrated_database(c) -> None:
         "inspection_standard_override",
         "idx_inspection_standard_override_scope",
         ("tenant_id", "industry_key", "active", "scope_kind", "scope_key"),
+        unique=False,
+        partial=False,
+    )
+    # 成员门店绑定的幂等写入依赖 (user_id,branch_id) 唯一键。
+    _require_unique_columns_contract(c, "user_branch", ("user_id", "branch_id"))
+    _require_index_contract(
+        c,
+        "user_branch",
+        "idx_user_branch_branch",
+        ("tenant_id", "branch_id"),
         unique=False,
         partial=False,
     )
@@ -3581,6 +3595,19 @@ def _initialize_anchor_locked(path: str):
           ON store_branch(tenant_id,industry_key,store_code)
           WHERE store_code IS NOT NULL AND trim(store_code)<>'';
 
+        -- v58:成员负责门店。经理/员工只能看、操作绑定给自己的门店；
+        -- 老板/总监不依赖绑定。门店行业由 store_branch 反查，不在此冗余。
+        CREATE TABLE IF NOT EXISTS user_branch(
+          tenant_id INTEGER NOT NULL,
+          user_id INTEGER NOT NULL,
+          branch_id INTEGER NOT NULL,
+          created_by INTEGER,
+          created_at REAL NOT NULL,
+          PRIMARY KEY(user_id,branch_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_branch_branch
+          ON user_branch(tenant_id,branch_id);
+
         CREATE TABLE IF NOT EXISTS inspection_branch_import(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           tenant_id INTEGER NOT NULL,
@@ -4107,6 +4134,19 @@ def _initialize_anchor_locked(path: str):
         _conn.execute(
             "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
             "VALUES(57,'member-hierarchy-employee-allocation',?)",
+            (time.time(),),
+        )
+        # v58:成员-门店绑定(user_branch，表与索引随巡店 DDL 一起建)。
+        # 旧库升级不预置任何绑定：经理/员工升级后看到空门店列表，
+        # 由老板在团队页分配；已被删除的成员/门店不留下悬空绑定。
+        _conn.execute(
+            "DELETE FROM user_branch WHERE user_id NOT IN (SELECT id FROM users) "
+            "OR branch_id NOT IN (SELECT id FROM store_branch)"
+        )
+        _validate_migrated_database(_conn)
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(58,'member-branch-scope',?)",
             (time.time(),),
         )
         _conn.execute(f"PRAGMA user_version={LATEST_SCHEMA_VERSION}")

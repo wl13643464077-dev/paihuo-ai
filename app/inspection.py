@@ -558,16 +558,84 @@ def _tenant_industry(tid: int, industry_key: str) -> dict:
     return {**tenant, "industry_key": industry}
 
 
+# 门店可见范围：老板/平台管理员/总监看全部门店；经理/员工只能看、
+# 操作老板绑定给自己的门店（user_branch）。
+NO_BRANCH_NOTICE = "老板还没给你分配门店，请联系老板"
+UNASSIGNED_REGION = "未分区"
+_REGION_LABEL_SQL = "COALESCE(NULLIF(b.region,''),'未分区')"
+# 逾期口径：已提交复查、等老板审核的整改不算逾期（球在老板手里）。
+_OVERDUE_EXCLUDED_SQL = "('closed','awaiting_recheck')"
+_MEMBER_TITLES = ("director", "manager", "staff")
+MAX_MEMBER_BRANCHES = 2000
+
+
+def _member_title(user: Mapping[str, Any]) -> str:
+    title = str(user.get("job_title") or "staff")
+    return title if title in _MEMBER_TITLES else "staff"
+
+
+def sees_all_branches(user: Mapping[str, Any]) -> bool:
+    """老板、平台管理员和总监不受门店绑定限制。"""
+    role = str(user.get("role") or "")
+    if role in {"root", "owner"}:
+        return True
+    return role == "member" and _member_title(user) == "director"
+
+
+def can_manage_branches(user: Mapping[str, Any]) -> bool:
+    """新建/停用门店、复查通过或驳回：仅老板/平台管理员/总监。"""
+    return sees_all_branches(user)
+
+
+def branch_scope_sql(
+    user: Mapping[str, Any],
+    tid: int,
+    column: str,
+) -> tuple[str, tuple]:
+    """返回追加到 WHERE 的门店范围条件；看全部时为空串。
+
+    用子查询而不是展开 IN 列表：经理绑定上千家门店也不会碰到
+    SQLite 绑定变量上限。
+    """
+    if sees_all_branches(user):
+        return "", ()
+    if not re.fullmatch(r"[a-z_]{1,20}(\.[a-z_]{1,20})?", column):
+        raise ValueError("invalid branch column")
+    return (
+        f" AND {column} IN (SELECT ub.branch_id FROM user_branch ub "
+        "WHERE ub.tenant_id=? AND ub.user_id=?)",
+        (int(tid), int(user["id"])),
+    )
+
+
+def _assert_branch_visible(
+    user: Mapping[str, Any],
+    tid: int,
+    branch_id: int,
+) -> None:
+    if sees_all_branches(user):
+        return
+    bound = db.one(
+        "SELECT 1 AS ok FROM user_branch WHERE tenant_id=? AND user_id=? "
+        "AND branch_id=?",
+        (int(tid), int(user["id"]), int(branch_id)),
+    )
+    if not bound:
+        # 与“不存在”同样返回 404，不泄露别人负责的门店。
+        raise InspectionNotFound("门店不存在或未分配给你")
+
+
 def _actor(
     tid: int,
     uid: int,
     industry_key: str,
     *,
     manager: bool = False,
+    branch_admin: bool = False,
 ) -> dict:
     _tenant_industry(tid, industry_key)
     user = db.one(
-        "SELECT id,tenant_id,role,modules_json,enabled FROM users WHERE id=?",
+        "SELECT id,tenant_id,role,modules_json,enabled,job_title FROM users WHERE id=?",
         (int(uid),),
     )
     if not user or not int(user.get("enabled") or 0):
@@ -582,6 +650,8 @@ def _actor(
         raise InspectionForbidden("不能访问其他企业的巡店数据")
     if manager and role not in {"root", "owner"}:
         raise InspectionForbidden("仅企业主或平台管理员可完成该操作")
+    if branch_admin and not can_manage_branches(user):
+        raise InspectionForbidden("仅老板或总监可以完成该操作")
     if role == "member":
         modules = db.jloads(user.get("modules_json"), []) or []
         if not isinstance(modules, list) or industry_key not in modules:
@@ -604,8 +674,10 @@ def task_scope(tid: int, uid: int, task_id: int) -> dict:
     )
     if not row:
         raise InspectionNotFound("巡店任务不存在")
-    _actor(tid, uid, str(row["industry_key"]))
-    _branch_scope(tid, str(row["industry_key"]), int(row["branch_id"]))
+    user = _actor(tid, uid, str(row["industry_key"]))
+    _branch_scope(
+        tid, str(row["industry_key"]), int(row["branch_id"]), actor=user,
+    )
     return {
         "visit_id": int(row["visit_id"]),
         "tenant_id": int(row["tenant_id"]),
@@ -625,7 +697,14 @@ def normalize_branch_input(raw: Mapping[str, Any]) -> dict:
     }
 
 
-def _branch_scope(tid: int, industry_key: str, branch_id: int) -> dict:
+def _branch_scope(
+    tid: int,
+    industry_key: str,
+    branch_id: int,
+    *,
+    actor: Mapping[str, Any] | None = None,
+) -> dict:
+    """反查可巡门店；传入 actor 时同时校验经理/员工的门店绑定。"""
     row = db.one(
         "SELECT id,tenant_id,industry_key,name,region,address,active,"
         "created_by,created_at,updated_at FROM store_branch "
@@ -635,6 +714,8 @@ def _branch_scope(tid: int, industry_key: str, branch_id: int) -> dict:
     if not row:
         # 404 而非 403：不泄露其他租户是否存在该门店。
         raise InspectionNotFound("门店不存在或已停用")
+    if actor is not None:
+        _assert_branch_visible(actor, tid, int(row["id"]))
     row["active"] = bool(row.get("active"))
     return row
 
@@ -650,10 +731,9 @@ def create_branch(
     ``industry_key`` 必须由路由层的当前行业上下文传入。如果客户端
     额外塞了 industry/industry_key，只用于检测篡改，绝不用它选行业。
     """
-    # 区域经理（已明确授权该行业的 member）需要在到店时
-    # 建立门店档案。_actor 仍会校验租户、行业映射、账号停用
-    # 状态与 member.modules，因此不会放大到其他行业或租户。
-    _actor(tid, uid, industry_key)
+    # 新建门店只允许老板/平台管理员/总监；经理和员工只能巡
+    # 老板分配给自己的门店，不能自建门店绕开分配。
+    _actor(tid, uid, industry_key, branch_admin=True)
     body = normalize_branch_input(raw)
     for key in ("industry", "industry_key"):
         claimed = raw.get(key)
@@ -683,21 +763,345 @@ def list_branches(
     *,
     include_inactive: bool = False,
 ) -> list[dict]:
-    """列出当前企业、当前行业的可巡门店。"""
-    _actor(tid, uid, industry_key)
+    """列出当前企业、当前行业的可巡门店（经理/员工只含分配给自己的）。"""
+    user = _actor(tid, uid, industry_key)
+    scope_sql, scope_params = branch_scope_sql(user, tid, "id")
     rows = db.q(
         "SELECT id,tenant_id,industry_key,name,region,address,active,created_by,"
         "created_at,updated_at FROM store_branch WHERE tenant_id=? "
         "AND industry_key=? "
         + ("" if include_inactive else "AND active=1 ")
-        + "ORDER BY active DESC,region,name,id",
-        (int(tid), industry_key),
+        + scope_sql
+        + " ORDER BY active DESC,region,name,id",
+        (int(tid), industry_key, *scope_params),
     )
     for row in rows:
         row["id"] = int(row["id"])
         row["tenant_id"] = int(row["tenant_id"])
         row["active"] = bool(row.get("active"))
     return rows
+
+
+def set_branch_active(
+    tid: int,
+    uid: int,
+    industry_key: str,
+    branch_id: int,
+    *,
+    active: bool,
+) -> dict:
+    """停用/恢复门店，仅老板/平台管理员/总监可操作。
+
+    停用后门店不再出现在可巡列表，其未闭环整改也不再计入 KPI；
+    历史巡店记录仍可查看。
+    """
+    _actor(tid, uid, industry_key, branch_admin=True)
+    if not isinstance(active, bool):
+        raise InspectionError("门店启用状态格式无效")
+    target_id = _positive_id(branch_id, "门店")
+    now = time.time()
+    with db.atomic() as connection:
+        row = connection.execute(
+            "SELECT id,active FROM store_branch WHERE id=? AND tenant_id=? "
+            "AND industry_key=?",
+            (target_id, int(tid), industry_key),
+        ).fetchone()
+        if not row:
+            raise InspectionNotFound("门店不存在")
+        if bool(row["active"]) != active:
+            # row_version 同步推进，避免停用前生成的导入预览静默覆盖。
+            connection.execute(
+                "UPDATE store_branch SET active=?,row_version=row_version+1,"
+                "updated_at=? WHERE id=? AND tenant_id=?",
+                (1 if active else 0, now, target_id, int(tid)),
+            )
+        current = connection.execute(
+            "SELECT id,tenant_id,industry_key,name,region,address,active,"
+            "created_by,created_at,updated_at FROM store_branch WHERE id=?",
+            (target_id,),
+        ).fetchone()
+    result = dict(current)
+    result["active"] = bool(result.get("active"))
+    return result
+
+
+def branch_scope_info(tid: int, uid: int, industry_key: str) -> dict:
+    """巡店页需要的门店范围与按钮权限，全部由服务端判定。"""
+    user = _actor(tid, uid, industry_key)
+    role = str(user.get("role") or "")
+    all_branches = sees_all_branches(user)
+    assigned = None
+    if not all_branches:
+        assigned = int((db.one(
+            "SELECT COUNT(*) n FROM user_branch ub JOIN store_branch b "
+            "ON b.id=ub.branch_id AND b.tenant_id=ub.tenant_id "
+            "WHERE ub.tenant_id=? AND ub.user_id=? AND b.industry_key=? "
+            "AND b.active=1",
+            (int(tid), int(user["id"]), industry_key),
+        ) or {}).get("n") or 0)
+    return {
+        "all_branches": all_branches,
+        "assigned_branches": assigned,
+        "notice": NO_BRANCH_NOTICE if assigned == 0 else "",
+        "can_manage_branches": can_manage_branches(user),
+        "can_review": can_manage_branches(user),
+        "can_assign_actions": role in {"root", "owner"},
+    }
+
+
+def _search_text(value: Any, *, field: str, limit: int) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise InspectionError(f"{field}格式无效")
+    clean = value.strip()
+    if len(clean) > limit or any(ord(char) < 32 for char in clean):
+        raise InspectionError(f"{field}格式无效")
+    return clean
+
+
+def _branch_assignees(tid: int, branch_ids: Sequence[int]) -> dict[int, list[dict]]:
+    ids = [int(value) for value in branch_ids][:200]
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    result: dict[int, list[dict]] = {}
+    for row in db.q(
+        "SELECT ub.branch_id,u.id,u.username,u.job_title FROM user_branch ub "
+        "JOIN users u ON u.id=ub.user_id AND u.tenant_id=ub.tenant_id "
+        f"WHERE ub.tenant_id=? AND ub.branch_id IN ({placeholders}) "
+        "AND u.role='member' ORDER BY u.id",
+        (int(tid), *ids),
+    ):
+        result.setdefault(int(row["branch_id"]), []).append({
+            "id": int(row["id"]),
+            "username": str(row.get("username") or ""),
+            "job_title": _member_title(row),
+        })
+    return result
+
+
+def search_branches(
+    tid: int,
+    uid: int,
+    industry_key: str,
+    *,
+    q: str = "",
+    region: str = "",
+    limit: int = 20,
+    before_id: int | None = None,
+) -> dict:
+    """服务端权威 tenant + actor + industry + 门店绑定作用域的有界门店搜索。"""
+    user = _actor(int(tid), int(uid), industry_key)
+    clean_q = _search_text(q, field="门店搜索词", limit=80)
+    clean_region = _search_text(region, field="门店区域", limit=60)
+    if isinstance(limit, bool):
+        raise InspectionError("门店分页条数无效")
+    try:
+        page_size = int(limit)
+    except (TypeError, ValueError):
+        raise InspectionError("门店分页条数无效") from None
+    if not 1 <= page_size <= 50:
+        raise InspectionError("门店分页条数必须在 1-50 之间")
+    cursor = None
+    if before_id is not None:
+        if isinstance(before_id, bool):
+            raise InspectionError("门店分页游标无效")
+        try:
+            cursor = int(before_id)
+        except (TypeError, ValueError):
+            raise InspectionError("门店分页游标无效") from None
+        if cursor < 1:
+            raise InspectionError("门店分页游标无效")
+
+    conditions = ["tenant_id=?", "industry_key=?", "active=1"]
+    params: list = [int(tid), industry_key]
+
+    def like(value: str) -> str:
+        return "%" + value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+    if clean_q:
+        conditions.append(
+            "(COALESCE(store_code,'') LIKE ? ESCAPE '\\' "
+            "OR name LIKE ? ESCAPE '\\')"
+        )
+        pattern = like(clean_q)
+        params.extend((pattern, pattern))
+    if clean_region:
+        conditions.append("region LIKE ? ESCAPE '\\'")
+        params.append(like(clean_region))
+    if cursor is not None:
+        conditions.append("id<?")
+        params.append(cursor)
+    scope_sql, scope_params = branch_scope_sql(user, tid, "id")
+    rows = db.q(
+        "SELECT id,industry_key,store_code,name,region,address,active "
+        "FROM store_branch WHERE "
+        + " AND ".join(conditions)
+        + scope_sql
+        + " ORDER BY id DESC LIMIT ?",
+        (*params, *scope_params, page_size + 1),
+    )
+    has_more = len(rows) > page_size
+    rows = rows[:page_size]
+    items = [{
+        "id": int(row["id"]),
+        "industry_key": str(row["industry_key"]),
+        "store_code": str(row.get("store_code") or ""),
+        "name": str(row.get("name") or ""),
+        "region": str(row.get("region") or ""),
+        "address": str(row.get("address") or ""),
+        "active": bool(row.get("active")),
+    } for row in rows]
+    if can_manage_branches(user):
+        # 老板/总监在门店列表里直接看到每家店的负责人。
+        assignees = _branch_assignees(tid, [item["id"] for item in items])
+        for item in items:
+            item["assignees"] = assignees.get(item["id"], [])
+    return {
+        "items": items,
+        "next_before_id": items[-1]["id"] if has_more and items else None,
+        "limit": page_size,
+    }
+
+
+def _team_admin(actor_uid: int) -> dict:
+    actor = db.one(
+        "SELECT u.id,u.tenant_id,u.role,u.enabled FROM users u "
+        "JOIN tenants t ON t.id=u.tenant_id WHERE u.id=? AND t.enabled=1",
+        (int(actor_uid),),
+    )
+    if (
+        not actor
+        or not int(actor.get("enabled") or 0)
+        or str(actor.get("role") or "") not in {"owner", "root"}
+    ):
+        raise InspectionForbidden("仅老板可以给成员分配门店")
+    return actor
+
+
+def member_branch_assignments(tid: int) -> dict[int, list[int]]:
+    """团队页：每个成员当前负责的门店编号。"""
+    result: dict[int, list[int]] = {}
+    for row in db.q(
+        "SELECT user_id,branch_id FROM user_branch WHERE tenant_id=? "
+        "ORDER BY user_id,branch_id",
+        (int(tid),),
+    ):
+        result.setdefault(int(row["user_id"]), []).append(int(row["branch_id"]))
+    return result
+
+
+def assignable_branches(tid: int, *, limit: int = MAX_MEMBER_BRANCHES) -> dict:
+    """团队页的门店多选候选：本企业所有启用门店（含行业，便于按成员板块过滤）。"""
+    rows = db.q(
+        "SELECT id,industry_key,store_code,name,region FROM store_branch "
+        "WHERE tenant_id=? AND active=1 ORDER BY industry_key,region,name,id "
+        "LIMIT ?",
+        (int(tid), int(limit) + 1),
+    )
+    truncated = len(rows) > int(limit)
+    return {
+        "items": [{
+            "id": int(row["id"]),
+            "industry_key": str(row["industry_key"]),
+            "store_code": str(row.get("store_code") or ""),
+            "name": str(row.get("name") or ""),
+            "region": str(row.get("region") or ""),
+        } for row in rows[: int(limit)]],
+        "truncated": truncated,
+    }
+
+
+def set_member_branches(
+    actor_uid: int,
+    member_uid: int,
+    branch_ids: Any,
+) -> dict:
+    """老板整体替换某成员负责的门店（增删绑定在同一事务里完成）。"""
+    actor = _team_admin(actor_uid)
+    if isinstance(branch_ids, (str, bytes, bytearray)) or not isinstance(
+        branch_ids, Sequence
+    ):
+        raise InspectionError("门店名单格式无效")
+    ids: list[int] = []
+    for value in branch_ids:
+        branch_id = _positive_id(value, "门店")
+        if branch_id not in ids:
+            ids.append(branch_id)
+    if len(ids) > MAX_MEMBER_BRANCHES:
+        raise InspectionError(f"一个成员最多负责 {MAX_MEMBER_BRANCHES} 家门店")
+    member = db.one(
+        "SELECT id,tenant_id,role,modules_json FROM users WHERE id=?",
+        (int(member_uid),),
+    )
+    if not member or (
+        str(actor["role"]) != "root"
+        and int(member["tenant_id"]) != int(actor["tenant_id"])
+    ):
+        raise InspectionNotFound("成员不存在")
+    if str(member.get("role") or "") != "member":
+        raise InspectionError("老板账号本来就能看全部门店，不需要分配")
+    tid = int(member["tenant_id"])
+    modules = db.jloads(member.get("modules_json"), []) or []
+    modules = set(modules) if isinstance(modules, list) else set()
+    found: dict[int, dict] = {}
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        for row in db.q(
+            "SELECT id,industry_key,name,active FROM store_branch "
+            f"WHERE tenant_id=? AND id IN ({placeholders})",
+            (tid, *chunk),
+        ):
+            found[int(row["id"])] = row
+    for branch_id in ids:
+        row = found.get(branch_id)
+        if row is None:
+            raise InspectionNotFound("门店不存在")
+        if not int(row.get("active") or 0):
+            raise InspectionConflict(f"门店「{row['name']}」已停用，不能分配")
+        if str(row["industry_key"]) not in modules:
+            raise InspectionError(
+                f"门店「{row['name']}」所在行业未对该成员开通，请先在板块里开通"
+            )
+    now = time.time()
+    with db.atomic() as connection:
+        connection.execute(
+            "DELETE FROM user_branch WHERE user_id=?", (int(member["id"]),)
+        )
+        connection.executemany(
+            "INSERT INTO user_branch(tenant_id,user_id,branch_id,created_by,"
+            "created_at) VALUES(?,?,?,?,?)",
+            [
+                (tid, int(member["id"]), branch_id, int(actor["id"]), now)
+                for branch_id in ids
+            ],
+        )
+    return {"user_id": int(member["id"]), "branch_ids": sorted(ids)}
+
+
+def visit_files_visible(tid: int, uid: int, visit_id: int) -> bool:
+    """巡店照片直链：经理/员工只能读自己负责门店的巡店照片。
+
+    租户与行业板块已由文件中间件校验；这里只补门店绑定这一层。
+    """
+    user = db.one(
+        "SELECT id,tenant_id,role,job_title,enabled FROM users WHERE id=?",
+        (int(uid),),
+    )
+    if not user or not int(user.get("enabled") or 0):
+        return False
+    if sees_all_branches(user):
+        return True
+    row = db.one(
+        "SELECT v.branch_id FROM inspection_visit v JOIN user_branch ub "
+        "ON ub.branch_id=v.branch_id AND ub.tenant_id=v.tenant_id "
+        "WHERE v.id=? AND v.tenant_id=? AND ub.user_id=? "
+        "AND v.deleted_at IS NULL",
+        (int(visit_id), int(tid), int(user["id"])),
+    )
+    return bool(row)
 
 
 def normalize_visit_input(
@@ -1036,8 +1440,8 @@ def create_visit_draft(
     task_id: int | None = None,
 ) -> dict:
     """持久化已经过 HTTP 层媒体校验的初检照片。"""
-    _actor(tid, uid, industry_key)
-    branch = _branch_scope(tid, industry_key, branch_id)
+    user = _actor(tid, uid, industry_key)
+    branch = _branch_scope(tid, industry_key, branch_id, actor=user)
     standard_snapshot = _effective_standard_snapshot(
         tid, uid, industry_key, int(branch["id"]), raw,
     )
@@ -1098,8 +1502,8 @@ def create_visit_shell(
     task_id: int | None = None,
 ) -> dict:
     """先建立 ``preparing`` 巡店锚点，供 HTTP 层按 visit_id 安全落图。"""
-    _actor(tid, uid, industry_key)
-    branch = _branch_scope(tid, industry_key, branch_id)
+    user = _actor(tid, uid, industry_key)
+    branch = _branch_scope(tid, industry_key, branch_id, actor=user)
     standard_snapshot = _effective_standard_snapshot(
         tid, uid, industry_key, int(branch["id"]), raw,
     )
@@ -1138,7 +1542,7 @@ def attach_visit_photos(
     photo_records: Sequence[Mapping[str, Any]],
 ) -> dict:
     """把已校验的照片一次性绑定到 shell，并推进为 ``analyzing``。"""
-    _actor(tid, uid, industry_key)
+    user = _actor(tid, uid, industry_key)
     with db.atomic() as connection:
         visit = connection.execute(
             "SELECT id,status,branch_id,template_key,template_version,"
@@ -1148,7 +1552,7 @@ def attach_visit_photos(
         ).fetchone()
         if not visit:
             raise InspectionNotFound("巡店记录不存在")
-        _branch_scope(tid, industry_key, int(visit["branch_id"]))
+        _branch_scope(tid, industry_key, int(visit["branch_id"]), actor=user)
         contract = _stored_visit_contract(dict(visit))
         photos = _normalize_photos(
             photo_records,
@@ -1540,6 +1944,9 @@ def _normalize_model_result_strict(
             minimum=0,
             maximum=90,
         )
+        # “立即/0 天”生成的期限等于入库时刻，整改单一出生就逾期；
+        # 最短给 1 天，让店里有时间处理和拍复查照片。
+        due_days = max(1.0, due_days)
         issues.append({
             "title": _text(value.get("title"), field="问题标题", limit=120, required=True),
             "description": _text(value.get("description"), field="问题描述", limit=1500, required=True),
@@ -1816,7 +2223,13 @@ def complete_visit(
     return get_visit(tid, uid, industry_key, int(visit_id))
 
 
-def _scoped_action(tid: int, industry_key: str, action_id: int) -> dict:
+def _scoped_action(
+    tid: int,
+    industry_key: str,
+    action_id: int,
+    *,
+    actor: Mapping[str, Any] | None = None,
+) -> dict:
     row = db.one(
         "SELECT a.*,v.industry_key,v.branch_id,v.deleted_at AS visit_deleted_at "
         "FROM inspection_action a JOIN inspection_visit v ON v.id=a.visit_id "
@@ -1826,7 +2239,7 @@ def _scoped_action(tid: int, industry_key: str, action_id: int) -> dict:
     )
     if not row:
         raise InspectionNotFound("整改任务不存在")
-    _branch_scope(tid, industry_key, int(row["branch_id"]))
+    _branch_scope(tid, industry_key, int(row["branch_id"]), actor=actor)
     return row
 
 
@@ -1863,8 +2276,8 @@ def update_action_assignment(
     模型产生的 owner / due_at 只是建议。人工确认和后续修改都用
     action.version 做 CAS，并同步 issue 的便捷查询字段。
     """
-    _actor(tid, uid, industry_key, manager=True)
-    action = _scoped_action(tid, industry_key, action_id)
+    user = _actor(tid, uid, industry_key, manager=True)
+    action = _scoped_action(tid, industry_key, action_id, actor=user)
     if str(action.get("status") or "") == "closed":
         raise InspectionConflict("已闭环整改任务不能修改责任信息")
     if isinstance(expected_version, bool):
@@ -1953,9 +2366,12 @@ def transition_action(
     target_status: str,
     note: str = "",
 ) -> dict:
-    """整改负责人推进状态，但无权自己将问题标记为已验证。"""
-    _actor(tid, uid, industry_key)
-    action = _scoped_action(tid, industry_key, action_id)
+    """整改负责人推进状态，但无权自己将问题标记为已验证。
+
+    经理/员工只能推进分配给自己的门店的整改单。
+    """
+    user = _actor(tid, uid, industry_key)
+    action = _scoped_action(tid, industry_key, action_id, actor=user)
     target = _text(target_status, field="整改状态", limit=40, required=True)
     if target not in _ACTION_TRANSITIONS.get(str(action["status"]), set()):
         raise InspectionConflict("整改任务当前不能转入该状态")
@@ -2065,8 +2481,8 @@ def add_recheck_photos(
     photo_records: Sequence[Mapping[str, Any]],
 ) -> list[dict]:
     """持久化整改后的复查照片，与初检证据分阶段保存。"""
-    _actor(tid, uid, industry_key)
-    action = _scoped_action(tid, industry_key, action_id)
+    user = _actor(tid, uid, industry_key)
+    action = _scoped_action(tid, industry_key, action_id, actor=user)
     if action["status"] != "awaiting_recheck":
         raise InspectionConflict("只有待复查整改任务可上传复查照片")
     photos = _normalize_photos(photo_records, tid, phase="recheck")
@@ -2102,8 +2518,8 @@ def record_recheck(
     *,
     task_id: int | None = None,
 ) -> dict:
-    _actor(tid, uid, industry_key)
-    action = _scoped_action(tid, industry_key, action_id)
+    user = _actor(tid, uid, industry_key)
+    action = _scoped_action(tid, industry_key, action_id, actor=user)
     if action["status"] != "awaiting_recheck":
         raise InspectionConflict("整改任务尚未提交复查")
     photos = db.q(
@@ -2182,7 +2598,8 @@ def review_recheck(
     expected_action_version: int,
     note: str,
 ) -> dict:
-    _actor(tid, uid, industry_key, manager=True)
+    # 复查通过/驳回：老板、平台管理员或总监。
+    user = _actor(tid, uid, industry_key, branch_admin=True)
     clean_decision = _text(decision, field="复核决定", limit=20, required=True).lower()
     if clean_decision not in {"close", "reject"}:
         raise InspectionError("复核决定只能为 close 或 reject")
@@ -2197,10 +2614,12 @@ def review_recheck(
     )
     if not recheck:
         raise InspectionNotFound("复查记录不存在")
-    _branch_scope(tid, industry_key, int(recheck["branch_id"]))
+    _branch_scope(tid, industry_key, int(recheck["branch_id"]), actor=user)
     if recheck["status"] != "pending":
         raise InspectionConflict("复查记录已完成人工复核")
-    action = _scoped_action(tid, industry_key, int(recheck["action_id"]))
+    action = _scoped_action(
+        tid, industry_key, int(recheck["action_id"]), actor=user,
+    )
     if action["status"] != "awaiting_recheck":
         raise InspectionConflict("整改任务当前不在待复核状态")
     now = time.time()
@@ -2271,7 +2690,7 @@ def get_visit(
     industry_key: str,
     visit_id: int,
 ) -> dict:
-    _actor(tid, uid, industry_key)
+    user = _actor(tid, uid, industry_key)
     row = db.one(
         "SELECT v.*,b.name AS branch_name,b.region AS branch_region,"
         "b.address AS branch_address FROM inspection_visit v "
@@ -2281,6 +2700,11 @@ def get_visit(
     )
     if not row:
         raise InspectionNotFound("巡店记录不存在")
+    try:
+        # 历史记录允许查看已停用门店，但经理/员工必须负责该门店。
+        _assert_branch_visible(user, tid, int(row["branch_id"]))
+    except InspectionNotFound:
+        raise InspectionNotFound("巡店记录不存在") from None
     contract = _stored_visit_contract(row)
     photos = db.q(
         "SELECT id,recheck_id,storage_key,mime_type,byte_size,sha256,phase,caption,width,"
@@ -2428,10 +2852,12 @@ def list_visits(
     before_id: int | None = None,
 ) -> dict:
     """分页返回巡店历史摘要，详细证据由 ``get_visit`` 按需加载。"""
-    _actor(tid, uid, industry_key)
+    user = _actor(tid, uid, industry_key)
     selected_branch = None
     if branch_id is not None:
-        selected_branch = _branch_scope(tid, industry_key, int(branch_id))
+        selected_branch = _branch_scope(
+            tid, industry_key, int(branch_id), actor=user,
+        )
     if selected_branch is not None and region is not None:
         raise InspectionError("门店与区域筛选不能同时使用")
     clean_region = None
@@ -2457,8 +2883,14 @@ def list_visits(
         conditions.append("v.branch_id=?")
         params.append(int(selected_branch["id"]))
     elif clean_region is not None:
-        conditions.append("COALESCE(b.region,'')=?")
-        params.append(clean_region)
+        # 区域汇总把空区域显示为“未分区”；下钻用同一表达式，
+        # 否则点“未分区 → 看记录”永远是空列表。
+        conditions.append(f"{_REGION_LABEL_SQL}=?")
+        params.append(clean_region or UNASSIGNED_REGION)
+    scope_sql, scope_params = branch_scope_sql(user, tid, "v.branch_id")
+    if scope_sql:
+        conditions.append(scope_sql.removeprefix(" AND "))
+        params.extend(scope_params)
     if before_id is not None:
         cursor_id = _positive_id(before_id, "分页游标")
         conditions.append("v.id<?")
@@ -2472,7 +2904,8 @@ def list_visits(
         "(SELECT COUNT(*) FROM inspection_issue i WHERE i.tenant_id=v.tenant_id "
         " AND i.visit_id=v.id AND i.status!='closed') open_issue_count,"
         "(SELECT COUNT(*) FROM inspection_action a WHERE a.tenant_id=v.tenant_id "
-        " AND a.visit_id=v.id AND a.status!='closed' AND a.due_at<?) overdue_count "
+        " AND a.visit_id=v.id AND a.status NOT IN ('closed','awaiting_recheck') "
+        " AND a.due_at<?) overdue_count "
         "FROM inspection_visit v JOIN store_branch b ON b.id=v.branch_id "
         "AND b.tenant_id=v.tenant_id WHERE "
         + " AND ".join(conditions)
@@ -2551,15 +2984,20 @@ def aggregate(
     """返回当前行业的巡店风险汇总，不读取任何业务正文。
 
     已授权的区域经理需要依此排定巡店与整改优先级，但仍只能
-    看到自己 tenant + industry 内的结构化计数。
+    看到自己 tenant + industry 内的结构化计数；经理/员工只统计
+    分配给自己的门店。统计口径统一排除已停用门店。
     """
-    _actor(tid, uid, industry_key)
+    user = _actor(tid, uid, industry_key)
     selected_branch = None
     if branch_id is not None:
-        selected_branch = _branch_scope(tid, industry_key, int(branch_id))
+        selected_branch = _branch_scope(
+            tid, industry_key, int(branch_id), actor=user,
+        )
     pinned_branch = None
     if pinned_branch_id is not None:
-        pinned_branch = _branch_scope(tid, industry_key, int(pinned_branch_id))
+        pinned_branch = _branch_scope(
+            tid, industry_key, int(pinned_branch_id), actor=user,
+        )
         if selected_branch and int(pinned_branch["id"]) != int(selected_branch["id"]):
             raise InspectionError("固定门店与汇总门店不一致")
     branch_cap = _aggregate_limit(branch_limit, field="门店汇总条数")
@@ -2570,7 +3008,14 @@ def aggregate(
     conditions = [
         "v.tenant_id=?", "v.industry_key=?", "v.deleted_at IS NULL",
         "v.status='completed'",
+        # 停用门店的整改单已无法推进，不能继续拉低 KPI、计入逾期。
+        "EXISTS(SELECT 1 FROM store_branch sb WHERE sb.id=v.branch_id "
+        "AND sb.tenant_id=v.tenant_id AND sb.active=1)",
     ]
+    scope_sql, scope_params = branch_scope_sql(user, tid, "v.branch_id")
+    if scope_sql:
+        conditions.append(scope_sql.removeprefix(" AND "))
+        params.extend(scope_params)
     if selected_branch:
         conditions.append("v.branch_id=?")
         params.append(int(selected_branch["id"]))
@@ -2602,7 +3047,8 @@ def aggregate(
     action_metrics = db.one(
         "SELECT COUNT(*) total,"
         "SUM(CASE WHEN a.status='closed' THEN 1 ELSE 0 END) verified,"
-        "SUM(CASE WHEN a.status!='closed' AND a.due_at<? THEN 1 ELSE 0 END) overdue "
+        f"SUM(CASE WHEN a.status NOT IN {_OVERDUE_EXCLUDED_SQL} AND a.due_at<? "
+        "THEN 1 ELSE 0 END) overdue "
         "FROM inspection_action a JOIN inspection_visit v "
         "ON v.id=a.visit_id AND v.tenant_id=a.tenant_id "
         f"WHERE {where} AND a.tenant_id=?",
@@ -2620,6 +3066,10 @@ def aggregate(
 
     branch_params: list[Any] = [int(tid), industry_key]
     branch_conditions = ["b.tenant_id=?", "b.industry_key=?", "b.active=1"]
+    branch_scope, branch_scope_params = branch_scope_sql(user, tid, "b.id")
+    if branch_scope:
+        branch_conditions.append(branch_scope.removeprefix(" AND "))
+        branch_params.extend(branch_scope_params)
     if selected_branch:
         branch_conditions.append("b.id=?")
         branch_params.append(int(selected_branch["id"]))
@@ -2638,7 +3088,8 @@ def aggregate(
         " AND i.tenant_id=? GROUP BY fv.branch_id"
         "), action_metrics AS ("
         " SELECT fv.branch_id,"
-        " SUM(CASE WHEN a.status!='closed' AND a.due_at<? THEN 1 ELSE 0 END) overdue_actions"
+        f" SUM(CASE WHEN a.status NOT IN {_OVERDUE_EXCLUDED_SQL} AND a.due_at<?"
+        " THEN 1 ELSE 0 END) overdue_actions"
         " FROM filtered_visits fv JOIN inspection_action a ON a.visit_id=fv.id"
         " AND a.tenant_id=? GROUP BY fv.branch_id"
         ") "
@@ -2690,7 +3141,7 @@ def aggregate(
         ))
         region_buckets: dict[str, dict] = {}
         for branch in branches:
-            region = str(branch.get("region") or "未分区")
+            region = str(branch.get("region") or UNASSIGNED_REGION)
             bucket = region_buckets.setdefault(region, {
                 "region": region, "branches": 0, "visits": 0,
                 "score_weighted_sum": 0.0, "scored_visits": 0,
@@ -2895,8 +3346,8 @@ def _prepare_run_context(
     raw: Mapping[str, Any],
 ) -> tuple[dict, dict, dict | None]:
     """在 DB worker 中完成运行前的作用域与幂等检查。"""
-    _actor(tid, uid, industry_key)
-    branch = _branch_scope(tid, industry_key, branch_id)
+    user = _actor(tid, uid, industry_key)
+    branch = _branch_scope(tid, industry_key, branch_id, actor=user)
     standard_snapshot = _effective_standard_snapshot(
         tid, uid, industry_key, int(branch["id"]), raw,
     )

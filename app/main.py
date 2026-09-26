@@ -746,6 +746,15 @@ async def _auth_mw(request: Request, call_next):
                 else "无权访问该文件"
             )
             return JSONResponse({"detail": detail}, status_code=403)
+        # 巡店照片再过一层门店绑定：经理/员工只能看自己负责门店的照片。
+        inspection_file = _re_files.match(r"/files/inspections/(\d+)/(\d+)/", path)
+        if inspection_file and not await db.arun(
+            inspection.visit_files_visible,
+            owner_tid,
+            int(cur.get("id") or 0),
+            int(inspection_file.group(2)),
+        ):
+            return JSONResponse({"detail": "无权访问该文件"}, status_code=403)
         # 演绎师/封面师产出的 HTML/SVG 由不可信输入链驱动生成,同源直开会让其中的
         # 脚本以登录会话调用 /api/*。用 sandbox CSP 剥夺其同源与脚本能力(iframe 预览
         # 已带 sandbox,这里堵的是"打开"式顶层导航),并禁止 MIME 嗅探。
@@ -2176,6 +2185,12 @@ def team_get():
            "my_job_title": auth.job_title(),
            "is_admin": admin_view,
            "can_allocate": auth.can_allocate_members()}
+    if admin_view:
+        # 巡店“负责门店”：老板给经理/员工分配门店（总监本来就看全部）。
+        assignments = inspection.member_branch_assignments(TEN())
+        for x in users:
+            x["branch_ids"] = assignments.get(int(x["id"]), [])
+        out["store_branches"] = inspection.assignable_branches(TEN())
     if auth.is_root():
         tenants = db.q("SELECT t.*, (SELECT COUNT(*) FROM users u WHERE u.tenant_id=t.id) n_users "
                        "FROM tenants t ORDER BY t.id")
@@ -2444,8 +2459,25 @@ def team_user_delete(uid: int):
         raise HTTPException(403, "root 账号不可删除")
     if u["id"] == auth.current()["id"]:
         raise HTTPException(400, "不能删除自己")
-    db.q("DELETE FROM users WHERE id=?", (uid,))
+    with db.atomic() as connection:
+        connection.execute("DELETE FROM users WHERE id=?", (uid,))
+        # 成员删掉后不留悬空的门店绑定。
+        connection.execute("DELETE FROM user_branch WHERE user_id=?", (uid,))
     return {"ok": True}
+
+
+@app.put("/api/team/users/{uid}/branches")
+def team_user_branches(uid: int, body: dict):
+    """老板给成员分配负责门店（整体替换）。"""
+    _need_admin()
+    try:
+        return inspection.set_member_branches(
+            int((auth.current() or {}).get("id") or 0),
+            uid,
+            body.get("branch_ids"),
+        )
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
 
 
 @app.put("/api/team/tenant")
@@ -10471,17 +10503,6 @@ def _raise_inspection_override_error(
     ) from exc
 
 
-def _inspection_search_text(value, *, field: str, limit: int) -> str:
-    if value is None:
-        return ""
-    if not isinstance(value, str):
-        raise inspection.InspectionError(f"{field}格式无效")
-    clean = value.strip()
-    if len(clean) > limit or any(ord(char) < 32 for char in clean):
-        raise inspection.InspectionError(f"{field}格式无效")
-    return clean
-
-
 def _inspection_branch_search_db(
     tid: int,
     uid: int,
@@ -10492,71 +10513,11 @@ def _inspection_branch_search_db(
     limit: int = 20,
     before_id: int | None = None,
 ) -> dict:
-    """服务端权威 tenant + actor + industry 作用域的有界门店搜索。"""
-    inspection._actor(int(tid), int(uid), industry_key)
-    clean_q = _inspection_search_text(q, field="门店搜索词", limit=80)
-    clean_region = _inspection_search_text(region, field="门店区域", limit=60)
-    if isinstance(limit, bool):
-        raise inspection.InspectionError("门店分页条数无效")
-    try:
-        page_size = int(limit)
-    except (TypeError, ValueError):
-        raise inspection.InspectionError("门店分页条数无效") from None
-    if not 1 <= page_size <= 50:
-        raise inspection.InspectionError("门店分页条数必须在 1-50 之间")
-    cursor = None
-    if before_id is not None:
-        if isinstance(before_id, bool):
-            raise inspection.InspectionError("门店分页游标无效")
-        try:
-            cursor = int(before_id)
-        except (TypeError, ValueError):
-            raise inspection.InspectionError("门店分页游标无效") from None
-        if cursor < 1:
-            raise inspection.InspectionError("门店分页游标无效")
-
-    conditions = ["tenant_id=?", "industry_key=?", "active=1"]
-    params: list = [int(tid), industry_key]
-
-    def like(value: str) -> str:
-        return "%" + value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-
-    if clean_q:
-        conditions.append(
-            "(COALESCE(store_code,'') LIKE ? ESCAPE '\\' "
-            "OR name LIKE ? ESCAPE '\\')"
-        )
-        pattern = like(clean_q)
-        params.extend((pattern, pattern))
-    if clean_region:
-        conditions.append("region LIKE ? ESCAPE '\\'")
-        params.append(like(clean_region))
-    if cursor is not None:
-        conditions.append("id<?")
-        params.append(cursor)
-    rows = db.q(
-        "SELECT id,industry_key,store_code,name,region,address,active "
-        "FROM store_branch WHERE "
-        + " AND ".join(conditions)
-        + " ORDER BY id DESC LIMIT ?",
-        (*params, page_size + 1),
+    """服务端权威 tenant + actor + industry + 门店绑定作用域的有界门店搜索。"""
+    return inspection.search_branches(
+        int(tid), int(uid), industry_key,
+        q=q, region=region, limit=limit, before_id=before_id,
     )
-    has_more = len(rows) > page_size
-    rows = rows[:page_size]
-    items = [{
-        "id": int(row["id"]),
-        "industry_key": str(row["industry_key"]),
-        "store_code": str(row.get("store_code") or ""),
-        "name": str(row.get("name") or ""),
-        "region": str(row.get("region") or ""),
-        "address": str(row.get("address") or ""),
-        "active": bool(row.get("active")),
-    } for row in rows]
-    return {
-        "items": items,
-        "next_before_id": items[-1]["id"] if has_more and items else None,
-        "limit": page_size,
-    }
 
 
 def _inspection_checklist_db(
@@ -10565,8 +10526,10 @@ def _inspection_checklist_db(
     industry_key: str,
     branch_id: int,
 ) -> dict:
-    inspection._actor(int(tid), int(uid), industry_key)
-    branch = inspection._branch_scope(int(tid), industry_key, int(branch_id))
+    actor = inspection._actor(int(tid), int(uid), industry_key)
+    branch = inspection._branch_scope(
+        int(tid), industry_key, int(branch_id), actor=actor,
+    )
     try:
         snapshot = inspectionoverrides.effective_snapshot(
             int(tid), int(uid), industry_key, int(branch["id"]),
@@ -10621,8 +10584,10 @@ def _assert_inspection_http_replay_contract(
     prepared: list[dict],
 ) -> None:
     """Reject request-key reuse when any persisted HTTP input has changed."""
-    inspection._actor(int(tid), int(uid), industry_key)
-    inspection._branch_scope(int(tid), industry_key, int(branch_id))
+    actor = inspection._actor(int(tid), int(uid), industry_key)
+    inspection._branch_scope(
+        int(tid), industry_key, int(branch_id), actor=actor,
+    )
     row = db.one(
         "SELECT request_key,industry_key,branch_id,visit_at,template_key,"
         "template_version,template_snapshot_json,observations_json "
@@ -11920,6 +11885,10 @@ def inspection_meta(industry_key: str | None = None):
             TEN(), _inspection_actor_id(), selected, limit=20
         )
         is_manager = auth.is_admin()
+        # 门店范围与按钮权限由服务层按职级/门店绑定判定。
+        scope_info = inspection.branch_scope_info(
+            TEN(), _inspection_actor_id(), selected
+        )
         return {
             "industry_key": selected,
             "industries": choices,
@@ -11934,8 +11903,15 @@ def inspection_meta(industry_key: str | None = None):
             },
             "permissions": {
                 "can_import_branches": is_manager,
-                "can_create_branch": True,
-                "can_review": is_manager,
+                "can_create_branch": scope_info["can_manage_branches"],
+                "can_manage_branches": scope_info["can_manage_branches"],
+                "can_review": scope_info["can_review"],
+                "can_assign_actions": scope_info["can_assign_actions"],
+            },
+            "branch_scope": {
+                "all_branches": scope_info["all_branches"],
+                "assigned_branches": scope_info["assigned_branches"],
+                "notice": scope_info["notice"],
             },
             "employee": _public_station(registry.BY_IDX[inspection.EMPLOYEE_IDX]),
         }
@@ -12196,6 +12172,21 @@ def inspection_branch_create(body: dict, industry_key: str | None = None):
         selected, _choices = _inspection_scope(industry_key or body.get("industry_key"))
         return inspection.create_branch(
             TEN(), _inspection_actor_id(), selected, body
+        )
+    except inspection.InspectionError as exc:
+        _raise_inspection_error(exc)
+
+
+@app.patch("/api/inspections/branches/{branch_id}")
+def inspection_branch_update(branch_id: int, body: dict):
+    """停用/恢复门店：老板或总监。"""
+    try:
+        selected, _choices = _inspection_scope(body.get("industry_key"))
+        if "active" not in body:
+            raise inspection.InspectionError("缺少门店启用状态")
+        return inspection.set_branch_active(
+            TEN(), _inspection_actor_id(), selected, branch_id,
+            active=body.get("active"),
         )
     except inspection.InspectionError as exc:
         _raise_inspection_error(exc)

@@ -4420,6 +4420,15 @@ async function apiUpload(path,form,{timeout=90000}={}){
 function inspectionStatusLabel(value){return ({preparing:"准备照片",analyzing:"分析中",completed:"已出报告",failed:"分析失败",open:"待整改",rectifying:"整改中",in_progress:"整改中",awaiting_recheck:"待企业主复核",reopened:"复核驳回",closed:"已人工闭环",pending:"待人工复核",approved:"复核通过",rejected:"复核驳回",close:"建议通过",reject:"建议驳回",manual_review:"需人工判断"})[value]||value||"—";}
 function inspectionStatusClass(value){return value==="completed"||value==="closed"||value==="approved"?"done":value==="failed"||value==="rejected"?"failed":value==="awaiting_recheck"||value==="pending"?"awaiting_review":"running";}
 function inspectionSeverity(value){return ({critical:"紧急",high:"高",medium:"中",low:"低"})[value]||value||"—";}
+// 本地日期(YYYY-MM-DD)：toISOString 是 UTC，北京时间 0-8 点会变成昨天。
+function inspectionLocalDate(value=new Date()){const d=value instanceof Date?value:new Date(value);if(!Number.isFinite(d.getTime()))return "";return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;}
+// 门店与复核权限以服务端 meta 为准；旧服务没有该字段时退回主账号判断。
+function inspectionPerm(key){const perms=(INSPECTION_META||{}).permissions||{};return key in perms?!!perms[key]:isAdmin();}
+async function inspectionBranchDeactivate(branchId,name){
+  if(!inspectionPerm("can_manage_branches"))return toast("仅老板或总监可以停用门店");
+  if(!await uiConfirm(`停用后「${name}」不再出现在可巡门店里，它的未闭环整改也不再计入统计；历史巡店记录仍可查看。`,{title:"停用门店",confirmText:"确定停用"}))return;
+  try{await api(`/inspections/branches/${Number(branchId)}`,{method:"PATCH",body:{active:false,industry_key:INSPECTION_INDUSTRY}});toast("门店已停用");if(Number(INSPECTION_CAPTURE_BRANCH_ID)===Number(branchId))INSPECTION_CAPTURE_BRANCH_ID=0;await inspectionView();}catch(e){toast(e.message);}
+}
 async function inspectionFileFingerprint(file){
   const bytes=await file.arrayBuffer();
   if(globalThis.crypto?.subtle?.digest){
@@ -4484,7 +4493,7 @@ async function inspectionBranchSelect(value){
   await inspectionChecklistLoad(INSPECTION_CAPTURE_BRANCH_ID);
 }
 function inspectionBranchPickerHtml(){
-  const state=INSPECTION_BRANCH_PICKER,items=state.items||[];
+  const state=INSPECTION_BRANCH_PICKER,items=state.items||[],canManage=inspectionPerm("can_manage_branches"),showAssignees=canManage&&items.some(branch=>Array.isArray(branch.assignees)),scopeNotice=String((INSPECTION_META||{}).branch_scope?.notice||"");
   const controls=`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(0,1fr));gap:10px;align-items:end">
     <div style="min-width:0"><label>门店编号 / 名称</label><input id="inspection-branch-q" value="${esc(state.q)}" placeholder="例：S001 或 人民路店" style="width:100%;min-width:0"></div>
     <div style="min-width:0"><label>区域筛选</label><input id="inspection-branch-region" value="${esc(state.region)}" placeholder="例：华东 / 静安" style="width:100%;min-width:0"></div>
@@ -4492,11 +4501,11 @@ function inspectionBranchPickerHtml(){
   if(state.status==="loading")return `${controls}<div class="notice" role="status"><span class="spin"></span> 正在加载门店…</div>`;
   if(state.status==="permission")return `${controls}<div class="notice red">无权限：${esc(state.error)}</div>`;
   if(state.status==="error")return `${controls}<div class="notice red">门店加载失败：${esc(state.error)} <button class="btn sm" onclick="inspectionBranchSearch()">重试</button></div>`;
-  if(state.status==="empty")return `${controls}<div class="empty">暂无匹配门店，请更换编号、名称或区域。</div>`;
+  if(state.status==="empty")return `${controls}<div class="empty">${scopeNotice&&!state.q&&!state.region?esc(scopeNotice):"暂无匹配门店，请更换编号、名称或区域。"}</div>`;
   return `${controls}${state.legacy?`<div class="notice">当前服务仍使用旧 branches 兼容模式，页面仅显示最多 20 家。</div>`:""}
     <label>选择门店 *</label><select id="inspection-branch" onchange="inspectionBranchSelect(this.value)">${items.map(branch=>`<option value="${Number(branch.id)}" ${Number(branch.id)===Number(INSPECTION_CAPTURE_BRANCH_ID)?"selected":""}>${esc(branch.store_code?branch.store_code+" · ":"")}${esc(branch.name||"未命名门店")}${branch.region?` · ${esc(branch.region)}`:""}</option>`).join("")}</select>
     <div class="sub" style="margin-top:8px">搜索结果：可选择本次巡店门店，也可直接查看该店历史。</div>
-    <div class="dimwrap"><table class="dimtable"><thead><tr><th>门店</th><th>区域</th><th>操作</th></tr></thead><tbody>${items.map(branch=>`<tr><td><b>${esc(branch.store_code||"—")}</b><div class="sub">${esc(branch.name||"未命名门店")}</div></td><td>${esc(branch.region||"未分区")}</td><td><div class="actions" style="margin:0;gap:6px"><button class="btn sm ${Number(branch.id)===Number(INSPECTION_CAPTURE_BRANCH_ID)?"pri":""}" onclick="inspectionBranchSelect(${Number(branch.id)})">选择巡店</button><button class="btn sm" onclick="inspectionFilterBranch(${Number(branch.id)})">看历史</button></div></td></tr>`).join("")}</tbody></table></div>
+    <div class="dimwrap"><table class="dimtable"><thead><tr><th>门店</th><th>区域</th>${showAssignees?"<th>负责人</th>":""}<th>操作</th></tr></thead><tbody>${items.map(branch=>`<tr><td><b>${esc(branch.store_code||"—")}</b><div class="sub">${esc(branch.name||"未命名门店")}</div></td><td>${esc(branch.region||"未分区")}</td>${showAssignees?`<td>${(branch.assignees||[]).length?branch.assignees.map(a=>esc(a.username)).join("、"):`<span class="sub">未分配</span>`}</td>`:""}<td><div class="actions" style="margin:0;gap:6px">${canManage?`<button class="btn sm" onclick="inspectionBranchDeactivate(${Number(branch.id)},${cp(branch.name||"")})">停用</button>`:""}<button class="btn sm ${Number(branch.id)===Number(INSPECTION_CAPTURE_BRANCH_ID)?"pri":""}" onclick="inspectionBranchSelect(${Number(branch.id)})">选择巡店</button><button class="btn sm" onclick="inspectionFilterBranch(${Number(branch.id)})">看历史</button></div></td></tr>`).join("")}</tbody></table></div>
     <div class="actions" style="justify-content:flex-end;flex-wrap:wrap"><button class="btn sm" ${state.page>0?"":"disabled"} onclick="inspectionBranchSearchPage(-1)">← 上一页</button><span class="sub">第 ${state.page+1} 页 · 每页最多 20 家</span><button class="btn sm" ${state.nextBeforeId!==null&&state.nextBeforeId!==undefined?"":"disabled"} onclick="inspectionBranchSearchPage(1)">下一页 →</button></div>`;
 }
 async function inspectionChecklistLoad(branchId,{silent=false}={}){
@@ -4875,14 +4884,15 @@ function inspectionDraw(){
       <h2 style="margin:0">🏪 区域经理巡店</h2><div class="sub" style="margin-top:5px">上传现场照片，巡店经理会标出可见问题、生成整改责任与期限，并持续跟踪复查。</div></div>
       ${industries.length>1?`<div style="min-width:170px"><label style="margin-top:0">巡店行业</label><select onchange="inspectionSelectIndustry(this.value)">${industries.map(item=>`<option value="${esc(item.key)}" ${item.key===meta.industry_key?"selected":""}>${esc(item.emoji||"")} ${esc(item.name)}</option>`).join("")}</select></div>`:""}
       ${inspectionImportActionHtml()}
-      <button class="btn" onclick="inspectionNewBranch()">＋ 新建门店</button></div></div>
+      ${inspectionPerm("can_manage_branches")?`<button class="btn" onclick="inspectionNewBranch()">＋ 新建门店</button>`:""}</div>
+    ${meta.branch_scope?.notice?`<div class="notice" style="margin:10px 0 0">${esc(meta.branch_scope.notice)}</div>`:""}</div>
   ${detail?inspectionDetailHtml(detail):`${inspectionImportRender()}<div class="grid3" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));margin-bottom:16px">
     ${[["已完成巡店",bossDashNumber(summary.visits)],["覆盖门店",bossDashNumber(visitedBranches)],["开放问题",bossDashNumber(summary.open_issues)],["逾期整改",bossDashNumber(summary.overdue_actions)],["已核验整改",bossDashNumber(summary.verified_actions)]].map(([l,v])=>`<div class="topic" style="margin:0"><div style="font-size:24px;font-weight:900">${v}</div><div class="sub">${l}</div></div>`).join("")}</div>
   <div class="card"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><h3 style="margin:0;flex:1">🗺️ 区域汇总${selectedRegion!==null?` · ${esc(selectedRegion||"未分区")}`:""}</h3>${selectedRegion!==null?`<button class="btn sm" onclick="inspectionFilterRegion(null)">清除区域筛选</button>`:""}</div><div class="sub" style="margin:8px 0">按逾期、开放问题和低分排序，先处理风险最高的区域；点“看记录”下钻到该区域。</div>${regionMetrics.length?`<div class="dimwrap"><table class="dimtable"><thead><tr><th>区域</th><th>门店</th><th>均分</th><th>开放问题</th><th>逾期</th><th>末次巡店</th><th></th></tr></thead><tbody>${regionMetrics.map(r=>`<tr><td><b>${esc(r.region||"未分区")}</b></td><td>${bossDashNumber(r.branches)}</td><td>${bossDashNumber(r.average_score,1)}</td><td>${bossDashNumber(r.open_issues)}</td><td>${bossDashNumber(r.overdue_actions)}</td><td>${r.last_visit_at?new Date(r.last_visit_at*1000).toLocaleDateString("zh-CN"):"未巡店"}</td><td><button class="btn sm ${selectedRegion!==null&&String(selectedRegion)===String(r.region||"")?"pri":""}" onclick="inspectionFilterRegion(${cp(r.region||"")})">${selectedRegion!==null&&String(selectedRegion)===String(r.region||"")?"筛选中":"看记录"}</button></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">暂无可汇总的区域巡店数据。</div>`}</div>
   <div class="card"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><h3 style="margin:0;flex:1">⚠️ 风险优先门店</h3>${selectedBranch?`<button class="btn sm" onclick="inspectionFilterBranch(0)">清除“${esc(selectedBranch.name)}”筛选</button>`:""}</div><div class="sub" style="margin:8px 0">点击门店，只看该店巡店记录；列表按逾期、开放问题和低分排序。</div>${branchMetrics.length?`<div class="dimwrap"><table class="dimtable"><thead><tr><th>门店 / 区域</th><th>均分</th><th>开放问题</th><th>逾期</th><th>末次巡店</th><th></th></tr></thead><tbody>${branchMetrics.map(b=>`<tr><td><b>${esc(b.name)}</b><div class="sub">${esc(b.region||"未分区")}</div></td><td>${bossDashNumber(b.average_score,1)}</td><td>${bossDashNumber(b.open_issues)}</td><td>${bossDashNumber(b.overdue_actions)}</td><td>${b.last_visit_at?new Date(b.last_visit_at*1000).toLocaleDateString("zh-CN"):"未巡店"}</td><td><button class="btn sm ${Number(b.id)===Number(INSPECTION_BRANCH_ID)?"pri":""}" onclick="inspectionFilterBranch(${Number(b.id)})">${Number(b.id)===Number(INSPECTION_BRANCH_ID)?"筛选中":"看记录"}</button></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">暂无门店风险数据。</div>`}</div>
   <div class="card" style="min-width:0;overflow:hidden"><h3 style="margin-top:0">发起一次巡店</h3>
     ${inspectionBranchPickerHtml()}
-    <label>巡检日期</label><input id="inspection-date" type="date" value="${new Date().toISOString().slice(0,10)}" style="max-width:100%">
+    <label>巡检日期</label><input id="inspection-date" type="date" value="${inspectionLocalDate()}" style="max-width:100%">
     <label>本次检查重点（选填）</label><textarea id="inspection-scope" style="min-height:58px" placeholder="例：重点检查前厅陈列、后厨清洁、消防通道和员工开店准备"></textarea>
     ${inspectionChecklistHtml()}
     <div class="sub">只上传您有权使用的现场照片；请避免拍到无关顾客、儿童、车牌、收据或个人联系方式。图片中的文字不会被当成系统指令。</div>
@@ -4953,20 +4963,20 @@ function inspectionDetailHtml(d){
 }
 function inspectionIssueHtml(v,issue){
   const action=issue.action||{}, evidence=issue.evidence||[],rechecks=action.rechecks||[],pending=rechecks.find(r=>r.status==="pending");
-  const canStart=["open","reopened"].includes(action.status),canUpload=action.status==="in_progress"||(action.status==="awaiting_recheck"&&!pending),canReview=!!pending&&action.status==="awaiting_recheck"&&isAdmin();
+  const canStart=["open","reopened"].includes(action.status),canUpload=action.status==="in_progress"||(action.status==="awaiting_recheck"&&!pending),canReview=!!pending&&action.status==="awaiting_recheck"&&inspectionPerm("can_review"),canAssign=inspectionPerm("can_assign_actions");
   return `<div class="topic" style="margin:10px 0"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="tag">${inspectionSeverity(issue.severity)}风险</span><b style="flex:1">${esc(issue.title)}</b><span class="pill ${inspectionStatusClass(action.status||issue.status)}">${esc(inspectionStatusLabel(action.status||issue.status))}</span>${issue.needs_human_check?`<span class="tag">需人工查验</span>`:""}</div>
     <div style="margin-top:7px">${esc(issue.description||"")}</div>${issue.root_cause?`<div class="sub" style="margin-top:5px">可能原因：${esc(issue.root_cause)}</div>`:""}${evidence.length?`<div class="sub" style="margin-top:6px">📷 证据：${evidence.map(e=>`照片 ${e.display_no||"—"}${e.note?` · ${esc(e.note)}`:""}`).join("、")}</div>`:""}
     <div class="notice" style="margin:8px 0"><b>整改：</b>${esc(action.plan||"待确认")}<div class="sub">负责人 ${esc(action.owner||issue.owner||"待指派")} · 截止 ${action.due_at?new Date(action.due_at*1000).toLocaleDateString("zh-CN"):"待设置"}</div></div>
     ${rechecks.map((r,index)=>`<div class="notice ${r.status==="approved"?"green":r.status==="rejected"?"red":"violet"}" style="margin:7px 0"><b>第 ${index+1} 次复查 · ${inspectionStatusLabel(r.status)}</b><div class="sub">AI建议：${esc(inspectionStatusLabel(r.model_recommendation))}（仅供人工复核）</div>${r.note?`<div>${esc(r.note)}</div>`:""}${(r.photos||[]).length?`<div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:8px">${r.photos.map(p=>{const src=safeAssetUrl(p.url||`/files/${p.storage_key}`);return src?`<a href="${esc(src)}" target="_blank" rel="noopener"><img src="${esc(src)}" alt="复查照片 ${p.display_no}" style="width:88px;height:70px;object-fit:cover;border-radius:7px"><div class="sub">照片 ${p.display_no}</div></a>`:"";}).join("")}</div>`:""}</div>`).join("")}
-    ${action.status!=="closed"?`<div class="actions">${isAdmin()?`<button class="btn sm" onclick="inspectionAssign(${v.id},${issue.id},${action.id},${action.version},${cp(action.owner||issue.owner||"")},${Number(action.due_at)||0},${cp(action.plan||"")})">确认 / 修改负责人与期限</button>`:""}${canStart?`<button class="btn sm" onclick="inspectionAction(${v.id},${issue.id},${action.id},${action.version},'in_progress')">① 开始整改</button>`:""}
+    ${action.status!=="closed"?`<div class="actions">${canAssign?`<button class="btn sm" onclick="inspectionAssign(${v.id},${issue.id},${action.id},${action.version},${cp(action.owner||issue.owner||"")},${Number(action.due_at)||0},${cp(action.plan||"")})">确认 / 修改负责人与期限</button>`:""}${canStart?`<button class="btn sm" onclick="inspectionAction(${v.id},${issue.id},${action.id},${action.version},'in_progress')">① 开始整改</button>`:""}
       ${canUpload?`<label class="btn sm" style="cursor:pointer">② 提交复查照片<input type="file" accept="image/jpeg,image/png,image/webp" style="display:none" onchange="inspectionRecheck(${v.id},${issue.id},${action.id},${action.version},this.files[0])"></label>`:""}
-      ${canReview?`<button class="btn sm pri" onclick="inspectionReview(${v.id},${pending.id},${action.version},'close')">③ 企业主确认通过</button><button class="btn sm bad" onclick="inspectionReview(${v.id},${pending.id},${action.version},'reject')">驳回继续整改</button>`:""}
-      ${pending&&!isAdmin()?`<span class="sub">复查证据已提交，等待企业主人工确认。</span>`:""}</div>`:""}</div>`;
+      ${canReview?`<button class="btn sm pri" onclick="inspectionReview(${v.id},${pending.id},${action.version},'close')">③ 确认整改通过</button><button class="btn sm bad" onclick="inspectionReview(${v.id},${pending.id},${action.version},'reject')">驳回继续整改</button>`:""}
+      ${pending&&!inspectionPerm("can_review")?`<span class="sub">复查证据已提交，等待老板或总监确认。</span>`:""}</div>`:""}</div>`;
 }
 async function inspectionAssign(visitId,issueId,actionId,expectedVersion,currentOwner,currentDueAt,currentPlan){
-  if(!isAdmin())return toast("仅企业主或平台管理员可确认整改责任");
+  if(!inspectionPerm("can_assign_actions"))return toast("仅企业主或平台管理员可确认整改责任");
   const owner=await uiPrompt({title:"确认整改责任人",label:"实际负责人",value:currentOwner||"",requiredMessage:"请填写实际负责人"});if(owner===null)return;
-  const currentDate=currentDueAt?new Date(currentDueAt*1000).toISOString().slice(0,10):"";
+  const currentDate=currentDueAt?inspectionLocalDate(new Date(currentDueAt*1000)):"";
   const due=await uiPrompt({title:"确认整改期限",label:"截止日期",type:"date",value:currentDate,requiredMessage:"请选择截止日期"});if(due===null)return;
   const plan=await uiPrompt({title:"整改计划（可选调整）",label:"整改计划",multiline:true,required:false,value:currentPlan||"",confirmText:"保存责任"});if(plan===null)return;
   const due_at=new Date(`${due}T23:59:59`).getTime()/1000;if(!Number.isFinite(due_at))return toast("截止日期无效");
@@ -4979,7 +4989,7 @@ async function inspectionRecheck(visitId,issueId,actionId,expectedVersion,file){
   try{await apiUpload("/inspections/rechecks",form,{timeout:120000});toast("复查照片已提交，巡店经理正在对比整改前后");await inspectionView(visitId);}catch(e){toast(e.message);}
 }
 async function inspectionReview(visitId,recheckId,actionVersion,decision){
-  if(!isAdmin())return toast("仅企业主可完成复核");
+  if(!inspectionPerm("can_review"))return toast("仅老板或总监可以审核复查");
   const close=decision==="close",note=await uiPrompt({title:close?"确认整改通过":"驳回继续整改",message:close?"请记录您在照片中确认到的改变。":"请说明仍未达标的地方。",label:"人工复核意见",multiline:true,requiredMessage:"请填写复核意见",confirmText:close?"确认闭环":"驳回"});
   if(note===null)return;
   const reviewBody=close?{decision:"close",expected_action_version:actionVersion,note:note.trim(),industry_key:INSPECTION_INDUSTRY}:{decision:"reject",expected_action_version:actionVersion,note:note.trim(),industry_key:INSPECTION_INDUSTRY};
@@ -5890,8 +5900,36 @@ function tmAllocSummary(u,t){
   const emp = u.allowed_emp_idxs===null||u.allowed_emp_idxs===undefined
     ? "行业内全部数字员工可用"
     : `指定 ${u.allowed_emp_idxs.length} 名数字员工可用`;
+  // 巡店负责门店:只有老板视图带门店数据;总监本来就看全部门店。
+  const stores = !t.store_branches ? "" : (u.job_title==="director"
+    ? "总监可看全部门店"
+    : (u.branch_ids||[]).length ? `负责 ${(u.branch_ids||[]).length} 家门店` : "还没分配门店(巡店页看不到任何门店)");
   return `<div class="sub" style="margin-top:4px">行业/板块:${industries}</div>
-    <div class="sub" style="margin-top:2px">数字员工:${emp}</div>`;
+    <div class="sub" style="margin-top:2px">数字员工:${emp}</div>
+    ${stores?`<div class="sub" style="margin-top:2px">巡店门店:${esc(stores)}</div>`:""}`;
+}
+function tmBranchForm(uid, name){
+  const t = window.__TEAM||{};
+  const target = (t.users||[]).find(x=>Number(x.id)===Number(uid))||{};
+  const targetMods = new Set(target.modules||[]);
+  const all = ((t.store_branches||{}).items||[]).filter(b=>targetMods.has(b.industry_key));
+  const sel = new Set((target.branch_ids||[]).map(Number));
+  const box = $("#tm-allocbox")||$("#tm-modbox");
+  const label = b=>`${b.store_code?b.store_code+" · ":""}${b.name}${b.region?` · ${b.region}`:""}`;
+  box.innerHTML = `<div class="card" style="background:#fff6dc">
+    <b>给「${esc(name)}」分配负责门店</b>
+    <div class="sub" style="margin-top:6px">经理/员工只能看、只能巡自己负责的门店,也只能对这些门店的整改单点「开始整改/提交复查」。总监不受限制。</div>
+    ${all.length?`<select id="tm-branch-sel" multiple size="${Math.min(10,Math.max(4,all.length))}" style="width:100%;margin-top:8px">${all.map(b=>`<option value="${Number(b.id)}" ${sel.has(Number(b.id))?"selected":""}>${esc(label(b))}</option>`).join("")}</select>
+      <div class="sub" style="margin-top:4px">按住 Ctrl(苹果电脑按 ⌘)可多选;全部取消=不负责任何门店。${(t.store_branches||{}).truncated?"门店太多,这里只列出前 2000 家。":""}</div>`
+      :`<div class="sub" style="margin-top:8px">TA 开通的行业里还没有门店${target.modules&&target.modules.length?"(先去巡店页新建或导入门店)":"(先点「🧩 行业/板块」开通行业)"}。</div>`}
+    <div class="actions" style="margin-top:10px">${all.length?`<button class="btn pri" onclick="tmSaveBranches(${uid})">💾 保存门店</button>`:""}
+      <button class="btn" onclick="this.closest('.card').remove()">取消</button></div></div>`;
+  box.scrollIntoView({behavior:"smooth"});
+}
+async function tmSaveBranches(uid){
+  const ids = [...($("#tm-branch-sel")?.selectedOptions||[])].map(o=>Number(o.value));
+  try{ await api(`/team/users/${uid}/branches`,{method:"PUT",body:{branch_ids:ids}});
+    toast(ids.length?`已分配 ${ids.length} 家门店`:"已清空负责门店"); render(); }catch(e){ toast(e.message); }
 }
 function tmMemberRow(u,t){
   const isSelf = ME && Number(ME.id)===Number(u.id);
@@ -5900,6 +5938,7 @@ function tmMemberRow(u,t){
     btns.push(`<button class="btn sm" onclick="tmEditMods(${u.id},${cp(u.username)},${cp(u.modules)})">🧩 行业/板块</button>`);
     btns.push(`<button class="btn sm" onclick="tmEditTitle(${u.id},${cp(u.username)},${cp(u.job_title||"staff")})">🎖 职级</button>`);
     btns.push(`<button class="btn sm" onclick="tmAllocForm(${u.id},${cp(u.username)})">🤝 分配数字员工</button>`);
+    if(t.store_branches && u.job_title!=="director") btns.push(`<button class="btn sm" onclick="tmBranchForm(${u.id},${cp(u.username)})">🏪 负责门店</button>`);
     btns.push(`<button class="btn sm" onclick="tmResetPw(${u.id})">🔑 改密</button>`);
     btns.push(`<button class="btn sm" onclick="tmToggle(${u.id},${u.enabled?0:1})">${u.enabled?"⏸ 停用":"▶️ 启用"}</button>`);
     btns.push(`<button class="btn sm bad" onclick="tmDel(${u.id},${cp(u.username)})">🗑</button>`);

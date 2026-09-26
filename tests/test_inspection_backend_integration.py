@@ -123,6 +123,9 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
         self.auto_branch = inspection.create_branch(
             2, 20, "auto", {"name": "测试车行", "region": "华北"}
         )
+        # v58：经理/员工只能操作老板分配给自己的门店。
+        inspection.set_member_branches(20, 21, [self.branch["id"]])
+        inspection.set_member_branches(20, 25, [self.auto_branch["id"]])
         main._persistent_upload_hits.clear()
         main._persistent_upload_active_tenants.clear()
 
@@ -184,6 +187,13 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
             "id": 21, "tenant_id": 2, "username": "u21",
             "role": "member", "modules": ["restaurant"],
         })
+        # v58：员工/经理不能建门店，总监可以。
+        with self.assertRaises(HTTPException) as staff_denied:
+            main.inspection_branch_create({
+                "name": "员工新建店", "industry_key": "restaurant",
+            })
+        self.assertEqual(403, staff_denied.exception.status_code)
+        db.execute("UPDATE users SET job_title='director' WHERE id=21")
         created = main.inspection_branch_create({
             "name": "成员新建店", "region": "华东",
             "industry_key": "restaurant",

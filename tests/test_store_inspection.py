@@ -253,6 +253,8 @@ class StoreInspectionTests(unittest.TestCase):
             "restaurant",
             {"name": "朝阳一店", "region": "华北区", "address": "朝阳路 1 号"},
         )
+        # v58 起经理/员工只能巡老板分配给自己的门店。
+        inspection.set_member_branches(20, 21, [self.branch["id"]])
 
     def tearDown(self):
         db._shutdown_async_pool(wait=True)
@@ -321,8 +323,14 @@ class StoreInspectionTests(unittest.TestCase):
     def test_industry_actor_and_branch_scope_are_server_authoritative(self):
         with self.assertRaises(inspection.InspectionForbidden):
             inspection.create_branch(2, 20, "hotel", {"name": "伪造酒店"})
+        # v58：经理/员工不能自建门店，只有老板/总监可以。
+        with self.assertRaises(inspection.InspectionForbidden):
+            inspection.create_branch(
+                2, 21, "restaurant", {"name": "员工自建店", "region": "华东区"}
+            )
+        db.execute("UPDATE users SET job_title='director' WHERE id=21")
         member_branch = inspection.create_branch(
-            2, 21, "restaurant", {"name": "区域经理新建店", "region": "华东区"}
+            2, 21, "restaurant", {"name": "区域总监新建店", "region": "华东区"}
         )
         self.assertEqual(21, member_branch["created_by"])
         with self.assertRaises(inspection.InspectionForbidden):
@@ -330,7 +338,7 @@ class StoreInspectionTests(unittest.TestCase):
         db.execute("UPDATE users SET enabled=0 WHERE id=21")
         with self.assertRaises(inspection.InspectionForbidden):
             inspection.create_branch(2, 21, "restaurant", {"name": "停用账号门店"})
-        db.execute("UPDATE users SET enabled=1 WHERE id=21")
+        db.execute("UPDATE users SET enabled=1,job_title='staff' WHERE id=21")
         for unauthorized_user in (31, 32):
             with self.assertRaises(inspection.InspectionForbidden):
                 inspection.list_branches(2, unauthorized_user, "restaurant")
@@ -358,8 +366,11 @@ class StoreInspectionTests(unittest.TestCase):
     def test_visit_history_region_filter_is_exact_and_exclusive(self):
         north = self._draft(request_key="region-filter-north-0001")
         east_branch = inspection.create_branch(
-            2, 21, "restaurant",
+            2, 20, "restaurant",
             {"name": "华东二店", "region": "华东区", "address": "东路 2 号"},
+        )
+        inspection.set_member_branches(
+            20, 21, [self.branch["id"], east_branch["id"]],
         )
         east = inspection.create_visit_draft(
             2, 21, "restaurant", east_branch["id"],
@@ -367,8 +378,12 @@ class StoreInspectionTests(unittest.TestCase):
             [photo("inspections/2/regions/east.jpg", digest="a" * 64)],
         )
         unassigned_branch = inspection.create_branch(
-            2, 21, "restaurant",
+            2, 20, "restaurant",
             {"name": "待分区门店", "region": "", "address": "待补地址"},
+        )
+        inspection.set_member_branches(
+            20, 21,
+            [self.branch["id"], east_branch["id"], unassigned_branch["id"]],
         )
         unassigned = inspection.create_visit_draft(
             2, 21, "restaurant", unassigned_branch["id"],
@@ -874,7 +889,8 @@ class StoreInspectionTests(unittest.TestCase):
         self.assertIsNone(issue["evidence"][0]["bbox"])
         self.assertEqual("立即设置警示；固定布线并拍照复查", issue["action"]["plan"])
         self.assertEqual("值班店长", issue["action"]["owner"])
-        self.assertEqual(0, issue["action"]["due_days"])
+        # “立即”也至少给 1 天整改期限，避免整改单一生成就逾期。
+        self.assertEqual(1, issue["action"]["due_days"])
 
         missing_confidence = copy.deepcopy(raw)
         missing_confidence["photo_reviews"][0].pop("confidence")
@@ -1155,6 +1171,8 @@ class StoreInspectionTests(unittest.TestCase):
         inspection.complete_visit(2, 21, "restaurant", second["id"], analysis_result(second["photos"], {
             "summary": "正常", "score": 100, "issues": [],
         }))
+        # 整改期限最短 1 天；把期限挪到过去，模拟已逾期的整改单。
+        db.execute("UPDATE inspection_action SET due_at=due_at-2*86400 WHERE tenant_id=2")
 
         hotel = inspection.create_branch(3, 30, "hotel", {"name": "酒店店"})
         foreign = inspection.create_visit_draft(
