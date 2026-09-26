@@ -17,7 +17,7 @@ import sqlite3
 import time
 import uuid
 
-from . import db, departments, employeeidentity, employees, providers
+from . import bossbrief, db, departments, employeeidentity, employees, providers
 from .skills import registry
 
 log = logging.getLogger("meeting")
@@ -704,11 +704,16 @@ def _build_consensus(question: str, constraints: str, acceptance_criteria: str,
     return "\n".join(lines)
 
 
-def _digest(decision: str, selected: dict | None, summary: str, next_action: str) -> str:
-    title = f"P{selected['id']}｜{selected['title']}" if selected else "尚未锁定方案"
-    return (f"- **决策：{decision}**\n- **锁定方案：{title}**\n"
-            f"- {_text(summary, 160) or '关键证据尚未补齐'}\n"
-            f"- 👉 **下一步：** {_text(next_action, 180)}")
+def _digest(decision: str, selected: dict | None, summary: str, next_action: str,
+            actions: list[dict] | None = None,
+            validations: list[dict] | None = None) -> str:
+    """会议速览：与专家任务同一结构（一句话结论 + 最多 3 条行动 + 要留意），大白话。"""
+    brief = bossbrief.meeting_brief(
+        decision, selected, summary, next_action, actions or (), validations or ()
+    )
+    return bossbrief.format_brief(
+        brief["verdict"], brief["actions"], brief["watch"], brief["extra"]
+    )
 
 
 async def _push(meeting_id: int, broadcast, who: str, text: str,
@@ -1151,7 +1156,8 @@ GO 要派 1-3 个能产出实物的执行任务；NEED_INFO 要派 1-2 个最小
                 "consensus_md": consensus,
                 "next_action": next_action,
                 "summary_md": _digest(
-                    decision, selected, summary, next_action
+                    decision, selected, summary, next_action,
+                    actions, validations,
                 ),
             },
         )
@@ -2351,7 +2357,7 @@ async def _ask(meeting_id: int, question: str, broadcast, billing_op: str = None
             "actions_json": json.dumps(actions, ensure_ascii=False),
             "consensus_md": updated_consensus,
             "next_action": next_action,
-            "summary_md": _digest(decision, None, summary, next_action),
+            "summary_md": _digest(decision, None, summary, next_action, actions),
             "phase": phase if execute_after else (
                 "awaiting_execution" if phase == "execute" else "stopped"
             ),

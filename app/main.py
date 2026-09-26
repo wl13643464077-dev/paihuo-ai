@@ -3250,8 +3250,8 @@ def meta():
               "department_employees_loaded": sum(
                   len(d.get("employees") or []) for d in loaded_departments),
               "stations": stations,
-              "modes": {"fullauto": "完全托管", "autopilot": "全自动", "copilot": "关键审批",
-                        "manual": "逐站审批"},
+              "modes": dict(JOB_MODE_LABELS),
+              "default_mode": DEFAULT_JOB_MODE,
               # 老板派活前必须能看到这单要花多少点(明码标价);价格可被 root 调整,
               # 所以从价目表读,不许前端写死。
               "job_points": (billing.prices().get("content_job") or {}).get("points", 18),
@@ -3413,12 +3413,17 @@ def _profile_id_for_tenant(value):
     return profile_id
 
 
-_JOB_MODES = {"fullauto", "autopilot", "copilot", "manual"}
+from .engine import (  # noqa: E402  内容工单模式枚举/缺省值的唯一来源
+    DEFAULT_JOB_MODE, JOB_MODE_LABELS, JOB_MODES as _ENGINE_JOB_MODES,
+    job_mode_or_default,
+)
+_JOB_MODES = set(_ENGINE_JOB_MODES)
 
 
 def _validated_mode(value) -> str:
-    mode = str(value or "copilot").strip()
-    if mode not in _JOB_MODES:
+    # 缺省模式与合法枚举统一由 engine 定义(新单缺省全自动,只在发布前终审停下)。
+    mode = job_mode_or_default(value)
+    if mode is None:
         raise HTTPException(400, "工单模式无效")
     return mode
 
@@ -5061,6 +5066,29 @@ def _task_row_or_404(tid: int) -> dict:
     return t
 
 
+def _task_boss_progress(task: dict, raw_steps) -> dict | None:
+    from . import bossbrief
+
+    if task.get("status") not in ("queued", "running"):
+        return None
+    if int(task.get("emp_idx") or 0) == inspection.EMPLOYEE_IDX:
+        return None  # 巡店是看照片的流程，不套「查资料/写方案」四段
+    brief = task.get("brief") if isinstance(task.get("brief"), dict) else {}
+    length = str(brief.get("length") or "")
+    steps = raw_steps if isinstance(raw_steps, list) else db.jloads(raw_steps, [])
+    return bossbrief.task_stage_progress(
+        steps,
+        task.get("status"),
+        task.get("created_at"),
+        typical_seconds=bossbrief.typical_task_seconds(
+            int(task.get("tenant_id") or TEN()),
+            int(task.get("emp_idx") or 0),
+            length,
+        ),
+        length=length,
+    )
+
+
 @app.get("/api/tasks/{tid}")
 def task_get(tid: int):
     t = _task_row_or_404(tid)
@@ -5069,8 +5097,11 @@ def task_get(tid: int):
     frozen_employee = t.pop("_frozen_employee", None)
     frozen_config = t.pop("_frozen_employee_config", None)
     t["brief"] = db.jloads(t.pop("brief_json"))
+    raw_steps = t.pop("steps_json")
+    # 老板看的大白话阶段进度：只给阶段名/已用时/预计剩余，不透出步骤原文。
+    t["boss_progress"] = _task_boss_progress(t, raw_steps)
     t["steps"] = _steps_for_view(
-        t.pop("steps_json"), _is_boss(), status=t.get("status")
+        raw_steps, _is_boss(), status=t.get("status")
     )
     t["emp_name"] = (
         f"{str(t.get('person_snapshot') or '').strip()}·"

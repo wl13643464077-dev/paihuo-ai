@@ -190,17 +190,21 @@ class TaskRunnerPhase0Case(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             taskrunner.providers, "call_text_json",
             new=AsyncMock(return_value={
-                "data": {"points": "客流稳定\n租金可谈", "action": "本周约房东"},
+                "data": {
+                    "verdict": "可以开",
+                    "actions": "店长:本周约房东\n老板:周六数客流",
+                },
                 "cost_usd": 0.0,
             }),
         ):
             await taskrunner._gen_summary(task_id, md, 0, 2, lambda _p: None)
         summary = self._row(task_id)["summary_md"]
-        self.assertEqual(
-            ["- 客流稳定", "- 租金可谈"], summary.splitlines()[:2]
-        )
+        # 字符串形式的 actions 按行切条，不会被逐字拆开。
+        self.assertIn("1. 店长:本周约房东", summary.splitlines())
+        self.assertIn("2. 老板:周六数客流", summary.splitlines())
+        self.assertNotIn("1. 店", summary.splitlines())
 
-    async def test_gen_summary_failure_is_logged_as_warning(self):
+    async def test_gen_summary_failure_is_logged_as_warning_and_falls_back(self):
         md = "# 报告\n" + "正文。" * 800
         task_id = self._task(status="done", billing_status="succeeded", output_md=md)
         with patch.object(
@@ -209,7 +213,10 @@ class TaskRunnerPhase0Case(unittest.IsolatedAsyncioTestCase):
         ), self.assertLogs("taskrunner", level="WARNING") as logs:
             await taskrunner._gen_summary(task_id, md, 0, 2, lambda _p: None)
         self.assertTrue(any("RuntimeError" in line for line in logs.output))
-        self.assertIsNone(self._row(task_id)["summary_md"])
+        # 模型失败也要给老板一张卡：规则兜底至少一条行动。
+        summary = self._row(task_id)["summary_md"]
+        self.assertIn("一句话结论", summary)
+        self.assertIn("1. ", summary)
 
 
 if __name__ == "__main__":
