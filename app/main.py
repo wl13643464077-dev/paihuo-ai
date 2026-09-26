@@ -31,6 +31,7 @@ from . import (analyzer, assetfiles, auth, billing, bossdashboard, db, departmen
                taskcenter, taskrunner, taskthreads)
 from . import instancelock, retention, timeutil  # 单进程锁 / 数据保留期 / 北京时间
 from . import wxpay  # 微信支付 APIv3(默认关闭)
+from . import photoproof  # 店员现场照片(压缩+水印+落盘)
 from .engine import engine
 from .skills import registry
 
@@ -796,6 +797,15 @@ async def _auth_mw(request: Request, call_next):
             owner_tid,
             int(cur.get("id") or 0),
             int(inspection_file.group(2)),
+        ):
+            return JSONResponse({"detail": "无权访问该文件"}, status_code=403)
+        # 店员现场照片同样按门店绑定：经理/员工只能看自己负责门店的。
+        staff_file = _re_files.match(r"/files/staff/(\d+)/(\d+)/", path)
+        if staff_file and not await db.arun(
+            photoproof.branch_visible,
+            owner_tid,
+            int(cur.get("id") or 0),
+            int(staff_file.group(2)),
         ):
             return JSONResponse({"detail": "无权访问该文件"}, status_code=403)
         # 演绎师/封面师产出的 HTML/SVG 由不可信输入链驱动生成,同源直开会让其中的
