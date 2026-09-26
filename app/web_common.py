@@ -227,6 +227,30 @@ def _public_station(
     return public
 
 
+_INDUSTRY_DEPT_DISPLAY = {
+    "auto": "汽车行业",
+    "beauty": "美容美业行业",
+    "convenience": "便利店行业",
+    "fitness": "健身瑜伽行业",
+    "grocery": "商超零售行业",
+    "hotel": "酒店住宿行业",
+    "pet": "宠物服务行业",
+    "pharmacy": "零售药房行业",
+    "restaurant": "餐饮行业",
+    "snack": "量贩零食行业",
+    "tea_coffee": "茶咖现制行业",
+}
+
+
+def _display_dept_name(dept_key, fallback="") -> str:
+    """行业板块的老板可读名，只改展示层。
+
+    目录文件、身份契约、任务快照与提示词继续使用原始部门名；这里只决定
+    界面上显示成「汽车行业」这类一眼懂的叫法，避免动到任何冻结哈希。
+    """
+    return _INDUSTRY_DEPT_DISPLAY.get(str(dept_key or ""), str(fallback or ""))
+
+
 def TEN() -> int:
     return auth.tenant_id()
 
@@ -300,6 +324,15 @@ async def _run_db_then_start_worker_safely(
 def _client_log_label(value, default: str, limit: int = 40) -> str:
     clean = re.sub(r"[^A-Za-z0-9_.:-]", "", str(value or ""))[:limit]
     return clean or default
+
+
+def _industry_scope():
+    depts = departments.list_depts()
+    return (
+        [str(d["key"]) for d in depts],
+        {str(d["key"]): str(d.get("name") or "") for d in depts},
+        depts,
+    )
 
 
 def _create_charged_expert_task(task_data: dict, note: str = "") -> int:
