@@ -5903,6 +5903,7 @@ async function adminView(){
       <div><label>客资收件邮箱</label><input id="adm-leadto" value="${esc(ADM.mail?.lead_email||"")}"></div>
     </div>
     <div class="actions"><button class="btn pri" onclick="admSaveMail()">💾 保存邮件配置</button></div></div>
+  ${window.PH_ONBOARDING?.smsAdminCard?.()||""}
   <div class="card"><h2>🧭 全局模型路由</h2>
     <div class="sub">所有文本员工默认跟随这里的模型;趋势官、情报员、拆解师也可以在下方单独切换。需要实时资料时系统会自动启动云雾能力网关执行检索,再交给您选择的模型完成交付。</div>
     <div class="row" style="margin-top:8px">

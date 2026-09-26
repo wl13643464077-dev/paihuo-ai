@@ -1945,7 +1945,7 @@ def tenant_subscribe(tid: int, body: dict):
         raise HTTPException(400, str(e))
 
 
-from . import loginguard, signup  # noqa: E402
+from . import loginguard, onboarding, signup, smslogin  # noqa: E402
 
 # 登录限速:公网站点必须防爆破。按 IP+账号计,10次失败锁15分钟(内存态,重启即清)
 _login_fails: dict = {}
@@ -2114,6 +2114,11 @@ def auth_login(body: dict, request: Request):
         raise HTTPException(403, "企业已停用")
     if auth.needs_rehash(u["password_hash"]):   # 老账号透明升级到 pbkdf2
         db.update("users", u["id"], {"password_hash": auth.hash_pw(body.get("password") or "")})
+    return _login_success_response(u, request, "password")
+
+
+def _login_success_response(u: dict, request: Request, method: str):
+    """密码登录与短信验证码登录共用:签发会话 Cookie + 记漏斗。"""
     resp = JSONResponse({
         "ok": True,
         "username": u["username"],
@@ -2125,14 +2130,89 @@ def auth_login(body: dict, request: Request):
                     max_age=auth.SESSION_DAYS * 86400, path="/",
                     httponly=True, samesite="lax", secure=secure)
     # 发布器的一次性只读账号只验证服务，不应污染真实产品漏斗。
-    if not username.startswith("__release_smoke_"):
+    if not str(u["username"]).startswith("__release_smoke_"):
         funnel.record_safe(
             "login_success",
-            "password",
+            method,
             tenant_id=int(u["tenant_id"]),
             actor_key=f"user:{u['id']}",
         )
     return resp
+
+
+# ---------------- 第 1 期:短信验证码登录(可配置,默认关闭) ----------------
+# 路径挂在 /api/auth/login 前缀下,中间件对未登录请求放行。
+_SMS_SEND_TASKS: set = set()   # 持有后台发送任务的引用,防止被提前回收
+
+
+def _sms_login_enabled(conf: dict | None = None) -> bool:
+    try:
+        return smslogin.is_enabled(conf)
+    except secureconfig.SecureConfigError:
+        return False
+
+
+@app.get("/api/auth/login/sms/config")
+def auth_sms_config():
+    """登录页据此决定是否显示「手机号+验证码」入口;只回开关,不回任何配置。"""
+    return {"enabled": _sms_login_enabled()}
+
+
+@app.post("/api/auth/login/sms/send")
+async def auth_sms_send(body: dict, request: Request):
+    try:
+        conf = await db.arun(smslogin.get_config)
+    except secureconfig.SecureConfigError:
+        conf = {}
+    if not _sms_login_enabled(conf):
+        raise HTTPException(404, "暂未开通验证码登录,请用账号密码登录")
+    try:
+        code, user = await db.arun(
+            smslogin.request_code, body.get("phone"), _client_ip(request)
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    except smslogin.SmsLimitError as exc:
+        raise HTTPException(
+            429, str(exc), headers={"Retry-After": str(exc.retry_after)}
+        ) from None
+    if user and code:
+        phone = smslogin.normalize_phone(body.get("phone"))
+
+        async def _deliver():
+            try:
+                await smslogin.send_code_sms(conf, phone, code)
+            except Exception as exc:
+                smslogin.CODES.discard(phone)
+                log.error("sms login send failed error_type=%s", type(exc).__name__)
+
+        # 后台发送:有账号/没账号的响应耗时一致,不能靠快慢探测手机号是否注册。
+        task = asyncio.create_task(_deliver())
+        _SMS_SEND_TASKS.add(task)
+        task.add_done_callback(_SMS_SEND_TASKS.discard)
+    return {"ok": True, "msg": smslogin.SENT_MSG, "cooldown": smslogin.PHONE_COOLDOWN_S}
+
+
+@app.post("/api/auth/login/sms/verify")
+def auth_sms_verify(body: dict, request: Request):
+    if not _sms_login_enabled():
+        raise HTTPException(404, "暂未开通验证码登录,请用账号密码登录")
+    phone = smslogin.normalize_phone(body.get("phone"))
+    if not phone:
+        raise HTTPException(400, "请填 11 位手机号")
+    # 与密码登录共用 IP+账号 锁和账号级渐进限速,换码也不能无限猜。
+    throttle_name = f"sms:{phone}"
+    key = _login_throttle_key(request, throttle_name)
+    _login_guard_check(throttle_name, key)
+    u = smslogin.verify_login(phone, body.get("code"))
+    if not u:
+        _login_guard_fail(throttle_name, key)
+        raise HTTPException(401, smslogin.VERIFY_FAIL_MSG)
+    _login_guard_ok(throttle_name, key)
+    if u.get("must_change_password"):
+        # 首登必须改密要验旧密码,验证码登录进去也改不了,直接说清楚。
+        raise HTTPException(403, "这个账号需要先用账号密码登录并设置新密码")
+    return _login_success_response(u, request, "sms")
 
 
 @app.post("/api/auth/logout")
@@ -2200,6 +2280,50 @@ def auth_choose_industry(body: dict):
     return {"ok": True, "industry": key, "name": signup.industry_label(key)}
 
 
+# ---------------- 第 1 期:新老板首次上手(首页顶部卡片) ----------------
+def _onboarding_owner() -> dict:
+    u = auth.current() or {}
+    if not onboarding.applies_to(u):
+        raise HTTPException(403, "只有企业老板账号需要完成上手引导")
+    return u
+
+
+def _raise_onboarding_error(exc: onboarding.OnboardingError):
+    raise HTTPException(exc.status, str(exc)) from None
+
+
+@app.get("/api/onboarding")
+def onboarding_get():
+    u = auth.current() or {}
+    return onboarding.get_state(int(u.get("tenant_id") or 0), u)
+
+
+@app.put("/api/onboarding/store")
+def onboarding_store(body: dict):
+    u = _onboarding_owner()
+    try:
+        return onboarding.save_store(int(u["tenant_id"]), body)
+    except onboarding.OnboardingError as exc:
+        _raise_onboarding_error(exc)
+
+
+@app.post("/api/onboarding/posts")
+async def onboarding_posts():
+    """免费(不扣点)生成今天的 3 条短文案,每个企业限 3 次。"""
+    u = _onboarding_owner()
+    try:
+        async with _free_ai_slot("onboarding-posts"):
+            return await onboarding.generate_posts(int(u["tenant_id"]))
+    except onboarding.OnboardingError as exc:
+        _raise_onboarding_error(exc)
+
+
+@app.post("/api/onboarding/dismiss")
+def onboarding_dismiss():
+    u = _onboarding_owner()
+    return onboarding.dismiss(int(u["tenant_id"]))
+
+
 @app.put("/api/auth/password")
 def auth_password(body: dict):
     u = auth.current()
@@ -2221,6 +2345,7 @@ def auth_password(body: dict):
         "must_change_password": 0,
     })
     db.set_setting("bootstrap_pw", None)
+    auth.clear_password_hint(u["id"])   # 改过密码就不再提示「建议改成好记的密码」
     return {"ok": True}
 
 
@@ -2334,13 +2459,8 @@ def _open_account_from_apply(a: dict, trial_points: float = 0) -> dict:
     username = base_name
     while db.one("SELECT id FROM users WHERE username=?", (username,)):
         username = base_name + str(_sec.randbelow(90) + 10)
-    letters = "abcdefghjkmnpqrstuvwxyz"
-    digits = "23456789"
-    alphabet = letters + digits
-    password = (
-        _sec.choice(letters) + _sec.choice(digits)
-        + "".join(_sec.choice(alphabet) for _ in range(14))
-    )
+    # 系统生成 16 位随机强密码:不强制首登改密,首页上手卡片里温和提示改成好记的。
+    password = auth.generate_initial_password()
     tname = (a.get("company") or "").strip() or f"{(a.get('name') or a.get('phone') or '客户')}的企业"
     # 按申请单上的行业绑定 1 个行业;拿不准就留空,老板登录后首页会让他自己选。
     valid_keys, dept_names, _ = _industry_scope()
@@ -2352,15 +2472,9 @@ def _open_account_from_apply(a: dict, trial_points: float = 0) -> dict:
         )
         if industry_key:
             signup.write_tenant_industries(connection, tid, [industry_key])
-        db.insert("users", {
-            "tenant_id": tid,
-            "username": username,
-            "password_hash": auth.hash_pw(password),
-            "role": "owner",
-            "modules_json": "[]",
-            "enabled": 1,
-            "must_change_password": 1,
-        })
+        auth.create_owner_account(
+            tid, username, password, system_generated=True
+        )
         if trial_points > 0:
             billing.grant(tid, trial_points, "开户体验点(自动赠送)")
         db.update(
@@ -2380,7 +2494,7 @@ def _open_account_from_apply(a: dict, trial_points: float = 0) -> dict:
             "notice": (f"【派活 PaiHuo】您的企业账号已开通\n"
                        f"网址:https://paihuo.ai\n账号:{username}\n初始密码:{password}\n"
                        + (f"已赠送 {trial_points:.0f} 点体验点数,登录就能派活。\n" if trial_points > 0 else "")
-                       + "登录后请立即修改密码。有任何问题随时联系我们,祝生意兴隆!")}
+                       + "登录后可在首页把密码改成您好记的。有任何问题随时联系我们,祝生意兴隆!")}
 
 
 @app.post("/api/team/applies/{aid}/approve")
@@ -2799,6 +2913,25 @@ def settings_put(body: dict):
         if k in body:
             db.set_setting(k, (body[k] or "").strip() or None)
     return {"ok": True}
+
+
+# ---------------- 第 1 期:短信验证码登录配置(平台后台) ----------------
+@app.get("/api/admin/sms")
+def admin_sms_get():
+    _need_root()
+    return smslogin.public_config()
+
+
+@app.put("/api/admin/sms")
+def admin_sms_put(body: dict):
+    _need_root()
+    try:
+        conf = smslogin.save_config(body)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    if conf["enabled"] and not conf["configured"]:
+        conf["warning"] = "开关已打开,但 AccessKey/签名/模板还没填齐,登录页暂不显示验证码登录"
+    return conf
 
 
 # ---------------- V6:管理者后台 ----------------
@@ -19215,7 +19348,27 @@ def _entry_asset_version() -> str:
     return _ENTRY_ASSET_VERSION
 
 
+_ONBOARDING_ASSET_VERSION: str | None = None
+
+
+def _onboarding_asset_version() -> str:
+    """onboarding.js 同样按内容哈希换 URL(第 1 期新增的首页上手脚本)。"""
+    global _ONBOARDING_ASSET_VERSION
+    if _ONBOARDING_ASSET_VERSION is None:
+        try:
+            with open(os.path.join(ROOT, "static", "onboarding.js"), "rb") as fh:
+                _ONBOARDING_ASSET_VERSION = hashlib.sha256(fh.read()).hexdigest()[:12]
+        except OSError:
+            _ONBOARDING_ASSET_VERSION = "unversioned"
+    return _ONBOARDING_ASSET_VERSION
+
+
 def _inject_entry_asset_version(html: str) -> str:
+    html = re.sub(
+        r"(/static/onboarding\.js\?v=)[0-9A-Za-z]+",
+        lambda match: match.group(1) + _onboarding_asset_version(),
+        html,
+    )
     return re.sub(
         r"(/static/app\.js\?v=)[0-9A-Za-z]+",
         lambda match: match.group(1) + _entry_asset_version(),
