@@ -21,6 +21,16 @@ def _read(rel):
         return fh.read()
 
 
+def _read_web_layer():
+    """main.py + 第 3 期拆出的 web_common.py 与 app/routes/*.py(HTTP 层源码合集)。"""
+    rels = ["app/main.py", "app/web_common.py"] + sorted(
+        os.path.join("app", "routes", name)
+        for name in os.listdir(os.path.join(ROOT, "app", "routes"))
+        if name.endswith(".py")
+    )
+    return "\n".join(_read(rel) for rel in rels)
+
+
 class WalkthroughFixContracts(unittest.TestCase):
     def test_brief_field_errors_use_chinese_labels(self):
         with self.assertRaises(HTTPException) as ctx:
@@ -223,7 +233,7 @@ class ReturningBossContracts(unittest.TestCase):
             "不带 q 行为不变")
 
     def test_billing_notes_carry_record_ids_and_frontend_linkifies(self):
-        src = _read("app/main.py")
+        src = _read_web_layer()
         for anchor in ('note=f"工单#{job_id}·{note}"',
                        'note=f"任务#{task_id}·{note}"',
                        'note=f"会议#{meeting_id}·圆桌会议"',

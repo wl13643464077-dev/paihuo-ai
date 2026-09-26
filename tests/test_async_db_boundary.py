@@ -542,6 +542,20 @@ class AppCoroutineSourceTests(unittest.TestCase):
             cls.engine_source = handle.read()
 
     @classmethod
+    def _app_sources(cls):
+        """app/*.py 加上第 3 期拆出的 app/routes/*.py(以 "routes/x.py" 命名)。"""
+        found = [
+            (filename, os.path.join(cls.app_dir, filename))
+            for filename in sorted(os.listdir(cls.app_dir))
+        ]
+        routes_dir = os.path.join(cls.app_dir, "routes")
+        found += [
+            (f"routes/{filename}", os.path.join(routes_dir, filename))
+            for filename in sorted(os.listdir(routes_dir))
+        ]
+        return found
+
+    @classmethod
     def _db_calls(cls, node):
         calls = []
         for child in ast.walk(node):
@@ -559,10 +573,9 @@ class AppCoroutineSourceTests(unittest.TestCase):
 
     def test_all_app_coroutines_have_no_inline_sync_db_calls(self):
         offenders = []
-        for filename in sorted(os.listdir(self.app_dir)):
+        for filename, path in self._app_sources():
             if not filename.endswith(".py"):
                 continue
-            path = os.path.join(self.app_dir, filename)
             with open(path, encoding="utf-8") as handle:
                 tree = ast.parse(handle.read(), filename=path)
             for coroutine in (
@@ -607,10 +620,9 @@ class AppCoroutineSourceTests(unittest.TestCase):
     def test_nested_db_transactions_are_only_dispatched_through_facade(self):
         """协程内同步事务闭包只能作为 arun/submit_write 的工作项，不能直接调用。"""
         offenders = []
-        for filename in sorted(os.listdir(self.app_dir)):
+        for filename, path in self._app_sources():
             if not filename.endswith(".py"):
                 continue
-            path = os.path.join(self.app_dir, filename)
             with open(path, encoding="utf-8") as handle:
                 tree = ast.parse(handle.read(), filename=path)
             for coroutine in (
@@ -675,10 +687,9 @@ class AppCoroutineSourceTests(unittest.TestCase):
             "taskrunner.py": 1,
         }
         found = {}
-        for filename in sorted(os.listdir(self.app_dir)):
+        for filename, path in self._app_sources():
             if not filename.endswith(".py") or filename == "db.py":
                 continue
-            path = os.path.join(self.app_dir, filename)
             with open(path, encoding="utf-8") as handle:
                 tree = ast.parse(handle.read(), filename=path)
             count = sum(
