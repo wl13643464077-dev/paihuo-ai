@@ -173,7 +173,8 @@ class V51FrontendContractTests(unittest.TestCase):
         self.assertIn("expected_action_version", review)
         self.assertIn('decision:"close"', review)
         self.assertIn('decision:"reject"', review)
-        self.assertIn("isAdmin()", function(self.source, "inspectionIssueHtml"))
+        # v58：复核按钮由服务端 meta.permissions.can_review 决定（老板/总监）。
+        self.assertIn('inspectionPerm("can_review")', function(self.source, "inspectionIssueHtml"))
         self.assertIn('action.status==="awaiting_recheck"&&!pending', function(self.source, "inspectionIssueHtml"))
 
     def test_inspection_home_ranks_regions_and_stores_and_filters_history(self):

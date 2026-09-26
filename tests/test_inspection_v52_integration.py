@@ -202,16 +202,27 @@ class InspectionV52HTTPIntegrationTests(unittest.TestCase):
         self.assertEqual({
             "can_import_branches": True,
             "can_create_branch": True,
+            "can_manage_branches": True,
             "can_review": True,
+            "can_assign_actions": True,
         }, result["permissions"])
+        self.assertTrue(result["branch_scope"]["all_branches"])
 
+        # v58：员工不能建门店/审核，未分配门店时拿到空列表和提示。
         auth.set_current(self.member)
         member = main.inspection_meta("restaurant")
         self.assertEqual({
             "can_import_branches": False,
-            "can_create_branch": True,
+            "can_create_branch": False,
+            "can_manage_branches": False,
             "can_review": False,
+            "can_assign_actions": False,
         }, member["permissions"])
+        self.assertEqual([], member["branches"])
+        self.assertEqual(0, member["branch_scope"]["assigned_branches"])
+        self.assertEqual(
+            "老板还没给你分配门店，请联系老板", member["branch_scope"]["notice"]
+        )
 
     def test_list_summary_is_bounded_for_fifty_thousand_branches(self):
         connection = db.conn()
