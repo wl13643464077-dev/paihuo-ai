@@ -31,6 +31,8 @@ SECRET_SETTING_KEYS = (
     "feishu_app_secret",
     "smtp_authcode",
     "runninghub_key",
+    # 微信支付商户配置(商户号/APIv3 密钥/商户私钥/微信支付公钥等)整体加密存一份 JSON。
+    "wxpay_config",
 )
 _SECRET_SETTING_SET = frozenset(SECRET_SETTING_KEYS)
 

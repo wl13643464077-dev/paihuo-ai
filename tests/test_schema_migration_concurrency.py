@@ -15,8 +15,8 @@ from app import db
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_SCHEMA_VERSION = 58
-EXPECTED_SCHEMA_LEDGER_NAME = "member-branch-scope"
+EXPECTED_SCHEMA_VERSION = 59
+EXPECTED_SCHEMA_LEDGER_NAME = "wxpay-native-pay-order"
 
 INITIALIZE_WORKER = textwrap.dedent(
     """

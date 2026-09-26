@@ -96,6 +96,38 @@ def prices() -> dict:
     return saved if saved else DEFAULT_PRICES
 
 
+# “1 点能做什么”：给老板看的大白话说明。这里只定说法，点数一律取自 prices()，
+# 后台改价后说明自动跟着变，不在前端写死。
+POINT_EXAMPLES = (
+    ("content_job", "写一整篇带配图的营销内容"),
+    ("expert_task", "请行业专家办一件事或答一个问题"),
+    ("avatar_video", "做一条 30 秒数字人口播视频"),
+    ("link_extract", "把一条爆款视频拆成口播稿"),
+)
+
+
+def point_examples(price_table: dict | None = None) -> list[dict]:
+    """返回 [{action,label,points}]；价目表里缺的动作直接跳过。"""
+    table = price_table if price_table is not None else prices()
+    result = []
+    for action, label in POINT_EXAMPLES:
+        row = (table or {}).get(action) if isinstance(table, dict) else None
+        if not isinstance(row, dict):
+            continue
+        try:
+            points = float(row.get("points"))
+        except (TypeError, ValueError):
+            continue
+        if points <= 0:
+            continue
+        result.append({
+            "action": action,
+            "label": label,
+            "points": int(points) if points.is_integer() else points,
+        })
+    return result
+
+
 def balance(tid: int = None) -> float:
     tid = tid or auth.tenant_id()
     r = db.one("SELECT balance FROM tenants WHERE id=?", (tid,))

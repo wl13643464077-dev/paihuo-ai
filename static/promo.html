@@ -71,6 +71,9 @@ p.sub{text-align:center;color:#8b7355;margin-bottom:36px;font-size:15px}
 .plan-action{width:100%;min-height:46px;margin-top:10px;border:3px solid var(--ink);border-radius:12px;background:var(--gold);color:var(--ink);font-size:15px;font-weight:900;cursor:pointer;box-shadow:4px 4px 0 rgba(51,41,31,.18)}
 .plan-action:hover{transform:translateY(-2px);box-shadow:6px 6px 0 rgba(51,41,31,.18)}
 .plan .quote{min-height:20px;margin-top:8px;color:#7d6549;font-size:13px;font-weight:700}
+.plan .old{min-height:20px}
+/* 提示语单独一行，不能套 .old 的删除线 */
+.plan .price-note{min-height:18px;margin-top:4px;color:#b45309;font-size:12px;font-weight:700;text-decoration:none}
 .plan .pts{background:#2b2317;color:var(--gold);display:inline-block;border-radius:9px;padding:3px 14px;font-size:13px;margin:8px 0 12px}
 .plan p{font-size:13px;color:#6b5d49;line-height:1.7}
 .trial-fields{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
@@ -238,35 +241,36 @@ footer a{color:var(--gold)}
   </div>
 
   <h2 class="sec" id="plans">💎 套餐与定价</h2>
-  <p class="sub">按点数计费,充值越多单价越低 · 内容整单 18 点 / 专家任务 1 点 / 数字人视频 12 点 · 季付 9 折,年付 8 折</p>
-  <p class="sub" style="margin-top:8px">这里提交的是购买意向,不是在线支付；平台联系并确认线下到账后,才会开通套餐和积分。</p>
+  <p class="sub">按点数计费,1 点 = ¥1 · <span id="point-examples">内容整单 18 点 / 专家任务 1 点 / 数字人视频 12 点</span> · 季付 9 折,年付 8 折</p>
+  <p class="sub" id="pay-notice" style="margin-top:8px">这里提交的是购买意向,不是在线支付；平台联系并确认线下到账后,才会开通套餐和积分。</p>
   <div class="plans">
-    <div class="plan" data-plan="trial"><h3>体验版</h3><div class="old">实时原价加载中</div>
-      <div class="price">—<small>/月</small></div><div class="pts">积分方案加载中</div>
+    <div class="plan" data-plan="trial"><h3>体验版</h3><div class="old"></div>
+      <div class="price">—<small>/月</small></div><div class="pts"></div>
       <p class="desc">先试试水:每月约 5 单内容 + 3 条数字人视频</p>
-      <label class="sr-only" for="period-trial">体验版购买周期</label><select id="period-trial" class="plan-period" aria-label="体验版购买周期" disabled><option value="month">报价加载中</option></select>
-      <div class="quote" aria-live="polite"></div><button class="plan-action" type="button" onclick="startPurchase('trial')">登录后查看实时报价</button></div>
-    <div class="plan hot" data-plan="startup"><div class="hotbadge">🔥 最多人选</div><h3>创业版</h3><div class="old">实时原价加载中</div>
-      <div class="price">—<small>/月</small></div><div class="pts">积分方案加载中</div>
+      <label class="sr-only" for="period-trial">体验版购买周期</label><select id="period-trial" class="plan-period" aria-label="体验版购买周期" disabled><option value="month">月付</option></select>
+      <div class="quote" aria-live="polite"></div><div class="price-note"></div><button class="plan-action" type="button" onclick="startPurchase('trial')">登录并购买</button></div>
+    <div class="plan hot" data-plan="startup"><div class="hotbadge">🔥 最多人选</div><h3>创业版</h3><div class="old"></div>
+      <div class="price">—<small>/月</small></div><div class="pts"></div>
       <p class="desc">一人公司日更标配:每月约 15 单内容 + 10 条数字人 + 专家任务按需派发</p>
-      <label class="sr-only" for="period-startup">创业版购买周期</label><select id="period-startup" class="plan-period" aria-label="创业版购买周期" disabled><option value="month">报价加载中</option></select>
-      <div class="quote" aria-live="polite"></div><button class="plan-action" type="button" onclick="startPurchase('startup')">登录后查看实时报价</button></div>
-    <div class="plan" data-plan="biz"><h3>企业版</h3><div class="old">实时原价加载中</div>
-      <div class="price">—<small>/月</small></div><div class="pts">积分方案加载中</div>
+      <label class="sr-only" for="period-startup">创业版购买周期</label><select id="period-startup" class="plan-period" aria-label="创业版购买周期" disabled><option value="month">月付</option></select>
+      <div class="quote" aria-live="polite"></div><div class="price-note"></div><button class="plan-action" type="button" onclick="startPurchase('startup')">登录并购买</button></div>
+    <div class="plan" data-plan="biz"><h3>企业版</h3><div class="old"></div>
+      <div class="price">—<small>/月</small></div><div class="pts"></div>
       <p class="desc">小团队矩阵运营:多账号分权,内容矩阵 + 数字人矩阵</p>
-      <label class="sr-only" for="period-biz">企业版购买周期</label><select id="period-biz" class="plan-period" aria-label="企业版购买周期" disabled><option value="month">报价加载中</option></select>
-      <div class="quote" aria-live="polite"></div><button class="plan-action" type="button" onclick="startPurchase('biz')">登录后查看实时报价</button></div>
-    <div class="plan" data-plan="flagship"><h3>旗舰版</h3><div class="old">实时原价加载中</div>
-      <div class="price">—<small>/月</small></div><div class="pts">积分方案加载中</div>
+      <label class="sr-only" for="period-biz">企业版购买周期</label><select id="period-biz" class="plan-period" aria-label="企业版购买周期" disabled><option value="month">月付</option></select>
+      <div class="quote" aria-live="polite"></div><div class="price-note"></div><button class="plan-action" type="button" onclick="startPurchase('biz')">登录并购买</button></div>
+    <div class="plan" data-plan="flagship"><h3>旗舰版</h3><div class="old"></div>
+      <div class="price">—<small>/月</small></div><div class="pts"></div>
       <p class="desc">MCN / 连锁多门店:全板块放开跑,专属服务</p>
-      <label class="sr-only" for="period-flagship">旗舰版购买周期</label><select id="period-flagship" class="plan-period" aria-label="旗舰版购买周期" disabled><option value="month">报价加载中</option></select>
-      <div class="quote" aria-live="polite"></div><button class="plan-action" type="button" onclick="startPurchase('flagship')">登录后查看实时报价</button></div>
+      <label class="sr-only" for="period-flagship">旗舰版购买周期</label><select id="period-flagship" class="plan-period" aria-label="旗舰版购买周期" disabled><option value="month">月付</option></select>
+      <div class="quote" aria-live="polite"></div><div class="price-note"></div><button class="plan-action" type="button" onclick="startPurchase('flagship')">登录并购买</button></div>
   </div>
 </div>
 
 <footer>派活 PaiHuo · 老板会派活，数字员工去干活<br>
 开通与咨询请联系您的渠道顾问 · <a href="/login">已有账号?登录 →</a></footer>
 
+<script type="application/json" id="plan-reference">{"periods":[{"discount":1.0,"key":"month","label":"月付","months":1},{"discount":0.9,"key":"quarter","label":"季付(9折)","months":3},{"discount":0.8,"key":"year","label":"年付(8折)","months":12}],"plans":[{"desc":"适合先试试水:每月约 5 单内容 + 3 条数字人","key":"trial","name":"体验版","points":150,"price":99,"sale":69},{"desc":"一人公司日更:含 500 点，专家任务按 1 点/次计费","key":"startup","name":"创业版","points":500,"price":299,"sale":199},{"desc":"小团队多账号:内容矩阵 + 数字人矩阵","key":"biz","name":"企业版","points":1800,"price":899,"sale":599},{"desc":"MCN/多门店连锁:全板块放开跑","key":"flagship","name":"旗舰版","points":7000,"price":2999,"sale":1999}],"point_examples":[{"action":"content_job","label":"写一整篇带配图的营销内容","points":18},{"action":"expert_task","label":"请行业专家办一件事或答一个问题","points":1},{"action":"avatar_video","label":"做一条 30 秒数字人口播视频","points":12},{"action":"link_extract","label":"把一条爆款视频拆成口播稿","points":1}],"quotes":[{"months":1,"period":"month","period_label":"月付","plan":"trial","plan_name":"体验版","points":150,"price":69},{"months":3,"period":"quarter","period_label":"季付(9折)","plan":"trial","plan_name":"体验版","points":450,"price":186},{"months":12,"period":"year","period_label":"年付(8折)","plan":"trial","plan_name":"体验版","points":1800,"price":662},{"months":1,"period":"month","period_label":"月付","plan":"startup","plan_name":"创业版","points":500,"price":199},{"months":3,"period":"quarter","period_label":"季付(9折)","plan":"startup","plan_name":"创业版","points":1500,"price":537},{"months":12,"period":"year","period_label":"年付(8折)","plan":"startup","plan_name":"创业版","points":6000,"price":1910},{"months":1,"period":"month","period_label":"月付","plan":"biz","plan_name":"企业版","points":1800,"price":599},{"months":3,"period":"quarter","period_label":"季付(9折)","plan":"biz","plan_name":"企业版","points":5400,"price":1617},{"months":12,"period":"year","period_label":"年付(8折)","plan":"biz","plan_name":"企业版","points":21600,"price":5750},{"months":1,"period":"month","period_label":"月付","plan":"flagship","plan_name":"旗舰版","points":7000,"price":1999},{"months":3,"period":"quarter","period_label":"季付(9折)","plan":"flagship","plan_name":"旗舰版","points":21000,"price":5397},{"months":12,"period":"year","period_label":"年付(8折)","plan":"flagship","plan_name":"旗舰版","points":84000,"price":19190}]}</script>
 <script>
 // 悬浮员工天团
 const colors=["#f4a261","#4cc9f0","#e76f51","#ffd166","#cdb4db","#90be6d","#f28cb1","#43aa8b","#577590","#9b5de5"];
@@ -281,7 +285,16 @@ function publicFunnel(event,dimension){
     body:JSON.stringify({event,dimension})}).catch(()=>{});
 }
 publicFunnel("landing_view","promo");
-let purchaseCatalog = null;
+let purchaseCatalog = null, catalogIsReference = true;
+// 内置参考价(由 tools/sync_plan_reference.py 从服务端套餐目录生成)：接口慢或挂了也能看到价格。
+const PLAN_REFERENCE_DATA=(()=>{
+  try{return JSON.parse(document.getElementById("plan-reference").textContent);}catch(_){return null;}
+})();
+function renderPointExamples(examples){
+  const box=document.getElementById("point-examples");
+  if(!box||!Array.isArray(examples)||!examples.length) return;
+  box.textContent=examples.slice(0,3).map(item=>`${item.label} ${Number(item.points)} 点`).join("；");
+}
 function updatePlanQuote(card){
   if(!purchaseCatalog||!card) return;
   const planKey=card.dataset.plan, period=card.querySelector(".plan-period")?.value||"month";
@@ -290,35 +303,54 @@ function updatePlanQuote(card){
   if(!plan||!quote) return;
   card.querySelector("h3").textContent=plan.name;
   card.querySelector(".old").textContent=`原价 ¥${plan.price}/月`;
-  card.querySelector(".price").innerHTML=`¥${plan.sale}<small>/月</small>`;
+  card.querySelector(".price").innerHTML=`¥${Number(plan.sale)}<small>/月</small>`;
   card.querySelector(".pts").textContent=`每月 ${plan.points} 点`;
   card.querySelector(".desc").textContent=plan.desc||"";
   card.querySelector(".quote").textContent=`${quote.period_label}合计 ¥${quote.price} · ${quote.points} 点`;
-  card.querySelector(".plan-action").textContent=`申请购买${plan.name}`;
+  card.querySelector(".price-note").textContent=catalogIsReference?"参考价，以实际报价为准":"";
+  card.querySelector(".plan-action").textContent=`登录并购买${plan.name}`;
+}
+function applyPurchaseCatalog(catalog,isReference){
+  if(!catalog||!Array.isArray(catalog.plans)||!Array.isArray(catalog.periods)||!Array.isArray(catalog.quotes)) return false;
+  purchaseCatalog=catalog;
+  catalogIsReference=!!isReference;
+  document.querySelectorAll(".plan[data-plan]").forEach(card=>{
+    const select=card.querySelector(".plan-period");
+    const current=select.value||"month";
+    select.innerHTML=catalog.periods.map(period=>`<option value="${period.key}">${period.label}</option>`).join("");
+    select.value=catalog.periods.some(period=>period.key===current)?current:"month";
+    select.disabled=false;
+    if(!select.dataset.bound){
+      select.dataset.bound="1";
+      select.addEventListener("change",()=>updatePlanQuote(card));
+    }
+    updatePlanQuote(card);
+  });
+  renderPointExamples(catalog.point_examples);
+  const notice=document.getElementById("pay-notice");
+  if(notice&&!isReference&&catalog.online_pay&&catalog.online_pay.wxpay){
+    notice.textContent="登录后可以微信扫码付款，付款成功立即开通；也可以提交购买意向，由平台联系。";
+  }
+  return true;
 }
 async function hydratePurchaseCatalog(){
+  // 先把参考价画出来，页面上永远不会停在“加载中”。
+  const hasReference=applyPurchaseCatalog(PLAN_REFERENCE_DATA,true);
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),5000);
   try{
-    const response=await fetch("/api/purchases/catalog");
+    const response=await fetch("/api/purchases/catalog",{signal:controller.signal});
     if(!response.ok) throw new Error("catalog unavailable");
-    const catalog=await response.json();
-    if(!Array.isArray(catalog.plans)||!Array.isArray(catalog.periods)||!Array.isArray(catalog.quotes)) return;
-    purchaseCatalog=catalog;
-    document.querySelectorAll(".plan[data-plan]").forEach(card=>{
-      const select=card.querySelector(".plan-period");
-      select.innerHTML=catalog.periods.map(period=>`<option value="${period.key}">${period.label}</option>`).join("");
-      select.value="month";
-      select.disabled=false;
-      select.addEventListener("change",()=>updatePlanQuote(card));
-      updatePlanQuote(card);
-    });
+    if(!applyPurchaseCatalog(await response.json(),false)) throw new Error("catalog invalid");
   }catch(_){
-    document.querySelectorAll(".plan[data-plan]").forEach(card=>{
-      card.querySelector(".old").textContent="实时价格暂不可用";
-      card.querySelector(".price").innerHTML="—<small>/月</small>";
-      card.querySelector(".pts").textContent="登录后获取服务端报价";
-      card.querySelector(".quote").textContent="请登录后获取实时服务端报价，提交前会再次核价";
-      card.querySelector(".plan-action").textContent="登录后查看实时报价";
-    });
+    // 实时价格暂不可用：保留参考价并标注“参考价，以实际报价为准”。
+    if(!hasReference){
+      document.querySelectorAll(".plan[data-plan]").forEach(card=>{
+        card.querySelector(".price-note").textContent="实时价格暂不可用，登录后可查看报价";
+      });
+    }
+  }finally{
+    clearTimeout(timer);
   }
 }
 function startPurchase(planKey){

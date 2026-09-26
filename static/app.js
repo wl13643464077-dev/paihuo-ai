@@ -6404,6 +6404,17 @@ const PURCHASE_SOURCE_LABELS={
 const PURCHASE_REQUEST_IDS=new Map();
 let PURCHASE_CONTEXT={catalog:null,own:{items:[],total:0},admin:{items:[],total:0},stats:null};
 let PURCHASE_ADMIN_OFFSET=0,PURCHASE_ADMIN_STATUS="";
+// 套餐参考价：由 tools/sync_plan_reference.py 从服务端套餐目录生成(勿手改)。
+// 实时报价 5 秒拿不到或接口失败时用它兜底，套餐区永远看得见价格。
+const PLAN_REFERENCE={"periods":[{"discount":1.0,"key":"month","label":"月付","months":1},{"discount":0.9,"key":"quarter","label":"季付(9折)","months":3},{"discount":0.8,"key":"year","label":"年付(8折)","months":12}],"plans":[{"desc":"适合先试试水:每月约 5 单内容 + 3 条数字人","key":"trial","name":"体验版","points":150,"price":99,"sale":69},{"desc":"一人公司日更:含 500 点，专家任务按 1 点/次计费","key":"startup","name":"创业版","points":500,"price":299,"sale":199},{"desc":"小团队多账号:内容矩阵 + 数字人矩阵","key":"biz","name":"企业版","points":1800,"price":899,"sale":599},{"desc":"MCN/多门店连锁:全板块放开跑","key":"flagship","name":"旗舰版","points":7000,"price":2999,"sale":1999}],"point_examples":[{"action":"content_job","label":"写一整篇带配图的营销内容","points":18},{"action":"expert_task","label":"请行业专家办一件事或答一个问题","points":1},{"action":"avatar_video","label":"做一条 30 秒数字人口播视频","points":12},{"action":"link_extract","label":"把一条爆款视频拆成口播稿","points":1}],"quotes":[{"months":1,"period":"month","period_label":"月付","plan":"trial","plan_name":"体验版","points":150,"price":69},{"months":3,"period":"quarter","period_label":"季付(9折)","plan":"trial","plan_name":"体验版","points":450,"price":186},{"months":12,"period":"year","period_label":"年付(8折)","plan":"trial","plan_name":"体验版","points":1800,"price":662},{"months":1,"period":"month","period_label":"月付","plan":"startup","plan_name":"创业版","points":500,"price":199},{"months":3,"period":"quarter","period_label":"季付(9折)","plan":"startup","plan_name":"创业版","points":1500,"price":537},{"months":12,"period":"year","period_label":"年付(8折)","plan":"startup","plan_name":"创业版","points":6000,"price":1910},{"months":1,"period":"month","period_label":"月付","plan":"biz","plan_name":"企业版","points":1800,"price":599},{"months":3,"period":"quarter","period_label":"季付(9折)","plan":"biz","plan_name":"企业版","points":5400,"price":1617},{"months":12,"period":"year","period_label":"年付(8折)","plan":"biz","plan_name":"企业版","points":21600,"price":5750},{"months":1,"period":"month","period_label":"月付","plan":"flagship","plan_name":"旗舰版","points":7000,"price":1999},{"months":3,"period":"quarter","period_label":"季付(9折)","plan":"flagship","plan_name":"旗舰版","points":21000,"price":5397},{"months":12,"period":"year","period_label":"年付(8折)","plan":"flagship","plan_name":"旗舰版","points":84000,"price":19190}]};
+let WXPAY_POLL=null,WXPAY_ORDER="",WXPAY_EXPIRES=0,WXPAY_POLL_BUSY=false;
+function purchaseReferenceCatalog(){
+  return {...PLAN_REFERENCE,reference:true,online_pay:{wxpay:false}};
+}
+function wxpayOnline(){
+  const catalog=PURCHASE_CONTEXT.catalog;
+  return !!(catalog&&!catalog.reference&&catalog.online_pay?.wxpay);
+}
 function purchaseRequestStorageKey(plan,period){
   return `paihuo:purchase-request:${Number(ME?.id||0)}:${String(plan)}:${String(period)}`;
 }
@@ -6450,8 +6461,11 @@ function activePurchase(plan){
     item.plan===plan&&["requested","contacted"].includes(item.status));
 }
 async function loadPurchaseContext(){
-  const catalog=await api("/purchases/catalog");
-  const context={catalog,own:{items:[],total:0},admin:{items:[],total:0},stats:null};
+  // 5 秒拿不到实时报价就用内置参考价，不让套餐区卡在“加载中”。
+  const live=await api("/purchases/catalog",{timeout:5000}).catch(optionalResult(null));
+  const catalog=live&&Array.isArray(live.plans)&&live.plans.length&&Array.isArray(live.quotes)
+    ?live:purchaseReferenceCatalog();
+  const context={catalog,own:{items:[],total:0},admin:{items:[],total:0},stats:null,wxpay:null,payOrders:null};
   if(ME?.role==="owner"||ME?.role==="root"){
     context.own=await api("/purchases?limit=100&offset=0").catch(()=>({items:[],total:0}));
   }
@@ -6463,9 +6477,11 @@ async function loadPurchaseContext(){
       limit:"50",offset:String(PURCHASE_ADMIN_OFFSET),
     });
     if(PURCHASE_ADMIN_STATUS) adminQuery.set("status",PURCHASE_ADMIN_STATUS);
-    [context.admin,context.stats]=await Promise.all([
+    [context.admin,context.stats,context.wxpay,context.payOrders]=await Promise.all([
       api(`/admin/purchases?${adminQuery.toString()}`).catch(()=>({items:[],total:0})),
       api("/admin/purchases/stats").catch(()=>null),
+      api("/admin/wxpay/config").catch(()=>null),
+      api("/admin/pay-orders?limit=20&offset=0").catch(()=>null),
     ]);
   }
   PURCHASE_CONTEXT=context;
@@ -6479,13 +6495,19 @@ function purchasePlanHtml(plan){
     `<option value="${esc(period.key)}" ${period.key===selectedPeriod?"selected":""}>${esc(period.label)}</option>`
   ).join("");
   const quote=purchaseQuote(plan.key,selectedPeriod);
+  const reference=!!PURCHASE_CONTEXT.catalog?.reference;
+  const payButton=ME?.role==="owner"&&wxpayOnline()
+    ?`<button class="btn pri sm wxpay-btn" onclick="wxpayOpen(${cp(plan.key)})">💚 微信扫码付款</button>`:"";
+  const intentButton=active
+    ?`<button class="btn sm" disabled>申请处理中 · ${esc(PURCHASE_STATUS_LABELS[active.status])}</button>`
+    :`<button class="btn ${payButton?"":"pri "}sm" onclick="purchaseOpen(${cp(plan.key)})">提交购买申请</button>`;
   const action=ME?.role==="member"
     ?`<div class="notice" style="margin:10px 0 0">请联系贵司企业主提交购买申请。</div>`
     :ME?.role==="root"
       ?`<a class="btn sm" href="#purchase-admin">查看平台购买线索</a>`
-      :active
-        ?`<button class="btn sm" disabled>申请处理中 · ${esc(PURCHASE_STATUS_LABELS[active.status])}</button>`
-        :`<button class="btn pri sm" onclick="purchaseOpen(${cp(plan.key)})">提交购买申请</button>`;
+      :ME?.role==="tour"
+        ?`<a class="btn pri sm" href="/promo#plans">了解开通方式</a>`
+        :payButton+intentButton;
   return `<div class="topic" data-purchase-plan="${esc(plan.key)}" style="text-align:center;${plan.key==="startup"?"border-color:#ef476f;border-width:3px":""}">
     ${plan.key==="startup"?`<div style="color:#ef476f;font-weight:900;font-size:12px">🔥 最多人选</div>`:""}
     <h3 style="margin:4px 0">${esc(plan.name)}</h3>
@@ -6494,6 +6516,7 @@ function purchasePlanHtml(plan){
     <div class="tag" style="margin:6px 0">${Number(plan.points)} 点/月</div>
     <select aria-label="${esc(plan.name)}购买周期" onchange="purchasePlanPeriodChanged(${cp(plan.key)},this.value)" ${ME?.role==="owner"?"":"disabled"}>${periods}</select>
     <div class="sub purchase-quote" style="margin:8px 0">${quote?`${esc(quote.period_label)}合计 <b>¥${Number(quote.price)}</b> · ${Number(quote.points)} 点`:"以服务端报价为准"}</div>
+    ${reference?`<div class="sub" style="color:#b45309;font-weight:700">参考价，以实际报价为准</div>`:""}
     <div class="sub">${esc(plan.desc||"")}</div><div class="actions" style="justify-content:center">${action}</div></div>`;
 }
 function purchasePlanPeriodChanged(plan,period){
@@ -6631,13 +6654,70 @@ async function purchaseTransition(id,expected,target){
     await billingView();
   }catch(e){toast(e.message);}
 }
+function billingPointExamples(b){
+  const live=Array.isArray(b?.point_examples)&&b.point_examples.length?b.point_examples:null;
+  const base=live||PURCHASE_CONTEXT.catalog?.point_examples||PLAN_REFERENCE.point_examples||[];
+  return base.filter(item=>Number(item.points)>0);
+}
+function billingPointsCardHtml(b){
+  // “1 点能做什么”：点数全部来自后端价目表(实时/参考)，前端不写死。
+  const examples=billingPointExamples(b);
+  if(!examples.length) return "";
+  const plans=PURCHASE_CONTEXT.catalog?.plans||PLAN_REFERENCE.plans||[];
+  const sample=plans.find(plan=>plan.key==="startup")||plans[0];
+  const [first,second]=examples;
+  const count=item=>item&&Number(item.points)>0?Math.floor(Number(sample.points)/Number(item.points)):0;
+  return `<div class="card" id="billing-points"><h2>💡 1 点能做什么</h2>
+    <div class="sub">1 点 = ¥1，做一件事扣一次点；没做成会自动把点退回来。</div>
+    <div class="grid3" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr));margin-top:10px">
+      ${examples.map(item=>`<div class="topic" style="text-align:center"><div style="font-size:24px;font-weight:900">${Number(item.points)} 点</div>
+        <div class="sub">${esc(item.label)}</div></div>`).join("")}</div>
+    ${sample&&first?`<div class="sub" style="margin-top:10px">举个例子：${esc(sample.name)}每月 ${Number(sample.points)} 点，大约够${esc(first.label)} ${count(first)} 次${second?`，或者${esc(second.label)} ${count(second)} 次`:""}。</div>`:""}</div>`;
+}
+function billingPlansCardHtml(){
+  const plans=PURCHASE_CONTEXT.catalog?.plans||PLAN_REFERENCE.plans||[];
+  const payLine=ME?.role==="member"?"充值/续费请联系<b>贵司主账号(企业主)</b>操作。"
+    :ME?.role==="root"?"在上方购买线索中核对客户申请和线下到账；也可在「权限管理→租户管理」人工开通。"
+    :wxpayOnline()?"选好套餐后可以直接微信扫码付款，付完自动开通；也可以提交购买申请，由平台联系。"
+    :"选择套餐后提交购买申请，平台联系并确认线下到账后才会开通，不会在页面内自动扣款。";
+  return `<div class="card" id="billing-plans"><h2>📦 套餐(月/季/年)</h2>
+    <div class="sub">季付 9 折,年付 8 折(按活动价再折)。${payLine}</div>
+    <div class="grid3" style="grid-template-columns:repeat(auto-fit,minmax(210px,1fr));margin-top:12px">
+    ${plans.map(p=>purchasePlanHtml(p)).join("")}</div></div>`;
+}
 async function billingView(){
   trackFunnelSessionOnce("pricing_view","billing");
-  const [b,digestConf] = await Promise.all([
+  // 先用参考价把套餐和“1 点能做什么”画出来：账户接口再慢，老板也能先看到价格。
+  if(!PURCHASE_CONTEXT.catalog) PURCHASE_CONTEXT={...PURCHASE_CONTEXT,catalog:purchaseReferenceCatalog()};
+  if(!document.getElementById("billing-plans")){
+    $("#main").innerHTML=`<div class="card route-loading" role="status" aria-live="polite">
+      <div style="display:flex;align-items:center;gap:12px"><span class="spin"></span><b>正在读取积分账户…</b></div></div>`
+      +billingPointsCardHtml(null)+billingPlansCardHtml();
+  }
+  const [billingResult,digestResult,contextResult] = await Promise.allSettled([
     api("/billing"),
     api("/notify/daily-digest").catch(()=>({enabled:true})),
     loadPurchaseContext(),
   ]);
+  for(const result of [billingResult,contextResult]){
+    const reason=result.status==="rejected"?result.reason:null;
+    if(reason&&(reason.name==="NavigationAbort"||reason.status===401)) throw reason;
+  }
+  if(contextResult.status==="rejected"){
+    PURCHASE_CONTEXT={...PURCHASE_CONTEXT,catalog:purchaseReferenceCatalog()};
+  }
+  if(billingResult.status==="rejected"){
+    if(billingResult.reason?.status===403) throw billingResult.reason;
+    $("#main").innerHTML=`<div class="card"><h2>💎 积分账户</h2>
+      <div class="notice" style="margin-bottom:0">积分账户暂时没读出来(${esc(billingResult.reason?.message||"网络不稳")})。下面的套餐价格可以先看，稍后再点重新加载。</div>
+      <div class="actions"><button class="btn pri" onclick="render(true)">重新加载</button></div></div>`
+      +billingPointsCardHtml(null)+billingPlansCardHtml();
+    return;
+  }
+  const b=billingResult.value||{};
+  const digestConf=digestResult.status==="fulfilled"?(digestResult.value||{enabled:true}):{enabled:true};
+  b.log=Array.isArray(b.log)?b.log:[];
+  b.prices=b.prices||{};
   const tourBanner = ME&&ME.role==="tour" ? `<div class="notice" style="background:#ece3ff;margin-top:0">👀 <b>参观模式</b>:点击员工卡片,了解每位数字员工可以为您的业务提供什么帮助。<a href="/promo#plans" style="text-decoration:underline;font-weight:900">查看套餐</a> 或联系开通企业账号后直接派活。</div>` : "";
   const isRefund = l=>l.delta>0&&String(l.reason||"").startsWith("退回");
   const shown = (BILL_TAB==="in"?b.log.filter(l=>l.delta>0&&!isRefund(l)):BILL_TAB==="out"?b.log.filter(l=>l.delta<0):b.log);
@@ -6650,7 +6730,6 @@ async function billingView(){
     :`⛔ 套餐 <b>${esc(b.plan||"")}</b> 已到期`},到期后不再按月发点。续费请${
     ME.role==="member"?"联系<b>贵司主账号(企业主)</b>"
     :`联系平台顾问${META?.support_contact?`:<b>${esc(META.support_contact)}</b>`:"(点右下角 💬 留言)"}`}。</div>`:"";
-  const catalogPlans=PURCHASE_CONTEXT.catalog?.plans||b.plans||[];
   $("#main").innerHTML = tourBanner + expBanner + `
   <div class="card" style="background:linear-gradient(120deg,#fff6dc,#fffaf0 60%)">
     <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
@@ -6665,7 +6744,8 @@ async function billingView(){
         <span>累计消耗 <b style="color:#e5484d">-${(b.spent||0).toFixed(0)}</b></span>
         ${(b.refunded_total||0)>0?`<span>失败退回 <b style="color:#b45309">+${(b.refunded_total||0).toFixed(0)}</b></span>`:""}
         <span>共 ${b.txn_n||0} 笔</span></div>`}</div>
-  ${purchaseOwnHtml()}${purchaseAdminHtml()}
+  ${purchaseOwnHtml()}${purchaseAdminHtml()}${wxpayAdminHtml()}
+  ${b.is_platform?"":billingPointsCardHtml(b)}
   ${spendActs.length?`<div class="card"><h2>💸 近30天花在哪</h2>
     <div class="sub">按功能统计最近 30 天实际消耗的积分,帮您看清钱被哪类动作花掉了。</div>
     ${spendActs.map(s=>`<div style="margin-top:12px">
@@ -6703,12 +6783,141 @@ async function billingView(){
   <div class="card"><h2>📋 价目表(按次消耗)</h2>
     <div class="dimwrap"><table class="dimtable" style="min-width:min(560px,100%)"><thead><tr><th>动作</th><th>消耗</th><th>成本参考</th></tr></thead>
     <tbody>${Object.values(b.prices).map(p=>`<tr><td>${esc(p.label)}</td><td><b>${p.points} 点</b></td><td class="sub">${esc(p.cost||"")}</td></tr>`).join("")}</tbody></table></div></div>
-  <div class="card"><h2>📦 套餐(月/季/年)</h2>
-    <div class="sub">季付 9 折,年付 8 折(按活动价再折)。${ME.role==="member"?"充值/续费请联系<b>贵司主账号(企业主)</b>操作。":""}${ME.role==="root"?"在上方购买线索中核对客户申请和线下到账；也可在「权限管理→租户管理」人工开通。":"选择套餐后提交购买申请，平台联系并确认线下到账后才会开通，不会在页面内自动扣款。"}</div>
-    <div class="grid3" style="grid-template-columns:repeat(auto-fit,minmax(210px,1fr));margin-top:12px">
-    ${catalogPlans.map(p=>purchasePlanHtml(p)).join("")}</div></div>
+  ${billingPlansCardHtml()}
 `;
   enhanceResponsiveTables($("#main"));
+}
+/* ---------- 微信扫码付款(平台开通在线支付后才出现) ---------- */
+async function wxpayOpen(plan){
+  if(ME?.role!=="owner") return toast("仅企业主账号可以付款开通套餐");
+  if(!wxpayOnline()) return toast("在线支付暂未开通，请提交购买申请");
+  const card=document.querySelector(`[data-purchase-plan="${plan}"]`);
+  const period=card?.querySelector("select")?.value||"month";
+  const button=card?.querySelector(".wxpay-btn");
+  if(button?.disabled) return;
+  if(button){button.disabled=true;button.textContent="正在生成付款码…";}
+  try{
+    // 只传套餐和周期；金额由服务器按报价计算。
+    const payload={plan,period};
+    const result=await api("/pay/wxpay/orders",{method:"POST",body:payload});
+    wxpayShowOrder(result.item);
+  }catch(e){toast(e.message);}
+  finally{if(button){button.disabled=false;button.textContent="💚 微信扫码付款";}}
+}
+function wxpayShowOrder(order){
+  wxpayClose();
+  if(!order?.order_no) return toast("付款码生成失败，请稍后再试");
+  const qr=order.qr_svg
+    ?`<div class="wxpay-qr" style="width:220px;max-width:70vw;margin:12px auto;border:3px solid var(--ink);border-radius:14px;padding:6px;background:#fff">${order.qr_svg}</div>`
+    :`<div class="notice" style="text-align:left">请打开微信“扫一扫”付款。二维码没显示出来时，可以把下面这串付款链接发到自己的微信里点开：
+        <div style="word-break:break-all;font-family:monospace;margin-top:6px">${esc(order.code_url||"")}</div></div>`;
+  document.body.insertAdjacentHTML("beforeend",`<div class="overlay" id="wxpay-overlay">
+    <div class="panel" role="dialog" aria-modal="true" aria-labelledby="wxpay-title" style="max-width:440px">
+      <div class="phead"><h2 id="wxpay-title" style="margin:0;flex:1">💚 微信扫码付款</h2>
+        <button class="btn sm" onclick="wxpayClose()" aria-label="关闭">✕</button></div>
+      <div class="pbody" style="text-align:center">
+        <b>${esc(order.plan_name)} · ${esc(order.period_label)}</b>
+        <div style="font-size:32px;font-weight:900;margin-top:4px">¥${Number(order.amount)}</div>
+        <div class="sub">付款成功后自动开通，并发放 ${Number(order.points)} 点</div>
+        ${qr}
+        <div class="sub" id="wxpay-status" aria-live="polite">${esc(order.status_message||"")}</div>
+        <div class="sub" id="wxpay-expire"></div>
+        <div class="actions" style="justify-content:center"><button class="btn" onclick="wxpayPoll()">我已付款，刷新一下</button></div>
+      </div></div></div>`);
+  WXPAY_ORDER=String(order.order_no);
+  WXPAY_EXPIRES=Number(order.expires_at)||0;
+  wxpayTick();
+  WXPAY_POLL=setInterval(wxpayPoll,3000);
+}
+function wxpayTick(){
+  const box=$("#wxpay-expire");
+  if(!box||!WXPAY_EXPIRES) return;
+  const minutes=Math.max(0,Math.ceil((WXPAY_EXPIRES*1000-Date.now())/60000));
+  box.textContent=minutes>0?`付款码 ${minutes} 分钟内有效，过期自动作废，不会扣钱`:"付款码已过期，请关闭后重新下单";
+}
+function wxpayClose(){
+  if(WXPAY_POLL) clearInterval(WXPAY_POLL);
+  WXPAY_POLL=null; WXPAY_ORDER=""; WXPAY_EXPIRES=0;
+  $("#wxpay-overlay")?.remove();
+}
+async function wxpayPoll(){
+  if(!WXPAY_ORDER||WXPAY_POLL_BUSY) return;
+  if(!$("#wxpay-overlay")) return wxpayClose();
+  WXPAY_POLL_BUSY=true;
+  const orderNo=WXPAY_ORDER;
+  try{
+    const {item}=await api(`/pay/wxpay/orders/${encodeURIComponent(orderNo)}`,{routeScoped:false,timeout:10000});
+    if(WXPAY_ORDER!==orderNo) return;
+    const status=$("#wxpay-status"); if(status) status.textContent=item.status_message||"";
+    wxpayTick();
+    if(item.status==="paid"){
+      wxpayClose();
+      toast(item.activated?"✅ 付款成功，套餐和点数已经开通":"已收到付款，平台会尽快为您开通");
+      if(location.hash.startsWith("#/billing")) billingView().catch(()=>{});
+    }else if(item.status!=="created"){
+      wxpayClose();
+      toast(item.status_message||"付款码已失效，请重新下单");
+    }
+  }catch(_){
+    // 网络抖一下不要紧，下一轮继续查；付款结果以服务器为准。
+  }finally{
+    WXPAY_POLL_BUSY=false;
+  }
+}
+const WXPAY_PAY_STATUS_LABELS={created:"待付款",paid:"已付款",closed:"已关闭",refunded:"已退款"};
+function wxpayAdminHtml(){
+  if(ME?.role!=="root") return "";
+  const cfg=PURCHASE_CONTEXT.wxpay;
+  if(!cfg) return `<div class="card" id="wxpay-admin"><h2>💚 微信在线支付</h2><div class="sub">支付设置暂时没读出来，请稍后刷新。</div></div>`;
+  const orders=PURCHASE_CONTEXT.payOrders?.items||[];
+  const input=(key,label,placeholder)=>`<label style="margin-top:8px">${label}</label>
+    <input id="wxcfg-${key}" value="${esc(cfg[key]||"")}" placeholder="${esc(placeholder)}" autocomplete="off">`;
+  return `<div class="card" id="wxpay-admin"><h2>💚 微信在线支付(扫码付款)</h2>
+    <div class="sub">默认关闭。填好商户信息并打开开关后，客户在套餐页可以直接微信扫码付款，付完自动开通；关着时仍然走“提交购买申请、线下到账后人工开通”。</div>
+    <div class="kv" style="margin-top:10px"><span>状态 <b>${cfg.ready?"已开启":"未开启"}</b></span>
+      ${(cfg.missing||[]).length?`<span>还缺 <b>${esc(cfg.missing.join("、"))}</b></span>`:""}
+      <span>已付款 <b>${Number(PURCHASE_CONTEXT.payOrders?.paid_count||0)}</b> 笔 · ¥${Number(PURCHASE_CONTEXT.payOrders?.paid_amount||0)}</span></div>
+    <details style="margin-top:10px"><summary>填写 / 修改商户配置</summary>
+      ${input("mchid","商户号","如 1900000001")}
+      ${input("appid","AppID(公众号或小程序)","wx 开头的 18 位")}
+      ${input("merchant_serial_no","商户 API 证书序列号","商户平台 → API 安全 → 证书序列号")}
+      <label style="margin-top:8px">APIv3 密钥${cfg.apiv3_key_set?"(已设置，留空不修改)":""}</label>
+      <input id="wxcfg-apiv3_key" type="password" autocomplete="new-password" placeholder="32 位">
+      <label style="margin-top:8px">商户 API 私钥 apiclient_key.pem${cfg.private_key_set?"(已设置，留空不修改)":""}</label>
+      <textarea id="wxcfg-private_key" class="promptbox" style="min-height:90px" autocomplete="off" spellcheck="false" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+      ${input("public_key_id","微信支付公钥 ID","PUB_KEY_ID_...")}
+      <label style="margin-top:8px">微信支付公钥 pub_key.pem${cfg.public_key_set?"(已设置，留空不修改)":""}</label>
+      <textarea id="wxcfg-public_key" class="promptbox" style="min-height:90px" autocomplete="off" spellcheck="false" placeholder="-----BEGIN PUBLIC KEY-----"></textarea>
+      ${input("notify_url","支付结果回调地址","https://你的域名/api/pay/wxpay/notify")}
+      <label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" id="wxcfg-enabled" style="width:auto" ${cfg.enabled?"checked":""}> 开启微信扫码付款</label>
+      <div class="actions"><button class="btn pri" id="wxcfg-save" onclick="wxpayConfigSave()">保存支付设置</button></div>
+    </details>
+    ${orders.length?`<div class="dimwrap" style="margin-top:12px"><table class="dimtable"><thead><tr>
+      <th>订单</th><th>企业</th><th>金额</th><th>状态</th></tr></thead><tbody>
+      ${orders.map(item=>`<tr><td><b>${esc(item.plan_name)}·${esc(item.period_label)}</b><div class="sub">${esc(item.order_no)} · ${tcFmt(item.created_at)}</div></td>
+        <td>#${Number(item.tenant_id)}</td><td>¥${Number(item.amount)}</td>
+        <td>${esc(WXPAY_PAY_STATUS_LABELS[item.status]||item.status)}${item.activation_error?`<div class="sub" style="color:#e5484d">开通失败：${esc(item.activation_error)}</div>`:""}</td></tr>`).join("")}
+      </tbody></table></div>`:""}
+  </div>`;
+}
+async function wxpayConfigSave(){
+  const button=$("#wxcfg-save");
+  if(button?.disabled) return;
+  const body={enabled:!!$("#wxcfg-enabled")?.checked};
+  for(const key of ["mchid","appid","merchant_serial_no","public_key_id","notify_url"]){
+    body[key]=($(`#wxcfg-${key}`)?.value||"").trim();
+  }
+  for(const key of ["apiv3_key","private_key","public_key"]){
+    const value=($(`#wxcfg-${key}`)?.value||"").trim();
+    if(value) body[key]=value;   // 留空=保持原值
+  }
+  if(button){button.disabled=true;button.textContent="保存中…";}
+  try{
+    const view=await api("/admin/wxpay/config",{method:"PUT",body});
+    toast(view.ready?"✅ 微信扫码付款已开启":"已保存；开关未打开或配置未填齐时，客户看不到在线付款");
+    await billingView();
+  }catch(e){toast(e.message);}
+  finally{if(button){button.disabled=false;button.textContent="保存支付设置";}}
 }
 async function digestToggle(cb){
   try{
