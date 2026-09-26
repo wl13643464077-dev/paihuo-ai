@@ -471,6 +471,8 @@ async def _startup():
         )
     await engine.start()
     asyncio.create_task(scheduler.loop(engine))
+    from . import watchdog as _watchdog          # 看门狗:卡住的任务/会议/工单超时收口退款
+    asyncio.create_task(_watchdog.loop(engine))
     asyncio.create_task(analyzer.loop())
     taskrunner.resume_pending(engine.broadcast)
     await _resume_inspection_tasks()

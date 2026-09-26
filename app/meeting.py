@@ -35,6 +35,93 @@ TEAM_INTEGRATION_ACCEPTANCE = "最终交付包完整合并全部成员交付，�
 TEAM_POLL_SECONDS = 5.0
 TEAM_TASK_TIMEOUT_SECONDS = 45 * 60
 _last_broadcast_warning = 0.0
+# 进程内正在推进的会议(会议 id → 嵌套层数)。看门狗据此只收口
+# 「确实没有协程在跑」的会议，绝不误杀正在开会/接力执行的会议。
+ACTIVE: dict[int, int] = {}
+
+
+def is_active(meeting_id: int) -> bool:
+    return ACTIVE.get(int(meeting_id), 0) > 0
+
+
+class _ActiveMeeting:
+    """可嵌套的进程内占位:run → execute_actions_team 嵌套时计数叠加。"""
+
+    def __init__(self, meeting_id: int):
+        self.meeting_id = int(meeting_id)
+
+    def __enter__(self):
+        ACTIVE[self.meeting_id] = ACTIVE.get(self.meeting_id, 0) + 1
+        return self
+
+    def __exit__(self, *_exc):
+        left = ACTIVE.get(self.meeting_id, 0) - 1
+        if left > 0:
+            ACTIVE[self.meeting_id] = left
+        else:
+            ACTIVE.pop(self.meeting_id, None)
+        return False
+
+
+_DECISION_CN = {"GO": "建议干", "NO_GO": "建议先别干", "NEED_INFO": "还缺关键信息"}
+
+
+def notify_outcome(meeting_id: int, ok: bool, detail: str = "") -> bool:
+    """会议完成/失败通知老板(站内 + 企微)。故障只记日志,绝不影响会议状态。"""
+    try:
+        from . import notify
+        row = db.one(
+            "SELECT tenant_id,question,decision,billing_status FROM meeting WHERE id=?",
+            (meeting_id,),
+        )
+        if not row:
+            return False
+        topic = " ".join(str(row.get("question") or "会议").split())
+        if len(topic) > 24:
+            topic = topic[:24] + "…"
+        if ok:
+            report_name = "会议出结论了"
+            decision = _DECISION_CN.get(_decision(row.get("decision")), "")
+            summary = (
+                f"【AI 会议室】你发起的《{topic}》已开完"
+                + (f"，结论：{decision}" if decision else "")
+                + (f"，{detail}" if detail else "")
+                + "，点开看结论"
+            )
+        else:
+            report_name = "会议没开完"
+            refund = (
+                "点数已自动退回，"
+                if row.get("billing_status") == "refunded" else ""
+            )
+            summary = (
+                f"【AI 会议室】你发起的《{topic}》{detail or '没有开完'}，"
+                f"{refund}可以重新开一次"
+            )
+        notify.push(int(row.get("tenant_id") or 1), "report", {
+            "report_name": report_name,
+            "summary": summary,
+            "link": f"#/meetings/{int(meeting_id)}",
+        })
+        return True
+    except Exception as exc:
+        log.warning(
+            "meeting %s outcome notify failed error_type=%s",
+            meeting_id,
+            type(exc).__name__,
+        )
+        return False
+
+
+async def _notify_outcome_async(meeting_id: int, ok: bool, detail: str = ""):
+    try:
+        await asyncio.to_thread(notify_outcome, meeting_id, ok, detail)
+    except Exception as exc:
+        log.warning(
+            "meeting %s outcome notify skipped error_type=%s",
+            meeting_id,
+            type(exc).__name__,
+        )
 
 
 def team_enabled(row: dict) -> bool:
@@ -721,14 +808,47 @@ def settle_failure(meeting_id: int, message: str) -> bool:
             "退回:结果型会议 · 执行失败",
         )
     if row.get("status") not in ("done", "failed"):
-        db.update("meeting", meeting_id, {
-            "status": "failed", "phase": "failed", "next_action": error})
-        return True
+        # 条件更新:和正常收口(done)竞争时只有一方生效。
+        return bool(db.execute(
+            "UPDATE meeting SET status='failed',phase='failed',next_action=?,"
+            "updated_at=? WHERE id=? AND status NOT IN ('done','failed')",
+            (error, time.time(), meeting_id),
+        ))
+    return False
+
+
+async def _settle_failure_safely(meeting_id: int, message: str) -> bool:
+    """失败结算兜底:结算再出错时至少标成失败(保留 charged 供对账补退)。"""
+    try:
+        return bool(await db.arun(settle_failure, meeting_id, message))
+    except Exception as exc:
+        log.error(
+            "meeting %s failure settlement failed error_type=%s",
+            meeting_id,
+            type(exc).__name__,
+        )
+    try:
+        await db.aexecute(
+            "UPDATE meeting SET status='failed',phase='failed',next_action=?,"
+            "updated_at=? WHERE id=? AND status IN ('queued','running')",
+            ((message or "会议执行失败")[:500], time.time(), meeting_id),
+        )
+    except Exception as exc:
+        log.error(
+            "meeting %s failure fallback failed error_type=%s",
+            meeting_id,
+            type(exc).__name__,
+        )
     return False
 
 
 async def run(meeting_id: int, broadcast):
     """执行一次三轮收敛会议。条件 UPDATE 保证快速连点/重启不会重复开会。"""
+    with _ActiveMeeting(meeting_id):
+        await _run(meeting_id, broadcast)
+
+
+async def _run(meeting_id: int, broadcast):
     claimed = await db.aexecute(
         "UPDATE meeting SET status='running', phase='brainstorm', round_no=1, summary_md=NULL, "
         "updated_at=? WHERE id=? AND status='queued'", (time.time(), meeting_id))
@@ -1046,9 +1166,15 @@ GO 要派 1-3 个能产出实物的执行任务；NEED_INFO 要派 1-2 个最小
 
         if phase == "execute" and int(m.get("auto_execute") if m.get("auto_execute") is not None else 1):
             if team_enabled(m):
+                # 团队接力在收官时自己通知老板(那时才有最终交付包)。
                 await execute_actions_team(meeting_id, broadcast)
             else:
-                await execute_actions(meeting_id, broadcast)
+                dispatched = await execute_actions(meeting_id, broadcast)
+                await _notify_outcome_async(
+                    meeting_id,
+                    True,
+                    f"已派出 {len(dispatched)} 个执行任务" if dispatched else "",
+                )
         else:
             final_phase = "awaiting_execution" if phase == "execute" else "stopped"
             def _finalize_meeting():
@@ -1068,6 +1194,11 @@ GO 要派 1-3 个能产出实物的执行任务；NEED_INFO 要派 1-2 个最小
                     })
 
             await db.arun(_finalize_meeting)
+            await _notify_outcome_async(
+                meeting_id,
+                True,
+                "等你决定要不要执行" if final_phase == "awaiting_execution" else "",
+            )
         # 会议纪要入资产库是非关键副作用，失败不能把已交付会议回滚成失败或误退款。
         try:
             await db.ainsert(
@@ -1113,7 +1244,8 @@ GO 要派 1-3 个能产出实物的执行任务；NEED_INFO 要派 1-2 个最小
                 meeting_id,
                 type(persist_exc).__name__,
             )
-        await db.arun(settle_failure, meeting_id, public_error)
+        if await _settle_failure_safely(meeting_id, public_error):
+            await _notify_outcome_async(meeting_id, False)
     finally:
         _emit_meeting_update(broadcast, meeting_id, m)
 
@@ -1626,6 +1758,11 @@ async def execute_actions_team(meeting_id: int, broadcast) -> list[int]:
     resume_pending 重新进入本编排器，已交付的棒直接收集，未完的棒继续等。
     编排器自身不抛异常——任务一旦启动，会议决不能被回滚成失败退款。
     """
+    with _ActiveMeeting(meeting_id):
+        return await _execute_actions_team(meeting_id, broadcast)
+
+
+async def _execute_actions_team(meeting_id: int, broadcast) -> list[int]:
     m = await db.aone("SELECT * FROM meeting WHERE id=?", (meeting_id,))
     if not m or _decision(m.get("decision")) not in {"GO", "NEED_INFO"}:
         return []
@@ -1713,6 +1850,16 @@ async def execute_actions_team(meeting_id: int, broadcast) -> list[int]:
             meeting_id, actions, integration_action, all_ids,
             delivered, total,
         )
+        await _notify_outcome_async(
+            meeting_id,
+            True,
+            f"团队交付了 {delivered}/{total} 份"
+            + (
+                "，队长已整合成最终交付包"
+                if integration_final and integration_final["status"] == "done"
+                else "，整合任务还没完成，可在任务中心重试"
+            ),
+        )
         if integration_final and integration_final["status"] == "done":
             await _push(
                 meeting_id, broadcast, "系统",
@@ -1761,6 +1908,11 @@ async def execute_actions_team(meeting_id: int, broadcast) -> list[int]:
                     _finalize_team_meeting,
                     meeting_id, started_actions, None,
                     list(dict.fromkeys(task_ids)), 0, len(task_ids),
+                )
+                await _notify_outcome_async(
+                    meeting_id,
+                    True,
+                    "团队执行中途遇到问题，已派出的任务会继续做",
                 )
             except Exception as finalize_exc:
                 log.error(
@@ -2064,6 +2216,11 @@ def recover_interventions() -> int:
 
 async def ask(meeting_id: int, question: str, broadcast, billing_op: str = None):
     """老板介入不是新一轮闲聊：员工补证据，主持人立即重做决策并更新共识。"""
+    with _ActiveMeeting(meeting_id):
+        await _ask(meeting_id, question, broadcast, billing_op)
+
+
+async def _ask(meeting_id: int, question: str, broadcast, billing_op: str = None):
     m = await db.aone("SELECT * FROM meeting WHERE id=?", (meeting_id,))
     if not m or m.get("status") != "running":
         if billing_op:

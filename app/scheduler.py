@@ -2,7 +2,8 @@
 
 - 时间一律按北京时间(Asia/Shanghai)理解;
 - kind: daily(每天 HH:MM) / weekly(每周X HH:MM) / interval(每 N 小时);
-- 到点时若 3 单并行已满则顺延 10 分钟重试,不硬塞;
+- 到点时若 3 单并行已满则顺延 10 分钟重试,不硬塞;等老板拍板的工单不占
+  并行名额,但积压超过 REVIEW_BACKLOG_LIMIT 单时先暂停开工并提醒老板一次;
 - 建出的工单与手工下达完全同构,走同一条流水线。
 """
 import asyncio
@@ -18,6 +19,29 @@ from . import db
 log = logging.getLogger("scheduler")
 TZ = ZoneInfo("Asia/Shanghai")
 WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+
+# 同时在跑(真正占用流水线)的工单上限。
+MAX_PARALLEL_JOBS = 3
+# 等老板处理(拍板/质检拦截)的工单不占并行名额,但积压太多再开新单只会
+# 越堆越多:超过这个数就先暂停开工,老板处理后自动恢复。
+REVIEW_BACKLOG_LIMIT = 10
+BOSS_PENDING_STATUSES = ("awaiting_review", "gate_blocked")
+# 并行已满属于常态排队,持续这么久(秒)还开不了工才提醒老板。
+PARALLEL_FULL_NOTIFY_AFTER = 3600
+_BLOCK_NOTE_PREFIX = "暂停开工:"
+
+
+class ScheduleBlocked(ValueError):
+    """到点但暂时不能开工(并行已满/等拍板积压),不是开工失败。
+
+    继承 ValueError 只为兼容「立即执行」接口既有的 429 映射;定时循环
+    按本类型精确判断,其他 ValueError 一律按开工失败处理。
+    """
+
+    def __init__(self, reason: str, count: int, message: str):
+        super().__init__(message)
+        self.reason = reason
+        self.count = int(count)
 
 
 async def _run_billed(
@@ -325,6 +349,32 @@ def occurrence_key(next_run_at: float) -> str:
     return str(round(float(next_run_at) * 1_000_000))
 
 
+def _check_capacity(tid: int) -> None:
+    """开新单前的容量检查;不能开工时抛 ScheduleBlocked。"""
+    marks = ",".join("?" for _ in BOSS_PENDING_STATUSES)
+    row = db.one(
+        "SELECT "
+        f"SUM(CASE WHEN status IN ({marks}) THEN 1 ELSE 0 END) AS pending,"
+        f"SUM(CASE WHEN status NOT IN ({marks}) THEN 1 ELSE 0 END) AS active "
+        "FROM job WHERE tenant_id=? AND status NOT IN ('done','cancelled','failed')",
+        (*BOSS_PENDING_STATUSES, *BOSS_PENDING_STATUSES, tid),
+    ) or {}
+    pending = int(row.get("pending") or 0)
+    active = int(row.get("active") or 0)
+    if pending >= REVIEW_BACKLOG_LIMIT:
+        raise ScheduleBlocked(
+            "review_backlog",
+            pending,
+            f"有 {pending} 单等你拍板,定时任务先暂停,拍板后自动恢复",
+        )
+    if active >= MAX_PARALLEL_JOBS:
+        raise ScheduleBlocked(
+            "parallel_full",
+            active,
+            f"并行工单已满({MAX_PARALLEL_JOBS})",
+        )
+
+
 def fire(s: dict, engine, occurrence: str | None = None) -> int:
     """按计划开单；同一 occurrence 重试只复用原单、绝不重复扣费。"""
     tid = s.get("tenant_id") or 1
@@ -343,13 +393,7 @@ def fire(s: dict, engine, occurrence: str | None = None) -> int:
     if existing:
         job_id = existing["id"]
     else:
-        running = db.q(
-            "SELECT id FROM job WHERE tenant_id=? AND "
-            "status NOT IN ('done','cancelled','failed')",
-            (tid,),
-        )
-        if len(running) >= 3:
-            raise ValueError("并行工单已满(3)")
+        _check_capacity(tid)
         profile_id = s.get("profile_id")
         if profile_id and not db.one(
                 "SELECT id FROM account_profile WHERE id=? AND tenant_id=? "
@@ -472,6 +516,73 @@ def _finish_claim(schedule_id: int, token: str, **fields) -> bool:
     ) == 1
 
 
+def _block_key(schedule_id: int) -> str:
+    return f"schedule_block:{int(schedule_id)}"
+
+
+def _clear_block(schedule_id: int) -> None:
+    try:
+        if db.get_setting(_block_key(schedule_id)) is not None:
+            db.set_setting(_block_key(schedule_id), None)
+    except Exception as exc:
+        log.warning(
+            "schedule %s block marker clear failed error_type=%s",
+            schedule_id,
+            type(exc).__name__,
+        )
+
+
+def _handle_blocked(s: dict, claim_token: str, blocked: ScheduleBlocked,
+                    now: float) -> None:
+    """到点开不了工:顺延 10 分钟重试;同一段阻塞期只提醒老板一次。
+
+    阻塞不是开工失败,不累加 fail_streak。阻塞起点与是否已提醒记在
+    app_setting,开工成功后清掉,下一段阻塞重新计时、重新提醒。
+    """
+    if blocked.reason == "review_backlog":
+        note = (f"{_BLOCK_NOTE_PREFIX}有 {blocked.count} 单等你拍板,"
+                "拍板后自动恢复,10 分钟后再看")
+    else:
+        note = f"到点时 {MAX_PARALLEL_JOBS} 单并行已满,10 分钟后重试"
+    _finish_claim(s["id"], claim_token, next_run_at=now + 600, last_note=note)
+    try:
+        state = db.jloads(db.get_setting(_block_key(s["id"])), {}) or {}
+        if not isinstance(state, dict) or state.get("reason") != blocked.reason:
+            state = {"reason": blocked.reason, "since": now, "notified": False}
+        should_notify = not state.get("notified") and (
+            blocked.reason == "review_backlog"
+            or now - float(state.get("since") or now) >= PARALLEL_FULL_NOTIFY_AFTER
+        )
+        if should_notify:
+            # 先落「已提醒」再推送:宁可极端情况漏一条,也不每 10 分钟刷屏。
+            state["notified"] = True
+        db.set_setting(
+            _block_key(s["id"]), json.dumps(state, ensure_ascii=False)
+        )
+        if not should_notify:
+            return
+        from . import notify
+        name = s.get("name") or "定时任务"
+        if blocked.reason == "review_backlog":
+            summary = (f"有 {blocked.count} 单等你拍板,定时任务「{name}」先暂停开工;"
+                       "拍板后会自动恢复,不用重新打开")
+        else:
+            summary = (f"定时任务「{name}」到点时正在做的工单已满 "
+                       f"{MAX_PARALLEL_JOBS} 单,已经等了一个多小时还没开工,"
+                       "建议看看有没有卡住的工单")
+        notify.push(s.get("tenant_id") or 1, "report", {
+            "report_name": "定时任务先暂停了",
+            "summary": summary,
+            "link": "#/schedules",
+        })
+    except Exception as exc:
+        log.warning(
+            "schedule %s block notify failed error_type=%s",
+            s["id"],
+            type(exc).__name__,
+        )
+
+
 def _tick(engine):
     now = time.time()
     for s in db.q("SELECT * FROM schedule WHERE enabled=1"):
@@ -492,6 +603,7 @@ def _tick(engine):
                 last_note=f"已按时开工 → 工单 #{job_id}",
                 fail_streak=0,
             )
+            _clear_block(s["id"])
             log.info("schedule %s fired -> job %s", s["id"], job_id)
         except Exception as e:
             from . import billing
@@ -510,12 +622,8 @@ def _tick(engine):
                                 {"title": s.get("name") or "定时任务"})
                 except Exception:
                     log.warning("schedule pause notify failed id=%s", s["id"])
-            elif isinstance(e, ValueError):
-                _finish_claim(
-                    s["id"], claim_token,
-                    next_run_at=now + 600,
-                    last_note="到点时 3 单并行已满,10 分钟后重试",
-                )
+            elif isinstance(e, ScheduleBlocked):
+                _handle_blocked(s, claim_token, e, now)
             else:
                 log.error(
                     "schedule %s fire failed error_type=%s",

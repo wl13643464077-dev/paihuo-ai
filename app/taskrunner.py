@@ -600,6 +600,146 @@ def settle_failure(task_id: int, message: str) -> bool:
         return changed.rowcount == 1
 
 
+async def _settle_failure_safely(task_id: int, message: str) -> bool:
+    """失败结算的兜底:结算本身再出错时,至少把任务标成失败(保留 charged)。
+
+    保留 billing_status='charged' 是有意的:看门狗与启动对账会对
+    failed+charged 再补一次幂等退款,绝不让任务卡在排队中/执行中又已扣费。
+    """
+    try:
+        return bool(await db.arun(settle_failure, task_id, message))
+    except Exception as exc:
+        log.error(
+            "task %s failure settlement failed error_type=%s",
+            task_id,
+            type(exc).__name__,
+        )
+    try:
+        now = time.time()
+        await db.aexecute(
+            "UPDATE task SET status='failed',output_md=?,"
+            "terminal_at=COALESCE(terminal_at,?),updated_at=? "
+            "WHERE id=? AND status IN ('queued','running')",
+            ((message or "执行失败")[:500], now, now, task_id),
+        )
+    except Exception as exc:
+        log.error(
+            "task %s failure fallback failed error_type=%s",
+            task_id,
+            type(exc).__name__,
+        )
+    return False
+
+
+async def _fail_running_task(task_id: int, public_error: str, progress) -> bool:
+    """执行中失败:先把「失败」这一步落库,再结算退款并通知老板。
+
+    进度写库条件是 status='running',必须在结算把状态改成 failed 之前
+    写入并冲刷,否则失败步骤会被条件更新静默丢掉。
+    """
+    try:
+        progress("error", public_error)
+        await db.adrain()
+    except Exception as exc:
+        log.warning(
+            "task %s error step persist failed error_type=%s",
+            task_id,
+            type(exc).__name__,
+        )
+    settled = await _settle_failure_safely(task_id, public_error)
+    if settled:
+        await _notify_task_outcome_async(task_id, False)
+    return settled
+
+
+async def _claim_or_settle(task_id: int) -> dict | None:
+    """CAS 抢占任务;抢占本身出错时安全收口,不让已扣费任务停在排队中。"""
+    try:
+        return await db.arun(_claim_task, task_id)
+    except Exception as exc:
+        log.error(
+            "task %s claim failed error_type=%s",
+            task_id,
+            type(exc).__name__,
+        )
+    if await _settle_failure_safely(
+        task_id, "任务启动时出错，已安全停止，点数已自动退回，可以重新派一次"
+    ):
+        await _notify_task_outcome_async(task_id, False)
+    return None
+
+
+def _task_notice_meta(task_id: int) -> dict | None:
+    row = db.one(
+        "SELECT id,tenant_id,brief_json,employee_name_snapshot,billing_status,"
+        "source_meeting_id FROM task WHERE id=?",
+        (task_id,),
+    )
+    if not row:
+        return None
+    brief = db.jloads(row.get("brief_json"), {}) or {}
+    title = " ".join(str(
+        (brief.get("direction") if isinstance(brief, dict) else "") or "专家任务"
+    ).split())
+    if len(title) > 24:
+        title = title[:24] + "…"
+    name = str(row.get("employee_name_snapshot") or "").strip() or "专家"
+    return {**row, "title": title, "name": name}
+
+
+def notify_task_outcome(task_id: int, ok: bool, reason: str = "") -> bool:
+    """专家任务完成/失败通知老板(站内 + 企微)。任何故障只记日志,绝不影响任务状态。
+
+    会议派生的任务交付由会议统一通知,这里只在它失败时提醒(老板要去重试)。
+    """
+    try:
+        from . import notify
+        meta = _task_notice_meta(task_id)
+        if not meta:
+            return False
+        if ok and meta.get("source_meeting_id"):
+            return False
+        if ok:
+            report_name = "专家任务已完成"
+            summary = (
+                f"【{meta['name']}】帮你做的《{meta['title']}》已完成，点开看结论"
+            )
+        else:
+            report_name = "专家任务没做完"
+            refund = (
+                "点数已自动退回，"
+                if meta.get("billing_status") == "refunded" else ""
+            )
+            summary = (
+                f"【{meta['name']}】帮你做的《{meta['title']}》"
+                f"{reason or '没有做完'}，{refund}点开可以重新派一次"
+            )
+        notify.push(int(meta.get("tenant_id") or 1), "report", {
+            "report_name": report_name,
+            "summary": summary,
+            "link": f"#/tasks/{int(task_id)}",
+        })
+        return True
+    except Exception as exc:
+        log.warning(
+            "task %s outcome notify failed error_type=%s",
+            task_id,
+            type(exc).__name__,
+        )
+        return False
+
+
+async def _notify_task_outcome_async(task_id: int, ok: bool, reason: str = ""):
+    try:
+        await asyncio.to_thread(notify_task_outcome, task_id, ok, reason)
+    except Exception as exc:
+        log.warning(
+            "task %s outcome notify skipped error_type=%s",
+            task_id,
+            type(exc).__name__,
+        )
+
+
 def _context_text(tid: int, query: str = "", *, with_meta: bool = False):
     """企业档案 + 公司知识沉淀(按租户隔离),注入专家/单独派活的员工提示词."""
     from .skills import registry
@@ -610,54 +750,84 @@ async def run_task(task_id: int, broadcast):
     from .skills import registry
     if task_id in RUNNING:
         return
-    t = await db.aone(
-        "SELECT * FROM task WHERE id=? AND deleted_at IS NULL", (task_id,)
-    )
-    if not t or t["status"] != "queued":
-        return
-    idx = t["emp_idx"]
-    binding = await db.arun(employeeidentity.resolve_task_binding, t)
-    if not binding:
-        await db.arun(
-            settle_failure,
-            task_id,
-            "员工身份、岗位配置或能力包版本不匹配，已安全停止并退回点数",
-        )
-        return
+    # 从读库起就占住进程内运行集:看门狗据此判断「确实没人在跑」,
+    # 会议接力轮询重复拉起时也不会并发进入准备阶段。
+    RUNNING.add(task_id)
+    claimed = False
     try:
-        effective_role = _approved_effective_role_context(binding)
-    except (TypeError, ValueError) as exc:
-        await db.arun(
-            settle_failure,
-            task_id,
-            "员工已批准能力包无法验证，已安全停止并退回点数",
+        t = await db.aone(
+            "SELECT * FROM task WHERE id=? AND deleted_at IS NULL", (task_id,)
         )
-        log.warning(
-            "task %s role bundle rejected error_type=%s",
+        if not t or t["status"] != "queued":
+            return
+        idx = t["emp_idx"]
+        try:
+            binding = await db.arun(employeeidentity.resolve_task_binding, t)
+        except Exception as exc:
+            log.error(
+                "task %s binding resolution failed error_type=%s",
+                task_id,
+                type(exc).__name__,
+            )
+            binding = None
+        if not binding:
+            if await _settle_failure_safely(
+                task_id,
+                "员工身份、岗位配置或能力包版本不匹配，已安全停止并退回点数",
+            ):
+                await _notify_task_outcome_async(task_id, False)
+            return
+        try:
+            effective_role = _approved_effective_role_context(binding)
+        except (TypeError, ValueError) as exc:
+            log.warning(
+                "task %s role bundle rejected error_type=%s",
+                task_id,
+                type(exc).__name__,
+            )
+            if await _settle_failure_safely(
+                task_id,
+                "员工已批准能力包无法验证，已安全停止并退回点数",
+            ):
+                await _notify_task_outcome_async(task_id, False)
+            return
+        e = effective_role["employee"]
+        cfg = effective_role["config"]
+        role_bundle = effective_role["role_bundle"]
+        effective_profile = effective_role["effective_profile"]
+        workflow = effective_role["workflow"]
+        capabilities = effective_role["capabilities"]
+        skills = effective_role["skills"]
+        solo_content = e.get("dept_key") == "content"
+        if solo_content:
+            s = e
+            e = {**s, "name": s["name"], "dept_name": "内容生产部", "group": s["dept"]}
+        required_modules = (
+            (str(e.get("dept_key") or "content"),)
+            if e
+            else ("content",)
+        )
+        claimed_row = await _claim_or_settle(task_id)
+        if not claimed_row:
+            return
+        t = claimed_row
+        claimed = True
+    except Exception as exc:
+        # 抢占前任何意外(读库/身份解析以外的数据异常)都要收口,不能让
+        # 已扣费任务停在排队中。
+        log.error(
+            "task %s startup failed error_type=%s",
             task_id,
             type(exc).__name__,
         )
+        if await _settle_failure_safely(
+            task_id, "任务启动时出错，已安全停止，点数已自动退回，可以重新派一次"
+        ):
+            await _notify_task_outcome_async(task_id, False)
         return
-    e = effective_role["employee"]
-    cfg = effective_role["config"]
-    role_bundle = effective_role["role_bundle"]
-    effective_profile = effective_role["effective_profile"]
-    workflow = effective_role["workflow"]
-    capabilities = effective_role["capabilities"]
-    skills = effective_role["skills"]
-    solo_content = e.get("dept_key") == "content"
-    if solo_content:
-        s = e
-        e = {**s, "name": s["name"], "dept_name": "内容生产部", "group": s["dept"]}
-    required_modules = (
-        (str(e.get("dept_key") or "content"),)
-        if e
-        else ("content",)
-    )
-    t = await db.arun(_claim_task, task_id)
-    if not t:
-        return
-    RUNNING.add(task_id)
+    finally:
+        if not claimed:
+            RUNNING.discard(task_id)
     steps = []
     st = {"save": 0.0}
 
@@ -797,8 +967,7 @@ async def run_task(task_id: int, broadcast):
         )
         public_error = providers.public_failure_message(exc)
         try:
-            await db.arun(settle_failure, task_id, public_error)
-            progress("error", public_error)
+            await _fail_running_task(task_id, public_error, progress)
         finally:
             await cleanup()
         return
@@ -884,8 +1053,7 @@ async def run_task(task_id: int, broadcast):
             progress("done", f"交付完成 · ${r['cost_usd']:.3f}")
     except llm.LLMError as ex:
         public_error = providers.public_failure_message(ex)
-        await db.arun(settle_failure, task_id, public_error)
-        progress("error", public_error)
+        await _fail_running_task(task_id, public_error, progress)
     except Exception as exc:
         log.error(
             "task %s failed error_type=%s",
@@ -893,10 +1061,11 @@ async def run_task(task_id: int, broadcast):
             type(exc).__name__,
         )
         public_error = providers.public_failure_message(exc)
-        await db.arun(settle_failure, task_id, public_error)
-        progress("error", public_error)
+        await _fail_running_task(task_id, public_error, progress)
     finally:
         await cleanup()
+    if md_done:
+        await _notify_task_outcome_async(task_id, True)
     # 任务已交付(done)后再补「老板速览」——绝不拖慢交付感知,失败也不回退状态
     if md_done and len(md_done) > DIGEST_MIN_CHARS:
         await _gen_summary(
@@ -1016,6 +1185,31 @@ def _decision_summary_lines(
     return lines
 
 
+def _summary_points(raw) -> list[str]:
+    """把模型给的 points 规整成 ≤5 条要点。
+
+    模型偶尔把 points 返回成一整段字符串;直接迭代会被逐字拆成几十条单字
+    要点。字符串按换行/分号切条,并去掉常见的列表前缀。
+    """
+    if isinstance(raw, str):
+        items = [
+            re.sub(r"^\s*(?:[-*•·]|\d+[.、)）])\s*", "", part)
+            for part in re.split(r"[\n；;]+", raw)
+        ]
+    elif isinstance(raw, (list, tuple)):
+        items = raw
+    else:
+        items = []
+    points = []
+    for item in items:
+        if isinstance(item, (dict, list, tuple)) or item is None:
+            continue
+        text = str(item).strip()
+        if text:
+            points.append(text[:60])
+    return points[:5]
+
+
 async def _gen_summary(
     task_id: int,
     md: str,
@@ -1076,7 +1270,9 @@ async def _gen_summary(
             idx, prompt, web=False, timeout=240, **identity_args
         )
         data = r.get("data") or {}
-        points = [str(p).strip()[:60] for p in (data.get("points") or []) if str(p).strip()][:5]
+        if not isinstance(data, dict):
+            data = {}
+        points = _summary_points(data.get("points"))
         action = str(data.get("action") or "").strip()[:80]
         if not points:
             return
@@ -1111,8 +1307,8 @@ async def _gen_summary(
             "idx": idx,
         })
     except Exception as exc:
-        log.debug(
-            "老板速览生成跳过 task=%s error_type=%s",
+        log.warning(
+            "老板速览生成失败 task=%s error_type=%s",
             task_id,
             type(exc).__name__,
         )
