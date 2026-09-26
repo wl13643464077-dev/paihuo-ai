@@ -503,6 +503,13 @@ def _guest_sign(gid: int) -> str:
     return _hmac.new(auth._secret(), f"guest{gid}".encode(), _hl.sha256).hexdigest()
 
 
+def _guest_sig_ok(gid: int, sig: str) -> bool:
+    """访客 cookie 签名用常量时间比较，防按响应耗时逐位猜签名。"""
+    return _hmac.compare_digest(
+        _guest_sign(int(gid)).encode(), str(sig or "").encode("utf-8", "replace")
+    )
+
+
 import re as _re_files  # noqa: E402
 
 
@@ -559,7 +566,7 @@ async def _auth_mw(request: Request, call_next):
         ck = request.cookies.get("cc_guest") or ""
         try:
             gid, sig = ck.split(".")
-            if sig == _guest_sign(int(gid)):
+            if _guest_sig_ok(int(gid), sig):
                 tour = True
                 auth.set_current({"id": 0, "tenant_id": -1, "username": "访客",
                                   "role": "tour", "modules": []})
@@ -1826,10 +1833,14 @@ def funnel_event(request: Request, body: dict):
 @app.post("/api/team/tenants/{tid}/grant")
 def tenant_grant(tid: int, body: dict):
     _need_root()
-    pts = float(body.get("points") or 0)
-    if not pts:
-        raise HTTPException(400, "points 必填")
-    bal = billing.grant(tid, pts, body.get("reason") or "平台充值")
+    try:
+        pts = signup.parse_grant_points(body.get("points"))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    if not db.one("SELECT id FROM tenants WHERE id=?", (tid,)):
+        raise HTTPException(404, "这个企业不存在，刷新列表后再试")
+    reason = signup.clip(body.get("reason"), 60) or "平台充值"
+    bal = billing.grant(tid, pts, reason)
     return {"balance": bal}
 
 
@@ -1895,8 +1906,12 @@ def tenant_subscribe(tid: int, body: dict):
         raise HTTPException(400, str(e))
 
 
+from . import loginguard, signup  # noqa: E402
+
 # 登录限速:公网站点必须防爆破。按 IP+账号计,10次失败锁15分钟(内存态,重启即清)
 _login_fails: dict = {}
+# 再加一层只按用户名计的全局失败计数:换 IP 轮流试同一账号也会被渐进限速。
+_login_user_throttle = loginguard.UserFailureThrottle()
 _LOGIN_MAX, _LOGIN_LOCK_S = 10, 900
 _LOGIN_CACHE_MAX = 5000
 _login_fails_lock = threading.Lock()
@@ -2007,19 +2022,54 @@ def _clear_login_failure(key: str):
         _login_fails.pop(key, None)
 
 
+def _login_wait_text(seconds: float) -> str:
+    seconds = max(1, int(math.ceil(seconds)))
+    if seconds < 60:
+        return f"{seconds} 秒"
+    return f"{int(seconds // 60) + (1 if seconds % 60 else 0)} 分钟"
+
+
+def _login_guard_check(username: str, ip_key: str | None = None):
+    """登录/改密共用:先看 IP+账号锁,再看账号全局渐进限速;超限抛 429。"""
+    now = time.time()
+    if ip_key is not None:
+        fails, until = _login_failure_state(ip_key, now)
+        if fails >= _LOGIN_MAX and now < until:
+            raise HTTPException(429, f"失败次数过多,请 {int((until - now) / 60) + 1} 分钟后再试")
+    wait = _login_user_throttle.retry_after(username, now)
+    if wait > 0:
+        raise HTTPException(
+            429,
+            f"这个账号密码错误次数较多,请 {_login_wait_text(wait)}后再试",
+            headers={"Retry-After": str(max(1, int(math.ceil(wait))))},
+        )
+
+
+def _login_guard_fail(username: str, ip_key: str | None = None):
+    now = time.time()
+    if ip_key is not None:
+        _record_login_failure(ip_key, now)
+    _login_user_throttle.record_failure(username, now)
+
+
+def _login_guard_ok(username: str, ip_key: str | None = None):
+    if ip_key is not None:
+        _clear_login_failure(ip_key)
+    _login_user_throttle.clear(username)
+
+
 @app.post("/api/auth/login")
 def auth_login(body: dict, request: Request):
     username = (body.get("username") or "").strip()
     key = _login_throttle_key(request, username)
-    now = time.time()
-    fails, until = _login_failure_state(key, now)
-    if fails >= _LOGIN_MAX and now < until:
-        raise HTTPException(429, f"失败次数过多,请 {int((until - now) / 60) + 1} 分钟后再试")
+    _login_guard_check(username, key)
     u = db.one("SELECT * FROM users WHERE username=? AND enabled=1", (username,))
-    if not u or not auth.check_pw(body.get("password") or "", u["password_hash"]):
-        _record_login_failure(key, time.time())
+    # 账号不存在时也对假哈希跑一次 PBKDF2,响应耗时与「密码错」一致。
+    password = body.get("password") or ""
+    if not auth.verify_login_password(password, (u or {}).get("password_hash")):
+        _login_guard_fail(username, key)
         raise HTTPException(401, "账号或密码不对")
-    _clear_login_failure(key)
+    _login_guard_ok(username, key)
     t = db.one("SELECT * FROM tenants WHERE id=? AND enabled=1", (u["tenant_id"],))
     if not t:
         raise HTTPException(403, "企业已停用")
@@ -2071,15 +2121,58 @@ def auth_me():
             "all_modules": auth.all_modules(),
             "job_title": auth.job_title(),
             "can_allocate": auth.can_allocate_members(),
+            # 自助开户的老企业可能一个行业都没绑,老板首页据此提示「先选你的行业」。
+            "needs_industry": (
+                u["role"] == "owner" and signup.tenant_needs_industry(u["tenant_id"])
+            ),
             "must_change_password": bool(u.get("must_change_password"))}
+
+
+def _industry_scope():
+    depts = departments.list_depts()
+    return (
+        [str(d["key"]) for d in depts],
+        {str(d["key"]): str(d.get("name") or "") for d in depts},
+        depts,
+    )
+
+
+@app.get("/api/guest/industries")
+def guest_industries():
+    """公开只读:申请表的行业下拉。只回行业 key + 中文名,不含任何员工/租户数据。"""
+    _, _, depts = _industry_scope()
+    return {"industries": signup.industry_options(depts),
+            "other": {"key": signup.OTHER_KEY, "name": signup.OTHER_LABEL}}
+
+
+@app.post("/api/auth/industry")
+def auth_choose_industry(body: dict):
+    """老板首次自选 1 个行业:仅当企业当前一个行业都没开时允许,防止绕过套餐加行业。"""
+    u = auth.current() or {}
+    if u.get("role") != "owner":
+        raise HTTPException(403, "只有企业老板账号可以选择行业")
+    valid_keys, _, _ = _industry_scope()
+    try:
+        key = signup.claim_first_industry(
+            int(u["tenant_id"]), body.get("industry"), valid_keys
+        )
+    except signup.IndustryChoiceError as exc:
+        raise HTTPException(exc.status, str(exc)) from None
+    return {"ok": True, "industry": key, "name": signup.industry_label(key)}
 
 
 @app.put("/api/auth/password")
 def auth_password(body: dict):
     u = auth.current()
-    row = db.one("SELECT password_hash FROM users WHERE id=?", (u["id"],))
-    if not auth.check_pw(body.get("old") or "", row["password_hash"]):
+    row = db.one("SELECT username,password_hash FROM users WHERE id=?", (u["id"],))
+    # 与登录共用按账号的全局失败计数:拿到会话也不能无限次猜旧密码。
+    throttle_name = (row or {}).get("username") or u.get("username") or ""
+    _login_guard_check(throttle_name)
+    if not auth.verify_login_password(
+            body.get("old") or "", (row or {}).get("password_hash")):
+        _login_guard_fail(throttle_name)
         raise HTTPException(400, "旧密码不对")
+    _login_guard_ok(throttle_name)
     new_password = body.get("new") or ""
     policy_error = auth.password_policy_error(new_password)
     if policy_error:
@@ -2204,11 +2297,16 @@ def _open_account_from_apply(a: dict, trial_points: float = 0) -> dict:
         + "".join(_sec.choice(alphabet) for _ in range(14))
     )
     tname = (a.get("company") or "").strip() or f"{(a.get('name') or a.get('phone') or '客户')}的企业"
-    with db.atomic():
+    # 按申请单上的行业绑定 1 个行业;拿不准就留空,老板登录后首页会让他自己选。
+    valid_keys, dept_names, _ = _industry_scope()
+    industry_key = signup.industry_key_for_apply(a, valid_keys, dept_names)
+    with db.atomic() as connection:
         tid = db.insert(
             "tenants",
             {"name": tname[:30], "industries_json": "[]"},
         )
+        if industry_key:
+            signup.write_tenant_industries(connection, tid, [industry_key])
         db.insert("users", {
             "tenant_id": tid,
             "username": username,
@@ -2233,7 +2331,7 @@ def _open_account_from_apply(a: dict, trial_points: float = 0) -> dict:
         unique_only=True,
     )
     return {"tenant_id": tid, "tenant_name": tname[:30], "username": username,
-            "password": password,
+            "password": password, "industry": industry_key or "",
             "notice": (f"【派活 PaiHuo】您的企业账号已开通\n"
                        f"网址:https://paihuo.ai\n账号:{username}\n初始密码:{password}\n"
                        + (f"已赠送 {trial_points:.0f} 点体验点数,登录就能派活。\n" if trial_points > 0 else "")
@@ -15299,9 +15397,13 @@ def library_export(kind: str = "knowledge"):
 
 # ---------------- V10:访客体验 ----------------
 # V27 自助开通防滥用(内存态,重启即清):同IP日限申请数 + 当天自动开号上限
-_apply_ips: dict = {}          # ip -> (当天申请数, 日序号)
 _APPLY_IP_DAILY = 3
-_auto_opens = [0, 0]           # [当天自动开号数, 日序号]
+_apply_ip_counter = signup.DailyCounter(_APPLY_IP_DAILY)
+# 当天自动开号名额:检查与占用一步完成(开户失败回滚),并发请求不能超发。
+_auto_open_quota = signup.DailyQuota()
+# 访客登记按 IP 限查询次数:防止拿手机号批量探测「是否体验过」。
+_GUEST_REGISTER_IP_DAILY = 10
+_guest_register_ip_counter = signup.DailyCounter(_GUEST_REGISTER_IP_DAILY)
 _guest_trial_ips: dict = {}    # ip -> (当天新领体验数, 日序号)
 _guest_trial_total = [0, 0]    # [当天全站新领体验数, 日序号]
 _GUEST_TRIAL_IP_DAILY = 2
@@ -15310,17 +15412,8 @@ _guest_trial_lock = threading.Lock()
 
 
 def _apply_ip_over_limit(ip: str) -> bool:
-    """记一次该IP的申请,返回是否已超当天上限(跨天自动清零,照登录防爆破的内存态风格)."""
-    today = int(time.time() // 86400)
-    cnt, day = _apply_ips.get(ip, (0, today))
-    cnt = cnt + 1 if day == today else 1
-    _apply_ips[ip] = (cnt, today)
-    if len(_apply_ips) > 5000:   # 防内存撑爆:先清过期日,再逐出最老的(不一把清空所有人配额)
-        for k in [k for k, (_, d) in _apply_ips.items() if d != today]:
-            _apply_ips.pop(k, None)
-        while len(_apply_ips) > 5000:
-            _apply_ips.pop(next(iter(_apply_ips)))
-    return cnt > _APPLY_IP_DAILY
+    """记一次该IP的申请,返回是否已超当天上限(跨天自动清零,缓存有界)."""
+    return _apply_ip_counter.hit(ip)
 
 
 def _claim_guest_trial_slot(ip: str) -> bool:
@@ -15344,16 +15437,28 @@ def _claim_guest_trial_slot(ip: str) -> bool:
         return True
 
 
+# 已有账号/已申请过/新申请一律回同一句话,防止拿手机号批量探测谁是我们的客户。
+_APPLY_RECEIVED_MSG = ("申请已收到:这个手机号如果已经开通过账号,直接登录就行(忘了密码联系客服);"
+                       "还没开通的,我们会在 1 个工作日内联系您")
+
+
 @app.post("/api/guest/apply")
 async def guest_apply(body: dict, request: Request):
     """登录页「申请开通账号」:留资入库+邮件通知老板,老板手动开租户后线下交付账号."""
     phone = (body.get("phone") or "").strip()
     if not (phone.isdigit() and len(phone) == 11):
         raise HTTPException(400, "请填 11 位手机号")
-    name = (body.get("name") or "").strip()[:30]
-    company = (body.get("company") or "").strip()[:60]
-    note = (body.get("note") or "").strip()[:200]
-    # 手机号去重:已有账号 / 已有待处理或已开通的申请 → 不重复建单,引导登录或联系客服
+    # 同IP日限放在最前:查重之前就计次,重复提交也占额度,不能拿来免费探测手机号。
+    if _apply_ip_over_limit(_client_ip(request)):
+        return {"ok": True, "msg": "今天的申请次数已达上限,明天再试,或直接联系客服帮您开通"}
+    name = signup.clip(body.get("name"), 30)
+    company = signup.clip(body.get("company"), 60)
+    valid_keys, _, _ = _industry_scope()
+    industry_line = signup.normalize_apply_industry(
+        body.get("industry"), body.get("industry_text"), valid_keys
+    )
+    note = signup.compose_apply_note(industry_line, body.get("note"))
+    # 手机号去重:已有账号 / 已有待处理或已开通的申请 → 不重复建单
     existing_user, existing_apply = await asyncio.gather(
         db.aone("SELECT id FROM users WHERE username=?", (phone,)),
         db.aone(
@@ -15363,17 +15468,13 @@ async def guest_apply(body: dict, request: Request):
         ),
     )
     if existing_user or existing_apply:
-        return {"ok": True, "msg": "这个手机号已申请过 / 已有账号啦:直接登录就行;"
-                                   "忘了密码或还没收到账号,联系客服帮您处理"}
-    # 同IP日限:防脚本刷号(不重复的申请才计次,已去重的重复提交不占额度)
-    if _apply_ip_over_limit(_client_ip(request)):
-        return {"ok": True, "msg": "今天的申请次数已达上限,明天再试,或直接联系客服帮您开通"}
+        return {"ok": True, "msg": _APPLY_RECEIVED_MSG}
     recent = await db.aone(
         "SELECT id FROM account_apply WHERE phone=? AND created_at>?",
         (phone, time.time() - 3600),
     )
     if recent:
-        return {"ok": True, "msg": "申请已收到,我们会在 1 个工作日内联系您开通账号"}
+        return {"ok": True, "msg": _APPLY_RECEIVED_MSG}
     aid = await db.ainsert(
         "account_apply",
         {"phone": phone, "name": name, "company": company, "note": note},
@@ -15398,12 +15499,10 @@ async def guest_apply(body: dict, request: Request):
     )
     if auto_approve == "1":
         cap = int(float(daily_cap or 20))
-        today = int(time.time() // 86400)
-        if _auto_opens[1] != today:
-            _auto_opens[0], _auto_opens[1] = 0, today
-        if _auto_opens[0] >= cap:
+        # 在任何 await 之前原子占用名额;开户失败再退回,并发请求不会超发。
+        if not _auto_open_quota.try_reserve(cap):
             # 当天自动名额已满 → 申请保留为待处理,转老板人工「⚡一键开通」
-            return {"ok": True, "msg": "今日体验名额已满,已转人工,我们会尽快为您开通"}
+            return {"ok": True, "msg": _APPLY_RECEIVED_MSG}
         try:
             a, trial_setting = await asyncio.gather(
                 db.aone("SELECT * FROM account_apply WHERE id=?", (aid,)),
@@ -15413,16 +15512,16 @@ async def guest_apply(body: dict, request: Request):
             r = await db.arun(
                 _open_account_from_apply, a, trial_points=trial
             )
-            _auto_opens[0] += 1
             return {"ok": True, "auto": True,
                     "msg": f"体验账号已自动开通,已赠 {trial:.0f} 点体验点,登录就能派活!",
                     "account": {"username": r["username"], "password": r["password"]}}
         except Exception as exc:
+            _auto_open_quota.release()
             log.error(
                 "auto approve apply failed error_type=%s",
                 type(exc).__name__,
             )
-    return {"ok": True, "msg": "申请已收到,我们会在 1 个工作日内联系您开通账号"}
+    return {"ok": True, "msg": _APPLY_RECEIVED_MSG}
 
 
 @app.post("/api/guest/tour")
@@ -15446,6 +15545,12 @@ async def guest_register(body: dict, request: Request):
     phone = (body.get("phone") or "").strip()
     if not (phone.isdigit() and len(phone) == 11):
         raise HTTPException(400, "请填 11 位手机号")
+    # 先按 IP 限查询次数,再查手机号,防止批量探测哪些手机号体验过。
+    if _guest_register_ip_counter.hit(_client_ip(request)):
+        raise HTTPException(429, "今天的登记次数已达上限，请明天再试或申请正式账号")
+    # 入库和邮件都只用截断清洗后的字段。
+    guest_name = signup.clip(body.get("name"), 30)
+    guest_company = signup.clip(body.get("company"), 60)
     old = await db.aone("SELECT * FROM guests WHERE phone=?", (phone,))
     if old and old["used"]:
         raise HTTPException(403, "这个手机号已经体验过啦,想继续用请联系我们开通账号")
@@ -15475,8 +15580,8 @@ async def guest_register(body: dict, request: Request):
                     "VALUES(?,?,?,?,?)",
                     (
                         phone,
-                        (body.get("company") or "").strip()[:60],
-                        (body.get("name") or "").strip()[:30],
+                        guest_company,
+                        guest_name,
                         now,
                         now,
                     ),
@@ -15493,12 +15598,14 @@ async def guest_register(body: dict, request: Request):
             actor_key=f"lead:{phone}",
             unique_only=True,
         )
-    try:
-        from . import mailer
-        asyncio.create_task(mailer.notify_lead(phone, body.get("name") or "",
-                                               body.get("company") or ""))
-    except Exception:
-        pass
+        # 只有真正新登记的线索才发邮件;老访客重复领 cookie 不再重复打扰老板。
+        try:
+            from . import mailer
+            asyncio.create_task(
+                mailer.notify_lead(phone, guest_name, guest_company)
+            )
+        except Exception:
+            pass
     resp = JSONResponse({"ok": True, "tour": True})
     resp.set_cookie(
         "cc_guest",
@@ -15520,7 +15627,7 @@ async def guest_try(request: Request, body: dict):
         gid = int(gid)
     except ValueError:
         raise HTTPException(401, "请先填写信息领取体验")
-    if sig != _guest_sign(gid):
+    if not _guest_sig_ok(gid, sig):
         raise HTTPException(401, "体验凭证无效")
     g = await db.aone("SELECT * FROM guests WHERE id=?", (gid,))
     if not g or g["used"]:

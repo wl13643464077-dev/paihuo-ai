@@ -42,12 +42,18 @@ class GuestTrialSecurityCase(unittest.IsolatedAsyncioTestCase):
 
         main._guest_trial_ips.clear()
         main._guest_trial_total[:] = [0, 0]
+        main._guest_register_ip_counter.clear()
+        main._apply_ip_counter.clear()
+        main._auto_open_quota.reset()
 
     async def asyncTearDown(self):
         from app import main
 
         main._guest_trial_ips.clear()
         main._guest_trial_total[:] = [0, 0]
+        main._guest_register_ip_counter.clear()
+        main._apply_ip_counter.clear()
+        main._auto_open_quota.reset()
         if db._conn is not None:
             db._conn.close()
         db._conn = None
@@ -141,6 +147,104 @@ class GuestTrialSecurityCase(unittest.IsolatedAsyncioTestCase):
         detail = response.json()["detail"]
         self.assertIn("浏览员工介绍并派活", detail)
         self.assertNotIn("详细能力", detail)
+
+    async def test_repeat_registration_mails_only_once_and_truncates_fields(self):
+        from app import main
+
+        notify = AsyncMock()
+        with patch("app.mailer.notify_lead", notify):
+            for peer in ("198.51.100.81", "198.51.100.82", "198.51.100.83"):
+                response = await main.guest_register(
+                    {"phone": "13800000010", "name": "王" * 500,
+                     "company": "店" * 500},
+                    _request(peer),
+                )
+                self.assertEqual(200, response.status_code)
+        self.assertEqual(1, notify.call_count)
+        _, mailed_name, mailed_company = notify.call_args.args
+        self.assertEqual(30, len(mailed_name))
+        self.assertEqual(60, len(mailed_company))
+        row = db.one("SELECT name,company FROM guests WHERE phone='13800000010'")
+        self.assertEqual(30, len(row["name"]))
+        self.assertEqual(60, len(row["company"]))
+
+    async def test_register_lookup_is_rate_limited_per_ip_before_phone_lookup(self):
+        from app import main
+        from app import signup
+
+        db.insert("guests", {"phone": "13800000011", "company": "", "name": "",
+                             "used": 1})
+        with patch.object(main, "_guest_register_ip_counter",
+                          signup.DailyCounter(1)):
+            with self.assertRaises(HTTPException) as first:
+                await main.guest_register({"phone": "13800000011"}, _request())
+            self.assertEqual(403, first.exception.status_code)
+            with self.assertRaises(HTTPException) as second:
+                await main.guest_register({"phone": "13800000011"}, _request())
+        self.assertEqual(429, second.exception.status_code)
+
+    async def test_apply_ip_limit_runs_before_existing_account_check(self):
+        from app import main
+        from app import signup
+
+        tid = db.insert("tenants", {"name": "已有客户"})
+        db.insert("users", {"tenant_id": tid, "username": "13900000001",
+                            "password_hash": "x", "role": "owner",
+                            "modules_json": "[]", "enabled": 1})
+        with patch("app.mailer.notify_apply", AsyncMock()), patch.object(
+                main, "_apply_ip_counter", signup.DailyCounter(1)):
+            existing = await main.guest_apply(
+                {"phone": "13900000001"}, _request("198.51.100.90"))
+            fresh = await main.guest_apply(
+                {"phone": "13900000002"}, _request("198.51.100.91"))
+            limited = await main.guest_apply(
+                {"phone": "13900000001"}, _request("198.51.100.90"))
+        # 已有账号与新申请回同一句话,不能用来探测手机号
+        self.assertEqual(main._APPLY_RECEIVED_MSG, existing["msg"])
+        self.assertEqual(existing["msg"], fresh["msg"])
+        self.assertIn("上限", limited["msg"])
+
+    async def test_auto_open_daily_cap_is_reserved_atomically(self):
+        from app import main
+
+        if not db.one("SELECT id FROM tenants WHERE id=1"):
+            db.insert("tenants", {"name": "平台总部"})
+        db.set_setting("auto_approve_apply", "1")
+        db.set_setting("auto_approve_daily_cap", "1")
+        db.set_setting("trial_points", "0")
+        with patch("app.mailer.notify_apply", AsyncMock()):
+            results = await asyncio.gather(*[
+                main.guest_apply(
+                    {"phone": f"1370000000{i}", "industry": "tea_coffee"},
+                    _request(f"198.51.100.{100 + i}"),
+                )
+                for i in range(4)
+            ])
+        opened = [r for r in results if r.get("account")]
+        self.assertEqual(1, len(opened))
+        self.assertEqual(1, main._auto_open_quota.used())
+        tenant_id = db.one(
+            "SELECT tenant_id FROM account_apply WHERE username=?",
+            (opened[0]["account"]["username"],),
+        )["tenant_id"]
+        bound = db.one(
+            "SELECT industry_key FROM tenant_industry WHERE tenant_id=?",
+            (tenant_id,),
+        )
+        self.assertEqual("tea_coffee", bound["industry_key"])
+
+    async def test_failed_auto_open_releases_reserved_slot(self):
+        from app import main
+
+        db.set_setting("auto_approve_apply", "1")
+        db.set_setting("auto_approve_daily_cap", "1")
+        with patch("app.mailer.notify_apply", AsyncMock()), patch.object(
+                main, "_open_account_from_apply",
+                side_effect=RuntimeError("boom")):
+            result = await main.guest_apply(
+                {"phone": "13600000001"}, _request("198.51.100.120"))
+        self.assertNotIn("account", result)
+        self.assertEqual(0, main._auto_open_quota.used())
 
 
 if __name__ == "__main__":

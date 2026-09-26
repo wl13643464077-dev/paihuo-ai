@@ -52,10 +52,12 @@ class AuthEntrySecurityCase(unittest.TestCase):
 
         from app import main
         main._login_fails.clear()
+        main._login_user_throttle.reset()
 
     def tearDown(self):
         from app import main
         main._login_fails.clear()
+        main._login_user_throttle.reset()
         auth.set_current(None)
         if db._conn is not None:
             db._conn.close()
@@ -672,6 +674,120 @@ class AuthEntrySecurityCase(unittest.TestCase):
             "company": "自动开户测试",
         })
         self.assertEqual("", auth.password_policy_error(result["password"]))
+
+    def test_username_throttle_holds_when_attacker_rotates_ips(self):
+        from app import loginguard, main
+
+        guard = loginguard.UserFailureThrottle(free_fails=2, base_delay=60)
+        with patch.object(main, "_login_user_throttle", guard):
+            for i in range(2):
+                with self.assertRaises(HTTPException) as caught:
+                    main.auth_login(
+                        {"username": "boss", "password": f"guess-{i}"},
+                        _request(f"198.51.100.{140 + i}"),
+                    )
+                self.assertEqual(401, caught.exception.status_code)
+            with self.assertRaises(HTTPException) as caught:
+                main.auth_login(
+                    {"username": "boss", "password": "guess-3"},
+                    _request("198.51.100.199"),
+                )
+        self.assertEqual(429, caught.exception.status_code)
+
+    def test_missing_user_login_still_checks_a_dummy_hash(self):
+        from app import main
+
+        with patch.object(auth, "verify_login_password",
+                          wraps=auth.verify_login_password) as spy:
+            with self.assertRaises(HTTPException) as caught:
+                main.auth_login({"username": "nobody", "password": "x"},
+                                _request("198.51.100.150"))
+        self.assertEqual(401, caught.exception.status_code)
+        spy.assert_called_once_with("x", None)
+
+    def test_password_change_shares_login_throttle(self):
+        from app import loginguard, main
+
+        tenant_id = db.insert("tenants", {"name": "改密限流"})
+        user_id = db.insert("users", {
+            "tenant_id": tenant_id,
+            "username": "throttle-owner",
+            "password_hash": auth.hash_pw("existing-password-2026"),
+            "role": "owner",
+            "modules_json": "[]",
+            "enabled": 1,
+        })
+        auth.set_current({"id": user_id, "tenant_id": tenant_id,
+                          "username": "throttle-owner", "role": "owner",
+                          "modules": []})
+        guard = loginguard.UserFailureThrottle(free_fails=1, base_delay=60)
+        with patch.object(main, "_login_user_throttle", guard):
+            with self.assertRaises(HTTPException) as wrong:
+                main.auth_password({"old": "guess", "new": "new-password-2026!"})
+            self.assertEqual(400, wrong.exception.status_code)
+            with self.assertRaises(HTTPException) as locked:
+                main.auth_password({"old": "existing-password-2026",
+                                    "new": "new-password-2026!"})
+            self.assertEqual(429, locked.exception.status_code)
+            # 同一账号的登录也被同一套计数限住
+            with self.assertRaises(HTTPException) as login_locked:
+                main.auth_login({"username": "throttle-owner",
+                                 "password": "existing-password-2026"},
+                                _request("198.51.100.160"))
+            self.assertEqual(429, login_locked.exception.status_code)
+
+    def test_root_grant_rejects_bad_points_and_missing_tenant(self):
+        from app import main
+
+        tenant_id = db.insert("tenants", {"name": "充值测试"})
+        with patch.object(main, "_need_root"):
+            for bad in (-5, 0, "abc", None):
+                with self.subTest(points=bad):
+                    with self.assertRaises(HTTPException) as caught:
+                        main.tenant_grant(tenant_id, {"points": bad})
+                    self.assertEqual(400, caught.exception.status_code)
+            with self.assertRaises(HTTPException) as missing:
+                main.tenant_grant(987654, {"points": 10})
+            self.assertEqual(404, missing.exception.status_code)
+            self.assertEqual(
+                10, main.tenant_grant(tenant_id, {"points": 10})["balance"])
+
+    def test_self_signup_binds_industry_and_owner_can_pick_once(self):
+        from app import main
+
+        if not db.one("SELECT id FROM tenants WHERE id=1"):
+            db.insert("tenants", {"name": "平台总部"})
+        bound = main._open_account_from_apply({
+            "id": 1001, "phone": "13800138001", "name": "王老板",
+            "company": "王记", "note": "行业：其他\n行业:奶茶店",
+        })
+        self.assertEqual("tea_coffee", bound["industry"])
+        rows = db.q("SELECT industry_key FROM tenant_industry WHERE tenant_id=?",
+                    (bound["tenant_id"],))
+        self.assertEqual(["tea_coffee"], [r["industry_key"] for r in rows])
+
+        unbound = main._open_account_from_apply({
+            "id": 1002, "phone": "13800138002", "name": "李老板",
+            "company": "某某科技", "note": "",
+        })
+        self.assertEqual("", unbound["industry"])
+        owner = db.one("SELECT id FROM users WHERE tenant_id=?",
+                       (unbound["tenant_id"],))
+        db.update("users", owner["id"], {"must_change_password": 0})
+        auth.set_current(auth.get_user(owner["id"]))
+        self.assertTrue(main.auth_me()["needs_industry"])
+        self.assertFalse(auth.dept_visible("fitness"))
+        self.assertEqual("fitness",
+                         main.auth_choose_industry({"industry": "fitness"})["industry"])
+        self.assertFalse(main.auth_me()["needs_industry"])
+        self.assertTrue(auth.dept_visible("fitness"))
+        with self.assertRaises(HTTPException) as again:
+            main.auth_choose_industry({"industry": "restaurant"})
+        self.assertEqual(409, again.exception.status_code)
+
+        public = main.guest_industries()["industries"]
+        self.assertTrue(public)
+        self.assertTrue(all(set(item) == {"key", "name"} for item in public))
 
     def test_healthz_response_is_minimal_on_success_and_failure(self):
         from app import main

@@ -240,6 +240,20 @@ function busy(on){
   if(BUSY_N>0){ bar.classList.add("on"); bar.style.width = "70%"; }
   else { bar.style.width = "100%"; setTimeout(()=>{ if(BUSY_N===0){ bar.classList.remove("on"); bar.style.width="0"; } }, 250); }
 }
+// FastAPI 参数校验失败(422)时 detail 是数组/对象,统一翻成可读中文,别弹 [object Object]
+function errorDetailText(detail,fallback){
+  if(typeof detail==="string"&&detail) return detail;
+  if(Array.isArray(detail)&&detail.length){
+    const first=detail[0]||{};
+    const field=Array.isArray(first.loc)?first.loc.filter(x=>x!=="body"&&x!=="query").join("."):"";
+    return "提交的内容格式不对"+(field?`(${field})`:"")+",请检查后再试";
+  }
+  if(detail&&typeof detail==="object"){
+    const text=detail.message||detail.msg||detail.detail;
+    if(typeof text==="string"&&text) return text;
+  }
+  return fallback||"请求失败";
+}
 async function apiRequest(path, opts={}){
   busy(true);
   let r;
@@ -281,10 +295,10 @@ async function apiRequest(path, opts={}){
     location.href="/login";
     const err=new Error("请先登录"); err.status=401;err.code=responseCode;throw err;
   }
-  if(r.status===402){ const e = await r.json().catch(()=>({detail:"点数不足"})); pay402(e.detail);
-    const err=new Error(e.detail||"点数不足"); err.status=402;err.code=responseCode;throw err; }
+  if(r.status===402){ const e = await r.json().catch(()=>({detail:"点数不足"})); const msg=errorDetailText(e.detail,"点数不足"); pay402(msg);
+    const err=new Error(msg); err.status=402;err.code=responseCode;throw err; }
   if(!r.ok){ const e = await r.json().catch(()=>({detail:r.statusText}));
-    const err=new Error(e.detail||"请求失败"); err.status=r.status;err.code=responseCode;throw err; }
+    const err=new Error(errorDetailText(e.detail,"请求失败")); err.status=r.status;err.code=responseCode;throw err; }
   return r.json();
 }
 function mutationRequestKey(path,opts={}){
@@ -1216,6 +1230,7 @@ async function dashboard(){
       ${can("content")?jobsCard:""}`;
   }
   $("#main").innerHTML = tourBanner + heroCard
+    + (await industryPickCard())
     + (isRoot?"":todoCards())
     + obCard()
     + howtoCard()
@@ -1223,6 +1238,30 @@ async function dashboard(){
     + notificationCard
     + inboxCard
     + floorSection;
+}
+/* 自助开户的老企业还没绑定行业时,行业专家一个都看不到:老板首页先让他选 1 个行业 */
+async function industryPickCard(){
+  if(!ME||ME.role!=="owner"||!ME.needs_industry) return "";
+  let list=[];
+  try{ list=(await fetch("/api/guest/industries").then(r=>r.ok?r.json():{})).industries||[]; }catch(_){}
+  if(!list.length) return "";
+  return `<div class="card" id="industry-pick" style="background:#fff1bd;border-width:3px">
+    <h2 style="margin:0">🏷️ 先选你的行业</h2>
+    <div class="sub" style="margin-top:6px">选好后,您这一行的专属数字员工就会出现在下面的「行业市场」里。这里只能选 1 个,之后想加行业请到套餐页或联系顾问。</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+      ${list.map(x=>`<button class="btn" onclick="industryPick(${cp(String(x.key))},${cp(String(x.name||x.key))},this)">${esc(x.name||x.key)}</button>`).join("")}
+    </div></div>`;
+}
+async function industryPick(key,name,btn){
+  const ok=await uiConfirm(`确认您做的是「${name}」吗?选定后要改只能联系顾问。`,{title:"确认行业",confirmText:"就选这个",danger:false});
+  if(!ok) return;
+  document.querySelectorAll("#industry-pick button").forEach(b=>b.disabled=true);
+  try{
+    await api("/auth/industry",{method:"POST",body:{industry:key}});
+    toast(`已开通「${name}」行业专家`);
+    ME=null; STATE=null; EMP=null; META=null; DEPTS=null; SHELL_DIRTY=true;
+    render();
+  }catch(e){ toast(e.message); document.querySelectorAll("#industry-pick button").forEach(b=>b.disabled=false); }
 }
 async function notificationOpen(id,link){
   try{ await api("/notifications/read",{method:"POST",body:{ids:[id]}}); }

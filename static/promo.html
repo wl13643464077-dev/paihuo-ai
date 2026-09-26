@@ -339,6 +339,20 @@ if(plans){
   },{threshold:.25});
   planObserver.observe(plans);
 }
+// FastAPI 参数校验失败(422)时 detail 是数组,统一翻成人话,别弹 [object Object]
+function errText(detail, fallback){
+  if(typeof detail==="string"&&detail) return detail;
+  if(Array.isArray(detail)&&detail.length){
+    const first=detail[0]||{};
+    const field=Array.isArray(first.loc)?first.loc.filter(x=>x!=="body").join("."):"";
+    return "填写的内容格式不对"+(field?"("+field+")":"")+",请检查后再提交";
+  }
+  if(detail&&typeof detail==="object"){
+    const text=detail.message||detail.msg||detail.detail;
+    if(typeof text==="string"&&text) return text;
+  }
+  return fallback||"操作失败,请稍后再试";
+}
 async function guestTry(btn){
   const err = document.getElementById('g-err'); err.textContent='';
   const phone = document.getElementById('g-phone').value.trim();
@@ -347,7 +361,7 @@ async function guestTry(btn){
   try{
     let r = await fetch('/api/guest/register',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({phone, name:document.getElementById('g-name').value.trim(), company:document.getElementById('g-co').value.trim()})});
-    if(!r.ok) throw new Error((await r.json()).detail||'登记失败');
+    if(!r.ok){ const j = await r.json().catch(()=>({})); throw new Error(errText(j.detail,'登记失败')); }
     location.href = '/';
   }catch(e){ err.textContent = e.message; btn.disabled=false; btn.textContent='🎁 进入办公室参观'; }
 }

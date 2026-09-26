@@ -102,6 +102,31 @@ def check_pw(pw: str, stored: str) -> bool:
         return False
 
 
+_dummy_hash: str | None = None
+_dummy_hash_lock = threading.Lock()
+
+
+def dummy_password_hash() -> str:
+    """进程内固定的假哈希：账号不存在时也跑一次同成本的 PBKDF2，
+    让「用户不存在」和「密码错」的响应耗时一致，防止按耗时枚举账号。"""
+    global _dummy_hash
+    if _dummy_hash is None:
+        with _dummy_hash_lock:
+            if _dummy_hash is None:
+                _dummy_hash = hash_pw(secrets.token_urlsafe(24))
+    return _dummy_hash
+
+
+def verify_login_password(pw: str, stored: str | None) -> bool:
+    """验密码；stored 为空（账号不存在/停用）时对假哈希验一次并返回 False。"""
+    if not isinstance(pw, str):
+        pw = ""
+    if not stored:
+        check_pw(pw, dummy_password_hash())
+        return False
+    return check_pw(pw, stored)
+
+
 def needs_rehash(stored: str) -> bool:
     return not (stored or "").startswith("pbkdf2:")
 
