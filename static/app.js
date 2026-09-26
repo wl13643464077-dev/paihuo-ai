@@ -560,6 +560,8 @@ const NAV_GROUPS = [
     title:"门店", intro:"各门店的巡店、整改和员工表现，一处看全。",
     cards:[
       {route:"inspections", icon:"🔍", title:"巡店", desc:"拍照上传就能巡店，问题自动记下来、派给店长整改", show:()=>!!ME&&ME.role!=="tour"},
+      {route:"checklists", icon:"✅", title:"开闭店清单", desc:"每天开店、闭店、交班要做的事，店员拍照打勾，哪家没做一眼看到", show:()=>isOwnerLike()||["director","manager"].includes(ME?.job_title)},
+      {route:"store-rank", icon:"🏆", title:"门店排行", desc:"按清单、整改、派活、巡店算分，看哪家做得好、哪家要盯", show:()=>isOwnerLike()||["director","manager"].includes(ME?.job_title)},
       {route:"boss", icon:"📈", title:"老板看板", desc:"各店得分、没整改完的问题、谁拖了后腿，一眼看清", show:isOwnerLike},
       {route:"production", icon:"📊", title:"员工产出", desc:"每位数字员工这段时间干了多少活、花了多少", show:isOwnerLike},
     ]},

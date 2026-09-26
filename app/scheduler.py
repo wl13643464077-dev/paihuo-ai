@@ -258,13 +258,35 @@ def _digest_stats(tid: int, balance: float, day_start: datetime) -> dict:
     }
 
 
+def _claim_daily_digest(tid: int, today: str) -> bool:
+    """原子地占住「今天的早报」:提醒循环(每 5 分钟)和这里的低频循环都会调
+    ``_run_daily_digest``,查-改在同一事务里,两边同时跑也只发一条。"""
+    key = f"daily_digest_sent:{tid}"
+    with db.atomic() as connection:
+        row = connection.execute(
+            "SELECT value FROM app_setting WHERE key=?", (key,)
+        ).fetchone()
+        if row and row["value"] == today:
+            return False
+        connection.execute(
+            "INSERT INTO app_setting(key,value,updated_at) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
+            "updated_at=excluded.updated_at",
+            (key, today, time.time()),
+        )
+    return True
+
+
 def _run_daily_digest(now: datetime):
     """老板「昨日经营简报」:每天早上一次,被动推给不天天登录的老板。
 
     幂等靠 app_setting ``daily_digest_sent:{tid}`` 记最近已发日期(北京时区),
     同日再 tick 直接跳过,重启后也不重发;昨日完全无活动且无暂停风险则不打扰。
+    第 2 期起由提醒循环在北京时间 8:00 后的第一轮(≤5 分钟)触发;这里的
+    低频循环仍保留作兜底。有门店的租户附带门店部分(清单完成率/逾期点名/
+    排行前 3 后 3/等老板处理),见 storerank.morning_brief。
     """
-    from . import notify
+    from . import notify, storerank
     today = now.strftime("%Y-%m-%d")
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     for t in db.q("SELECT id,balance,plan,plan_expires FROM tenants "
@@ -276,6 +298,15 @@ def _run_daily_digest(now: datetime):
             if db.get_setting(f"daily_digest_sent:{tid}") == today:
                 continue                              # 今天已发过,不重发
             stats = _digest_stats(tid, float(t["balance"] or 0), day_start)
+            try:
+                store = storerank.morning_brief(tid, now.timestamp())
+            except Exception as exc:
+                log.error(
+                    "daily digest store part tid=%s failed error_type=%s",
+                    tid,
+                    type(exc).__name__,
+                )
+                store = {}
             # 套餐临期是必须叫醒老板的风险:即使昨日无活动也要提醒
             plan_days_left = None
             if t.get("plan_expires"):
@@ -287,7 +318,8 @@ def _run_daily_digest(now: datetime):
                         and -3 <= plan_days_left <= 7)
             had_activity = (stats["jobs_done"] or stats["tasks_done"]
                             or stats["spent"] > 0 or stats["refunds"])
-            if not had_activity and not stats["paused"] and not expiring:
+            if (not had_activity and not stats["paused"] and not expiring
+                    and not store.get("has_content")):
                 continue                              # 昨日没动静也没风险,别骚扰
             spend_part = f"消耗 {stats['spent']:.0f} 点"
             if stats["refunds"]:
@@ -301,9 +333,13 @@ def _run_daily_digest(now: datetime):
                        + (("" if not expiring else
                            ";套餐已到期,请尽快续费" if plan_days_left < 0
                            else f";套餐还有 {plan_days_left} 天到期")))
+            if store.get("short"):
+                summary = store["short"] + ";" + summary
             stats["plan_days_left"] = plan_days_left
+            stats["store_lines"] = list(store.get("lines") or [])
             # 先落幂等标记再推送:宁可极端情况漏一天,也不给老板发两条
-            db.set_setting(f"daily_digest_sent:{tid}", today)
+            if not _claim_daily_digest(tid, today):
+                continue
             notify.push(tid, "daily_digest", {**stats, "summary": summary})
             log.info("daily digest sent tid=%s", tid)
         except Exception as exc:
