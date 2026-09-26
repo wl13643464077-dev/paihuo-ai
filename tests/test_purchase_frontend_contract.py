@@ -14,11 +14,12 @@ class PurchaseFrontendContractTests(unittest.TestCase):
         cls.login = (ROOT / "static" / "login.html").read_text(encoding="utf-8")
 
     def test_public_pricing_uses_server_catalog_and_honest_offline_copy(self):
-        self.assertIn('fetch("/api/purchases/catalog")', self.promo)
+        self.assertIn('fetch("/api/purchases/catalog"', self.promo)
         self.assertIn("不是在线支付", self.promo)
         self.assertIn("确认线下到账后", self.promo)
-        self.assertIn("实时价格暂不可用", self.promo)
-        self.assertIn("请登录后获取实时服务端报价", self.promo)
+        # 接口失败/超时时展示内置参考价(与服务端目录一致性见 test_wxpay_payments)。
+        self.assertIn("参考价，以实际报价为准", self.promo)
+        self.assertNotIn("登录后查看实时报价", self.promo)
         for stale_price in ("¥69", "¥199", "¥599", "¥1999"):
             self.assertNotIn(stale_price, self.promo)
         for plan in ("trial", "startup", "biz", "flagship"):

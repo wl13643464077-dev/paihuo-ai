@@ -30,6 +30,7 @@ from . import (analyzer, assetfiles, auth, billing, bossdashboard, db, departmen
                learningevidence, purchases, secureconfig,
                taskcenter, taskrunner, taskthreads)
 from . import instancelock, retention, timeutil  # 单进程锁 / 数据保留期 / 北京时间
+from . import wxpay  # 微信支付 APIv3(默认关闭)
 from .engine import engine
 from .skills import registry
 
@@ -500,6 +501,8 @@ async def _startup():
     from . import watchdog as _watchdog          # 看门狗:卡住的任务/会议/工单超时收口退款
     obs.watch_task("watchdog", asyncio.create_task(_watchdog.loop(engine)))
     obs.watch_task("analyzer", asyncio.create_task(analyzer.loop()))
+    # 微信扫码订单:超过 2 小时未付的定期查单后关闭(未开通在线支付时只做本地收口)。
+    obs.watch_task("pay_orders", asyncio.create_task(purchases.pay_order_loop()))
     # 数据保留期:每天北京时间凌晨分批清理过期日志;循环内部兜住所有异常并自报心跳。
     app.state.retention_task = asyncio.create_task(retention.loop())
     taskrunner.resume_pending(engine.broadcast)
@@ -615,6 +618,9 @@ async def _auth_mw(request: Request, call_next):
             and not path.startswith("/api/guest/")
             and path != "/api/funnel/events"
             and not public_purchase_catalog
+            # 微信支付结果通知由微信服务器发起，没有登录态；靠验签保证可信。
+            and not (request.method.upper() == "POST"
+                     and path == "/api/pay/wxpay/notify")
             # 登录页「忘记密码」要在未登录时展示对客联系方式;该接口只回
             # root 主动配置、本就面向客户公开的联系字符串。
             and path != "/api/support-contact"):
@@ -1425,12 +1431,17 @@ def billing_get():
             "log_limit": 300,
             "log_truncated": int(agg.get("n") or 0) > len(log_rows),
             "spend_by_action": spend_by_action,
+            "point_examples": billing.point_examples(billing.prices()),
             "monthly": monthly}
 
 
 def _raise_purchase_error(exc: Exception):
     if isinstance(exc, purchases.PurchaseNotFound):
         status_code = 404
+    elif isinstance(exc, purchases.PaymentGatewayError):
+        status_code = 502
+    elif isinstance(exc, purchases.PaymentUnavailable):
+        status_code = 409
     elif isinstance(exc, purchases.PurchaseForbidden):
         status_code = 403
     elif isinstance(exc, purchases.PurchaseConflict):
@@ -1547,6 +1558,89 @@ def purchase_admin_transition(intent_id: int, body: dict):
             target_status=body.get("status"),
             actor_id=int(user["id"]),
             note=body.get("note") or "",
+        )
+    except purchases.PurchaseError as exc:
+        _raise_purchase_error(exc)
+
+
+# ---------------- 微信支付 Native 扫码付款 ----------------
+_WXPAY_NOTIFY_MAX_BYTES = 64 * 1024
+
+
+@app.post("/api/pay/wxpay/orders")
+def wxpay_order_create(body: dict):
+    user = auth.current() or {}
+    if user.get("role") not in {"root", "owner"}:
+        raise HTTPException(403, "仅企业主账号可以付款开通套餐")
+    if any(
+        key in body
+        for key in ("price", "points", "amount", "amount_fen", "total",
+                    "quoted_price", "quoted_points")
+    ):
+        raise HTTPException(400, "价格和点数由服务器计算，请勿自行传入")
+    try:
+        return purchases.create_wxpay_order(
+            int(user["tenant_id"]),
+            int(user["id"]),
+            plan_key=body.get("plan"),
+            period_key=body.get("period"),
+        )
+    except purchases.PurchaseError as exc:
+        _raise_purchase_error(exc)
+
+
+@app.get("/api/pay/wxpay/orders/{order_no}")
+def wxpay_order_status(order_no: str):
+    user = auth.current() or {}
+    if user.get("role") not in {"root", "owner"}:
+        raise HTTPException(403, "仅企业主账号可以查看付款订单")
+    try:
+        return purchases.pay_order_status(
+            int(user["tenant_id"]), int(user["id"]), order_no
+        )
+    except purchases.PurchaseError as exc:
+        _raise_purchase_error(exc)
+
+
+@app.post("/api/pay/wxpay/notify")
+async def wxpay_notify(request: Request):
+    """微信支付结果通知：验签失败 401 且不改状态；重复通知幂等返回成功。"""
+    declared = request.headers.get("content-length")
+    try:
+        if declared is not None and int(declared) > _WXPAY_NOTIFY_MAX_BYTES:
+            return JSONResponse({"code": "FAIL", "message": "报文过大"}, status_code=413)
+    except ValueError:
+        return JSONResponse({"code": "FAIL", "message": "报文长度无效"}, status_code=400)
+    raw = await request.body()
+    if len(raw) > _WXPAY_NOTIFY_MAX_BYTES:
+        return JSONResponse({"code": "FAIL", "message": "报文过大"}, status_code=413)
+    status_code, reply = await db.arun(
+        purchases.handle_wxpay_notify, dict(request.headers), raw
+    )
+    return JSONResponse(reply, status_code=status_code)
+
+
+@app.get("/api/admin/wxpay/config")
+def wxpay_config_get():
+    _need_root()
+    return wxpay.public_view()
+
+
+@app.put("/api/admin/wxpay/config")
+def wxpay_config_put(body: dict):
+    _need_root()
+    try:
+        return wxpay.save_config(body)
+    except wxpay.WxPayConfigError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@app.get("/api/admin/pay-orders")
+def wxpay_admin_orders(status: str | None = None, limit: int = 50, offset: int = 0):
+    _need_root()
+    try:
+        return purchases.list_pay_orders_admin(
+            status=status, limit=limit, offset=offset
         )
     except purchases.PurchaseError as exc:
         _raise_purchase_error(exc)

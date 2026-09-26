@@ -522,8 +522,8 @@ class SchemaV58MigrationTests(unittest.TestCase):
 
     def test_fresh_database_is_v58_with_user_branch_contract(self):
         db.conn()
-        self.assertEqual(58, db.LATEST_SCHEMA_VERSION)
-        self.assertEqual(58, db.one("PRAGMA user_version")["user_version"])
+        self.assertEqual(59, db.LATEST_SCHEMA_VERSION)
+        self.assertEqual(59, db.one("PRAGMA user_version")["user_version"])
         self.assertEqual(
             "member-branch-scope",
             db.one("SELECT name FROM schema_version WHERE version=58")["name"],
@@ -556,11 +556,11 @@ class SchemaV58MigrationTests(unittest.TestCase):
         # 模拟 v57 旧库：没有 user_branch，账本/user_version 停在 57。
         self._raw(
             "DROP TABLE user_branch",
-            "DELETE FROM schema_version WHERE version=58",
+            "DELETE FROM schema_version WHERE version>=58",
             "PRAGMA user_version=57",
         )
         db.conn()
-        self.assertEqual(58, db.one("PRAGMA user_version")["user_version"])
+        self.assertEqual(59, db.one("PRAGMA user_version")["user_version"])
         self.assertEqual(
             0, db.one("SELECT COUNT(*) n FROM user_branch")["n"],
         )
@@ -569,7 +569,7 @@ class SchemaV58MigrationTests(unittest.TestCase):
             f"INSERT INTO user_branch VALUES(2,22,{branch_id},20,0)",
             "INSERT INTO user_branch VALUES(2,999,1,20,0)",
             f"INSERT INTO user_branch VALUES(2,22,{branch_id + 100},20,0)",
-            "DELETE FROM schema_version WHERE version=58",
+            "DELETE FROM schema_version WHERE version>=58",
             "PRAGMA user_version=57",
         )
         db.conn()

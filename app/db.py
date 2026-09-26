@@ -37,7 +37,7 @@ _all_connections: set[sqlite3.Connection] = set()
 # schema lock to finish.
 _generation_lock = threading.RLock()
 _generation_switching = threading.Event()
-LATEST_SCHEMA_VERSION = 58
+LATEST_SCHEMA_VERSION = 59
 MIGRATION_LOCK_SUFFIX = ".migration.lock"
 
 SCHEMA = """
@@ -2436,6 +2436,15 @@ def _validate_migrated_database(c) -> None:
             "id", "tenant_id", "job_id", "request_hash", "status",
             "billing_status", "op_key",
         },
+        "pay_order": {
+            "id", "tenant_id", "created_by", "channel", "intent_id",
+            "plan_key", "period_key", "plan_name", "period_label",
+            "quoted_points", "amount_fen", "out_trade_no", "transaction_id",
+            "status", "code_url", "expires_at", "last_query_at", "paid_at",
+            "closed_at", "close_reason", "subscription_op_key",
+            "activation_error", "receipt_json", "notify_digest",
+            "created_at", "updated_at",
+        },
     }
     tables = {
         str(row["name"])
@@ -2560,6 +2569,10 @@ def _validate_migrated_database(c) -> None:
         "idx_inspection_business_value_period",
         "idx_inspection_standard_override_scope",
         "idx_user_branch_branch",
+        "idx_pay_order_out_trade_no",
+        "idx_pay_order_transaction",
+        "idx_pay_order_tenant_created",
+        "idx_pay_order_status_expires",
     }
     missing_indexes = sorted(required_indexes - indexes)
     if missing_indexes:
@@ -2640,6 +2653,23 @@ def _validate_migrated_database(c) -> None:
         ("tenant_id", "branch_id"),
         unique=False,
         partial=False,
+    )
+    # v59:同一商户订单号只能对应一笔订单；回调/查单都按它幂等定位。
+    _require_index_contract(
+        c,
+        "pay_order",
+        "idx_pay_order_out_trade_no",
+        ("out_trade_no",),
+        unique=True,
+        partial=False,
+    )
+    _require_index_contract(
+        c,
+        "pay_order",
+        "idx_pay_order_transaction",
+        ("transaction_id",),
+        unique=True,
+        partial=True,
     )
 
 
@@ -2977,6 +3007,46 @@ def _initialize_anchor_locked(path: str):
         CREATE UNIQUE INDEX IF NOT EXISTS idx_purchase_intent_subscription_op
           ON purchase_intent(subscription_op_key)
           WHERE subscription_op_key IS NOT NULL;
+        -- v59:微信支付 Native 扫码订单。金额只存服务端报价(分)，
+        -- 商户订单号全局唯一；开通走与人工确认到账同一套幂等入账。
+        CREATE TABLE IF NOT EXISTS pay_order(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tenant_id INTEGER NOT NULL,
+          created_by INTEGER NOT NULL,
+          channel TEXT NOT NULL DEFAULT 'wxpay_native',
+          intent_id INTEGER,
+          plan_key TEXT NOT NULL,
+          period_key TEXT NOT NULL,
+          plan_name TEXT NOT NULL,
+          period_label TEXT NOT NULL,
+          quoted_points REAL NOT NULL,
+          amount_fen INTEGER NOT NULL CHECK(amount_fen>0),
+          out_trade_no TEXT NOT NULL,
+          transaction_id TEXT,
+          status TEXT NOT NULL DEFAULT 'created'
+            CHECK(status IN ('created','paid','closed','refunded')),
+          code_url TEXT,
+          expires_at REAL NOT NULL,
+          last_query_at REAL,
+          paid_at REAL,
+          closed_at REAL,
+          close_reason TEXT,
+          subscription_op_key TEXT,
+          activation_error TEXT,
+          receipt_json TEXT,
+          notify_digest TEXT,
+          created_at REAL,
+          updated_at REAL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_order_out_trade_no
+          ON pay_order(out_trade_no);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_order_transaction
+          ON pay_order(transaction_id)
+          WHERE transaction_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_pay_order_tenant_created
+          ON pay_order(tenant_id,id DESC);
+        CREATE INDEX IF NOT EXISTS idx_pay_order_status_expires
+          ON pay_order(status,expires_at);
         CREATE TABLE IF NOT EXISTS wechat_draft_delivery(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           tenant_id INTEGER NOT NULL,
@@ -4148,6 +4218,13 @@ def _initialize_anchor_locked(path: str):
         _conn.execute(
             "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
             "VALUES(58,'member-branch-scope',?)",
+            (time.time(),),
+        )
+        # v59:微信支付扫码订单(pay_order，表与索引随购买意向 DDL 一起建，
+        # 已由上面的 _validate_migrated_database 覆盖校验)。旧库升级无数据回填。
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(59,'wxpay-native-pay-order',?)",
             (time.time(),),
         )
         _conn.execute(f"PRAGMA user_version={LATEST_SCHEMA_VERSION}")
