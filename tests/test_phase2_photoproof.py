@@ -77,6 +77,40 @@ class PhotoProofTests(unittest.TestCase):
         with self.assertRaises(photoproof.PhotoError):
             photoproof.store_photo(2, 0, _jpeg(10, 10), asset_root=self.root)
 
+    def test_pixel_bomb_is_rejected_from_header_before_decoding(self):
+        buf = io.BytesIO()
+        Image.new("1", (13000, 13000)).save(buf, "PNG")   # 几十 KB，解码后上亿像素
+        self.assertLess(len(buf.getvalue()), 2 * 1024 * 1024)
+        with self.assertRaises(photoproof.PhotoError):
+            photoproof.store_photo(2, self.branch["id"], buf.getvalue(), asset_root=self.root)
+        buf = io.BytesIO()
+        Image.new("1", (9000, 6000)).save(buf, "PNG")     # 5400 万像素 > 上限
+        with self.assertRaises(photoproof.PhotoError):
+            photoproof.store_photo(2, self.branch["id"], buf.getvalue(), asset_root=self.root)
+        # 目录里没有留下任何文件
+        staff_dir = os.path.join(self.root, "staff")
+        leftover = [f for _, _, fs in os.walk(staff_dir) for f in fs] if os.path.isdir(staff_dir) else []
+        self.assertEqual([], leftover)
+
+    def test_pil_bomb_errors_become_friendly_photo_errors(self):
+        from PIL import Image as PILImage
+        old = PILImage.MAX_IMAGE_PIXELS
+        try:
+            PILImage.MAX_IMAGE_PIXELS = 1_000_000   # 模拟全局上限被改小：不能变成 500
+            with self.assertRaises(photoproof.PhotoError):
+                photoproof.store_photo(2, self.branch["id"], _jpeg(2400, 1800),
+                                       asset_root=self.root)
+        finally:
+            PILImage.MAX_IMAGE_PIXELS = old
+        # imagehunt 不再改全局上限：调用它的解码后全局值保持不变
+        from app import imagehunt
+        buf = io.BytesIO(); Image.new("RGB", (40, 30)).save(buf, "PNG")
+        try:
+            imagehunt._decode_image(buf.getvalue())
+        except Exception:
+            pass
+        self.assertEqual(old, PILImage.MAX_IMAGE_PIXELS)
+
     def test_file_scope_uses_branch_industry_and_fails_closed(self):
         meta = photoproof.store_photo(2, self.branch["id"], _jpeg(40, 30),
                                       asset_root=self.root)

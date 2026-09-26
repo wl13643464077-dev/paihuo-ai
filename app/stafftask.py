@@ -592,11 +592,18 @@ def _can_view(actor: Mapping[str, Any], row: Mapping[str, Any]) -> bool:
     uid = int(actor["id"])
     if int(row.get("assignee_user_id") or 0) == uid:
         return True
+    branch_id = int(row.get("branch_id") or 0)
+    if branch_id and str(actor.get("role") or "") == "member":
+        branch = db.one(
+            "SELECT id,industry_key FROM store_branch WHERE id=? AND tenant_id=?",
+            (branch_id, int(row["tenant_id"])),
+        )
+        if not branch or not _industry_ok(actor, branch):
+            return False
     if sees_all_branches(actor):
         return True
     if int(row.get("created_by") or 0) == uid:
         return True
-    branch_id = int(row.get("branch_id") or 0)
     if not branch_id or branch_id not in _bound_branch_ids(int(row["tenant_id"]), uid):
         return False
     if _member_title(actor) == "manager":
@@ -668,6 +675,14 @@ def list_tasks(
     uid = int(actor["id"])
     where = ["t.tenant_id=?", "t.deleted_at IS NULL"]
     params: list[Any] = [int(tid)]
+    if str(actor.get("role") or "") == "member":
+        # 成员(含总监)只看自己开通了行业板块的门店的活；不挂门店的活不受限
+        where.append(
+            "(t.branch_id IS NULL OR t.branch_id IN (SELECT sb.id FROM store_branch sb "
+            "WHERE sb.tenant_id=t.tenant_id AND sb.industry_key IN "
+            "(SELECT value FROM json_each(?))))"
+        )
+        params.append(json.dumps([str(m) for m in (actor.get("modules") or [])]))
     if not sees_all_branches(actor):
         bound = "t.branch_id IN (SELECT ub.branch_id FROM user_branch ub " \
                 "WHERE ub.tenant_id=? AND ub.user_id=?)"

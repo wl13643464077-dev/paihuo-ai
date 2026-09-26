@@ -214,12 +214,27 @@ def claim_first_industry(tid: int, key: str, valid_keys) -> str:
             raise IndustryChoiceError(
                 409, "您的企业已经开通了行业；想再加行业请到套餐页或联系顾问"
             )
+        # 自选只有一次：平台后来清空行业(例如停权)后，不能再自己免费选回来。
+        claimed_key = f"industry_self_claimed:{tid}"
+        if connection.execute(
+            "SELECT 1 FROM app_setting WHERE key=? LIMIT 1", (claimed_key,)
+        ).fetchone():
+            raise IndustryChoiceError(
+                409, "您已经自选过一次行业；需要调整请联系顾问"
+            )
         write_tenant_industries(connection, tid, [key])
+        connection.execute(
+            "INSERT OR REPLACE INTO app_setting(key,value) VALUES(?,?)",
+            (claimed_key, key),
+        )
     return key
 
 
 def tenant_needs_industry(tid: int) -> bool:
     if int(tid or 0) <= 1:
+        return False
+    if db.one("SELECT 1 ok FROM app_setting WHERE key=?",
+              (f"industry_self_claimed:{int(tid)}",)):
         return False
     return not db.one(
         "SELECT 1 ok FROM tenant_industry WHERE tenant_id=? LIMIT 1", (int(tid),)

@@ -273,9 +273,14 @@ async def wxpay_notify(request: Request):
             return JSONResponse({"code": "FAIL", "message": "报文过大"}, status_code=413)
     except ValueError:
         return JSONResponse({"code": "FAIL", "message": "报文长度无效"}, status_code=400)
-    raw = await request.body()
-    if len(raw) > _WXPAY_NOTIFY_MAX_BYTES:
-        return JSONResponse({"code": "FAIL", "message": "报文过大"}, status_code=413)
+    # 边读边计数：没带 Content-Length 的分块请求也不能先整段读进内存
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > _WXPAY_NOTIFY_MAX_BYTES:
+            return JSONResponse({"code": "FAIL", "message": "报文过大"}, status_code=413)
+        chunks.append(chunk)
+    raw = b"".join(chunks)
     status_code, reply = await db.arun(
         purchases.handle_wxpay_notify, dict(request.headers), raw
     )

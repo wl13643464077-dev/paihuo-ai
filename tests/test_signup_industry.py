@@ -196,6 +196,17 @@ class TenantIndustryDbCase(unittest.TestCase):
         self.assertEqual(["tea_coffee"], db.jloads(row["industries_json"], []))
         self.assertIn("tea_coffee", [m["key"] for m in auth.all_modules()])
 
+    def test_self_claim_is_one_time_even_after_platform_clears_industries(self):
+        tid = self._tenant()
+        signup.claim_first_industry(tid, "fitness", _valid_keys())
+        # 平台后来把行业清空(例如停权)：老板不能再自己免费选回来
+        db.execute("DELETE FROM tenant_industry WHERE tenant_id=?", (tid,))
+        db.execute("UPDATE tenants SET industries_json='[]' WHERE id=?", (tid,))
+        self.assertFalse(signup.tenant_needs_industry(tid))
+        with self.assertRaises(signup.IndustryChoiceError) as caught:
+            signup.claim_first_industry(tid, "restaurant", _valid_keys())
+        self.assertEqual(409, caught.exception.status)
+
     def test_owner_cannot_add_second_industry_or_invalid_key(self):
         tid = self._tenant()
         with self.assertRaises(signup.IndustryChoiceError) as caught:

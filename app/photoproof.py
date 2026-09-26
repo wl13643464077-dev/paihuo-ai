@@ -20,13 +20,22 @@ import hashlib
 import io
 import os
 import re
+import threading
 import time
+import warnings
 from typing import Any
 
 from . import assetfiles, db, timeutil
 
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
 MAX_EDGE = 1600
+# 解码前就按图片头里的尺寸拒绝：防"小文件、超大像素"的解压炸弹把内存吃光。
+# 手机原图一般 12–50MP；前端已先压到长边 1600，这里的上限只是兜底。
+MAX_PIXELS = 50_000_000
+MAX_DIMENSION = 12_000
+_ALLOWED_FORMATS = {"JPEG", "MPO", "PNG", "WEBP"}
+# 同时处理的照片数上限：每张解码最多占几十到上百 MB，防并发上传把进程挤爆。
+_RENDER_SLOTS = threading.BoundedSemaphore(2)
 JPEG_QUALITY = 82
 _CJK_FONT_CANDIDATES = (
     os.environ.get("PAIHUO_WATERMARK_FONT") or "",
@@ -62,20 +71,47 @@ def watermark_text(branch_name: str, person_name: str, ts: float) -> str:
 
 
 def _render(data: bytes, text: str) -> tuple[bytes, int, int]:
-    from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
     if not data:
         raise PhotoError("没有收到照片，请重新拍一张")
     if len(data) > MAX_UPLOAD_BYTES:
         raise PhotoError("照片太大了(超过 12MB)，请重新拍一张")
-    try:
-        with Image.open(io.BytesIO(data)) as probe:
-            probe.verify()
-        img = Image.open(io.BytesIO(data))
-        img.load()
-    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
-        raise PhotoError("这不是能识别的照片，请用相机重新拍一张") from exc
-    if img.width * img.height > 64_000_000:
-        raise PhotoError("照片像素太高，请重新拍一张")
+    with _RENDER_SLOTS:
+        return _render_locked(data, text)
+
+
+def _open_checked(data: bytes):
+    """只读图片头判断格式和尺寸，合格后才解码像素。"""
+    from PIL import Image, UnidentifiedImageError
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", Image.DecompressionBombWarning)
+        try:
+            img = Image.open(io.BytesIO(data))
+        except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+            raise PhotoError("照片像素太高，请重新拍一张") from exc
+        except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
+            raise PhotoError("这不是能识别的照片，请用相机重新拍一张") from exc
+        width, height = img.size
+        if (str(img.format or "").upper() not in _ALLOWED_FORMATS
+                or width <= 0 or height <= 0
+                or width > MAX_DIMENSION or height > MAX_DIMENSION
+                or width * height > MAX_PIXELS):
+            img.close()
+            raise PhotoError("照片格式或像素不支持，请用相机重新拍一张")
+        if str(img.format or "").upper() in {"JPEG", "MPO"}:
+            # JPEG 可按比例缩小解码，大图只解出需要的分辨率，省内存省 CPU
+            img.draft("RGB", (MAX_EDGE * 2, MAX_EDGE * 2))
+        try:
+            img.load()
+        except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+            raise PhotoError("照片像素太高，请重新拍一张") from exc
+        except (OSError, SyntaxError, ValueError) as exc:
+            raise PhotoError("照片文件不完整，请重新拍一张") from exc
+    return img
+
+
+def _render_locked(data: bytes, text: str) -> tuple[bytes, int, int]:
+    from PIL import ImageDraw, ImageOps
+    img = _open_checked(data)
     # 按 EXIF 方向摆正后，丢弃全部元数据
     img = ImageOps.exif_transpose(img)
     if img.mode not in ("RGB",):

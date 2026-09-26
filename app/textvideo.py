@@ -1725,7 +1725,7 @@ async def _run_job_inner(tvid: int, row: dict, p: dict, tid: int, broadcast):
                 progress(f"没有现成配图,按「{p['image_query']}」全网抓图…")
                 from . import imagehunt
                 try:
-                    cands = await imagehunt.search(p["image_query"], 12)
+                    cands = await imagehunt.search(p["image_query"], 12, tenant_id=tid)
                     got = await imagehunt._grab_first_ok(cands, 4)
                     for i, (data, _c) in enumerate(got):
                         lp = os.path.join(ASSET_DIR, "tv", f"hunt_{tvid}_{i}.jpg")

@@ -119,7 +119,7 @@ def _decode_image(data: bytes, max_pixels: int = MAX_IMAGE_PIXELS):
     """先读图片头并限制像素/帧，再允许 PIL 解压像素数据。"""
     from PIL import Image
 
-    Image.MAX_IMAGE_PIXELS = max_pixels
+    # 不改 PIL 的全局像素上限(会影响全进程的其他图片处理)；下面按图片头自行判断。
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)

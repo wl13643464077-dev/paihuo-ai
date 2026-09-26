@@ -20,7 +20,8 @@ router = APIRouter()
 
 # 店员交差照片上传：前端压到长边 1600 的 JPEG(一般几百 KB)，一次最多 9 张。
 # 整个请求上限与巡店一致(Caddy 40MB 以内)，单张在读取时再按 12MB 卡。
-_SUBMIT_PATH_RE = re.compile(r"^/api/staff/tasks/[1-9][0-9]{0,11}/submit$")
+# 编号段放宽到任意数字：FastAPI 会把 "0123" 解析成 123，闸门正则必须覆盖路由能接受的所有写法
+_SUBMIT_PATH_RE = re.compile(r"^/api/staff/tasks/[0-9]{1,24}/submit$")
 SUBMIT_REQUEST_LIMIT = 38 * 1024 * 1024 + 1024 * 1024
 _BACKGROUND: set[asyncio.Task] = set()
 

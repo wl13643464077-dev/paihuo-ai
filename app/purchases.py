@@ -1265,6 +1265,10 @@ def handle_wxpay_notify(headers, body: bytes, *, now: float | None = None) -> tu
     except wxpay.WxPaySignatureError as exc:
         log.warning("wxpay notify signature rejected reason=%s", str(exc)[:80])
         return _notify_reply(401, False, "签名验证失败")
+    except wxpay.WxPayConfigError as exc:
+        # 存储的平台公钥/证书损坏：同样不能信任报文，按验签失败处理且不改状态
+        log.error("wxpay notify verify config broken reason=%s", str(exc)[:80])
+        return _notify_reply(401, False, "签名验证失败")
     try:
         event = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):

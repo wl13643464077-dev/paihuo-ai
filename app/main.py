@@ -201,7 +201,8 @@ _TRANSIENT_UPLOAD_ROUTES = {
 # 一个上传」的名额(开店时多家门店会同时拍照);门店归属由服务层校验。
 _BOUNDED_UPLOAD_PATTERNS = (
     (
-        re.compile(r"^/api/checklist/runs/\d{1,12}/items/[a-z0-9_]{1,32}$"),
+        # 覆盖路由能接受的全部写法(前导零、任意 item_key)，否则可绕过上传大小与并发闸门
+        re.compile(r"^/api/checklist/runs/[0-9]{1,24}/items/[^/]{1,200}$"),
         (
             "checklist-photo",
             "*user",

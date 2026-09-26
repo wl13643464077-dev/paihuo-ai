@@ -162,6 +162,18 @@ class PermissionTests(StaffTaskBase):
             stafftask.assign_task(2, self.u(20), task["id"], 24)    # 不在这家店
 
 
+class IndustryScopeTests(StaffTaskBase):
+    def test_director_without_branch_industry_module_cannot_see_task(self):
+        task = self.create(title="清点库存", assignee_user_id=23)
+        ids = lambda uid: [row["id"] for row in stafftask.list_tasks(2, self.u(uid))["items"]]
+        self.assertIn(task["id"], ids(21))                     # 开通了餐饮的总监
+        db.execute("UPDATE users SET modules_json='[\"content\"]' WHERE id=21")
+        self.assertNotIn(task["id"], ids(21))                  # 撤掉餐饮板块后看不到
+        with self.assertRaises(stafftask.StaffTaskNotFound):
+            stafftask.get_task(2, self.u(21), task["id"])
+        self.assertIn(task["id"], ids(20))                     # 老板不受板块限制
+
+
 class LifecycleTests(StaffTaskBase):
     def test_submit_requires_photo_and_stores_watermarked_evidence(self):
         task = self.create(20, assignee_user_id=23)
