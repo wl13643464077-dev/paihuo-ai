@@ -36,6 +36,13 @@ SECRET_SETTING_KEYS = (
     "aliyun_sms_key_secret",
     # 微信支付商户配置(商户号/APIv3 密钥/商户私钥/微信支付公钥等)整体加密存一份 JSON。
     "wxpay_config",
+    # 第 3 期:国内已备案模型直连(见 app/cnmodels.py)与博查搜索 API
+    "cn_deepseek_key",
+    "cn_dashscope_key",
+    "cn_zhipu_key",
+    "cn_moonshot_key",
+    "cn_ark_key",
+    "bocha_search_key",
 )
 _SECRET_SETTING_SET = frozenset(SECRET_SETTING_KEYS)
 

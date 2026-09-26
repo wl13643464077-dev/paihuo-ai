@@ -6060,7 +6060,8 @@ async function adminView(){
       </tbody></table></div>
     </details>
   </div>
-  <div class="card"><h2>☁️ 供应商 · OpenAI 兼容网关</h2>
+  <div id="adm-cn-card"></div>
+  <div class="card"><h2>☁️ 旧通道 · OpenAI 兼容中转网关</h2>
     <div class="sub" style="margin-bottom:8px">可填云雾或 <a href="https://doc.openlux.ai/" target="_blank" rel="noreferrer">OpenLux</a> 等兼容地址（不含 /v1）。</div>
     <div class="row">
       <div><label>接口地址</label><input id="adm-base" value="${esc(ADM.provider.yunwu_base)}" placeholder="https://api.openlux.ai"></div>
@@ -6130,6 +6131,70 @@ async function adminView(){
         <td><button class="btn sm" onclick="admDetail(${e.idx})">🧰 技能/档案</button></td>
       </tr>`).join("")}</tbody></table></div></details>`).join("")}
     <div id="adm-prompt-box"></div><div id="adm-detail-box"></div></div>`;
+  admCnCard();
+}
+// ---- 第3期：国内已备案模型直连 + 联网查资料(平台管理员) ----
+async function admCnCard(){
+  const box=$("#adm-cn-card"); if(!box) return;
+  let d;
+  try{ d=await api("/admin/model-providers"); }
+  catch(e){ box.innerHTML=`<div class="card"><h2>🇨🇳 模型供应商 · 国内直连</h2><div class="sub">${esc(e.message)}</div></div>`; return; }
+  const sel=(id,opts,cur)=>`<select id="${id}">${opts.map(o=>`<option value="${esc(o.id)}" ${cur===o.id?"selected":""}>${esc(o.label)}${o.ready===false?"(还没配好)":""}</option>`).join("")}</select>`;
+  box.innerHTML=`<div class="card"><h2>🇨🇳 模型供应商 · 国内直连</h2>
+    <div class="notice" style="margin-top:0">⚠️ ${esc(d.notice)}</div>
+    <div class="sub">默认还是旧通道,和以前完全一样。填好某家的 API Key 并启用后,可以把“默认模型通道”切过去:写作、速览、会议等文字工作都走这家;看图走它的看图模型(没填就还走旧通道)。模型名和接口地址以厂商最新文档为准,可随时改。</div>
+    <div class="row" style="margin-top:8px"><div><label>默认模型通道</label>${sel("adm-cn-channel",d.channel_options,d.channel)}</div></div>
+    ${(d.hints||[]).map(h=>`<div class="sub">💡 ${esc(h)}</div>`).join("")}
+    ${d.vendors.map(v=>`<details style="margin-top:10px"><summary style="cursor:pointer;font-weight:800">${esc(v.label)} <span class="tag">${v.ready?"可用":v.enabled?"缺 API Key":"未启用"}</span></summary>
+      <div class="row" style="margin-top:8px">
+        <div><label><input type="checkbox" id="adm-cn-en-${v.id}" ${v.enabled?"checked":""}> 启用这家</label></div>
+        <div><label>接口地址</label><input id="adm-cn-base-${v.id}" value="${esc(v.base_url)}" placeholder="${esc(v.default_base_url)}"></div>
+        <div><label>API Key <span class="tag">${v.key_set?"已填写":"未填写"}</span></label><input id="adm-cn-key-${v.id}" type="password" autocomplete="off" placeholder="留空不改"></div>
+      </div>
+      <div class="row">
+        <div><label>文字模型名</label><input id="adm-cn-tm-${v.id}" value="${esc(v.text_model)}" placeholder="${esc(v.default_text_model)}"></div>
+        <div><label>看图模型名(可不填)</label><input id="adm-cn-vm-${v.id}" value="${esc(v.vision_model)}" placeholder="${esc(v.default_vision_model||"不填=看图走旧通道")}"></div>
+      </div>
+      <div class="actions"><button class="btn sm" onclick="admCnTest('${v.id}','text')">🔌 保存并测试文字模型</button>
+        <button class="btn sm" onclick="admCnTest('${v.id}','vision')">🔌 保存并测试看图模型</button></div>
+    </details>`).join("")}
+    <details style="margin-top:10px" ${d.search.provider?"open":""}><summary style="cursor:pointer;font-weight:800">🔎 联网查资料(不再依赖服务器上的 Claude 命令行)</summary>
+      <div class="sub" style="margin-top:6px">默认通道切到直连且选好搜索服务后,需要查实时资料的任务改为:搜索 → 安全打开网页 → 所选模型整理要点并附来源网址。</div>
+      <div class="row" style="margin-top:8px">
+        <div><label>搜索服务</label>${sel("adm-cn-search",d.search.options,d.search.provider)}</div>
+        <div><label>博查接口地址</label><input id="adm-cn-bocha-url" value="${esc(d.search.bocha_url)}"></div>
+        <div><label>博查 API Key <span class="tag">${d.search.bocha_key_set?"已填写":"未填写"}</span></label><input id="adm-cn-bocha-key" type="password" autocomplete="off" placeholder="留空不改"></div>
+      </div>
+      <div class="actions"><button class="btn sm" onclick="admCnTest('search','search')">🔌 保存并测试搜索</button></div>
+    </details>
+    <div class="actions"><button class="btn pri" onclick="admCnSave()">💾 保存直连设置</button>
+      <span id="adm-cn-result" class="sub"></span></div></div>`;
+  window.__ADM_CN=d;
+}
+function admCnBody(){
+  const d=window.__ADM_CN||{vendors:[]}, vendors={};
+  d.vendors.forEach(v=>{
+    const row={enabled:!!$(`#adm-cn-en-${v.id}`)?.checked, base_url:$(`#adm-cn-base-${v.id}`)?.value.trim()||"",
+      text_model:$(`#adm-cn-tm-${v.id}`)?.value.trim()||"", vision_model:$(`#adm-cn-vm-${v.id}`)?.value.trim()||""};
+    const k=$(`#adm-cn-key-${v.id}`)?.value.trim(); if(k) row.api_key=k;
+    vendors[v.id]=row;
+  });
+  const search={provider:$("#adm-cn-search")?.value||"", bocha_url:$("#adm-cn-bocha-url")?.value.trim()||""};
+  const bk=$("#adm-cn-bocha-key")?.value.trim(); if(bk) search.bocha_key=bk;
+  return {channel:$("#adm-cn-channel")?.value||"legacy_gateway", vendors, search};
+}
+async function admCnSave(quiet){
+  try{ await api("/admin/model-providers",{method:"PUT",body:admCnBody()});
+    if(!quiet){ toast("直连设置已保存,下次派活生效"); await admCnCard(); } return true; }
+  catch(e){ toast(e.message); return false; }
+}
+async function admCnTest(target, kind){
+  if(!(await admCnSave(true))) return;
+  const out=$("#adm-cn-result"); if(out) out.textContent="正在测试…";
+  try{ const r=await api("/admin/model-providers/test",{method:"POST",body:{target,kind},timeout:45000});
+    toast((r.ok?"✅ ":"❌ ")+r.message); await admCnCard();
+    const again=$("#adm-cn-result"); if(again) again.textContent=(r.ok?"✅ ":"❌ ")+r.message; }
+  catch(e){ toast(e.message); if(out) out.textContent=""; }
 }
 async function admSaveProvider(){
   const body = {yunwu_base:$("#adm-base").value.trim()};

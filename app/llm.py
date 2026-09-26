@@ -3,6 +3,10 @@
 业务路由在 app/providers.py。本模块只接受调用方显式传入的云雾兼容
 base URL/token,绝不读取本地 Claude 登录态或历史 Anthropic Key 设置。
 网页正文由应用自己的逐跳 SSRF 防护网关读取，不把任意 URL 访问权交给 CLI。
+
+第 3 期起这里属于「旧通道」:后台把默认模型通道切到国内直连并配好搜索服务后,
+联网研究改走 app/cnmodels.py(搜索 API + netfetch 抓取 + 直连模型总结),
+不再启动本执行器;未切换的部署行为与之前完全一致。
 """
 import asyncio
 import json

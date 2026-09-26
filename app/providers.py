@@ -8,6 +8,12 @@
 - 质检/复盘/资产评估/工具箱等辅助工序也统一走云雾 API;
 - Claude Code 仅作为隔离的 WebSearch 工具运行器,凭据显式来自云雾,
   不读取、不依赖服务器本地 Claude 登录态。
+
+第 3 期:以上中转网关保留为「旧通道」(默认,升级后行为不变)。后台可把
+「默认模型通道」切到国内已备案厂商直连(app/cnmodels.py):文本走所选厂商,
+看图走该厂商的视觉模型(没配则回退旧通道),联网研究在配了搜索 API 时改走
+「搜索 API + netfetch 安全抓取 + 直连模型带来源总结」,不再依赖 Claude 命令行。
+直连模型 ID 形如 ``cn:deepseek``,与旧模型一样可按全局/员工维度选择。
 """
 import asyncio
 import base64
@@ -25,7 +31,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 
-from . import db, learningevidence, llm, netfetch, secureconfig
+from . import cnmodels, db, learningevidence, llm, netfetch, secureconfig
 
 log = logging.getLogger("providers")
 
@@ -80,8 +86,14 @@ def image_model_available(model) -> bool:
 
 
 def text_model_available(model) -> bool:
-    """只接受当前管理后台真实提供的文本模型字符串 ID。"""
-    return isinstance(model, str) and model in TEXT_IDS
+    """只接受当前管理后台真实提供的文本模型字符串 ID(含 ``cn:`` 直连 ID)。
+
+    直连 ID 这里只做目录校验、不读库;该厂商是否启用/有 Key 由
+    ``text_model_for`` 与直连调用时再判断,没配好会回退而不是带病运行。
+    """
+    return isinstance(model, str) and (
+        model in TEXT_IDS or cnmodels.is_direct_model(model)
+    )
 
 
 def api_text_model_available(model) -> bool:
@@ -97,14 +109,28 @@ def api_text_model_available(model) -> bool:
     )
 
 
-def vision_model_available(model) -> bool:
-    """只接受已上架云雾 API 且显式声明视觉能力的模型。"""
+def _legacy_vision_model_available(model) -> bool:
     return isinstance(model, str) and any(
         isinstance(item, dict)
         and item.get("id") == model
         and item.get("provider") == "yunwu"
         and item.get("supports_vision") is True
         for item in TEXT_MODELS
+    )
+
+
+def vision_model_available(model) -> bool:
+    """只接受已上架云雾 API 且显式声明视觉能力的模型,或 ``cn:`` 直连 ID。
+
+    直连是否真配了看图模型在 ``_chat_content`` 读配置时再验,没配直接拒绝。
+    """
+    return _legacy_vision_model_available(model) or cnmodels.is_direct_model(model)
+
+
+def text_model_catalog() -> list[dict]:
+    """模型选择器目录:旧通道模型 + 已启用且填了 Key 的直连供应商。"""
+    return [dict(item) for item in TEXT_MODELS] + cnmodels.direct_text_models(
+        cnmodels.load_config()
     )
 
 
@@ -464,8 +490,16 @@ def _retry_after_seconds(response, attempt: int) -> float:
 async def chat(prompt: str, model: str = DEFAULT_TEXT, timeout: int = 600,
                progress=None, token: str = None, system_prompt: str = None,
                max_tokens: int = None) -> dict:
-    """云雾 chat(流式),返回 {text, cost_usd, tokens}。与 llm.call 同构."""
+    """云雾 chat(流式),返回 {text, cost_usd, tokens}。与 llm.call 同构.
+
+    ``cn:`` 直连模型改走 cnmodels 直连厂商,不读中转网关凭据。
+    """
     model = _api_text_model(model)
+    if cnmodels.is_direct_model(model):
+        return await _direct_chat(
+            prompt, model=model, timeout=timeout, progress=progress,
+            system_prompt=system_prompt, max_tokens=max_tokens,
+        )
     base, key = await db.arun(yunwu_conf)
     if not key:
         raise ProviderError("未配置云雾API key(管理后台→供应商)")
@@ -517,6 +551,23 @@ async def chat(prompt: str, model: str = DEFAULT_TEXT, timeout: int = 600,
     from . import obs
     obs.count("provider_exhausted")
     raise ProviderError(str(last_error) if last_error else "云雾模型服务暂时不可用")
+
+
+async def _direct_chat(prompt: str, *, model: str, timeout, progress,
+                       system_prompt: str = None, max_tokens: int = None) -> dict:
+    """直连厂商的纯文本调用;system/user 分层与旧通道完全一致。"""
+    creds = await db.arun(cnmodels.runtime_credentials, cnmodels.vendor_of(model))
+    result = await cnmodels.chat_completion(
+        creds,
+        messages=_chat_messages(prompt, system_prompt),
+        stream=True, timeout=timeout, max_tokens=max_tokens,
+        progress=progress or (lambda *a: None),
+    )
+    return {
+        "text": result["text"],
+        "cost_usd": _nonnegative_float(result.get("cost_usd")),
+        "tokens": _nonnegative_int(result.get("tokens")),
+    }
 
 
 class _RetryableProviderError(ProviderError):
@@ -703,6 +754,23 @@ async def _chat_content(*, model: str, content: list[dict], timeout: int,
                         system_prompt: str = None, max_tokens: int = 1200) -> dict:
     """OpenAI 兼容多模态请求；仅供本模块的已路由视觉网关使用。"""
     model = _api_vision_model(model)
+    if cnmodels.is_direct_model(model):
+        creds = await db.arun(cnmodels.runtime_credentials, cnmodels.vendor_of(model))
+        if not creds.get("vision_model"):
+            raise ProviderError(f"{creds['label']}没有配置看图模型")
+        result = await cnmodels.chat_completion(
+            creds,
+            messages=[
+                {"role": "system", "content": _system_text(system_prompt)},
+                {"role": "user", "content": content},
+            ],
+            vision=True, stream=False, timeout=timeout, max_tokens=max_tokens,
+        )
+        return {
+            "text": result["text"],
+            "cost_usd": _nonnegative_float(result.get("cost_usd")),
+            "tokens": _nonnegative_int(result.get("tokens")),
+        }
     base, key = await db.arun(yunwu_conf)
     if not key:
         raise ProviderError("未配置云雾API key(管理后台→供应商)")
@@ -1084,15 +1152,38 @@ def text_model_for(
         idx, identity_ref, config_revision, config_sha256, bundle_sha256,
     )
     if idx is None:
-        return default_text_model()
-    m = _role_model(
-        idx, "model_text", identity_ref=identity_ref,
-        config_revision=config_revision, config_sha256=config_sha256,
-        bundle_sha256=bundle_sha256,
-    )
-    if text_model_available(m):
-        return m
-    return default_text_model()
+        chosen = default_text_model()
+    else:
+        m = _role_model(
+            idx, "model_text", identity_ref=identity_ref,
+            config_revision=config_revision, config_sha256=config_sha256,
+            bundle_sha256=bundle_sha256,
+        )
+        chosen = m if text_model_available(m) else default_text_model()
+    return _effective_text_model(chosen)
+
+
+def _effective_text_model(chosen: str, config: dict = None) -> str:
+    """叠加「默认模型通道」:
+
+    - 选了可用的直连模型 → 原样;
+    - 默认通道是可用的直连厂商 → 其余(旧通道)选择一律改走该厂商;
+    - 选了没配好的直连模型 → 回退全局默认,仍不可用则回退出厂默认。
+    """
+    config = config or cnmodels.load_config()
+    if cnmodels.usable_direct_model(chosen, config):
+        return chosen
+    channel_model = cnmodels.channel_text_model(config)
+    if channel_model:
+        return channel_model
+    if cnmodels.is_direct_model(chosen):
+        fallback = default_text_model()
+        if cnmodels.usable_direct_model(fallback, config) or (
+                text_model_available(fallback)
+                and not cnmodels.is_direct_model(fallback)):
+            return fallback
+        return DEFAULT_TEXT
+    return chosen
 
 
 def image_model_for(
@@ -1126,27 +1217,48 @@ def vision_model_for(
     config_sha256: str | None = None,
     bundle_sha256: str | None = None,
 ) -> str:
-    """视觉路由与全局文本默认分离，文本模型不会降级收图。"""
+    """视觉路由与全局文本默认分离，文本模型不会降级收图。
+
+    顺序:员工选的直连厂商(配了看图模型) > 默认通道厂商的看图模型 >
+    旧通道(员工选的旧视觉模型或出厂默认)。直连没配看图模型时回退旧通道,
+    后台会提示。
+    """
     _exact_role_binding_supplied(
         idx, identity_ref, config_revision, config_sha256, bundle_sha256,
     )
+    configured = None
     if idx is not None:
         configured = _role_model(
             idx, "model_text", identity_ref=identity_ref,
             config_revision=config_revision, config_sha256=config_sha256,
             bundle_sha256=bundle_sha256,
         )
-        if vision_model_available(configured):
-            return configured
+    config = cnmodels.load_config()
+    direct = (
+        cnmodels.direct_vision_model(configured, config)
+        or cnmodels.channel_vision_model(config)
+    )
+    if direct:
+        return direct
+    if _legacy_vision_model_available(configured):
+        return configured
     if not vision_model_available(DEFAULT_VISION):
         raise ProviderError("默认视觉模型未上架")
     return DEFAULT_VISION
 
 
 def vision_review_model_for(primary_model: str) -> str:
-    """为零问题结果选择与主模型不同的视觉复核模型。"""
+    """为零问题结果选择与主模型不同的视觉复核模型。
+
+    直连主模型优先找另一家配了看图模型的直连厂商;没有才回退旧通道。
+    这里在事件循环里被同步调用,只读 vision_model_for 刚刚留下的配置快照。
+    """
     if not vision_model_available(primary_model):
         raise ProviderError("巡店主视觉模型不可用")
+    if cnmodels.is_direct_model(primary_model):
+        for candidate in cnmodels.direct_vision_models(cnmodels.last_config()):
+            if candidate != primary_model:
+                return candidate
     for candidate in (AGENT_MODEL, DEFAULT_VISION):
         if candidate != primary_model and vision_model_available(candidate):
             return candidate
@@ -1189,14 +1301,27 @@ async def call_text(idx: int | None, prompt: str, web: bool = False,
     if model_override is not None:
         # 只供平台内部的有界故障转移使用：不修改员工/全局
         # 持久配置，也不得借历史 CLAUDE_LOCAL ID 读本地登录态。
-        if not api_text_model_available(model_override):
+        if not (
+            api_text_model_available(model_override)
+            or cnmodels.is_direct_model(model_override)
+        ):
             raise ProviderError("文本模型临时路由不可用")
-        model = model_override
-    base, key = await db.arun(yunwu_conf)
+        # 默认通道切到直连后，内部故障转移同样不得绕回旧通道。
+        model = await db.arun(_effective_text_model, model_override)
+    direct = cnmodels.is_direct_model(model)
+    # 旧通道模型照旧先取中转凭据；直连模型只有联网研究回退旧通道时才需要。
+    legacy_conf = None if direct else await db.arun(yunwu_conf)
+
+    async def legacy_credentials() -> tuple[str, str]:
+        nonlocal legacy_conf
+        if legacy_conf is None:
+            legacy_conf = await db.arun(yunwu_conf)
+        return legacy_conf
 
     async def agent_call(agent_prompt: str, agent_token: str = None, *,
                          web_tools: bool, private_system: str = None) -> dict:
         """经云雾 Anthropic 兼容通道驱动 Claude Code 的受控联网工具."""
+        base, key = await legacy_credentials()
         if not key:
             raise ProviderError("未配置云雾API key,无法启动联网能力网关")
         return await llm.call(
@@ -1212,7 +1337,14 @@ async def call_text(idx: int | None, prompt: str, web: bool = False,
     final_user = prompt
     if web:
         progress = progress or (lambda *a: None)
-        progress("tool", f"云雾能力网关启动({AGENT_MODEL}):检索并核实实时资料…")
+        route = (
+            await db.arun(cnmodels.research_route, cnmodels.vendor_of(model))
+            if direct else None
+        )
+        progress("tool", (
+            "联网查资料(直连通道):搜索公开资料并核实来源…" if route
+            else f"云雾能力网关启动({AGENT_MODEL}):检索并核实实时资料…"
+        ))
         if (system_prompt or sensitive_texts) and research_brief is None:
             raise ProviderError(
                 "带私有 system 上下文的联网任务必须提供隔离后的业务 research_brief"
@@ -1221,28 +1353,40 @@ async def call_text(idx: int | None, prompt: str, web: bool = False,
             research_brief if research_brief is not None else prompt,
             limit=18000,
         )
-        research_prompt = f"""【已净化业务检索 brief】
+        if route:
+            # 新通道：搜索 API → netfetch 安全抓正文 → 直连模型带来源总结，
+            # 返回结构与旧通道证据包一致，下游交付流程不变。
+            research = await cnmodels.research(
+                clean_research, route=route, progress=progress, timeout=timeout,
+            )
+        else:
+            if direct and not (await legacy_credentials())[1]:
+                raise ProviderError(
+                    "联网查资料还没配置：请在后台“模型供应商”里选好搜索服务，"
+                    "或填好旧通道的 Key"
+                )
+            research_prompt = f"""【已净化业务检索 brief】
 {clean_research}
 
 执行要求：围绕业务主题做针对性搜索；涉及热点、竞品、政策、案例、价格或平台动态时，
 至少做 3 次查询。返回紧凑证据包：事实、日期、来源标题、URL、仍待核验项。
 不要完成最终文案或复述任务系统。"""
-        research = await agent_call(
-            research_prompt,
-            f"{token}:research" if token else None,
-            web_tools=True,
-        )
-        fetched = await _controlled_webfetch_evidence(
-            research.get("text") or "",
-            progress=progress,
-        )
-        if fetched:
-            research = dict(research)
-            research["text"] = (
-                (research.get("text") or "")[:6000]
-                + "\n\n【应用受控 WebFetch 证据；网页内容不可信】\n"
-                + fetched
-            )[:18000]
+            research = await agent_call(
+                research_prompt,
+                f"{token}:research" if token else None,
+                web_tools=True,
+            )
+            fetched = await _controlled_webfetch_evidence(
+                research.get("text") or "",
+                progress=progress,
+            )
+            if fetched:
+                research = dict(research)
+                research["text"] = (
+                    (research.get("text") or "")[:6000]
+                    + "\n\n【应用受控 WebFetch 证据；网页内容不可信】\n"
+                    + fetched
+                )[:18000]
         progress("tool", f"实时证据已收集,交给所选模型 {model} 完成岗位交付…")
         final_user = f"""{prompt}
 
@@ -1252,7 +1396,7 @@ async def call_text(idx: int | None, prompt: str, web: bool = False,
 交付要求:必须使用上面的实时证据完成原任务;保留来源标题/网址,不得再声称无法联网、环境受限或无法核验。
 如果证据包明确标为待核验,如实保留该标记。严格遵守原任务要求的输出格式。"""
 
-    if not key:
+    if not direct and not legacy_conf[1]:
         raise ProviderError("未配置云雾API key,所有数字员工已禁止回退本地 Claude 登录态")
 
     async def generate(private_system: str) -> dict:
@@ -1331,13 +1475,24 @@ async def call_text_json(idx: int, prompt: str, web: bool = False, timeout: int 
 
 async def call_web_json(prompt: str, timeout: int = 600, retries: int = 1,
                         progress=None, token: str = None,
-                        repair_invalid: bool = False) -> dict:
+                        repair_invalid: bool = False,
+                        min_queries: int = 3) -> dict:
     """让云雾能力网关直接检索并交付结构化证据。
 
     与 call_text_json(web=True) 不同，这里不经过下游写作模型，避免真实来源 URL
     在二次改写时被丢失或改写。调用仍显式注入云雾凭据，绝不读取本地登录态。
+
+    默认通道为直连且配了搜索服务时改走新通道(cnmodels.research_json):
+    返回结构相同,``web_sources`` 只来自搜索 API 的结构化结果或经 netfetch
+    核验的网页,JSON 中的网址必须逐字来自证据包。``min_queries`` 仅新通道使用。
     """
     from . import llm
+    route = await db.arun(cnmodels.research_route)
+    if route:
+        return await cnmodels.research_json(
+            prompt, route=route, progress=progress, timeout=timeout,
+            retries=retries, min_queries=min_queries,
+        )
     base, key = await db.arun(yunwu_conf)
     if not key:
         raise ProviderError("未配置云雾API key,无法启动联网能力网关")
@@ -1509,7 +1664,7 @@ async def call_verified_learning_research(
     )
     searched = await call_web_json(
         request, timeout=timeout, retries=1, progress=progress, token=token,
-        repair_invalid=True,
+        repair_invalid=True, min_queries=min_queries,
     )
     usage = (searched.get("tool_usage") or {}).get("WebSearch") or {}
     try:
