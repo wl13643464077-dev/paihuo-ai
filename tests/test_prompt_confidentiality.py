@@ -506,6 +506,7 @@ class GrowthResearchBoundaryTests(unittest.IsolatedAsyncioTestCase):
     async def test_product_shot_provider_body_never_reaches_exception_or_api(self):
         from fastapi import HTTPException
         from app import main
+        from app.routes import tools as tools_routes
 
         secret = "INTERNAL-MANUAL-SECRET echoed in image provider body"
 
@@ -536,9 +537,9 @@ class GrowthResearchBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(secret, str(caught.exception))
 
         with (
-            patch.object(main, "_need_module"),
-            patch.object(main, "_read_limited", AsyncMock(return_value=b"image")),
-            patch.object(main, "_start_billed_operation", return_value="op"),
+            patch.object(tools_routes, "_need_module"),
+            patch.object(tools_routes, "_read_limited", AsyncMock(return_value=b"image")),
+            patch.object(tools_routes, "_start_billed_operation", return_value="op"),
             patch.object(
                 main.growth,
                 "product_shot",

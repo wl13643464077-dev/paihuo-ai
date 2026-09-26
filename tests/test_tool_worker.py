@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi import HTTPException
 
 from app import auth, billing, db, llm, main
+from app.routes import tools as tools_routes
 
 
 class ToolWorkerReliabilityTests(unittest.IsolatedAsyncioTestCase):
@@ -48,7 +49,7 @@ class ToolWorkerReliabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_failure_settles_before_broken_logger_and_refunds_once(self):
         jid = self._job()
         secret = "INTERNAL-MANUAL-SECRET echoed by provider"
-        with patch.object(main, "_run_tool",
+        with patch.object(tools_routes, "_run_tool",
                           AsyncMock(side_effect=llm.LLMError(secret))), \
                 patch.object(main.log, "exception", side_effect=RuntimeError("日志也坏了")), \
                 patch.object(main.engine, "broadcast") as broadcast:
@@ -70,7 +71,7 @@ class ToolWorkerReliabilityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_notification_and_broadcast_failure_do_not_revert_done(self):
         jid = self._job()
-        with patch.object(main, "_run_tool",
+        with patch.object(tools_routes, "_run_tool",
                           AsyncMock(return_value={"leads": [{"source_url": "https://a.example/p/1"}]})), \
                 patch.object(main.notify, "push", side_effect=RuntimeError("通知不可用")), \
                 patch.object(main.engine, "broadcast", side_effect=RuntimeError("SSE不可用")):
@@ -94,7 +95,7 @@ class ToolWorkerReliabilityTests(unittest.IsolatedAsyncioTestCase):
                 "intent": "低",
             }],
         }
-        with patch.object(main, "_run_tool", AsyncMock(return_value=result)), \
+        with patch.object(tools_routes, "_run_tool", AsyncMock(return_value=result)), \
                 patch.object(main.notify, "push"), \
                 patch.object(main.engine, "broadcast"):
             await main._tool_worker(jid)
@@ -116,7 +117,7 @@ class ToolWorkerReliabilityTests(unittest.IsolatedAsyncioTestCase):
                 cancelled.set()
                 raise
 
-        with patch.object(main, "_run_tool", side_effect=never_finishes), \
+        with patch.object(tools_routes, "_run_tool", side_effect=never_finishes), \
                 patch.dict(main.TOOL_TIMEOUTS, {"leads": 0.01}):
             await main._tool_worker(jid)
 
@@ -149,13 +150,13 @@ class ToolWorkerReliabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_loser_is_never_charged_when_active_index_rejects_insert(self):
         auth.set_current({"id": 22, "tenant_id": 2, "role": "owner",
                           "modules": ["content"]})
-        with patch.object(main, "_spawn_tool_worker"):
+        with patch.object(tools_routes, "_spawn_tool_worker"):
             first = main._tool_enqueue(
                 "leads", {"industry": "企业服务"}, note="第一次请求"
             )
         self.assertEqual(db.one("SELECT balance FROM tenants WHERE id=2")["balance"], 7)
 
-        with patch.object(main, "_spawn_tool_worker"):
+        with patch.object(tools_routes, "_spawn_tool_worker"):
             with self.assertRaises(HTTPException) as denied:
                 main._tool_enqueue(
                     "leads", {"industry": "企业服务"}, note="并发重复请求"
@@ -183,7 +184,7 @@ class ToolWorkerReliabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_failure_refunds_frozen_amount_after_admin_reprices_tool(self):
         auth.set_current({"id": 22, "tenant_id": 2, "role": "owner",
                           "modules": ["content"]})
-        with patch.object(main, "_spawn_tool_worker"):
+        with patch.object(tools_routes, "_spawn_tool_worker"):
             created = main._tool_enqueue("leads", {"industry": "企业服务"})
         self.assertEqual(7, billing.balance(2))
         prices = dict(billing.DEFAULT_PRICES)
@@ -208,7 +209,7 @@ class ToolWorkerReliabilityTests(unittest.IsolatedAsyncioTestCase):
             params={"ym": "2026-07", "industry": "企业服务", "focus": ""},
         )
         result = {"days": [{"d": 1, "moment": "内容"}], "tips": "建议"}
-        with patch.object(main, "_run_tool", AsyncMock(return_value=result)), \
+        with patch.object(tools_routes, "_run_tool", AsyncMock(return_value=result)), \
                 patch.object(main.notify, "push"), \
                 patch.object(main.engine, "broadcast"):
             await main._tool_worker(jid)
@@ -236,7 +237,7 @@ class ToolWorkerReliabilityTests(unittest.IsolatedAsyncioTestCase):
             "BEGIN SELECT RAISE(ABORT,'cache disk full'); END"
         )
         with patch.object(
-                main, "_run_tool",
+                tools_routes, "_run_tool",
                 AsyncMock(return_value={"days": [{"d": 1}], "tips": "建议"})):
             await main._tool_worker(jid)
 
@@ -261,7 +262,7 @@ class ToolWorkerReliabilityTests(unittest.IsolatedAsyncioTestCase):
             "BEGIN SELECT RAISE(ABORT,'cache disk full'); END"
         )
         with patch.object(
-                main, "_run_tool",
+                tools_routes, "_run_tool",
                 AsyncMock(return_value={"summary": "周报", "items": []})):
             await main._tool_worker(failed)
         self.assertNotIn("last_run", json.loads(db.get_setting("bench_watch:2")))
@@ -271,7 +272,7 @@ class ToolWorkerReliabilityTests(unittest.IsolatedAsyncioTestCase):
         billing.charge("bench_watch", tid=2)
         succeeded = self._job(kind="bench", params={})
         with patch.object(
-                main, "_run_tool",
+                tools_routes, "_run_tool",
                 AsyncMock(return_value={"summary": "周报", "items": []})), \
                 patch.object(main.notify, "push"):
             await main._tool_worker(succeeded)

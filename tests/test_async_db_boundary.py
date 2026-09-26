@@ -683,7 +683,8 @@ class AppCoroutineSourceTests(unittest.TestCase):
         expected = {
             "avatar.py": 1,
             "engine.py": 1,
-            "main.py": 1,
+            # 第 3 期：工具作业进度快照随工具箱路由搬到 routes/tools.py
+            "routes/tools.py": 1,
             "taskrunner.py": 1,
         }
         found = {}
@@ -752,15 +753,15 @@ class ReviewedAsyncCallGraphTests(unittest.TestCase):
         ("main.py", "_bg"): {
             "billing.fail_operation", "billing.complete_operation", "notify.push",
         },
-        ("main.py", "_tool_watchdog_loop"): {"_recover_stale_tool_jobs"},
-        ("main.py", "_tool_enqueue_async"): {
+        ("routes/tools.py", "_tool_watchdog_loop"): {"_recover_stale_tool_jobs"},
+        ("routes/tools.py", "_tool_enqueue_async"): {
             "_tool_require_idle", "_tool_enqueue_record",
         },
-        ("main.py", "pcal_gen"): {"_tool_require_idle", "_tool_enqueue"},
-        ("main.py", "hotpick_gen"): {"_tool_require_idle", "_tool_enqueue"},
-        ("main.py", "warmup_gen"): {"_tool_require_idle", "_tool_enqueue"},
-        ("main.py", "leads_gen"): {"_tool_require_idle", "_tool_enqueue"},
-        ("main.py", "bench_run"): {
+        ("routes/tools.py", "pcal_gen"): {"_tool_require_idle", "_tool_enqueue"},
+        ("routes/tools.py", "hotpick_gen"): {"_tool_require_idle", "_tool_enqueue"},
+        ("routes/tools.py", "warmup_gen"): {"_tool_require_idle", "_tool_enqueue"},
+        ("routes/tools.py", "leads_gen"): {"_tool_require_idle", "_tool_enqueue"},
+        ("routes/tools.py", "bench_run"): {
             "growth.watch_conf", "_tool_require_idle", "_tool_enqueue",
         },
         ("matrixpub.py", "check_account"): {"accounts", "_save"},

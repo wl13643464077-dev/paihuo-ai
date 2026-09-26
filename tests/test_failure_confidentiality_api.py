@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 from app import auth, db, employeeidentity, llm, main, providers
+from app.routes import tools as tools_routes
 from app.engine import engine
 
 
@@ -337,7 +338,7 @@ class FailureConfidentialityApiTests(unittest.IsolatedAsyncioTestCase):
             "billing_points": 1,
         })
         with patch.object(
-            main,
+            tools_routes,
             "_run_tool",
             AsyncMock(side_effect=llm.LLMError(SECRET_SENTINEL)),
         ), patch.object(main.log, "exception"):

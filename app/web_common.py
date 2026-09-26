@@ -33,6 +33,9 @@ def _read_file_bytes(path: str) -> bytes:
         return handle.read()
 
 
+INDUSTRIES = ["通用", "餐饮", "科技数码", "美妆个护", "教育培训", "母婴亲子", "家居生活",
+              "健康养生", "金融理财", "本地生活", "文旅出行", "服装时尚", "三农"]
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -447,6 +450,22 @@ def _public_failure_for_view(status, value, internal: bool):
     if str(status or "").lower() in {"failed", "error"}:
         return providers.PUBLIC_TASK_FAILURE
     return value
+
+
+def _public_progress_for_view(status, value, internal: bool) -> str:
+    """Non-boss progress is a state label, never a tool/query/error transcript."""
+    group = str(status or "").lower()
+    if group in {"failed", "error"}:
+        return providers.PUBLIC_TASK_FAILURE
+    if internal:
+        return str(value or "")
+    if group in {"done", "succeeded", "submitted"}:
+        return "任务已完成"
+    if group in {"cancelled", "canceled", "deleted"}:
+        return "任务已取消"
+    if group in {"queued", "pending", "pending_charge"}:
+        return "任务已进入队列"
+    return "任务正在处理"
 
 
 def _steps_for_view(raw, internal: bool, status=None) -> list:

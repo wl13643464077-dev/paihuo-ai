@@ -275,6 +275,7 @@ class ScheduledBillingOperationCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_product_shot_disk_failure_refunds_operation(self):
         from app import main
+        from app.routes import tools as tools_routes
 
         class Upload:
             filename = "product.png"
@@ -291,7 +292,7 @@ class ScheduledBillingOperationCase(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(
             main.growth, "product_shot", new=AsyncMock(return_value=b"png-result")
-        ), patch.object(main, "ROOT", self.tmp.name), \
+        ), patch.object(tools_routes, "ROOT", self.tmp.name), \
                 patch("builtins.open", side_effect=OSError("disk full")):
             with self.assertRaises(HTTPException) as failed:
                 await main.product_shot_api(Upload(), "桌面")
