@@ -7393,7 +7393,7 @@ function wxpayAdminHtml(){
       <label style="margin-top:8px">APIv3 密钥${cfg.apiv3_key_set?"(已设置，留空不修改)":""}</label>
       <input id="wxcfg-apiv3_key" type="password" autocomplete="new-password" placeholder="32 位">
       <label style="margin-top:8px">商户 API 私钥 apiclient_key.pem${cfg.private_key_set?"(已设置，留空不修改)":""}</label>
-      <textarea id="wxcfg-private_key" class="promptbox" style="min-height:90px" autocomplete="off" spellcheck="false" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+      <textarea id="wxcfg-private_key" class="promptbox" style="min-height:90px" autocomplete="off" spellcheck="false" placeholder="粘贴商户私钥 apiclient_key.pem 的全部内容"></textarea>
       ${input("public_key_id","微信支付公钥 ID","PUB_KEY_ID_...")}
       <label style="margin-top:8px">微信支付公钥 pub_key.pem${cfg.public_key_set?"(已设置，留空不修改)":""}</label>
       <textarea id="wxcfg-public_key" class="promptbox" style="min-height:90px" autocomplete="off" spellcheck="false" placeholder="-----BEGIN PUBLIC KEY-----"></textarea>
