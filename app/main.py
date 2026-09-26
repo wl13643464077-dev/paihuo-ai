@@ -32,6 +32,7 @@ from . import (analyzer, assetfiles, auth, billing, bossdashboard, db, departmen
 from . import instancelock, retention, timeutil  # 单进程锁 / 数据保留期 / 北京时间
 from . import wxpay  # 微信支付 APIv3(默认关闭)
 from . import photoproof  # 店员现场照片(压缩+水印+落盘)
+from . import api_staff, stafftask  # 第 2 期:派给店员的任务(路由模块 + 服务层)
 from .engine import engine
 from .skills import registry
 
@@ -664,6 +665,10 @@ async def _auth_mw(request: Request, call_next):
     if upload_policy is None:
         upload_policy = _TRANSIENT_UPLOAD_ROUTES.get(upload_key)
         upload_kind = "transient"
+    if upload_policy is None:
+        # 店员交差照片:路径带任务编号,按正则登记;按人限流,不占大文件通道
+        upload_policy = api_staff.upload_policy(request.method, path)
+        upload_kind = "staff"
     if upload_policy:
         action, module, request_limit = upload_policy
         if not await db.arun(_upload_permission_allowed, module):
@@ -714,6 +719,8 @@ async def _auth_mw(request: Request, call_next):
         slot = (
             _persistent_upload_slot(action)
             if upload_kind == "persistent"
+            else api_staff.upload_slot(action)
+            if upload_kind == "staff"
             else _transient_upload_slot(action)
         )
         reserved_context = (
@@ -19437,6 +19444,10 @@ async def matrix_task_retry(pid: int):
     return await task_center_retry("publish", pid)
 
 
+# 第 2 期:派给店员的任务(/api/staff/*),路由在独立模块里
+app.include_router(api_staff.router)
+
+
 # ---------------- 静态 ----------------
 app.mount("/files/avatar-public",
           StaticFiles(directory=avatar.PUBLIC_DIR, follow_symlink=False),
@@ -19498,7 +19509,30 @@ def _onboarding_asset_version() -> str:
     return _ONBOARDING_ASSET_VERSION
 
 
+_STAFF_ASSET_VERSIONS: dict[str, str] = {}
+
+
+def _static_asset_version(name: str) -> str:
+    """第 2 期新增脚本(staff.js / staff-admin.js)同样按内容哈希换 URL。"""
+    if name not in _STAFF_ASSET_VERSIONS:
+        try:
+            with open(os.path.join(ROOT, "static", name), "rb") as fh:
+                _STAFF_ASSET_VERSIONS[name] = hashlib.sha256(fh.read()).hexdigest()[:12]
+        except OSError:
+            _STAFF_ASSET_VERSIONS[name] = "unversioned"
+    return _STAFF_ASSET_VERSIONS[name]
+
+
+def _inject_staff_asset_versions(html: str) -> str:
+    return re.sub(
+        r"(/static/(staff\.js|staff-admin\.js)\?v=)[0-9A-Za-z]+",
+        lambda match: match.group(1) + _static_asset_version(match.group(2)),
+        html,
+    )
+
+
 def _inject_entry_asset_version(html: str) -> str:
+    html = _inject_staff_asset_versions(html)
     html = re.sub(
         r"(/static/onboarding\.js\?v=)[0-9A-Za-z]+",
         lambda match: match.group(1) + _onboarding_asset_version(),
@@ -19511,8 +19545,23 @@ def _inject_entry_asset_version(html: str) -> str:
     )
 
 
+@app.get("/staff")
+def staff_page():
+    """店员手机版(独立轻页面，不加载老板端 app.js)。老板也能打开看店员视角。"""
+    with open(os.path.join(ROOT, "static", "staff.html"), encoding="utf-8") as f:
+        return HTMLResponse(
+            _inject_staff_asset_versions(f.read()),
+            headers=_HTML_ENTRY_NO_CACHE_HEADERS,
+        )
+
+
 @app.get("/")
-def index():
+def index(request: Request):
+    # 店员/店长(已分门店的成员)默认进手机版;带 ?full=1 仍可打开完整版
+    if request.query_params.get("full") != "1" \
+            and stafftask.prefers_staff_home(auth.current()):
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse("/staff", status_code=302)
     with open(os.path.join(ROOT, "static", "index.html"), encoding="utf-8") as f:
         return HTMLResponse(
             _inject_entry_asset_version(f.read()),

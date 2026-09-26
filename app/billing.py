@@ -41,6 +41,9 @@ DEFAULT_PRICES = {
     "bench_watch": {"points": 3, "label": "竞品盯梢周报", "cost": "成本≈¥1.1(联网)"},
     "menu_copy": {"points": 1, "label": "看图写卖点/菜单文案", "cost": "成本≈¥0.3"},
     "product_shot": {"points": 2, "label": "产品图美化(图生图)", "cost": "成本≈¥0.6"},
+    # 第 2 期真人派活:只有调大模型的两步扣点,派活/拍照/审核本身不扣
+    "staff_parse": {"points": 0.2, "label": "一句话派活·AI 拆任务", "cost": "成本≈¥0.03"},
+    "staff_ai_check": {"points": 0.2, "label": "店员交差·AI 验照片", "cost": "成本≈¥0.05"},
 }
 
 PLANS = [
