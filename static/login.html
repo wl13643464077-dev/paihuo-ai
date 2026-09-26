@@ -71,7 +71,7 @@ button:active{transform:translateY(1px);box-shadow:2px 2px 0 rgba(51,41,31,.2)}
     <input id="u" placeholder="您的账号" autocomplete="username">
     <label>密码</label>
     <input id="p" type="password" placeholder="您的密码" autocomplete="current-password" onkeydown="if(event.key==='Enter')go()">
-    <button onclick="go()">进 入 集 团</button>
+    <button onclick="go()">登 录</button>
     <div class="err" id="err" role="status" aria-live="polite"></div>
     <div class="alt">
       <button onclick="toggleApply()">📝 申请开通账号</button>
@@ -192,7 +192,7 @@ async function applyGo(btn){
         ok.appendChild(div); };
       line([['🎉 ' + (j.msg||'体验账号已开通')]]);
       line([['账号:'],[j.account.username,true],[' 初始密码:'],[j.account.password,true]]);
-      line([['👉 已帮您填进上面登录框,截图保存好密码,点「进入集团」开工!']]);
+      line([['👉 已帮您填进上面登录框,截图保存好密码,点「登录」开工!']]);
       document.getElementById('u').value = j.account.username;
       document.getElementById('p').value = j.account.password;
       document.getElementById('u').scrollIntoView({behavior:'smooth',block:'center'});

@@ -537,42 +537,133 @@ const routes = {"":dashboard,"new":newBrief,"job":jobView,"profiles":profilesVie
   "tasks":tasksView,"company":companyView,"production":productionView,"boss":bossDashboardView,
   "inspections":inspectionView,"censor":censorView,
   "channels":channelsView,"tools":toolsView,"trash":trashView,"guide":guideReset,
-  "notifications":notificationsView};
+  "notifications":notificationsView,
+  // 第 1 期:5 个一级入口里的中转页 + 行业专家楼层独立成页(原有路由一个不删,深链/通知照常可用)
+  "dispatch":dispatchHub,"store":storeHub,"growth":growthHub,"mine":mineHub,"experts":expertsView};
+
+/* ---------- 导航:5 个一级入口(今天/派活/门店/获客/我的) ----------
+   纯数据:每个一级入口列出它的子功能卡片(中转页用)和归属它的其他路由(只用于高亮)。
+   show 仍按原来的权限函数(canWork/can/isAdmin/角色)判断,没有权限的卡片不出现。 */
+const isOwnerLike = () => !!ME && (ME.role==="owner"||ME.role==="root");
+const NAV_GROUPS = [
+  {key:"today", label:"今天", icon:"☀️", hub:"", extra:[], cards:[]},
+  {key:"dispatch", label:"派活", icon:"📋", hub:"dispatch", extra:["job","delivery"],
+    title:"派活", intro:"把活交给数字员工，它们干完会通知您。",
+    cards:[
+      {route:"new", icon:"✍️", title:"下达任务(内容)", desc:"说一句想发什么，图文或短视频脚本从选题到成稿自动写好", show:()=>canWork("content")},
+      {route:"experts", icon:"🧑‍🔧", title:"找行业专家", desc:"您这一行的专家一人一岗，店里遇到的事直接问、直接派", show:()=>!!ME},
+      {route:"meetings", icon:"🪑", title:"多位专家一起商量", desc:"大事拿不准，拉几位专家各出方案、互相挑错，最后给您结论", show:()=>!!ME},
+      {route:"tasks", icon:"📦", title:"派出去的活", desc:"所有派出去的活都在这：谁在干、卡在哪、哪些等您看", show:()=>!!ME&&ME.role!=="tour"},
+    ]},
+  {key:"store", label:"门店", icon:"🏪", hub:"store", extra:[],
+    title:"门店", intro:"各门店的巡店、整改和员工表现，一处看全。",
+    cards:[
+      {route:"inspections", icon:"🔍", title:"巡店", desc:"拍照上传就能巡店，问题自动记下来、派给店长整改", show:()=>!!ME&&ME.role!=="tour"},
+      {route:"boss", icon:"📈", title:"老板看板", desc:"各店得分、没整改完的问题、谁拖了后腿，一眼看清", show:isOwnerLike},
+      {route:"production", icon:"📊", title:"员工产出", desc:"每位数字员工这段时间干了多少活、花了多少", show:isOwnerLike},
+    ]},
+  {key:"growth", label:"获客", icon:"📣", hub:"growth", extra:[],
+    title:"获客", intro:"每天该发什么、发之前查一遍、定好时间自动发出去。",
+    cards:[
+      {route:"tools", icon:"🧰", title:"获客工具", desc:"今日必发、私域日历、竞品盯梢、线索雷达等小工具，点一下就出结果", show:()=>canWork("content")},
+      {route:"censor", icon:"🛡️", title:"内容审查", desc:"发之前免费查一遍广告法、违禁词，避免被平台限流或罚款", show:()=>canWork("content")},
+      {route:"avatar", icon:"🎥", title:"数字人视频", desc:"上传一张照片就能开口说话，用您自己的声音出口播视频", show:()=>canWork("avatar")},
+      {route:"schedules", icon:"⏰", title:"定时发布", desc:"设好时间，内容每天自动写好、按时送到", show:()=>canWork("content")},
+      {route:"channels", icon:"🔗", title:"发布渠道", desc:"绑定公众号和企业微信群，写好的内容一键发出去", show:()=>canWork("content")&&isOwnerLike()},
+    ]},
+  {key:"mine", label:"我的", icon:"👤", hub:"mine", extra:["settings"],
+    title:"我的", intro:"账号、团队和资料都在这里。",
+    cards:[
+      {route:"billing", icon:"💎", title:"套餐", desc:"看余额、续费或升级套餐", show:()=>!!ME},
+      {route:"team", icon:"👥", title:"团队与权限", desc:"给店长、店员开账号，分配能用哪些功能", show:isOwnerLike},
+      {route:"team", icon:"👥", title:"团队分配", desc:"把同事分到对应门店和板块", show:()=>!isOwnerLike()&&!!ME?.can_allocate},
+      {route:"company", icon:"🏢", title:"企业档案", desc:"企业介绍、主营产品和店铺信息，数字员工干活都会参考", show:isOwnerLike,
+        subs:[{route:"profiles", icon:"🎭", title:"品牌人设", desc:"品牌说话的口吻和往期文章，写出来才像您自己", show:()=>canWork("content")}]},
+      {route:"assets", icon:"🗂️", title:"我的资料库", desc:"数字员工交付的成品都存在这，好内容可以存成经验反复用", show:()=>canWork("library"),
+        subs:[{route:"knowledge", icon:"📚", title:"经验库", desc:"存下来的好经验，以后所有员工干活都会带上", show:()=>canWork("library")}]},
+      {route:"notifications", icon:"🔔", title:"通知记录", desc:"看过的通知都能在这里翻到", show:()=>!!ME&&ME.role!=="tour"},
+      {route:"trash", icon:"🗑", title:"回收站", desc:"误删的任务和资料可以在这里找回", show:()=>!!isAdmin()},
+      // 引导卡只对 owner/root 展示,重看入口同样只给他们
+      {route:"guide", icon:"🧭", title:"新手引导重看", desc:"重新打开「今天」页里的新手上路说明", show:isOwnerLike},
+      // 以下仅平台 root:放在最下面
+      {action:"openEmployeeLearningBatchManager()", icon:"🏭", title:"员工进修管理", desc:"平台运营:批量安排数字员工进修、审核进修结果", show:()=>!!isBoss(), rootOnly:true},
+      {route:"admin", icon:"🛠", title:"后台", desc:"平台运营:模型、租户和系统设置", show:()=>!!ME&&ME.role==="root", rootOnly:true},
+    ]},
+];
+/* 当前路由属于哪个一级入口(子页面在导航上高亮它的上级) */
+function navGroupOf(page){
+  const p = String(page||"");
+  if(!p) return "today";
+  const g = NAV_GROUPS.find(x=>x.hub===p || x.extra.includes(p)
+    || x.cards.some(c=>c.route===p || (c.subs||[]).some(s=>s.route===p)));
+  return g ? g.key : "today";
+}
+/* 某个一级入口当前账号能看到的卡片:主卡没权限、但子入口有权限时,子入口单独成卡 */
+function navVisibleCards(group){
+  const out = [];
+  for(const c of group.cards){
+    const subs = (c.subs||[]).filter(s=>s.show());
+    if(c.show()) out.push({...c, subs});
+    else subs.forEach(s=>out.push({...s, subs:[]}));
+  }
+  return out;
+}
+/* 一级入口的链接:没有可见卡片就不显示;只有一张卡(如店员只能巡店)时直接进那一页,省一次点击 */
+function navGroupHref(group){
+  if(group.key==="today") return "#/";
+  const cards = navVisibleCards(group);
+  if(!cards.length) return null;
+  if(cards.length===1 && cards[0].route && group.key!=="mine") return "#/"+cards[0].route;
+  return "#/"+group.hub;
+}
 function nav(){
   const cur = location.hash.replace("#/","").split("/")[0];
+  const on = navGroupOf(cur);
   const inbox = (STATE?.inbox?.length||0)+(STATE?.notifications?.length||0);
-  // 主导航(常用) + 更多(次要,收进下拉)
-  const primary = [["","🏢 办公室"]];
-  if(ME && ME.role!=="tour") primary.push(["tasks","📋 任务中心"]);
-  if(ME && ME.role!=="tour") primary.push(["inspections","🏪 巡店"]);
-  if(ME && (ME.role==="owner"||ME.role==="root")) primary.push(["boss","📈 老板看板"]);
-  if(canWork("content")) primary.push(["new","➕ 下达任务"]);
-  if(canWork("avatar")) primary.push(["avatar","🎥 数字人"]);
-  primary.push(["meetings","🪑 会议室"]);
-  if(canWork("content")) primary.push(["tools","🧰 工具箱"]);
-  const more = [];
-  if(canWork("content") && ME && (ME.role==="owner"||ME.role==="root")) more.push(["channels","📣 发布渠道"]);
-  // 审查官是核心卖点(发前合规把关),此前只藏在可被永久关闭的引导卡后面
-  if(canWork("content")) more.push(["censor","🛡️ 审查官"]);
-  if(canWork("content")) more.push(["schedules","⏰ 定时任务"],["profiles","🎭 人设档案"]);
-  if(canWork("library")) more.push(["assets","🗂️ 资产库"],["knowledge","📚 沉淀库"]);
-  if(ME && (ME.role==="owner"||ME.role==="root")) more.push(["production","📊 员工产出"],["company","🏢 企业档案"]);
-  if(isAdmin()) more.push(["trash","🗑 回收站"]);
-  if(ME && ME.role!=="tour") more.push(["notifications","🔔 通知记录"]);
-  more.push(["billing","💎 套餐"]);
-  if(ME && (ME.role==="owner"||ME.role==="root")) more.push(["team","👥 团队与权限"]);
-  else if(ME && ME.can_allocate) more.push(["team","👥 团队分配"]);
-  if(ME && ME.role==="root") more.push(["admin","🛠 后台"]);
-  // 引导卡(开工四步/发布三件套)只对 owner/root 展示,重看入口同样只给他们
-  if(ME && (ME.role==="owner"||ME.role==="root")) more.push(["guide","🧭 重看新手引导"]);
-  const link = ([k,l])=>`<a href="#/${k}" class="${cur===k?"on":""}">${l}${k===""&&inbox?`<span class="badge">${inbox}</span>`:""}</a>`;
-  const moreOn = more.some(([k])=>k===cur);
-  $("#nav").innerHTML = primary.map(link).join("")
-    + `<span class="navmore ${moreOn?"on":""}"><button type="button" class="nav-action" onclick="this.parentNode.classList.toggle('open')" aria-haspopup="menu">更多 ▾</button>`
-    + `<div class="navmenu">${more.map(link).join("")}</div></span>`
+  const items = NAV_GROUPS.map(g=>({g, href:navGroupHref(g)})).filter(x=>x.href);
+  const link = ({g,href},cls)=>`<a href="${href}" class="${cls} ${on===g.key?"on":""}" data-nav="${g.key}" ${on===g.key?'aria-current="page"':""}>`
+    + `<span class="nav-ic" aria-hidden="true">${g.icon}</span><span class="nav-tx">${g.label}</span>`
+    + `${g.key==="today"&&inbox?`<span class="badge" aria-label="${inbox} 条待处理">${inbox}</span>`:""}</a>`;
+  // 桌面:顶部导航;手机:同样的 5 个入口放进底部 Tab 栏(#tabbar),顶部只留退出
+  $("#nav").innerHTML = items.map(x=>link(x,"nav-top")).join("")
     + `<button type="button" class="nav-action navlogout" onclick="logout()" title="${ME?esc(ME.tenant)+" · "+esc(ME.username):""}">🚪 退出</button>`;
+  const bar = $("#tabbar");
+  if(bar) bar.innerHTML = items.map(x=>link(x,"tab")).join("");
+  document.body.classList.toggle("has-tabbar", !!bar && items.length>0);
 }
-document.addEventListener("click", e=>{ if(!e.target.closest(".navmore")) document.querySelectorAll(".navmore.open").forEach(x=>x.classList.remove("open")); });
+/* ---------- 中转页:大卡片列出子功能,每张一句大白话,点进去就是原页面 ---------- */
+function hubCardHtml(c){
+  const go = c.route ? `location.hash=${cp("#/"+c.route)}` : c.action;
+  const subs = (c.subs||[]).map(s=>`<a class="btn sm" href="#/${s.route}" onclick="event.stopPropagation()">${s.icon} ${esc(s.title)}</a>`).join("");
+  return `<div class="hubcard ${c.rootOnly?"hub-root":""}" role="link" tabindex="0" onclick="${go}"
+    onkeydown="if(event.key==='Enter'){${go}}">
+    <span class="hc-emoji" aria-hidden="true">${c.icon}</span>
+    <span class="hc-body"><span class="hc-t">${esc(c.title)}</span><span class="hc-d">${esc(c.desc)}</span>
+      ${subs?`<span class="hc-subs">${subs}</span>`:""}</span>
+    <span class="hc-arrow" aria-hidden="true">→</span></div>`;
+}
+function hubView(key, top=""){
+  const g = NAV_GROUPS.find(x=>x.key===key);
+  const cards = navVisibleCards(g);
+  const normal = cards.filter(c=>!c.rootOnly), root = cards.filter(c=>c.rootOnly);
+  $("#main").innerHTML = `<div class="hubhead"><h2>${g.icon} ${esc(g.title)}</h2><div class="sub">${esc(g.intro)}</div></div>`
+    + top
+    + (normal.length?`<div class="hubgrid">${normal.map(hubCardHtml).join("")}</div>`
+      :`<div class="card"><div class="empty">您的账号还没有开通这里的功能，请联系企业主账号开通。</div></div>`)
+    + (root.length?`<h3 class="hub-section">平台运营(仅平台账号可见)</h3><div class="hubgrid">${root.map(hubCardHtml).join("")}</div>`:"");
+}
+async function dispatchHub(){ hubView("dispatch"); }
+async function storeHub(){ hubView("store"); }
+async function growthHub(){
+  hubView("growth", canWork("content")?`<a class="btn pri today-post" href="#/tools/hot">🔥 今天发什么<span class="sub">每天挑好今天该发的内容,照着发就行</span></a>`:"");
+}
+async function mineHub(){
+  const who = ME?`<div class="card mine-who"><b>${esc(ME.tenant||"")}</b> · ${esc(ME.username||"")}
+    ${ME.role!=="root"&&STATE?`<div class="sub" style="margin-top:4px">余额 ${Math.round(STATE.balance||0)} 点${STATE.plan?` · ${esc(STATE.plan)}`:""}</div>`:""}</div>`:"";
+  hubView("mine", who);
+  $("#main").insertAdjacentHTML("beforeend",
+    `<div class="actions" style="margin-top:18px"><button type="button" class="btn bad" onclick="logout()">🚪 退出登录</button></div>`);
+}
 async function logout(){
   if(ME&&ME.role==="tour"){ clearBusinessStorage(); location.href="/promo"; return; }
   await api("/auth/logout",{method:"POST"}).catch(()=>{});
@@ -585,6 +676,8 @@ function forcedPasswordView(){
   $("#nav").innerHTML=`<span style="font-weight:900">🔐 账号安全升级</span>
     <span style="flex:1"></span>
     <button type="button" class="nav-action navlogout" onclick="logout()">🚪 退出</button>`;
+  const bar=$("#tabbar"); if(bar) bar.innerHTML="";
+  document.body.classList.remove("has-tabbar");
   $("#main").innerHTML=`<div class="card" style="max-width:620px;margin:42px auto">
     <h2>请先设置您自己的密码</h2>
     <div class="notice">为了账号安全,初始/旧密码需要换成您自己的新密码(仅需一次),之后就能正常查看任务和使用数字员工。</div>
@@ -620,12 +713,13 @@ async function forcedPasswordChange(){
   }catch(e){ toast(e.message); }
 }
 function routeLoading(page){
-  const labels={tasks:"任务中心",new:"下达任务",avatar:"数字人摄影棚",meetings:"AI会议室",
-    tools:"营销工具箱",channels:"发布渠道",schedules:"定时任务",profiles:"人设档案",
-    assets:"资产库",knowledge:"沉淀库",production:"员工产出",boss:"老板看板",
+  const labels={tasks:"派出去的活",new:"下达任务",avatar:"数字人视频",meetings:"专家商量室",
+    tools:"获客工具",channels:"发布渠道",schedules:"定时发布",profiles:"品牌人设",
+    assets:"资料库",knowledge:"经验库",production:"员工产出",boss:"老板看板",
     inspections:"巡店工作台",company:"企业档案",
-    billing:"套餐",team:"权限管理",admin:"后台",job:"工单详情",delivery:"交付中心",
-    trash:"回收站",notifications:"通知记录"};
+    billing:"套餐",team:"权限管理",admin:"后台",job:"任务详情",delivery:"交付中心",
+    trash:"回收站",notifications:"通知记录",dispatch:"派活",store:"门店",growth:"获客",
+    mine:"我的",experts:"行业专家"};
   const box=$("#main"); if(!box) return;
   box.innerHTML=`<div class="card route-loading" role="status" aria-live="polite">
     <div style="display:flex;align-items:center;gap:12px"><span class="spin"></span>
@@ -698,7 +792,7 @@ async function render(reuseShell=false){
       // 权限不足是确定性的,不是网络故障:说清原因给出路,不再提供无效的「重新加载」
       if(box) box.innerHTML=`<div class="card"><h2>这个页面需要更高权限</h2>
         <div class="sub">${esc(e?.message||"需要主账号权限")}${ME?.role==="member"?"。请联系贵司主账号(企业主)开通对应板块或代为操作":""}</div>
-        <div class="actions"><a class="btn pri" href="#/">← 回办公室</a></div></div>`;
+        <div class="actions"><a class="btn pri" href="#/">← 回今天</a></div></div>`;
       return;
     }
     reportClientError("render",e);
@@ -963,13 +1057,13 @@ function sse(){
         }
         DEPTS=null;
         if(location.hash.startsWith("#/tasks")){ scheduleRender(); return; }
-        if(location.hash==="#/"||!location.hash) scheduleRender();
+        if(location.hash==="#/"||!location.hash||location.hash.startsWith("#/experts")) scheduleRender();
         return; }
       if(ev.type==="job_update"||ev.type==="gate_running"){
         const [page,arg] = location.hash.replace("#/","").split("/");
         if(page==="job" && +arg===ev.job_id) scheduleRender();
         else if(page==="tasks") scheduleRender();
-        else if(page===""||page===undefined) scheduleRender();
+        else if(page===""||page===undefined||page==="experts") scheduleRender();
       }
     }catch(err){ reportClientError("sse_message",err); }
   };
@@ -1068,7 +1162,7 @@ function roomCard(s){
   const capsN = isBoss() ? (e.capabilities||[]).filter(c=>c.enabled).length : 0;
   return `<div class="room ${st==="work"?"working":""}" data-room="${s.idx}" onclick="openEmp(${s.idx})">
     <div class="roof" style="background:${s.color}"><span class="lamp"></span>${esc(s.dept)}<span style="flex:1"></span>${s.emoji}</div>
-    ${job?`<span class="jobtag">工单#${job.id}</span>`:""}
+    ${job?`<span class="jobtag">任务#${job.id}</span>`:""}
     <div class="scene">${charSVG(s.color, s.emoji, st, 108)}</div>
     <div class="meta">
       <div class="nm"><span>${esc(s.name)}${e.is_custom?` <span title="老板改过提示词">📝</span>`:""}${capsN?` <span class="sub" style="font-weight:700" title="启用能力项">🧰${capsN}</span>`:""}${skillsN?` <span class="sub" style="font-weight:700" title="进修技能数">⚡${skillsN}</span>`:""}</span>
@@ -1090,10 +1184,10 @@ function gateRoom(){
   const st = blocked?"await":"idle";
   return `<div class="room" data-room="gate" onclick="location.hash='#/censor'">
     <div class="roof" style="background:#ef476f;color:#fff"><span class="lamp"></span>合规审查部<span style="flex:1"></span>🛡️</div>
-    ${blocked?`<span class="jobtag">工单#${blocked.id}</span>`:""}
+    ${blocked?`<span class="jobtag">任务#${blocked.id}</span>`:""}
     <div class="scene">${charSVG("#ef476f","🛡️",st,108)}</div>
     <div class="meta"><div class="nm"><span>审查官</span><span class="stpill ${blocked?"fail":"idle"}">${blocked?"拦下了内容":"铁面待命"}</span></div>
-      <div class="live">${blocked?"有工单被审查拦截,去工单里处理":"发前审查 · 发布终审 · 发后数据复盘"}</div>
+      <div class="live">${blocked?"有任务被审查拦截,去任务里处理":"发前审查 · 发布终审 · 发后数据复盘"}</div>
       <div class="actions" style="margin-top:8px;gap:6px">
         <button class="btn sm" onclick="event.stopPropagation();location.hash='#/censor'">🪪 工作台</button>
         ${blocked?`<button class="btn sm blue" onclick="event.stopPropagation();location.hash='#/job/${blocked.id}'">去处理</button>`
@@ -1114,26 +1208,6 @@ function toggleDept(key){
   // 显式记 "0"/"1":收起也落一笔,避免「内容生产部收起后因无记录又默认展开」
   lsSet(k, deptIsOpen(key)?"0":"1");
   render();
-}
-function goExperts(){
-  const d = (DEPTS||[]).filter(x=>can(x.key))[0];
-  if(!d){ toast("您的账号还没有开通产业专家板块,找企业主账号开通"); return; }
-  lsSet(deptOpenKey(d.key),"1");
-  render().then(()=>{ const el=document.querySelector(`[data-deptsec="${d.key}"]`);
-    if(el) el.scrollIntoView({behavior:"smooth",block:"start"}); });
-}
-function todoCards(){
-  const cards = [];
-  if(canWork("content")) cards.push(["📝","发一单内容","图文/短视频脚本 → 整条流水线替您写","location.hash='#/new'"]);
-  if((DEPTS||[]).some(d=>can(d.key))) cards.push(["🧑‍🔧","找专家问一件事","产业专家一对一,直接给 TA 派活","goExperts()"]);
-  if(canWork("avatar")) cards.push(["🎬","出条视频","照片开口说话;不想烧额度也能图文一键成片","location.hash='#/avatar'"]);
-  else if(canWork("content")) cards.push(["🎬","出条视频","把图文一键变竖版成片,自动配音+字幕","TS.tab='vars';location.hash='#/tools/vars'"]);
-  if(!cards.length) return "";
-  return `<h2 style="margin:20px 0 0;letter-spacing:1px">🧭 今天想干点啥?</h2>
-  <div class="todo3">${cards.map(([e,t,d,act])=>`<div class="todocard" onclick="${act}">
-    <span class="tc-emoji">${e}</span>
-    <span class="tc-body"><span class="tc-t">${t}</span><span class="tc-d">${d}</span></span>
-    <span class="tc-arrow">→</span></div>`).join("")}</div>`;
 }
 function specRoomCard(e){
   const st = e.running_n?"work":e.learning?"learn":"idle";
@@ -1173,54 +1247,130 @@ function deptSection(key, emoji, name, count, tagline, innerFn){
     ${open?`<div class="deptbody">${innerFn()}</div>`:""}
   </div>`;
 }
+function goExperts(){
+  // 行业专家楼层已从「今天」页挪到「派活 → 找行业专家」
+  const d = (DEPTS||[]).filter(x=>can(x.key))[0];
+  if(d) lsSet(deptOpenKey(d.key),"1");
+  location.hash = "#/experts";
+}
+/* ---------- 「今天」页的门店小结:巡店接口的汇总数,60 秒内复用,避免每次推送都重查 ---------- */
+let STORE_TODAY = {key:"", at:0, data:null};
+async function storeTodaySummary(){
+  if(!ME || ME.role==="tour") return null;
+  const key = (ME.tenant||"")+":"+(ME.id||"");
+  if(STORE_TODAY.key===key && Date.now()-STORE_TODAY.at<60000) return STORE_TODAY.data;
+  let data = null;
+  try{
+    const r = await api("/inspections?limit=40");
+    const s = r?.summary||{};
+    if(s.availability!==false){
+      const start = new Date(); start.setHours(0,0,0,0);
+      const t0 = start.getTime()/1000, items = r.items||[];
+      const today = items.filter(v=>Number(v.visit_at||v.created_at||0)>=t0).length;
+      data = {today, todayMore: !!r.next_before_id && today>=items.length,
+        open:Number(s.open_issues)||0, overdue:Number(s.overdue_actions)||0,
+        rechecks:Number(s.pending_rechecks)||0, branches:Number(s.total_branches)||0};
+    }
+  }catch(e){
+    // 没开巡店/没权限/网络抖动都不影响「今天」页;只有切页中止要继续往上抛
+    if(e?.name==="NavigationAbort") throw e;
+  }
+  STORE_TODAY = {key, at:Date.now(), data};
+  return data;
+}
+/* 「等我处理的」一行一条:左边说清是什么事,右边一个按钮 */
+function todayTodoRow(icon, title, sub, btnText, onclick, cls="pri"){
+  return `<div class="todo-row"><span class="todo-ic" aria-hidden="true">${icon}</span>
+    <div class="todo-tx"><b>${title}</b>${sub?`<div class="sub">${sub}</div>`:""}</div>
+    <button type="button" class="btn sm ${cls}" onclick="${onclick}">${btnText}</button></div>`;
+}
+/* 新手上路:原来的「开工四步 / 四步用人法 / 发布三件套」合并成一个默认折叠的区块 */
+let GUIDE_FOLD_OPEN = false;
+function guideFold(){
+  const parts = [obCard(), howtoCard(), trioCard()].filter(Boolean);
+  if(!parts.length) return "";
+  const open = GUIDE_FOLD_OPEN; GUIDE_FOLD_OPEN = false;
+  return `<details class="card guide-fold" data-guide-fold ${open?"open":""}>
+    <summary><b>🧭 新手上路</b><span class="sub">第一次用?点开看怎么上手</span></summary>
+    ${parts.join("")}</details>`;
+}
 async function dashboard(){
+  const inbox = STATE.inbox||[];
+  const notifications = STATE.notifications||[];
+  // 第 1 期新手引导(另一个模块提供):函数存在就把它返回的卡片放在最上面
+  let onboarding = "";
+  try{
+    const fn = window.PH_ONBOARDING?.card;
+    if(typeof fn==="function") onboarding = String((await fn()) || "");
+  }catch(e){ if(e?.name==="NavigationAbort") throw e; reportClientError("onboarding_card",e); }
+  const store = await storeTodaySummary();
+  const tourBanner = ME&&ME.role==="tour" ? `<div class="notice" style="background:#ece3ff;margin-top:0">👀 <b>参观模式</b>:去看看每位数字员工能帮您的店做什么。<a href="#/experts" style="text-decoration:underline;font-weight:900">看数字员工 →</a> <a href="/promo#plans" style="text-decoration:underline;font-weight:900">查看套餐</a> 或联系开通企业账号后直接派活。</div>` : "";
+  const d = new Date();
+  const dateLabel = `${d.getMonth()+1}月${d.getDate()}日 周${"日一二三四五六"[d.getDay()]}`;
+  const money = ME.role!=="root"&&ME.role!=="tour"
+    ? `<a class="today-money" href="#/billing">余额 ${Math.round(STATE.balance||0)} 点${STATE.plan?` · ${esc(STATE.plan)}`:""} ›</a>` : "";
+  const hello = `<div class="today-hello"><h2>☀️ ${ME.role==="member"?"同事好":"老板好"} <span class="sub">${dateLabel}</span></h2>${money}</div>`;
+  // 等我处理的:等拍板 / 失败要处理 / 待审核整改 + 新进展
+  const rows = [];
+  inbox.forEach(j=>{
+    const name = esc(j.title&&j.title!=="(未产出标题)"?j.title:(j.brief?.direction||`任务 #${j.id}`));
+    if(j.status==="failed") rows.push(todayTodoRow("❌",`失败了:${name}`,"点数已按规则退回，去看看怎么处理","去处理",`location.hash='#/job/${Number(j.id)}'`,"blue"));
+    else if(j.status==="gate_blocked") rows.push(todayTodoRow("🛡️",`审查拦下了:${name}`,"内容有风险表述，要您看一眼","去处理",`location.hash='#/job/${Number(j.id)}'`,"blue"));
+    else rows.push(todayTodoRow("👔",`等您拍板:${name}`,"数字员工做到一半，等您点头再往下做","去拍板",`location.hash='#/job/${Number(j.id)}'`));
+  });
+  if(store?.rechecks) rows.push(todayTodoRow("🧾",`${store.rechecks} 条门店整改等您审核`,"店长已经整改完，要您确认是否合格","去审核","location.hash='#/inspections'"));
+  const noteRows = notifications.slice(0,5).map(n=>todayTodoRow("🔔",esc(n.title),n.body?esc(n.body):tcFmt(n.created_at),"查看",
+    `notificationOpen(${Number(n.id)},${cp(safeRouteUrl(n.link)||"#/")})`,""));
+  const todoCard = `<div class="card today-todo">
+    <div class="today-head"><h2>📥 等我处理的${rows.length?`(${rows.length})`:""}</h2></div>
+    ${rows.length?rows.join(""):`<div class="sub today-empty">✅ 眼下没有要您拍板的事。</div>`}
+    ${noteRows.length?`<div class="today-head" style="margin-top:12px"><h3>🔔 新进展(${notifications.length})</h3>
+      <a class="btn sm" href="#/notifications">全部通知</a>
+      ${isAdmin()?`<button class="btn sm" onclick="notificationReadAll(this)">全部已读</button>`:""}</div>${noteRows.join("")}`:""}
+  </div>`;
+  // 今天的门店:开了巡店才显示
+  let storeCard = "";
+  if(store && store.branches>0){
+    storeCard = `<a class="card today-store" href="#/store">
+      <div class="today-head"><h2>🏪 今天的门店</h2><span class="sub">共 ${store.branches} 家 ›</span></div>
+      <div class="today-stats">
+        <div><b>${store.today}${store.todayMore?"+":""}</b><span>今日巡店</span></div>
+        <div><b>${store.open}</b><span>未闭环整改</span></div>
+        <div class="${store.overdue?"bad":""}"><b>${store.overdue}</b><span>逾期</span></div>
+      </div></a>`;
+  }else if(store && isAdmin()){
+    storeCard = `<a class="card today-store" href="#/inspections"><div class="today-head"><h2>🏪 门店</h2><span class="sub">›</span></div>
+      <div class="sub">还没录入门店。录好门店，店长拍照就能巡店，问题自动派给店长整改。</div></a>`;
+  }
+  // 获客:一个醒目的「今天发什么」
+  const growthCard = canWork("content") ? `<div class="card today-growth">
+    <h2>📣 获客</h2>
+    <a class="btn pri today-post" href="#/tools/hot">🔥 今天发什么<span class="sub">每天挑好今天该发的内容,照着发就行</span></a></div>` : "";
+  $("#main").innerHTML = onboarding + tourBanner + hello
+    + (await industryPickCard())
+    + todoCard + storeCard + growthCard
+    + guideFold();
+}
+/* ---------- 派活 → 找行业专家:原办公室首页的行业专家楼层 + 内容任务列表 ---------- */
+async function expertsView(){
   if(!DEPTS) DEPTS = await api("/depts");
   const jobsContract=normalizeListContract(
     await api(listPath("/state","jobs")),LIST_PAGE_SIZE);
-  const inbox = STATE.inbox, jobs = jobsContract.items;
-  const notifications = STATE.notifications||[];
-  const active = (STATE.jobs||[])
-    .filter(j=>!["done","cancelled","failed"].includes(j.status)).length;
-  const specN = DEPTS.reduce((n,d)=>n+d.employees.length,0);
+  const jobs = jobsContract.items;
   const allowedDepts = DEPTS.filter(d=>can(d.key));
   const isRoot = isBoss();
   if(CUR_DEPT==="content"&&!can("content")) CUR_DEPT = allowedDepts[0]?.key||(can("avatar")?"__avatar":"content");
-  const tourBanner = ME&&ME.role==="tour" ? `<div class="notice" style="background:#ece3ff;margin-top:0">👀 <b>参观模式</b>:点击员工卡片,了解每位数字员工可以为您的业务提供什么帮助。<a href="/promo#plans" style="text-decoration:underline;font-weight:900">查看套餐</a> 或联系开通企业账号后直接派活。</div>` : "";
-  const heroCard = `
-  <div class="card" style="background:linear-gradient(120deg,#fff6dc,#fffaf0 60%)">
-    <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
-      <div style="flex:1;min-width:240px">
-        <h2 style="font-size:22px">👔 ${esc(META.app?.name||"老板的AI集团")} · ${ME.role==="member"?"同事好":"董事长好"}</h2>
-        <div class="sub">${esc(META.app?.slogan||"")}。${11+specN} 位数字员工、${1+DEPTS.length} 个产业部门随时待命:内容部整条流水线+审查官把关出成品,行业专家一人一岗随叫随到。</div>
-      </div>
-      ${ME.role!=="tour"?`<a class="btn blue" href="#/tasks" style="font-size:15px">📋 我的任务在哪</a>`:""}
-      ${canWork("content")?`<a class="btn pri" href="#/new" style="font-size:15px">➕ 下达新任务</a>`:""}
-      ${isBoss()?`<button class="btn" onclick="openEmployeeLearningBatchManager()">🏭 修理厂</button>`:""}
-    </div>
-    <div class="kv" style="margin-top:12px">${ME.role!=="root"?`<span><a href="#/billing" style="font-weight:800;text-decoration:underline">💎 余额 ${Math.round(STATE.balance||0)} 点${STATE.plan?` · ${esc(STATE.plan)}`:""}</a></span>`:""}<span>内容工单进行中 ${active} 单</span><span>内容工单累计 ${jobsContract.total??jobs.length} 单</span>
-      <span>数字员工 ${11+specN} 人</span>
-      ${isBoss()?`<span>技能储备 ${EMP.reduce((n,e)=>n+(e.skills||[]).length,0)} 条</span>`:""}</div>
-  </div>`;
-  const inboxCard = inbox.length?`<div class="card" style="background:#fff6dc"><h2>📥 等您拍板(${inbox.length})</h2>${inbox.map(jobRow).join("")}</div>`:"";
-  const notificationCard = notifications.length?`<div class="card" style="background:#eef6ff">
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><h2 style="margin:0;flex:1">🔔 新进展(${notifications.length})</h2>
-      <a class="btn sm" href="#/notifications">查看历史</a>
-      ${isAdmin()?`<button class="btn sm" onclick="notificationReadAll(this)">全部已读</button>`:""}</div>
-    ${notifications.map(n=>`<div class="topic" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-      <div style="flex:1;min-width:190px"><b>${esc(n.title)}</b>${n.body?`<div class="sub">${esc(n.body)}</div>`:""}
-        <div class="sub">${tcFmt(n.created_at)}</div></div>
-      <button class="btn sm pri" onclick="notificationOpen(${n.id},${cp(safeRouteUrl(n.link)||"#/")})">查看</button></div>`).join("")}</div>`:"";
-  const jobsCard = `<div class="card" style="margin-top:22px"><h2>📋 全部工单(${jobsContract.total??jobs.length})</h2>
-    ${listContractNotice(jobsContract,"内容工单")}
-    ${jobs.length?jobs.map(jobRow).join(""):`<div class="empty">${(jobsContract.total??0)===0?"还没有工单。点上面「发一单内容」,3 分钟看你的数字员工团队跑起来。":"这一页没有工单；返回上一页,或点上面「发一单内容」开工。"}</div>`}
+  const jobsCard = `<div class="card" style="margin-top:22px"><h2>📋 内容任务(${jobsContract.total??jobs.length})</h2>
+    ${listContractNotice(jobsContract,"内容任务")}
+    ${jobs.length?jobs.map(jobRow).join(""):`<div class="empty">${(jobsContract.total??0)===0?`还没有内容任务。<div class="actions" style="justify-content:center"><a class="btn sm pri" href="#/new">✍️ 下达任务</a></div>`:"这一页没有任务；返回上一页,或点「✍️ 下达任务」开工。"}</div>`}
     ${listPager(jobsContract,"jobs")}</div>`;
   let floorSection;
   if(isRoot){
     // root 平台视图:保持原「标签页切换 + 全展开楼层」现状
     const deptTabs = `<div class="depttabs">
-      ${can("content")?`<span class="dt ${CUR_DEPT==="content"?"on":""}" onclick="CUR_DEPT='content';render()">🎬 内容生产部 <span class="sub">10人流水线</span></span>`:""}
+      ${can("content")?`<span class="dt ${CUR_DEPT==="content"?"on":""}" onclick="CUR_DEPT='content';render()">🎬 内容生产部 <span class="sub">10 人接力</span></span>`:""}
       ${allowedDepts.map(d=>`<span class="dt ${CUR_DEPT===d.key?"on":""}" onclick="CUR_DEPT=${cp(d.key)};render()">${d.emoji} ${esc(d.name)} <span class="sub">${d.employees.length}人</span></span>`).join("")}
-      ${can("avatar")?`<span class="dt" onclick="location.hash='#/avatar'">🎥 数字人摄影棚 <span class="sub">新</span></span>`:""}
+      ${can("avatar")?`<span class="dt" onclick="location.hash='#/avatar'">🎥 数字人视频 <span class="sub">新</span></span>`:""}
     </div>`;
     let floor;
     if(CUR_DEPT==="content"&&can("content")){
@@ -1229,31 +1379,26 @@ async function dashboard(){
       const d = DEPTS.find(x=>x.key===CUR_DEPT) || allowedDepts[0];
       floor = !d ? `<div class="empty">您的账号还没有开通任何板块,请联系企业主账号</div>` : deptFloorHtml(d);
     }
-    floorSection = `<h2 style="margin:22px 0 0;letter-spacing:1px">🏬 行业市场</h2>${deptTabs}${floor}
+    floorSection = `${deptTabs}${floor}
       ${CUR_DEPT==="content"?jobsCard:""}`;
   }else{
     // 租户视图:部门楼层默认折叠为标题行,点击展开;展开状态按租户+部门记忆
     const sections = [];
     if(can("content")) sections.push(deptSection("content","🎬","内容生产部",(META.stations.length+1)+"人",
-      "选题→写稿→配图→审查,整条流水线出成品",
+      "选题→写稿→配图→审查,一步步接力出成品",
       ()=>`<div class="floor">${META.stations.map(roomCard).join("")}${gateRoom()}</div>`));
     allowedDepts.forEach(d=> sections.push(deptSection(d.key, d.emoji, d.name, d.employees.length+"人",
       deptTagline(d)||"行业精品员工,一人一岗随叫随到", ()=>deptFloorHtml(d))));
     const avatarRow = can("avatar")?`<div class="deptsec"><div class="depthead" onclick="location.hash='#/avatar'">
-      <span class="dh-emoji">🎥</span><span class="dh-name">数字人摄影棚</span><span class="dh-count">新</span>
+      <span class="dh-emoji">🎥</span><span class="dh-name">数字人视频</span><span class="dh-count">新</span>
       <span class="dh-tag">照片开口说话 · 出条口播视频</span><span class="dh-caret">→</span></div></div>`:"";
-    floorSection = `<h2 style="margin:22px 0 4px;letter-spacing:1px">🏬 行业市场 <span class="sub" style="font-weight:600;font-size:13px">每个行业一支精品员工队伍,点行业标题展开/收起</span></h2>
+    floorSection = `${sections.length||avatarRow?"":`<div class="card"><div class="empty">您的账号还没有开通任何行业专家,请联系企业主账号开通。</div></div>`}
       ${sections.join("")}${avatarRow}
       ${can("content")?jobsCard:""}`;
   }
-  $("#main").innerHTML = tourBanner + heroCard
+  $("#main").innerHTML = `<div class="hubhead"><h2>🧑‍🔧 找行业专家 <span class="sub" style="font-weight:600;font-size:13px">行业市场 · 每个行业一支精品员工队伍,点行业标题展开/收起</span></h2>
+    <div class="sub">点任何一位专家看介绍、直接派活;不知道找谁,就在行业里的「找专家」框里说说您遇到的事。</div></div>`
     + (await industryPickCard())
-    + (isRoot?"":todoCards())
-    + obCard()
-    + howtoCard()
-    + trioCard()
-    + notificationCard
-    + inboxCard
     + floorSection;
 }
 /* 自助开户的老企业还没绑定行业时,行业专家一个都看不到:老板首页先让他选 1 个行业 */
@@ -1264,7 +1409,7 @@ async function industryPickCard(){
   if(!list.length) return "";
   return `<div class="card" id="industry-pick" style="background:#fff1bd;border-width:3px">
     <h2 style="margin:0">🏷️ 先选你的行业</h2>
-    <div class="sub" style="margin-top:6px">选好后,您这一行的专属数字员工就会出现在下面的「行业市场」里。这里只能选 1 个,之后想加行业请到套餐页或联系顾问。</div>
+    <div class="sub" style="margin-top:6px">选好后,您这一行的专属数字员工就会出现在「派活 → 找行业专家」里。这里只能选 1 个,之后想加行业请到套餐页或联系顾问。</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
       ${list.map(x=>`<button class="btn" onclick="industryPick(${cp(String(x.key))},${cp(String(x.name||x.key))},this)">${esc(x.name||x.key)}</button>`).join("")}
     </div></div>`;
@@ -1340,7 +1485,8 @@ async function notificationHistoryReadAll(btn){
     await notificationsView(0);
   }catch(e){ toast(e.message); btn.disabled=false; }
 }
-/* V27.2:「发布三件套」向导——把 成片→审查→排版 串成一条可点的流程(对外主推卖点的上手版) */
+/* V27.2:「发布三件套」向导——把 成片→审查→排版 串成一条可点的流程(对外主推卖点的上手版)
+   第 1 期起与「开工四步」「四步用人法」一起收进「今天」页默认折叠的「新手上路」里 */
 function trioCard(){
   if(!ME || !["owner","root"].includes(ME.role) || !can("content")) return "";
   if(lsGet("trio_hide_"+(ME.tenant||""))) return "";
@@ -1349,55 +1495,55 @@ function trioCard(){
     {done:tr.video, e:"🎬", t:"① 图文一键成片", act:"trioGo('video')",
       d:"把已交付的图文自动变成竖版口播视频,配音+字幕全包",
       how:"怎么做:任务交付页→「一键成片」,选模板等几分钟即可;抖音/视频号直接用"},
-    {done:tr.censor, e:"🛡️", t:"② 审查官把关", act:"location.hash='#/censor'",
+    {done:tr.censor, e:"🛡️", t:"② 发前审查", act:"location.hash='#/censor'",
       d:"发布前免费扫一遍广告法、违禁词和敏感表述",
-      how:"怎么做:审查页贴上正文→秒出风险报告和替换建议,发出去才踏实"},
+      how:"怎么做:内容审查页贴上正文→秒出风险报告和替换建议,发出去才踏实"},
     {done:tr.publish, e:"📰", t:"③ 公众号排版发出去", act:"trioGo('mp')",
       d:"12套主题排版,一键复制或直接发进公众号草稿箱",
       how:"怎么做:交付页→「公众号排版」选主题;绑定公众号后可一键发草稿箱"},
   ];
   const undone = steps.filter(x=>!x.done).length;
   if(!undone) return "";
-  return `<div class="card" style="background:linear-gradient(120deg,#e8f0ff,#fffaf0 70%)">
-    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-      <h2 style="margin:0;flex:1;min-width:200px">🧰 发布三件套 · 一篇图文这样发出去(还差 ${undone} 步)</h2>
-      <span class="sub" style="cursor:pointer;text-decoration:underline" onclick="lsSet('trio_hide_'+(ME.tenant||''),1);render()">不再提示</span></div>
+  return `<section class="guide-sec">
+    <div class="guide-sec-head">
+      <h3>🧰 发布三件套 · 一篇图文这样发出去(还差 ${undone} 步)</h3>
+      <button type="button" class="link-btn dismiss" onclick="lsSet('trio_hide_'+(ME.tenant||''),1);GUIDE_FOLD_OPEN=true;render()">不再提示</button></div>
     <div class="grid3" style="grid-template-columns:repeat(auto-fill,minmax(250px,1fr));margin-top:10px">
       ${steps.map(x=>`<div class="topic" style="margin:0;cursor:pointer;${x.done?"opacity:.55":""}" onclick="${x.act}">
         <b>${x.done?"✅":x.e} ${x.t}</b><div class="sub" style="margin-top:3px">${x.d}${x.done?"":" →"}</div>
         ${x.done?"":`<div class="sub" style="margin-top:4px;opacity:.85">${x.how}</div>`}</div>`).join("")}
     </div>
-    <div class="sub" style="margin-top:8px">一条内容的完整出路:流水线写好 → 成片 → 审查 → 排版发出去;三步都在您已交付的工单上操作,不重复扣点</div></div>`;
+    <div class="sub" style="margin-top:8px">一条内容的完整出路:数字员工写好 → 成片 → 审查 → 排版发出去;三步都在您已交付的任务上操作,不重复扣点</div></section>`;
 }
-/* 「数字员工怎么用」教程卡:常驻首页的用人指南,可不再提示,重看引导时恢复 */
+/* 「数字员工怎么用」教程卡:收在「新手上路」里,可不再提示,重看引导时恢复 */
 function howtoCard(){
   if(!ME || !["owner","root"].includes(ME.role)) return "";
   if(lsGet("howto_hide_"+(ME.tenant||""))) return "";
   const steps = [
-    {e:"🧭", t:"① 挑人", d:"下面「行业市场」进您的行业,每个岗位一位专职员工;不知道找谁就用行业里的「找专家」搜索框,直接搜您遇到的事(比如\u201c顾客要退卡\u201d)"},
+    {e:"🧭", t:"① 挑人", d:"点「派活 → 找行业专家」进您的行业,每个岗位一位专职员工;不知道找谁就用行业里的「找专家」搜索框,直接搜您遇到的事(比如“顾客要退卡”)"},
     {e:"📋", t:"② 派活", d:"点员工→「派活」。一句话说清背景+想要什么结果,再把手头材料(数据/记录/照片)贴上;说得越具体,交付越准"},
     {e:"📬", t:"③ 收活", d:"8-15分钟出交付:结论+依据+能直接执行的清单。不满意就在同一单里继续追问,免费改到您满意为止"},
-    {e:"📚", t:"④ 沉淀", d:"交付自动进资产库;好内容一键存成企业知识,之后全部员工开工都会带上,越用越懂您的企业"},
+    {e:"📚", t:"④ 攒经验", d:"交付自动进资料库;好内容一键存进经验库,之后全部员工开工都会带上,越用越懂您的店"},
   ];
-  return `<div class="card" style="background:linear-gradient(120deg,#fdf3e3,#fffaf0 70%)">
-    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-      <h2 style="margin:0;flex:1;min-width:200px">📖 数字员工怎么用 · 四步用人法</h2>
-      <span class="sub" style="cursor:pointer;text-decoration:underline" onclick="lsSet('howto_hide_'+(ME.tenant||''),1);render()">不再提示</span></div>
+  return `<section class="guide-sec">
+    <div class="guide-sec-head">
+      <h3>📖 数字员工怎么用 · 四步用人法</h3>
+      <button type="button" class="link-btn dismiss" onclick="lsSet('howto_hide_'+(ME.tenant||''),1);GUIDE_FOLD_OPEN=true;render()">不再提示</button></div>
     <div class="grid3" style="grid-template-columns:repeat(auto-fill,minmax(250px,1fr));margin-top:10px">
       ${steps.map(x=>`<div class="topic" style="margin:0"><b>${x.e} ${x.t}</b>
         <div class="sub" style="margin-top:3px">${x.d}</div></div>`).join("")}
     </div>
-    <div class="sub" style="margin-top:8px">进阶玩法:🪑 大事拿不准就开 <a href="#/meetings" style="text-decoration:underline;font-weight:700">AI会议室</a>,多位员工提案互验;勾选「Agent 团队协作执行」还能让他们接力干活、队长整合交付 · 🧰 <a href="#/tools" style="text-decoration:underline;font-weight:700">工具箱</a>处理一次性小活 · ⏰ 定时任务让内容天天自动来</div></div>`;
+    <div class="sub" style="margin-top:8px">进阶玩法:🪑 大事拿不准就用 <a href="#/meetings" style="text-decoration:underline;font-weight:700">多位专家一起商量</a>,几位员工各出方案、互相挑错;勾选「多位专家接力完成」还能让他们接力干活、队长整合交付 · 🧰 <a href="#/tools" style="text-decoration:underline;font-weight:700">获客工具</a>处理一次性小活 · ⏰ 定时发布让内容天天自动来</div></section>`;
 }
 let MP_AUTO = null;   // trio 向导:进交付页后自动弹公众号排版(照 AV_OPEN_CLONE 的路子)
 function trioGo(step){
   const j = (STATE.jobs||[]).find(x=>x.status==="done");
-  if(!j){ toast("先发一单内容,交付后就能一键成片/排版"); location.hash="#/new"; return; }
+  if(!j){ toast("先下达一个内容任务,交付后就能一键成片/排版"); location.hash="#/new"; return; }
   if(step==="mp") MP_AUTO = j.id;
   location.hash = "#/delivery/"+j.id;
 }
-/* 「更多」菜单里的「重看新手引导」:不是真页面,清掉两张引导卡的「不再提示」标记后回办公室。
-   借用 routes 机制(菜单项统一是 #/xxx 链接);改 hash 后本次 render 会因 hash 变化自动中止,由 hashchange 重新渲染办公室 */
+/* 「我的 → 新手引导重看」:不是真页面,清掉三块引导的「不再提示」标记后回「今天」并展开「新手上路」。
+   借用 routes 机制(入口统一是 #/xxx 链接);改 hash 后本次 render 会因 hash 变化自动中止,由 hashchange 重新渲染「今天」 */
 function guideReset(){
   try{
   localStorage.removeItem("ob_hide_"+((ME&&ME.tenant)||""));
@@ -1406,7 +1552,8 @@ function guideReset(){
   // 四步都完成时引导卡默认不渲染;点了"重看"就强制展示一次完成态
   localStorage.setItem("ob_force_"+((ME&&ME.tenant)||""),"1");
   }catch(_){}   // 存储被禁用时引导卡本来就不会被隐藏,无需处理
-  toast("新手引导已恢复,回到办公室即可重看");
+  GUIDE_FOLD_OPEN = true;
+  toast("新手引导已恢复,在「今天」页的「新手上路」里");
   location.hash = "#/";
 }
 function obCard(){
@@ -1414,13 +1561,13 @@ function obCard(){
   if(lsGet("ob_hide_"+(ME.tenant||""))) return "";
   const su = STATE.setup||{};
   const steps = [
-    {done:su.profile, t:"① 建人设档案", h:"#/profiles",
+    {done:su.profile, t:"① 建品牌人设", h:"#/profiles",
       d:"把企业介绍、品牌调性和两三篇您写过的东西喂给AI",
       why:"为什么:有了它,产出才像您本人写的,不是千篇一律的通稿",
       how:"怎么做:点进去→粘贴企业介绍+往期文章→保存,约2分钟"},
-    {done:su.first_job, t:"② 发出第一单", h:"#/new", pts:`${META?.job_points??18} 点`,
-      d:"发一单真实内容,看10个工位流水线直播出稿",
-      why:"为什么:跑通一单您就知道整套团队怎么干活、交付长什么样",
+    {done:su.first_job, t:"② 派出第一个任务", h:"#/new", pts:`${META?.job_points??18} 点`,
+      d:"发一个真实的内容任务,看 10 位数字员工一步步接力写出来",
+      why:"为什么:跑通一次您就知道整套团队怎么干活、交付长什么样",
       how:"怎么做:选方向和模板→提交→8-15分钟收成品,全程可看"},
     {done:su.wechat, t:"③ 打通微信", h:"#/channels",
       d:"绑定公众号草稿箱或企业微信群机器人",
@@ -1429,21 +1576,21 @@ function obCard(){
     {done:su.clone, t:"④ 克隆您的声音", h:"#/avatar", pts:`${META?.voice_clone_points??9} 点`,
       d:"录30秒话或传一段清晰人声",
       why:"为什么:以后所有视频都用您的原声配音,不是机器人腔",
-      how:"怎么做:数字人摄影棚→声音克隆→跟着念一段文字即可"},
+      how:"怎么做:数字人视频→声音克隆→跟着念一段文字即可"},
   ];
   const undone = steps.filter(x=>!x.done).length;
   const forced = lsGet("ob_force_"+(ME.tenant||""));
   if(!undone && !forced) return "";
   if(!undone && forced){
     lsDel("ob_force_"+(ME.tenant||""));
-    return `<div class="card" style="background:linear-gradient(120deg,#e7f6ec,#fffaf0 70%)">
-      <h2 style="margin:0">🎉 开工四步已全部完成</h2>
-      <div class="sub" style="margin-top:6px">配置齐了:人设、首单、微信通知、原声克隆都已就绪。日常从「➕ 下达新任务」或「⏰ 定时任务」开工即可。</div></div>`;
+    return `<section class="guide-sec">
+      <h3>🎉 开工四步已全部完成</h3>
+      <div class="sub" style="margin-top:6px">配置齐了:品牌人设、首个任务、微信通知、原声克隆都已就绪。日常从「派活 → 下达任务」或「获客 → 定时发布」开工即可。</div></section>`;
   }
-  return `<div class="card" style="background:linear-gradient(120deg,#e8f7ee,#fffaf0 70%)">
-    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-      <h2 style="margin:0;flex:1;min-width:200px">🚀 开工四步(还差 ${undone} 步)</h2>
-      <span class="sub" style="cursor:pointer;text-decoration:underline" onclick="lsSet('ob_hide_'+(ME.tenant||''),1);render()">不再提示</span></div>
+  return `<section class="guide-sec">
+    <div class="guide-sec-head">
+      <h3>🚀 开工四步(还差 ${undone} 步)</h3>
+      <button type="button" class="link-btn dismiss" onclick="lsSet('ob_hide_'+(ME.tenant||''),1);GUIDE_FOLD_OPEN=true;render()">不再提示</button></div>
     <div class="grid3" style="grid-template-columns:repeat(auto-fill,minmax(250px,1fr));margin-top:10px">
       ${steps.map(x=>`<a href="${x.h}" class="topic" style="margin:0;display:block;text-decoration:none;${x.done?"opacity:.55":""}">
         <b>${x.done?"✅":"⬜"} ${x.t}</b>${x.pts?` <span class="sub">${esc(x.pts)}</span>`:""}
@@ -1451,41 +1598,41 @@ function obCard(){
         ${x.done?"":`<div class="sub" style="margin-top:4px;opacity:.85">${x.why}</div>
         <div class="sub" style="margin-top:2px;opacity:.85">${x.how}</div>`}</a>`).join("")}
     </div>
-    <div class="sub" style="margin-top:8px">试用额度有限?②必做,其余可开通后再补,不影响先跑通第一单</div></div>`;
+    <div class="sub" style="margin-top:8px">试用额度有限?②必做,其余可开通后再补,不影响先跑通第一个任务</div></section>`;
 }
 function jobRow(j){
   const stn = META.stations[j.current_idx];
   const dots = (j.stations||[]).map((st,i)=>{
     const s = META.stations[i];
     const eff = st || (i===j.current_idx && j.status==="running" ? "running" : "");
-    return `<span class="dot ${eff}" title="工位${i+1} ${s?s.name:""}:${RUN_LABEL[eff]||"未开始"}"></span>`;
+    return `<span class="dot ${eff}" title="步骤${i+1} ${s?s.name:""}:${RUN_LABEL[eff]||"未开始"}"></span>`;
   }).join("");
   return `<div class="jobrow" onclick="location.hash='#/job/${j.id}'">
     <span style="font-size:22px">${stn?stn.emoji:"📦"}</span>
     <div class="t">#${j.id} ${esc(j.title!=="(未产出标题)"?j.title:j.brief.direction)}
       <div class="sub" style="font-weight:400">${esc(j.brief.template||"")} · ${esc(MODE_LABEL[j.mode]||j.mode)} · ${(j.brief.platforms||[]).map(esc).join("/")}</div></div>
     <div class="dots">${dots}</div>
-    <span class="sub">工位${j.current_idx+1}/10 ${stn?stn.name:""}</span>
+    <span class="sub">步骤${j.current_idx+1}/10 ${stn?stn.name:""}</span>
     <span class="pill ${j.status}">${ST_LABEL[j.status]||j.status}</span>
     ${isAdmin()?`<button class="btn sm" style="padding:2px 8px" title="移入回收站" onclick="event.stopPropagation();deleteJob(${j.id})">🗑</button>`:""}</div>`;
 }
 async function deleteJob(id){
   const j = (STATE.jobs||[]).find(x=>x.id===id);
-  const activeMsg = j && !["done","cancelled","failed"].includes(j.status) ? "该工单还在进行中,删除会先停工。" : "";
-  if(!await uiConfirm(`${activeMsg}把工单 #${id} 移入回收站?\n记录与交付物会保留，可从回收站恢复。`,{
+  const activeMsg = j && !["done","cancelled","failed"].includes(j.status) ? "该任务还在进行中,删除会先停工。" : "";
+  if(!await uiConfirm(`${activeMsg}把任务 #${id} 移入回收站?\n记录与交付物会保留，可从回收站恢复。`,{
     title:"移入回收站",confirmText:"移入回收站"
   })) return;
   try{
     await api(`/jobs/${id}`,{method:"DELETE"});
-    toast("🗑 工单已移入回收站");
+    toast("🗑 任务已移入回收站");
     if(location.hash.startsWith(`#/job/${id}`)||location.hash.startsWith(`#/delivery/${id}`)) location.hash="#/";
     else render();
   }catch(e){ toast("删除失败:"+e.message, true); }
 }
 
 /* ---------- V42:可恢复回收站 ---------- */
-const TRASH_KIND_LABEL = {job:"内容工单",task:"数字员工任务",knowledge:"知识沉淀",avatar:"数字人任务",
-  profile:"人设档案",asset:"资产"};
+const TRASH_KIND_LABEL = {job:"内容任务",task:"数字员工任务",knowledge:"知识沉淀",avatar:"数字人任务",
+  profile:"品牌人设",asset:"资产"};
 let TRASH_ITEMS=[];
 async function trashView(offset=0){
   if(!isAdmin()){ $("#main").innerHTML='<div class="empty">需要企业主账号权限</div>'; return; }
@@ -1498,7 +1645,7 @@ async function trashView(offset=0){
   $("#main").innerHTML=`<div class="card" style="background:linear-gradient(120deg,#f4edde,#fffaf0)">
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <div style="flex:1;min-width:220px"><h2 style="margin:0">🗑 回收站</h2>
-        <div class="sub" style="margin-top:5px">误删的工单、员工任务、知识沉淀、资产、人设档案和数字人任务可在这里恢复；交付物不会在移入回收站时被销毁,内容<b>长期保留、暂无自动清理</b>。含敏感客户信息的记录可在此「⛔ 彻底删除」,连同交付文件一并销毁。</div></div>
+        <div class="sub" style="margin-top:5px">误删的内容任务、员工任务、经验、资料、品牌人设和数字人任务可在这里恢复；交付物不会在移入回收站时被销毁,内容<b>长期保留、暂无自动清理</b>。含敏感客户信息的记录可在此「⛔ 彻底删除」,连同交付文件一并销毁。</div></div>
       <button class="btn" onclick="trashView()">↻ 刷新</button></div>
     ${data.truncated?`<div class="notice">当前已展示 ${rows.length} 条，下面还能加载更早记录。</div>`:""}</div>
   <div class="card">${rows.length?rows.map(item=>`<div class="topic" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
@@ -1545,7 +1692,7 @@ async function trashPurge(kind,id,btn){
 const TC_PAGE_SIZE=100;
 let TC_DATA = null, TC_DATA_Q = "", TC_STATUS = "open", TC_KIND = "all", TC_QUERY = "", TC_LOADING_MORE = false;
 let TC_REQUEST_SEQ = 0, TC_SEARCH_TIMER = null;
-const TC_KIND_LABEL = {expert:"数字员工任务",content:"内容工单",meeting:"AI会议",avatar:"数字人视频",
+const TC_KIND_LABEL = {expert:"数字员工任务",content:"内容任务",meeting:"AI会议",avatar:"数字人视频",
   video:"图文成片",tool:"营销工具",publish:"发布任务",wechat:"公众号草稿投递"};
 function tcPill(group){ return group==="done"?"done":group==="failed"?"failed":
   group==="waiting"?"awaiting_review":group==="cancelled"?"cancelled":"running"; }
@@ -1641,7 +1788,7 @@ function tcStatusCard(key,emoji,label,n,color){
 function tcNewButton(){
   if(canWork("content")) return `<a class="btn pri" href="#/new">➕ 派一个任务</a>`;
   if(canWork("avatar")) return `<a class="btn pri" href="#/avatar">➕ 新建数字人任务</a>`;
-  return `<a class="btn pri" href="#/">➕ 去办公室找员工派活</a>`;
+  return `<a class="btn pri" href="#/experts">➕ 去找行业专家派活</a>`;
 }
 function taskCenterDraw(){
   const d=TC_DATA||{counts:{},items:[],kind_counts:{}}, c=d.counts||{}, rows=tcVisibleItems();
@@ -1650,7 +1797,7 @@ function taskCenterDraw(){
   const hasMore = d.has_more===true || (d.has_more===undefined && d.truncated===true);
   $("#main").innerHTML = `<div class="card" style="background:linear-gradient(120deg,#fff2bd,#fffaf0 65%)">
     <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-      <div style="flex:1;min-width:240px"><h2 style="font-size:22px;margin:0">📋 任务中心</h2>
+      <div style="flex:1;min-width:240px"><h2 style="font-size:22px;margin:0">📦 派出去的活</h2>
         <div class="sub" style="margin-top:5px">您派出去的活都在这里。先看谁正在干、卡在哪里，再点开任务或追到它的生成来源。</div></div>
       ${tcNewButton()}</div></div>
   <div class="grid3 tc-stats" style="grid-template-columns:repeat(auto-fit,minmax(145px,1fr));margin-bottom:18px">
@@ -1670,7 +1817,7 @@ function taskCenterDraw(){
       <span class="tag" id="tc-count">${filteredTotal} 条</span>${hasMore?`<span class="sub">已加载 ${d.items.length} / ${filteredTotal} 条</span><button class="btn sm" id="tc-load-more" onclick="tcLoadMore(this)">加载更早任务</button>`:""}
       <button class="btn sm" style="margin-left:auto" onclick="tasksView()">↻ 刷新</button></div>
     ${TC_QUERY.trim()?`<div class="notice" style="margin:0 0 9px">🔍 已按「${esc(TC_QUERY.trim())}」<b>全局搜索</b>全部历史记录,命中 ${c.all||0} 条${hasMore?",下方还有更多可加载":""}。</div>`:""}
-    <div id="tc-list">${rows.length?rows.map(tcRow).join(""):`<div class="empty">${(c.all||0)===0?`还没有任务。<div class="actions" style="margin-top:10px;justify-content:center"><a class="btn sm pri" href="#/new">✍️ 发第一单内容</a><a class="btn sm" href="#/">🧑‍🔧 找行业专家派活</a></div>`:"这个筛选下没有任务。换个状态或关键词看看。"}</div>`}</div>
+    <div id="tc-list">${rows.length?rows.map(tcRow).join(""):`<div class="empty">${(c.all||0)===0?`还没有任务。<div class="actions" style="margin-top:10px;justify-content:center"><a class="btn sm pri" href="#/new">✍️ 下达第一个内容任务</a><a class="btn sm" href="#/experts">🧑‍🔧 找行业专家派活</a></div>`:"这个筛选下没有任务。换个状态或关键词看看。"}</div>`}</div>
   </div>`;
 }
 function tcRow(x){
@@ -2267,7 +2414,7 @@ function soloTab(s,e){
           <span class="sub">不再次扣点 · 还可重试 ${t.free_retries_remaining} 次</span>`
           :`<span class="sub">免费重试次数已用完</span>`}</div></div>${taskRevisionPanel(t,"solo")}`:""}</div>`;
   }
-  return `<div class="notice" style="margin-top:0">📋 <b>不走流水线,单独用 ${esc(s.name)}</b>:一句话派活,TA 独立交付(自动进资产库)。适合只需要 ${esc(s.name)} 完成一个明确环节的任务。</div>
+  return `<div class="notice" style="margin-top:0">📋 <b>不走整套制作流程,单独用 ${esc(s.name)}</b>:一句话派活,TA 独立交付(自动进资产库)。适合只需要 ${esc(s.name)} 完成一个明确环节的任务。</div>
   ${taskGuideCard(guide)}
   <label>任务内容 *</label>
   <textarea id="solo-dir" placeholder="${esc(guide.task_placeholder)}"></textarea>
@@ -2354,7 +2501,7 @@ function methodTab(s,e){
   return `
   <div class="flow">
     <div class="fnode"><b>📥 接单输入</b><div class="sub" style="margin-top:3px">
-      ${prev?`来自工位${s.idx}「${esc(prev.name)}」的产出`:"老板的 Brief(内容方向/平台/人设)"} + 老板 Brief + 人设档案 + 公司知识沉淀</div></div>
+      ${prev?`来自步骤${s.idx}「${esc(prev.name)}」的产出`:"老板的需求(内容方向/平台/人设)"} + 老板的需求 + 品牌人设 + 公司经验库</div></div>
     <div class="farrow">⬇️</div>
     <div class="fnode" style="border-color:${s.color}"><b>🧰 逐项运用 ${caps.length} 项能力</b>
       <div class="capgrid">${caps.map(c=>`<span class="chip on" title="${esc(c.desc)}">${c.emoji} ${esc(c.name)}</span>`).join("")||`<span class="sub">全部能力被停用了!</span>`}</div>
@@ -2366,9 +2513,9 @@ function methodTab(s,e){
     <div class="fnode"><b>🚦 放行方式</b><div class="sub" style="margin-top:3px">${appr}</div></div>
     ${s.idx===7?`<div class="farrow">⬇️</div><div class="fnode" style="border-color:#ef476f"><b>🛡️ 质检关卡</b><div class="sub" style="margin-top:3px">发布前自动质检,高风险内容会被拦下等老板定夺</div></div>`:""}
     <div class="farrow">⬇️</div>
-    <div class="fnode" style="opacity:.85"><b>➡️ 交棒</b><div class="sub" style="margin-top:3px">${next?`交给工位${next.idx+1}「${esc(next.name)}」继续`:"全部完成,进交付包,复盘经验自动写入沉淀库"}</div></div>
+    <div class="fnode" style="opacity:.85"><b>➡️ 交棒</b><div class="sub" style="margin-top:3px">${next?`交给步骤${next.idx+1}「${esc(next.name)}」继续`:"全部完成,进交付包,复盘经验自动写入沉淀库"}</div></div>
   </div>
-  <div class="sub" style="margin-top:10px">工作时的每一步(检索/读网页/写了多少字)都会实时打在办公室房间和工单页的工作日志里。</div>`;
+  <div class="sub" style="margin-top:10px">工作时的每一步(检索/读网页/写了多少字)都会实时显示在员工卡片和任务页的工作日志里。</div>`;
 }
 
 function skillsTab(s,e){
@@ -2588,7 +2735,7 @@ function specTaskTab(e){
           ${cur.thread?.status==="standalone"?`<button class="btn sm" onclick="taskEdit(${cur.id})">✏️ 编辑</button>`:""}
           <a class="btn sm" href="/api/tasks/${cur.id}/export.pdf">⬇️ PDF</a>
           <a class="btn sm" href="/api/tasks/${cur.id}/export.docx">⬇️ Word</a>
-          <button class="btn sm" onclick="taskToKnow(${cur.id})">📚 存入沉淀库</button>`:""}
+          <button class="btn sm" onclick="taskToKnow(${cur.id})">📚 存入经验库</button>`:""}
         <button class="btn sm" onclick="SPEC_TASK=null;drawSpec()">收起</button></div>
       <div class="sub">任务书:${esc(cur.brief?.direction||"")}</div>
       ${["queued","running"].includes(cur.status)?`<div class="steps" id="spec-steps" style="margin-top:8px">${(cur.steps||[]).map((s,i)=>stepRow(s,i+1)).join("")||`<div class="step"><span class="ic">⏳</span><span class="lb">专家上线中…</span></div>`}</div>`:""}
@@ -3112,7 +3259,7 @@ async function pauseJob(id){
   catch(e){ toast(e.message); }
 }
 async function resumeJob(id){
-  try{ await api(`/jobs/${id}/resume`,{method:"POST"}); toast("▶️ 已恢复,被打断的工位自动重跑"); render(); }
+  try{ await api(`/jobs/${id}/resume`,{method:"POST"}); toast("▶️ 已恢复,被打断的步骤自动重跑"); render(); }
   catch(e){ toast(e.message); }
 }
 
@@ -3214,7 +3361,7 @@ async function newBrief(){
   $("#main").innerHTML = `<div class="card" id="brief-form" style="max-width:820px;margin:0 auto">
     <h2>➕ 下达任务</h2>
     <div id="brief-draft-notice"></div>
-    <div class="notice" style="margin-top:8px">👔 <b>老板只需要三步</b>:①选行业 ②说方向 ③点提交。剩下的交给流水线:趋势官找热点 → 情报员查资料 → 拆解师学爆款 → 撰稿改稿配图封面 → 质检 → 各平台发布包。关键节点会停下来等您拍板。</div>
+    <div class="notice" style="margin-top:8px">👔 <b>老板只需要三步</b>:①选行业 ②说方向 ③点提交。剩下的交给制作流程:趋势官找热点 → 情报员查资料 → 拆解师学爆款 → 撰稿改稿配图封面 → 质检 → 各平台发布包。关键节点会停下来等您拍板。</div>
     <label>① 行业/赛道(内容会贴着这个行业做:渠道、黑话、案例、对标)</label>
     <div class="chips" id="b-ind">${META.industries.map((t,i)=>`<span class="chip${i===0?" on":""}" onclick="pick(this)">${t}</span>`).join("")}</div>
     <input id="b-ind-c" value="${esc(PRE?.industry||"")}" placeholder="✏️ 或自己输入行业/赛道(如:宠物烘焙、二手奢侈品)——填了就用您输入的" style="margin-top:6px">
@@ -3222,7 +3369,7 @@ async function newBrief(){
     <textarea id="b-dir" placeholder="例:${esc(BRIEF_EXAMPLES[0])}">${esc(PRE?.direction||"")}</textarea>
     ${PRE?`<div class="notice green">🔥 来自「今日必发」:${esc(PRE.why||"")}</div>`:""}
     <div class="chips" style="margin-top:4px">${BRIEF_EXAMPLES.map(x=>`<span class="chip" style="font-size:11px" onclick="$('#b-dir').value=this.textContent;scheduleBriefDraftSave()">${esc(x)}</span>`).join("")}</div>
-    <label>③ 内容类型 <span class="sub">(决定整条流水线的打法)</span></label>
+    <label>③ 内容类型 <span class="sub">(决定整个制作流程的打法)</span></label>
     <div class="chips" id="b-tpl">${META.brief_templates.map((t,i)=>`<span class="chip${i===1?" on":""}" onclick="pick(this)" title="${{蹭热点:"追当下热点,时效优先",日更选题:"从趋势里挑题,稳定日更",产品软文:"带货种草,卖点前置",观点输出:"独到观点,人设优先",教程干货:"手把手教程,信息密度高",二创改写:"对标内容二次创作"}[t]||t}">${t}</span>`).join("")}</div>
     <input id="b-tpl-c" value="${esc(PRE?.template||"")}" placeholder="✏️ 或自己输入内容类型(如:门店探访日记、老板问答)——填了就用您输入的" style="margin-top:6px">
     <label>④ 配图 · 张数</label>
@@ -3240,14 +3387,14 @@ async function newBrief(){
       ${DY_ALL.map((s,i)=>`<option value="${i}">${esc(s.name)}${s.preset?" · 预设":" · 自定义"}</option>`).join("")}</select></div>
     </div>
     <div class="row">
-      <div><label>⑥ 用哪个账号人设 <span class="sub">(写出来像您本人)</span></label><select id="b-profile"><option value="">(不使用人设档案)</option>
+      <div><label>⑥ 用哪个账号人设 <span class="sub">(写出来像您本人)</span></label><select id="b-profile"><option value="">(不使用品牌人设)</option>
         ${profiles.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join("")}</select>
         <div class="sub" style="margin-top:4px">还没档案?<a href="#/profiles" style="text-decoration:underline">30秒去建一个 →</a></div></div>
       <div><label>⑦ 您想管多少 <span class="sub">(随时可打断)</span></label><select id="b-mode">
         <option value="copilot">关键审批(推荐)— 选题/初稿/视觉/发布 4 处等您拍板</option>
         <option value="fullauto">完全托管 — 一停不停,员工接力干到交付(质检仍生效)</option>
         <option value="autopilot">全自动 — 只在发布前终审等您</option>
-        <option value="manual">逐站审批 — 10 个工位每一步都等您</option></select></div>
+        <option value="manual">逐站审批 — 10 个步骤每一步都等您</option></select></div>
     </div>
     <details style="margin-top:12px"><summary class="sub" style="cursor:pointer">📎 高级选项:参考链接 / 附加素材 / 演绎稿(选填)</summary>
       <label>参考链接</label><input id="b-ref" placeholder="热点新闻/对标文章链接,情报员会精读" value="${esc(PRE?.ref_link||"")}">
@@ -3262,7 +3409,7 @@ async function newBrief(){
   </div>`;
   const restored=!PRE&&restoreBriefDraft();
   if(restored) $("#brief-draft-notice").innerHTML=`<div class="notice green" role="status">
-    已恢复您上次未提交的 Brief 草稿。
+    已恢复您上次未提交的需求草稿。
     <button class="btn sm" type="button" onclick="discardBriefDraft()">清空草稿</button></div>`;
   const form=$("#brief-form");
   form.addEventListener("input",scheduleBriefDraftSave,true);
@@ -3671,11 +3818,11 @@ async function deliveryView(id){
 /* ---------- 人设档案 ---------- */
 async function profilesView(){
   const ps = STATE.profiles;
-  $("#main").innerHTML = `<div class="card"><h2>🎭 账号人设档案</h2>
-    <div class="sub">定义"为谁生产"。人设会注入全流水线:选题偏好、撰稿、文风固定、视觉规范。</div>
+  $("#main").innerHTML = `<div class="card"><h2>🎭 品牌人设</h2>
+    <div class="sub">定义"为谁生产"。人设会用在整个制作流程里:选题偏好、撰稿、文风固定、视觉规范。</div>
     <div class="actions"><button class="btn pri" onclick="newProfile()">➕ 新建档案</button>
       ${isAdmin()?`<a class="btn" href="/api/records/export.xlsx?kind=profiles">⬇️ 导出全部档案(含语料)</a>`:""}</div></div>
-  <div id="plist">${ps.map(profileCard).join("")||`<div class="empty">还没有人设档案</div>`}</div>`;
+  <div id="plist">${ps.map(profileCard).join("")||`<div class="empty">还没有品牌人设</div>`}</div>`;
 }
 function profileCard(p){
   const s = p.persona||{};
@@ -3691,7 +3838,7 @@ function profileCard(p){
 function profileForm(p){
   const s = (p&&p.persona)||{};
   return `<div class="card pform" style="max-width:780px">
-    <h2>${p?"编辑":"新建"}人设档案</h2>
+    <h2>${p?"编辑":"新建"}品牌人设</h2>
     <label>账号名称 *</label><input id="p-name" value="${esc(p?.name||"")}" placeholder="如:阿磊聊AI">
     <div class="row">
       <div><label>账号定位</label><input id="p-pos" value="${esc(s.positioning||"")}" placeholder="如:普通人视角的 AI 工具测评"></div>
@@ -3717,7 +3864,7 @@ async function loadProfileFiles(input){
 }
 function closeProfileForms(){ document.querySelectorAll(".pform").forEach(f=>f.remove()); }
 async function profileDel(id,name){
-  if(!await uiConfirm(`把人设档案「${name}」移入回收站?\n历史作品语料会保留,可从回收站恢复。正在跑的工单不受影响。`,{
+  if(!await uiConfirm(`把品牌人设「${name}」移入回收站?\n历史作品语料会保留,可从回收站恢复。正在跑的任务不受影响。`,{
     title:"移入回收站",confirmText:"移入回收站"
   })) return;
   try{ await api("/profiles/"+id,{method:"DELETE"}); toast("已移入回收站"); SHELL_DIRTY=true; render(); }
@@ -3771,7 +3918,7 @@ async function assetsView(){
   const rows=assetContract.items;
   const shown = rows;
   const action = a => ASSET_TAB==="topic"
-    ? `<button class="btn sm" onclick="fromTopic(${a.id})">🚀 发起工单</button>`
+    ? `<button class="btn sm" onclick="fromTopic(${a.id})">🚀 用它下达任务</button>`
     : ASSET_TAB==="final" ? `<a class="btn sm" href="#/delivery/${a.job_id}">交付包</a>`
     : `<button class="btn sm" onclick="openReport(${a.payload.task_id})">📄 看报告</button>`;
   const title = a => ASSET_TAB==="report"
@@ -3804,7 +3951,7 @@ async function assetsView(){
           <button class="btn sm" onclick="reAnalyze('assets',${a.id},this)">🔁 重评</button>
           ${isAdmin()?`<button class="btn sm bad" onclick="assetDel(${a.id})" title="移入回收站">🗑</button>`:""}</div>
       </div>`).join("")}</div>`
-      :`<div class="empty">空的。汽车、美容、酒店等行业专家交付的报告会沉淀到这里;工具箱的报告在工具箱当页看,点「💾 沉淀」的会进沉淀库。</div>`)
+      :`<div class="empty">空的。汽车、美容、酒店等行业专家交付的报告会沉淀到这里;获客工具的报告在工具页里看,点「💾 存进经验库」的会进经验库。</div>`)
     : shown.length?`<div class="dimwrap"><table class="dimtable"><thead><tr>
       <th>标题</th><th>类别</th><th>平台</th><th>行业</th><th>主题</th><th>关键词</th>
       <th>质量</th><th>匹配</th><th>复用</th><th>时效</th><th>情绪</th><th>摘要</th><th>操作</th>
@@ -3815,7 +3962,7 @@ async function assetsView(){
         <button class="btn sm" onclick="reAnalyze('assets',${a.id},this)" title="重新评估">🔁</button>
         ${isAdmin()?`<button class="btn sm bad" onclick="assetDel(${a.id})" title="移入回收站">🗑</button>`:""}</td>
     </tr>`).join("")}</tbody></table></div>`
-    :`<div class="empty">空的。${{topic:"趋势官没被选中的选题会自动沉淀到这里",final:"完成的工单会沉淀到这里",report:"汽车、美容、酒店等行业专家交付的报告会沉淀到这里"}[ASSET_TAB]}</div>`}
+    :`<div class="empty">空的。${{topic:"趋势官没被选中的选题会自动沉淀到这里",final:"完成的内容任务会存到这里",report:"汽车、美容、酒店等行业专家交付的报告会沉淀到这里"}[ASSET_TAB]}</div>`}
     ${listPager(assetContract,"assets")}
   </div>`;
 }
@@ -3832,7 +3979,7 @@ async function openReport(tid){
     <div class="pbody">${taskBody(t)}</div></div></div>`);
 }
 async function assetDel(id){
-  if(!await uiConfirm("把这条资产移入回收站? 之后可以恢复;关联工单的交付物不受影响。",{
+  if(!await uiConfirm("把这条资产移入回收站? 之后可以恢复;关联任务的交付物不受影响。",{
     title:"移入回收站",confirmText:"移入回收站"
   })) return;
   try{ await api("/assets/"+id,{method:"DELETE"}); toast("已移入回收站"); render(); }
@@ -3979,7 +4126,7 @@ function employeeLearningPanel(employee,{readonly=false,bindingScope="spec"}={})
     <div class="actions" style="margin-top:10px">
       <span class="tag ${status==="activated"?"green":""}">${esc(stateText)}</span>
       ${readonly?`<span class="tag readonly">只读</span>`:`<button class="btn pri" ${canStart?"":"disabled"} onclick="employeeStartLearning(${Number(employee?.idx)||0},${bindingExpr})">${employee?.learning?`<span class="spin"></span> 研究中…`:"🔎 发起证据研究"}</button>`}
-      ${!readonly&&isBoss()?`<button class="btn" onclick="openEmployeeLearningBatchManager()">🏭 修理厂 · 全员进修</button>`:""}
+      ${!readonly&&isBoss()?`<button class="btn" onclick="openEmployeeLearningBatchManager()">🏭 员工进修管理 · 全员进修</button>`:""}
       ${status==="awaiting_approval"&&!readonly?`<button class="btn blue" ${hasReviewBinding?"":"disabled"} onclick="employeeApproveLearning(${Number(latest.run_id||latest.id)||0},${cp(bindingScope)},${Number(latest.batch_id)||0},${Number(employee?.idx)||0})">✅ 审核并激活</button>`:""}
       ${status==="awaiting_approval"&&isBoss()?`<button class="btn bad" ${hasReviewBinding?"":"disabled"} onclick="employeeRejectLearning(${Number(latest.run_id||latest.id)||0},${cp(bindingScope)},${Number(latest.batch_id)||0},${Number(employee?.idx)||0})">✕ 拒绝提案</button>`:""}
     </div>
@@ -4204,8 +4351,8 @@ function drawEmployeeLearningBatchManager(){
       ${employeeLearningBatchReviewList(batch)}</div>`;}).join("");
   document.body.insertAdjacentHTML("beforeend",`<div class="overlay" id="employee-learning-batch-dialog" role="presentation" onclick="if(event.target===this)closeEmployeeLearningBatchManager()">
     <div class="panel" role="dialog" aria-modal="true" aria-labelledby="employee-learning-batch-title" style="max-width:900px">
-      <div class="phead"><div style="flex:1"><h2 id="employee-learning-batch-title" style="margin:0">🏭 修理厂 · 全员进修</h2>
-        <div class="sub">把行业专属员工送进修理厂做全网证据研究。先预览四元组和预算，确认后再开工；暂停不会打断已在核验的来源。</div></div>
+      <div class="phead"><div style="flex:1"><h2 id="employee-learning-batch-title" style="margin:0">🏭 员工进修管理 · 全员进修</h2>
+        <div class="sub">把行业专属员工送去进修,做全网证据研究。先预览四元组和预算，确认后再开工；暂停不会打断已在核验的来源。</div></div>
         <button class="btn sm" onclick="closeEmployeeLearningBatchManager()">✕</button></div>
       <div class="pbody"><div class="grid2"><label>进修范围<select id="learning-batch-scope" onchange="employeeLearningBatchScopeChanged(this.value)">
         ${EMPLOYEE_LEARNING_INDUSTRIES.map(([value,label])=>`<option value="${esc(value)}" ${state.scope===value?"selected":""}>${esc(label)}</option>`).join("")}</select></label>
@@ -5100,7 +5247,7 @@ async function companyView(){
   const p = c.profile || {};
   const f = (k,label,ph)=>`<label>${esc(label)}</label><input id="cp-${k}" value="${esc(p[k]||"")}" placeholder="${esc(ph)}">`;
   $("#main").innerHTML = `<div class="card"><h2>🏢 企业档案</h2>
-    <div class="sub">把企业介绍/品牌手册/产品说明/话术规范粘进来,点「提炼并同步」——AI 会压成一份固定档案,<b>自动注入每一个数字员工</b>(内容工位 / 行业专家 / 圆桌会议),让他们产出更懂你的企业、更贴品牌调性、不踩表达禁忌。也会自动带上沉淀库里的企业知识。</div>
+    <div class="sub">把企业介绍/品牌手册/产品说明/话术规范粘进来,点「提炼并同步」——AI 会压成一份固定档案,<b>自动注入每一个数字员工</b>(内容团队 / 行业专家 / 专家商量),让他们产出更懂你的企业、更贴品牌调性、不踩表达禁忌。也会自动带上经验库里的企业知识。</div>
     ${c.injected?(c.filled>=(c.total_fields||7)
       ?`<div class="notice" style="background:#e7f6ec;border-color:#8fd3a6">✅ 企业档案已生效(7/7 项齐全),正注入全部数字员工</div>`
       :`<div class="notice" style="background:#fff3d6">🟡 企业档案部分生效:已填 ${c.filled}/${c.total_fields||7} 项。员工只知道已填的部分——<b>空着的字段(如调性/禁忌)不会凭空生效</b>,建议补全后重新保存。</div>`)
@@ -5177,7 +5324,7 @@ async function knowledgeView(){
   const rows=knowledgeContract.items;
   KNOW_CACHE = rows;
   const shown = rows;
-  $("#main").innerHTML = `<div class="card"><h2>📚 公司沉淀库</h2>
+  $("#main").innerHTML = `<div class="card"><h2>📚 公司经验库</h2>
     <div class="sub">交付自动沉淀 + 老板手记。每条自动做 <b>11 维评估</b>(类别/平台/行业/主题/关键词/质量/匹配/复用/时效/情绪/摘要);📌 置顶的会注入员工每次工作(<b>每次最多带 12 条、每条取前 800 字</b>,置顶优先)。</div>
     ${(n=>n>12?`<div class="notice red" style="margin-top:8px">📌 已置顶 ${n} 条,超过单次注入上限 <b>12 条</b>:每次开工只有最新置顶的 12 条会带上,建议把最关键的留在置顶、其余取消。</div>`:"")(rows.filter(k=>k.pinned).length)}
     ${listContractNotice(knowledgeContract,"沉淀")}
@@ -5301,7 +5448,7 @@ function schedRow(s,selected=false){
       <button class="btn sm" onclick="schedRunNow(${s.id})">▶️ 立即来一单</button>
       <button class="btn sm bad" onclick="schedDel(${s.id})">🗑</button></div>
     <div class="sub" style="margin-top:6px">方向:${esc(s.brief.direction||"")} · ${(s.brief.platforms||[]).map(esc).join("/")} · ${esc(MODE_LABEL[s.mode]||s.mode)}</div>
-    ${s.last_note?`<div class="sub" style="margin-top:3px">📝 ${esc(s.last_note).replace(/工单 #(\d+)/,'工单 <a href="#/job/$1" style="text-decoration:underline;font-weight:800">#$1</a>')}</div>`:""}
+    ${s.last_note?`<div class="sub" style="margin-top:3px">📝 ${esc(s.last_note).replace(/工单 #(\d+)/,'任务 <a href="#/job/$1" style="text-decoration:underline;font-weight:800">#$1</a>')}</div>`:""}
   </div>`;
 }
 function schedForm(s){
@@ -5315,7 +5462,7 @@ function schedForm(s){
   const anyPf = s && META.platforms.some(pfOn);
   $("#sform").innerHTML = `<div class="card" style="background:#fff6dc">
     <h3 style="margin-top:0">${s?`✏️ 编辑定时任务 #${s.id}`:"新建定时任务"}</h3>
-    ${s?"":`<div class="notice" style="margin-top:6px">💡 <b>定好主题,以后每天全自动</b>:到点自动走完整条流水线(<b>每次自动开工扣 ${META?.job_points??18}点</b>,点数不足自动暂停)。建议先跑两单手动任务,满意了再定时。</div>`}
+    ${s?"":`<div class="notice" style="margin-top:6px">💡 <b>定好主题,以后每天全自动</b>:到点自动走完整个制作流程(<b>每次自动开工扣 ${META?.job_points??18}点</b>,点数不足自动暂停)。建议先跑两单手动任务,满意了再定时。</div>`}
     <label>任务名</label><input id="s-name" value="${esc(s?.name||"")}" placeholder="如:每日行业选题">
     <label>行业/赛道</label>
     <div class="chips" id="s-ind">${META.industries.map((t,i)=>`<span class="chip${(anyInd?indOn(t):i===0)?" on":""}" onclick="pick(this)">${t}</span>`).join("")}</div>
@@ -5392,9 +5539,9 @@ async function schedToggle(id,enabled){
   try{ await api("/schedules/"+id,{method:"PUT",body:{enabled:!!enabled}}); render(); }catch(e){ toast(e.message); }
 }
 async function schedRunNow(id){
-  if(!await uiConfirm(`立即按该主题跑一单完整流水线,将扣 ${META?.job_points??18} 点?`,{okText:"🚀 开工",okClass:"pri"})) return;
+  if(!await uiConfirm(`立即按该主题按完整制作流程跑一次,将扣 ${META?.job_points??18} 点?`,{okText:"🚀 开工",okClass:"pri"})) return;
   try{ const r = await api(`/schedules/${id}/run-now`,{method:"POST"});
-    toast("已开工 → 工单 #"+r.job_id); location.hash="#/job/"+r.job_id;
+    toast("已开工 → 任务 #"+r.job_id); location.hash="#/job/"+r.job_id;
   }catch(e){ toast(e.message); }
 }
 async function schedDel(id){
@@ -6858,11 +7005,11 @@ async function meetingsView(mid){
     </label>
     <label style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;cursor:pointer">
       <input id="mt-team" type="checkbox" style="width:auto;margin-top:3px">
-      <span><b>🤝 Agent 团队协作执行</b><span class="sub" style="display:block">不再各干各的：成员按分工接力开工，每一棒自动拿到前面队友的交付内容，最后由队长把全部交付整合成一份最终交付包。适合需要多人共创一个成果的议题；包含在本次会议中，不重复扣点。</span></span>
+      <span><b>🤝 多位专家接力完成</b><span class="sub" style="display:block">不再各干各的：成员按分工接力开工，每一棒自动拿到前面队友的交付内容，最后由队长把全部交付整合成一份最终交付包。适合需要多人共创一个成果的议题；包含在本次会议中，不重复扣点。</span></span>
     </label>
     <div class="actions"><button class="btn pri" onclick="mtStart(this)">🎯 开会并收敛(每人1点)</button></div></div>
   ${cur?`<div class="card" style="background:#fffaf0"><h2>会议 #${cur.id} ${{queued:"排队",running:"🗣 进行中…",done:"✅ 已收口",failed:"中断"}[cur.status]||cur.status}
-    ${cur.team_execute?`<span class="tag" style="background:#e7d9ff;font-weight:900">🤝 Agent 团队</span>`:""}
+    ${cur.team_execute?`<span class="tag" style="background:#e7d9ff;font-weight:900">🤝 专家接力</span>`:""}
     ${cur.status==="done"?`<span style="float:right"><a class="btn sm" href="/api/meetings/${cur.id}/export.pdf">⬇️ PDF</a>
     <a class="btn sm" href="/api/meetings/${cur.id}/export.docx">⬇️ Word</a></span>`:""}</h2>
     <div class="sub" style="margin-bottom:6px">议题:${esc(cur.question)}</div>
@@ -6871,7 +7018,7 @@ async function meetingsView(mid){
     ${mtConsensus(cur)}
     ${mtStructured(cur)}
     ${mtBody(cur)}
-    ${(cur.actions||[]).length?`<div class="card" style="background:#fff;margin-top:12px"><h3 style="margin-top:0">${cur.team_execute?"🤝 Agent 团队分工 · 接力执行":"📋 已锁定行动 · 责任到人"}</h3>
+    ${(cur.actions||[]).length?`<div class="card" style="background:#fff;margin-top:12px"><h3 style="margin-top:0">${cur.team_execute?"🤝 专家分工 · 接力完成":"📋 已锁定行动 · 责任到人"}</h3>
       ${cur.team_execute?`<div class="sub" style="margin-bottom:6px">每一棒自动拿到前面队友的交付内容；最后一棒是队长整合，输出一份最终交付包。</div>`:""}
       ${cur.actions.map((a,i)=>`<div class="topic" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         ${cur.team_execute?`<span class="tag" style="background:${a.team_role==="integrate"?"#e7d9ff":"#ffe59a"};font-weight:900">${a.team_role==="integrate"?"🧩 队长整合":`第 ${i+1} 棒`}</span>`:""}
@@ -6989,7 +7136,7 @@ async function mtAssignAll(mid, btn){
 async function mtExecute(mid, btn){
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 正在启动任务…`;
   try{ const r=await api(`/meetings/${mid}/execute`,{method:"POST"});
-    toast(r.team?"🤝 Agent 团队已开工，接力进度看会议消息流":`已启动 ${r.task_ids.length} 个执行任务`); render();
+    toast(r.team?"🤝 专家接力已开工，接力进度看会议消息流":`已启动 ${r.task_ids.length} 个执行任务`); render();
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🚀 执行会议决定"; }
 }
 function mtOpenTask(tid){
@@ -7324,7 +7471,7 @@ async function censorView(){
       ${charSVG("#e63946","🛡️","idle",92)}
       <div style="flex:1;min-width:min(100%,240px)"><div class="sub" style="font-weight:800">🎬 内容生产部 · 合规审查部</div>
       <h2 style="margin:2px 0 0">🛡️ 审查官的工作台</h2>
-      <div class="sub" style="margin-top:5px">流水线质检关卡就是他;发布前把关(广告法/平台规范/敏感违禁),发布后复盘(数据判读/限流体检)。公众号、小红书等平台规范逐条对照,发草稿箱前会自动终审。</div></div>
+      <div class="sub" style="margin-top:5px">内容制作流程里的质检关就是他;发布前把关(广告法/平台规范/敏感违禁),发布后复盘(数据判读/限流体检)。公众号、小红书等平台规范逐条对照,发草稿箱前会自动终审。</div></div>
       <a class="btn sm" href="#/">← 回办公室</a></div></div>
   <div class="card">
     <div class="tabs">${tabs.map(([k,l])=>`<span class="tb ${CEN_TAB===k?"on":""}" onclick="CEN_TAB=${cp(k)};resetListPage('censor');resetListPage('publog');render()">${l}</span>`).join("")}</div>
@@ -7725,7 +7872,7 @@ async function toolRun(key, btn, fn){
 }
 function keepReport(title, md){
   api("/knowledge",{method:"POST",body:{title, content:md}})
-    .then(()=>toast("✅ 已沉淀到「📚 沉淀库」")).catch(e=>toast(e.message));
+    .then(()=>toast("✅ 已存进「📚 经验库」")).catch(e=>toast(e.message));
 }
 const TOOL_TABS = [["hot","🔥 今日必发"],["remix","🎞️ 视频混剪"],["pcal","📅 私域日历"],["bench","👀 竞品盯梢"],["warm","🚀 起号军师"],["leads","🎯 线索雷达"],["shot","📸 产品图/文案"],["vars","📣 口播矩阵"]];
 let TOOL_HISTORY_FILTER={kind:"",status:""};
@@ -7762,7 +7909,7 @@ async function toolHistory(offset=0){
 }
 async function toolsView(tab,preserveDraft=false){
   if(ME?.role==="tour"||!can("content")){
-    $("#main").innerHTML=`<div class="card"><h2>该页面需要内容生产权限</h2><div class="sub">当前账号不能使用营销工具箱。</div><div class="actions"><a class="btn" href="#/">返回办公室</a></div></div>`;
+    $("#main").innerHTML=`<div class="card"><h2>该页面需要内容生产权限</h2><div class="sub">当前账号不能使用获客工具。</div><div class="actions"><a class="btn" href="#/">返回办公室</a></div></div>`;
     return;
   }
   if(TOOL_TABS.some(([key])=>key===tab)) TS.tab=tab;
@@ -7858,7 +8005,7 @@ async function toolsView(tab,preserveDraft=false){
     <div id="pc-out" style="margin-top:10px">${c?pcalHtml(c):""}</div>`;
   } else if(TS.tab==="bench"){
     const b = TOOLS_META.bench||{targets:[]};
-    body = `<div class="sub">把要盯的对标账号加进来,<b>每周一上午</b>自动出《竞品盯梢周报》(3点/期,自动扣):对手做了什么+值得抄的作业,存进沉淀库并推微信。也可随时手动出一期。</div>
+    body = `<div class="sub">把要盯的对标账号加进来,<b>每周一上午</b>自动出《竞品盯梢周报》(3点/期,自动扣):对手做了什么+值得抄的作业,存进经验库并推微信。也可随时手动出一期。</div>
     <div id="bw-list">${(b.targets||[]).map(t=>bwRow(t)).join("")||bwRow()}</div>
     <div class="actions" style="margin-top:8px"><button class="btn" onclick="bwAdd()">➕ 加对标</button>
       <label style="display:inline-flex;align-items:center;font-weight:700;margin:0 8px"><input type="checkbox" id="bw-en" style="width:auto;margin-right:6px" ${b.enabled?"checked":""}>每周自动</label>
@@ -7866,7 +8013,7 @@ async function toolsView(tab,preserveDraft=false){
       <button class="btn pri" ${TS.busy.bench||TS.running?.bench?"disabled":""} onclick="bwRun(this)">📰 立即出一期(3点)</button></div>
     ${etaHint("bench","通常2-5分钟，最迟6分钟自动结束")}
     ${busyBar("bench","情报官正在逐个盯对标的近7天动态")}
-    <div class="sub" style="margin-top:6px">${b.last_run?`上次出报:${new Date(b.last_run*1000).toLocaleString("zh-CN")}(每周一自动出的那期在<a href="#/knowledge" style="text-decoration:underline">沉淀库</a>)`:""}</div>
+    <div class="sub" style="margin-top:6px">${b.last_run?`上次出报:${new Date(b.last_run*1000).toLocaleString("zh-CN")}(每周一自动出的那期在<a href="#/knowledge" style="text-decoration:underline">经验库</a>)`:""}</div>
     <div id="bw-out" style="margin-top:8px">${TS.bench?benchResHtml(TS.bench):""}</div>`;
   } else if(TS.tab==="warm"){
     body = `<div class="sub">新账号从 0 起:军师先联网调研您行业在该平台的头部打法,再给《30天冷启动作战计划》——定位诊断/账号名/简介/对标账号/分周打法/30天逐日选题。</div>
@@ -7874,8 +8021,8 @@ async function toolsView(tab,preserveDraft=false){
       <div style="flex:0 0 150px"><label>平台</label><select id="wm-pf" onchange="TS.wmPf=this.value">${["小红书","抖音","公众号","视频号"].map(x=>`<option ${TS.wmPf===x?"selected":""}>${x}</option>`).join("")}</select></div>
       <div style="flex:1;min-width:200px"><label>行业</label>${indChips("wm-ind", TS.wmInd)}</div></div>
     <input id="wm-ind-c" placeholder="✏️ 或自己输入行业(填了就用这个)" value="${esc(TS.wmIndC||"")}" oninput="TS.wmIndC=this.value" style="margin-top:6px">
-    <label>挂哪个人设档案 <span class="sub">(强烈建议选:账号名/简介/选题全按这个人设来;<a href="#/profiles" style="text-decoration:underline">没有就先建 →</a>)</span></label>
-    <select id="wm-profile" onchange="TS.wmProfile=this.value"><option value="">(不用人设档案)</option>
+    <label>挂哪个品牌人设 <span class="sub">(强烈建议选:账号名/简介/选题全按这个人设来;<a href="#/profiles" style="text-decoration:underline">没有就先建 →</a>)</span></label>
+    <select id="wm-profile" onchange="TS.wmProfile=this.value"><option value="">(不用品牌人设)</option>
       ${(STATE.profiles||[]).map(p=>`<option value="${p.id}" ${String(TS.wmProfile||"")===String(p.id)?"selected":""}>${esc(p.name)}</option>`).join("")}</select>
     <label>您的定位想法(选填)</label><input id="wm-pos" placeholder="如:社区宝妈客群的轻食店,想走老板娘人设" value="${esc(TS.wmPos||"")}" oninput="TS.wmPos=this.value">
     <div class="actions"><button class="btn pri" ${TS.busy.warm||TS.running?.warm?"disabled":""} onclick="warmGo(this)">🚀 出30天起号计划(3点)</button></div>
@@ -7928,7 +8075,7 @@ async function toolsView(tab,preserveDraft=false){
   }
   const snapshot=preserveDraft?captureFormState():null;
   $("#main").innerHTML = `<div class="card" style="background:linear-gradient(120deg,#fff6dc,#f4f9f4 65%)">
-    <h2 style="margin:0">🧰 营销工具箱</h2>
+    <h2 style="margin:0">🧰 获客工具</h2>
     <div class="sub" style="margin-top:5px">老板的日常武器库:每个工具都是「填两个空 → 点一下 → 拿走就能用」。</div>
     <div class="actions"><button class="btn sm" onclick="toolHistory(0)">🧾 查看全部工具任务</button></div></div>
   <div class="card"><div class="tabs" style="flex-wrap:wrap">${TOOL_TABS.map(([k,l])=>`<a class="tb ${TS.tab===k?"on":""}" href="#/tools/${k}">${l}</a>`).join("")}</div>
@@ -8075,7 +8222,7 @@ function benchResHtml(r){
       <div class="sub" style="margin-top:4px">✂️ 抄作业:${esc(it.steal||"")}</div></div>`).join("")
     +(r.actions||[]).map(a=>`<div class="sub" style="margin-top:4px">→ ${esc(a)}</div>`).join("")
     +`<div class="actions" style="margin-top:8px">
-      <button class="btn sm pri" onclick="keepReport('竞品盯梢周报 '+new Date().toLocaleDateString('zh-CN'), TS.bench.md||'')">💾 有价值,沉淀到沉淀库</button>
+      <button class="btn sm pri" onclick="keepReport('竞品盯梢周报 '+new Date().toLocaleDateString('zh-CN'), TS.bench.md||'')">💾 有价值,存进经验库</button>
       <button class="btn sm" onclick="copyText(TS.bench.md||'')">📋 复制全文</button></div>`;
 }
 function warmHtml(w){
@@ -8161,7 +8308,7 @@ function leadsHtml(L, context={}){
   ${(L.followup||[]).length?`<div class="card" style="background:#f4f9f4;margin-top:8px"><b>📆 未来3天跟进清单</b>
     ${L.followup.map((f,i)=>`<div class="sub" style="margin-top:4px">${i+1}. ${esc(f)}</div>`).join("")}</div>`:""}
   <div class="notice" style="margin-top:6px">⚠️ ${esc(L.note||"人工逐条回复,别群发")}</div>
-  <div class="actions" style="margin-top:8px"><button class="btn sm pri" onclick="keepReport(${cp(reportTitle)},${cp(reportMd)})">💾 有价值,沉淀到沉淀库</button>
+  <div class="actions" style="margin-top:8px"><button class="btn sm pri" onclick="keepReport(${cp(reportTitle)},${cp(reportMd)})">💾 有价值,存进经验库</button>
     <button class="btn sm" onclick="copyText(${cp(reportMd)})">📋 复制全文</button></div>`;
 }
 function leadsMd(L, city=TS.ldCity||"", industry=TS.ldInd||""){
