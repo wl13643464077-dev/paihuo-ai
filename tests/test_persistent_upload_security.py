@@ -249,7 +249,7 @@ class PersistentUploadSecurityCase(unittest.TestCase):
             "face.jpg", b"<script>not an image</script>", "image/jpeg"
         )
         with self.assertRaises(HTTPException) as caught:
-            asyncio.run(self.main.avatar_upload(upload, "photo"))
+            asyncio.run(self.main.avatar_upload(upload, "photo", "1"))
         self.assertEqual(400, caught.exception.status_code)
         self.assertEqual(before, set(os.listdir(avatar.PUBLIC_DIR)))
         self.assertEqual([], avatar.saved_assets(2))
@@ -261,7 +261,7 @@ class PersistentUploadSecurityCase(unittest.TestCase):
         ), mock.patch.object(
             self.main, "_PERSISTENT_UPLOAD_TENANT_LIMIT", 1
         ):
-            result = asyncio.run(self.main.avatar_upload(first, "photo"))
+            result = asyncio.run(self.main.avatar_upload(first, "photo", "1"))
             self.assertTrue(os.path.isfile(
                 os.path.join(avatar.PUBLIC_DIR, result["name"])
             ))
@@ -275,7 +275,7 @@ class PersistentUploadSecurityCase(unittest.TestCase):
                     side_effect=AssertionError("rate limit must run before read")
                 ),
             ) as read_limited, self.assertRaises(HTTPException) as caught:
-                asyncio.run(self.main.avatar_upload(second, "photo"))
+                asyncio.run(self.main.avatar_upload(second, "photo", "1"))
             self.assertEqual(429, caught.exception.status_code)
             read_limited.assert_not_awaited()
 
@@ -1317,6 +1317,7 @@ class PersistentUploadSecurityCase(unittest.TestCase):
             self._as_tenant(2)
             try:
                 asyncio.run(self.main.avatar_job_create({
+                    "consent": True,
                     "photo_name": photo["name"],
                     "script": "这是一段用于验证素材引用互斥的数字人口播稿。",
                     "duration": 15,

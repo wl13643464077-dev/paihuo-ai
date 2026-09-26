@@ -23,6 +23,9 @@ class TaskCenterDatabaseCase(unittest.TestCase):
         db._conn = None
         db.DB_PATH = os.path.join(self.tmp.name, "fresh.db")
         db.conn()
+        # 第3期起矩阵自动发布默认关闭；这里的发布重试/CAS 用例验证开启后的行为。
+        from app import features
+        features.set_platform("matrix_autopub", True)
 
     def tearDown(self):
         from app import auth

@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import html as _htmlmod
 import re
+import time
 from urllib.parse import urlsplit
 
 from markdown import markdown as _md
@@ -112,15 +113,53 @@ def _secret() -> bytes:
     return auth._secret()
 
 
-def sign_file(rel_path: str) -> str:
-    """"job12/media_v1_0.png" → "/pubfile/<sig>/job12/media_v1_0.png"(签名即凭证)."""
-    sig = hmac.new(_secret(), f"pubfile:{rel_path}".encode(), hashlib.sha256).hexdigest()
-    return f"/pubfile/{sig}/{rel_path}"
+_DAY = 86400
+# 新版凭证 "<过期时间戳>-<64位签名>";旧版只有 64 位签名(永久有效，过渡期后作废)
+_TOKEN_RE = re.compile(r"^(\d{9,11})-([0-9a-f]{64})$")
+_LEGACY_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
-def verify_file(sig: str, rel_path: str) -> bool:
-    want = hmac.new(_secret(), f"pubfile:{rel_path}".encode(), hashlib.sha256).hexdigest()
-    return hmac.compare_digest(sig or "", want)
+def _legacy_sig(rel_path: str) -> str:
+    return hmac.new(_secret(), f"pubfile:{rel_path}".encode(), hashlib.sha256).hexdigest()
+
+
+def _expiring_sig(rel_path: str, expires: int) -> str:
+    return hmac.new(_secret(), f"pubfile:v2:{int(expires)}:{rel_path}".encode(),
+                    hashlib.sha256).hexdigest()
+
+
+def sign_file(rel_path: str, now: float = None, ttl_days: int = None) -> str:
+    """"job12/media_v1_0.png" → "/pubfile/<过期>-<sig>/job12/media_v1_0.png".
+
+    过期时间按天取整(至少 ttl_days 天、不到 ttl_days+1 天)，同一天内重复生成的
+    链接完全一致，公众号草稿去重哈希不会因为时间戳每秒变化而失效。
+    """
+    from . import features
+    if ttl_days is None:
+        ttl_days = features.config_int("pubfile_ttl_days")
+    now = time.time() if now is None else float(now)
+    expires = (int(now // _DAY) + 1 + max(1, int(ttl_days))) * _DAY
+    return f"/pubfile/{expires}-{_expiring_sig(rel_path, expires)}/{rel_path}"
+
+
+def legacy_deadline() -> float:
+    """旧版永久签名最后可用的时间点(升级后首次启动 + 过渡天数)."""
+    from . import features
+    return features.legacy_since() + features.config_int("pubfile_legacy_days") * _DAY
+
+
+def verify_file(sig: str, rel_path: str, now: float = None) -> bool:
+    token = str(sig or "")
+    now = time.time() if now is None else float(now)
+    matched = _TOKEN_RE.fullmatch(token)
+    if matched:
+        expires = int(matched.group(1))
+        ok = hmac.compare_digest(matched.group(2), _expiring_sig(rel_path, expires))
+        return ok and now <= expires
+    if _LEGACY_RE.fullmatch(token):
+        ok = hmac.compare_digest(token, _legacy_sig(rel_path))
+        return ok and now <= legacy_deadline()
+    return False
 
 
 # ---------------- 渲染 ----------------
@@ -131,10 +170,12 @@ def _base_font(t):
             "'Hiragino Sans GB','Microsoft YaHei',sans-serif")
 
 
-def render(body_md: str, theme_key: str, images: list = None, title: str = "") -> str:
+def render(body_md: str, theme_key: str, images: list = None, title: str = "",
+           ai_label: str = "") -> str:
     """正文 markdown → 公众号可粘贴的内联样式 HTML.
 
     images: [{"url": 公开可抓的图片地址, ...}],自动插到小节之间。
+    ai_label: 非空时在文末加「本内容由 AI 辅助生成」这类显式标识。
     返回完整 <section> 片段(不含标题——公众号标题是单独字段)。
     """
     t = THEMES.get(theme_key) or THEMES[DEFAULT_THEME]
@@ -240,6 +281,11 @@ def render(body_md: str, theme_key: str, images: list = None, title: str = "") -
         html += (f"<section style='margin-top:26px;padding-top:12px;border-top:1px dashed #ddd'>"
                  f"<section style='font-size:13px;color:#888;font-weight:700;margin-bottom:6px'>参考链接</section>"
                  f"{items}</section>")
+
+    # AI 生成内容显式标识(企业设置可关/改文案)
+    if ai_label:
+        html += (f"<section style='margin-top:22px;font-size:12.5px;color:#999;text-align:center'>"
+                 f"{_htmlmod.escape(ai_label)}</section>")
 
     # 主题化收尾
     html += (f"<section style='text-align:center;margin:34px 0 8px'>"

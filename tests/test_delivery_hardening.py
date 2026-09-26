@@ -284,6 +284,9 @@ class CredentialAtRestTests(unittest.TestCase):
         db._conn = None
         db.DB_PATH = os.path.join(self.tmp.name, "creds.db")
         db.conn()
+        # 第 3 期起矩阵自动发布默认关闭；这里验证开启后账号 Cookie 的落库加密。
+        from app import features
+        features.set_platform("matrix_autopub", True)
 
         def _restore():
             if db._conn is not None:
@@ -383,6 +386,9 @@ class MatrixEnqueueValidationTests(unittest.TestCase):
         db._conn = None
         db.DB_PATH = os.path.join(self.tmp.name, "enqueue.db")
         db.conn()
+        # 第 3 期起矩阵自动发布默认关闭；这里验证开启后的入队校验。
+        from app import features
+        features.set_platform("matrix_autopub", True)
 
         def _restore():
             if db._conn is not None:

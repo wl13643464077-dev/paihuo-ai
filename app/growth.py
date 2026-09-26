@@ -1034,8 +1034,19 @@ async def _public_lead_search(query: str, timeout: float = 12) -> list:
     return merged
 
 
-async def direct_lead_sources(industry: str, city: str, product: str) -> list:
-    """按四类意图并行检索，类别间轮询取样，避免单一查询占满结果。"""
+async def direct_lead_sources(industry: str, city: str, product: str,
+                              tenant_id: int = None, progress=None) -> list:
+    """按四类意图并行检索，类别间轮询取样，避免单一查询占满结果。
+
+    第 3 期:这一步直接抓 DuckDuckGo/必应搜索结果网页，受平台开关
+    lead_search_scrape 控制(默认关闭);关闭时不发任何抓取请求，说明原因后
+    返回空列表，由调用方改走正规联网检索服务。
+    """
+    from . import features
+    if not await db.arun(features.is_enabled, "lead_search_scrape", tenant_id):
+        if progress:
+            progress("search", features.off_hint("lead_search_scrape"))
+        return []
     sector = _lead_search_term(industry, fallback="通用行业", limit=120)
     place = _lead_search_term(city, fallback="全国", limit=80)
     offer = _lead_search_term(product, fallback=sector or "产品服务", limit=160)
@@ -1591,8 +1602,9 @@ async def leads_radar(tid: int, industry: str, city: str, product: str,
         product, fallback=safe_industry or "相关产品服务", limit=160
     )
     progress("search", "正在按四类购买信号检索公开原帖…")
+    # 平台关闭搜索引擎网页抓取时，这一步会说明原因并直接返回空，走下方正规联网检索
     direct_candidates = await direct_lead_sources(
-        safe_industry, safe_city, safe_product
+        safe_industry, safe_city, safe_product, tenant_id=tid, progress=progress
     )
     direct_sources = await verify_lead_sources(direct_candidates)
     if direct_sources:

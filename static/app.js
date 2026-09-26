@@ -3527,7 +3527,7 @@ async function newBrief(){
     <input id="b-tpl-c" value="${esc(PRE?.template||"")}" placeholder="✏️ 或自己输入内容类型(如:门店探访日记、老板问答)——填了就用您输入的" style="margin-top:6px">
     <label>④ 配图 · 张数</label>
     <div class="chips" id="b-imgn">${["自动","2","3","4","5","6"].map((n,i)=>`<span class="chip${i===0?" on":""}" onclick="pick(this)">${n}${i?"张":""}</span>`).join("")}</div>
-    <label>配图来源 <span class="sub">(真实图=全网抓取真实照片,适合公众号/资讯类;AI=生成插画)</span></label>
+    <label>配图来源 <span class="sub">${(META.image_modes||[]).length>1?"(真实图=全网抓取真实照片,适合公众号/资讯类;AI=生成插画)":"(全网抓图已由平台关闭:用 AI 生图;自己拍的照片可在「营销工具箱→📸 产品图」上传)"}</span></label>
     <div class="chips" id="b-imode">${(META.image_modes||[{key:"ai",label:"🎨 AI生成"}]).map((m,i)=>`<span class="chip${i===0?" on":""}" data-k="${m.key}" onclick="pick(this)">${m.label}</span>`).join("")}</div>
     <label>⑤ 发到哪些平台(多选,每个平台出专属版本+专属封面尺寸)</label>
     <div class="chips" id="b-pf">${META.platforms.map((p,i)=>`<span class="chip${i===0?" on":""}" data-p="${p}" onclick="this.classList.toggle('on')">${META.platform_specs[p]?.emoji||""} ${p}</span>`).join("")}</div>
@@ -3897,11 +3897,20 @@ function scaleFrames(){
 }
 window.addEventListener("resize",scaleFrames);
 
+/* ---------- 第3期:高风险功能开关(平台后台控制,默认关闭) ---------- */
+let FEAT = null;
+async function featFlags(){
+  if(!FEAT){ try{ FEAT = await api("/features"); }catch(_){ FEAT = {}; } }
+  return FEAT;
+}
+const featOn = k => !!(FEAT && FEAT[k] && FEAT[k].enabled);
+const featHint = k => (FEAT && FEAT[k] && FEAT[k].hint) || "该功能已被平台关闭";
+
 /* ---------- 交付包 ---------- */
 async function deliveryView(id){
   const [d, TVS, MX] = await Promise.all([api(`/jobs/${id}/delivery`),
     api(`/text-video?job_id=${id}`).catch(optionalResult([])),
-    api("/matrix/accounts").catch(optionalResult({accounts:[]}))]);
+    api("/matrix/accounts").catch(optionalResult({accounts:[]})), featFlags()]);
   const cover = d.covers[d.cover_selected]||d.covers[0];
   $("#main").innerHTML = `<div class="card">
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
@@ -3940,7 +3949,7 @@ async function deliveryView(id){
         <button class="btn sm pri" onclick="copyText(${cp((pk.title||"")+"\n\n"+(pk.body||"")+"\n\n"+(pk.tags||[]).map(t=>"#"+t).join(" "))})">📋 复制全文</button>
         ${pk.platform==="公众号"?`<button class="btn sm pri" onclick="mpOpen(${id})">📰 排版·发草稿箱</button>`:""}
         ${pk.platform!=="公众号"?`<button class="btn sm pri" onclick="semiPub(${id},${cp(pk.platform)},${cp(pk.title||"")},${cp((pk.body||"")+"\n\n"+(pk.tags||[]).map(t=>"#"+t).join(" "))},${cp(pk.upload_url||"")})">🪄 半自动发布</button>`:""}
-        ${pk.platform==="小红书"&&(MX.accounts||[]).some(a=>a.platform==="xhs")?`<button class="btn sm" onclick="mxQuickPub('xhs',${id},${cp(pk.title||"")},${cp(pk.body||"")})">🚀 全自动β</button>`:""}
+        ${featOn("matrix_autopub")&&pk.platform==="小红书"&&(MX.accounts||[]).some(a=>a.platform==="xhs")?`<button class="btn sm" onclick="mxQuickPub('xhs',${id},${cp(pk.title||"")},${cp(pk.body||"")})">🚀 全自动β</button>`:""}
         <button class="btn sm" onclick="censorQuick(${cp(pk.platform)},${cp(pk.title||"")},${cp(pk.body||"")})">🛡️ 审查</button>
         ${safeExternalUrl(pk.upload_url)?`<a class="btn sm" href="${esc(safeExternalUrl(pk.upload_url))}" target="_blank" rel="noopener noreferrer">↗ 去发布</a>`:""}
       </div>
@@ -3950,12 +3959,13 @@ async function deliveryView(id){
   :d.versions?.length?`<div class="card"><h3 style="margin-top:0">各平台版本</h3>${d.versions.map(v=>`<div class="topic">
     <span class="tag">${esc(v.platform)}</span> <b>${esc(v.title)}</b>
     <button class="btn sm" style="float:right" onclick="copyText(${cp((v.title||"")+"\n\n"+(v.body||"")+"\n\n"+(v.tags||[]).map(t=>"#"+t).join(" "))})">📋 复制</button></div>`).join("")}</div>`:""}
-  <div class="card"><h3 style="margin-top:0">📷 真实素材图库(全网抓取)</h3>
+  ${featOn("imagehunt")?`<div class="card"><h3 style="margin-top:0">📷 真实素材图库(全网抓取)</h3>
     <div class="sub">觉得配图不够真实?搜真实图,点选即入库到本工单素材(公众号排版/发布包都会带上)。抓取图仅作素材参考,商用请确认版权。</div>
     <div class="row" style="align-items:flex-end;margin-top:8px">
       <div style="flex:1;min-width:220px"><input id="hunt-q" placeholder="画面关键词,如:火锅店 生意火爆 实拍" value="${esc((d.title||"").slice(0,16))}" onkeydown="if(event.key==='Enter')huntGo(${id})"></div>
       <button class="btn pri" onclick="huntGo(${id})">🔎 全网搜图</button></div>
-    <div class="grid3" id="hunt-res" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr));margin-top:10px"></div></div>
+    <div class="grid3" id="hunt-res" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr));margin-top:10px"></div></div>`
+    :`<div class="notice" style="font-size:12.5px">📷 ${esc(featHint("imagehunt"))}</div>`}
   ${tvListCard(TVS, MX, id)}
   ${d.gate?`<div class="card"><h3 style="margin-top:0">质检报告</h3><div class="notice ${d.gate.passed?"green":"red"}">${esc(d.gate.report||"")}</div>
     ${(d.gate.issues||[]).map(i=>`<div class="sub">[${esc(i.severity)}] ${esc(i.type)}:${esc(i.detail)}</div>`).join("")}</div>`:""}
@@ -5473,7 +5483,30 @@ async function companyView(){
     ${f("taboo","表达禁忌","不能说什么 / 避免的调性")}
     ${f("keywords","常用话术 / 关键词 / slogan","顿号分隔")}
     <div class="actions"><button class="btn pri" onclick="companySaveProfile(this)">💾 保存档案</button></div>
-  </div>`;
+  </div>
+  <div class="card" id="cp-ailabel"></div>`;
+  aiLabelLoad();
+}
+/* ---------- 第3期:AI 生成内容标识(企业设置,默认开启) ---------- */
+async function aiLabelLoad(){
+  const box=$("#cp-ailabel"); if(!box) return;
+  let c; try{ c=await api("/settings/ai-label"); }catch(e){ box.remove(); return; }
+  const off=new Set(c.off_platforms||[]);
+  box.innerHTML=`<h2>🏷 AI 生成内容标识</h2>
+    <div class="sub">开启后,发布包文案末尾、导出的 Word/PDF、成片视频结尾、数字人视频信息里都会带上这句标识,符合平台对 AI 生成内容的标注要求。<b>建议保持开启</b>;个别平台规则另有要求时可单独关闭该平台的文末标识。</div>
+    <label style="display:flex;gap:8px;align-items:center;margin-top:8px;cursor:pointer"><input type="checkbox" id="ail-on" style="width:auto" ${c.enabled?"checked":""} ${isAdmin()?"":"disabled"}> 开启 AI 生成内容标识</label>
+    <label>标识文案(最多 30 字)</label><input id="ail-text" maxlength="30" value="${esc(c.text)}" placeholder="${esc(c.default_text)}" ${isAdmin()?"":"disabled"}>
+    <label>这些平台的发布包<b>不加</b>文末标识(默认都加)</label>
+    <div class="chips">${(c.platforms||[]).map(p=>`<span class="chip ${off.has(p)?"on":""}" data-p="${esc(p)}" onclick="${isAdmin()?"this.classList.toggle('on')":""}">${esc(p)}</span>`).join("")}</div>
+    ${isAdmin()?`<div class="actions"><button class="btn pri" onclick="aiLabelSave(this)">💾 保存标识设置</button></div>`:`<div class="sub">只有企业主账号可以修改。</div>`}`;
+}
+async function aiLabelSave(btn){
+  btn.disabled=true;
+  try{
+    await api("/settings/ai-label",{method:"PUT",body:{enabled:$("#ail-on").checked, text:$("#ail-text").value.trim(),
+      off_platforms:[...document.querySelectorAll("#cp-ailabel .chip.on")].map(x=>x.dataset.p)}});
+    toast("已保存 AI 标识设置"); aiLabelLoad();
+  }catch(e){ toast(e.message); btn.disabled=false; }
 }
 async function companySaveMaterials(){
   const r = await api("/company",{method:"PUT",body:{materials:$("#cp-materials").value}});
@@ -5805,8 +5838,12 @@ async function avatarView(){
         <select id="av-link-profile"><option value="">(不用人设)</option>${(STATE.profiles||[]).map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join("")}</select></div>
       <div><button class="btn pri" onclick="avFromLink(this)">🪄 提取并改写(1点)</button></div>
     </div>
-    <div class="sub" style="margin-top:6px">情报员会打开链接提取内容,自动改写成 30-60 秒口播稿并填到下面(约 1 分钟)。</div></div>
+    <div class="sub" style="margin-top:6px">情报员会打开链接提取内容,自动改写成 30-60 秒口播稿并填到下面(约 1 分钟)。</div>
+    ${meta.link_video_enabled===false?`<div class="notice" style="font-size:12.5px;margin-top:6px">ℹ️ ${esc(meta.link_video_hint||"")}</div>`:""}</div>
   <div class="card"><h2>🎬 开拍</h2>
+    ${meta.consent?`<label class="notice" style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;margin-top:0">
+      <input type="checkbox" id="av-consent" style="width:auto;margin-top:3px" ${AV_CONSENT?"checked":""} onchange="AV_CONSENT=this.checked">
+      <span><b>授权声明(必勾)</b>:${esc(meta.consent.text)}。上传照片、录音和克隆声音前都需要勾选,系统会记录勾选人和时间。</span></label>`:""}
     <div class="row" style="align-items:flex-start">
       <div style="flex:1;min-width:260px">
         <label>① 数字人照片 *(正脸清晰、光线好,单人)</label>
@@ -5850,6 +5887,9 @@ async function avatarView(){
           <div><select id="av-engine" onchange="avPriceSync()">${meta.engines.map(e=>`<option value="${e.key}">${esc(e.label)}</option>`).join("")}</select></div>
           <div><select id="av-dur" onchange="avPriceSync()">${meta.durations.map(d=>`<option value="${d.s}" ${d.s===30?"selected":""}>${d.label}</option>`).join("")}</select></div>
         </div>
+        <label style="display:flex;gap:6px;align-items:flex-start;font-weight:400;cursor:pointer">
+          <input type="checkbox" id="av-overseas" style="width:auto;margin-top:3px" ${AV_OVERSEAS?"checked":""} onchange="AV_OVERSEAS=this.checked">
+          <span class="sub">同意使用境外服务商:${esc(meta.consent?.overseas_text||"HeyGen 为境外服务商,照片和声音将传输至境外服务商处理")}。<b>不勾选则只用国内服务商(可灵/基础版)</b>。</span></label>
         ${meta.heygen_ready&&meta.heygen_exhausted?`<div class="notice" style="font-size:12px">⚠️ HeyGen 余额不足,选它会自动改用可灵。想继续用请去 <a href="https://app.heygen.com/settings?nav=Subscriptions" target="_blank" style="text-decoration:underline">HeyGen 充值</a>;日常口播用<b>基础版/可灵</b>即可。</div>`:""}
         <label>⑤ 表演提示(选填)</label>
         <input id="av-prompt" placeholder="如:微笑讲述,偶尔点头,手势自然">
@@ -5875,7 +5915,8 @@ async function avatarView(){
         ${isAdmin()?`<button class="btn sm bad" onclick="avDel(${j.id})" title="移入回收站">🗑</button>`:""}</div>
       ${j.status==="done"&&safeAssetUrl(j.video_file)?`<video controls style="max-width:360px;width:100%;border:3px solid var(--ink);border-radius:14px;margin-top:8px" src="${esc(safeAssetUrl(j.video_file))}"></video>
         <div class="actions" style="margin-top:6px"><a class="btn sm pri" href="${esc(safeAssetUrl(j.video_file))}" download>⬇️ 下载成片</a>
-        ${safeAssetUrl(j.audio_file)?`<a class="btn sm" href="${esc(safeAssetUrl(j.audio_file))}" target="_blank" rel="noopener noreferrer">🔊 只要配音</a>`:""}</div>`:""}
+        ${safeAssetUrl(j.audio_file)?`<a class="btn sm" href="${esc(safeAssetUrl(j.audio_file))}" target="_blank" rel="noopener noreferrer">🔊 只要配音</a>`:""}</div>
+        ${meta.ai_label?`<div class="sub" style="font-size:11px">🏷 ${esc(meta.ai_label)}(发布时请保留此标识)</div>`:""}`:""}
       ${j.status==="failed"?`<div class="notice red" style="margin-top:6px">${esc(j.error||"生成失败")}</div>`:""}
       <div class="sub" style="margin-top:4px;font-size:11px">${new Date(j.created_at*1000).toLocaleString("zh-CN")}</div>
     </div>`).join(""):`<div class="empty">这一页没有数字人任务。</div>`}
@@ -5883,7 +5924,15 @@ async function avatarView(){
   active.forEach(j=>{ const box=document.querySelector(`[data-avsteps="${j.id}"]`); if(box) box.scrollTop=box.scrollHeight; });
   avPriceSync();
 }
-let AV_VOICE_MODE = "preset", AV_OWN_AUDIO = null;
+let AV_VOICE_MODE = "preset", AV_OWN_AUDIO = null, AV_CONSENT = false, AV_OVERSEAS = false;
+// 第3期:肖像/声音授权声明,没勾选不让上传(服务端同样校验并留痕)
+function avConsentOk(input){
+  if(AV_CONSENT) return true;
+  toast("请先勾选上方「授权声明」:确认是本人,或已取得肖像/声音权利人的书面授权");
+  if(input) input.value="";
+  $("#av-consent")?.scrollIntoView({behavior:"smooth",block:"center"});
+  return false;
+}
 function avVoiceMode(m){
   AV_VOICE_MODE = m;
   $("#av-vm-preset").classList.toggle("on", m==="preset");
@@ -5914,7 +5963,8 @@ function xhrUpload(url, fd, input){
 }
 async function avUploadVoice(input){
   const f = input.files[0]; if(!f) return;
-  const fd = new FormData(); fd.append("file", f); fd.append("kind", "voice");
+  if(!avConsentOk(input)) return;
+  const fd = new FormData(); fd.append("file", f); fd.append("kind", "voice"); fd.append("consent", "1");
   try{
     AV_OWN_AUDIO = await xhrUpload("/api/avatar/upload", fd, input);
     $("#av-own-status").innerHTML = `✅ 已上传:${esc(f.name)} <audio controls src="${esc(safeAssetUrl(AV_OWN_AUDIO.preview))}" style="vertical-align:middle;height:28px"></audio>`;
@@ -5923,7 +5973,8 @@ async function avUploadVoice(input){
 let AV_CLONE_SAMPLE = null;
 async function avUploadCloneSample(input){
   const f = input.files[0]; if(!f) return;
-  const fd = new FormData(); fd.append("file", f); fd.append("kind", "voice");
+  if(!avConsentOk(input)) return;
+  const fd = new FormData(); fd.append("file", f); fd.append("kind", "voice"); fd.append("consent", "1");
   try{
     AV_CLONE_SAMPLE = await xhrUpload("/api/avatar/upload", fd, input);
     $("#av-clone-btn").disabled = false;
@@ -5932,10 +5983,11 @@ async function avUploadCloneSample(input){
 }
 async function avClone(btn){
   if(!AV_CLONE_SAMPLE) return toast("先上传录音");
+  if(!avConsentOk()) return;
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 克隆中(约30秒)…`;
   try{
     const v = await api("/avatar/clone",{method:"POST",body:{audio_name:AV_CLONE_SAMPLE.name,
-      label:$("#av-clone-label").value.trim()}});
+      label:$("#av-clone-label").value.trim(), consent:AV_CONSENT}});
     toast(`克隆成功!音色「${v.label}」已加入列表`); AV_CLONE_SAMPLE=null; render();
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent=`🧬 开始克隆(${META?.voice_clone_points??9}点)`; }
 }
@@ -5966,7 +6018,8 @@ async function avFromLink(btn){
 }
 async function avUpload(input){
   const f = input.files[0]; if(!f) return;
-  const fd = new FormData(); fd.append("file", f); fd.append("kind", "photo");
+  if(!avConsentOk(input)) return;
+  const fd = new FormData(); fd.append("file", f); fd.append("kind", "photo"); fd.append("consent", "1");
   try{
     AV_PHOTO = await xhrUpload("/api/avatar/upload", fd, input);
     toast("照片已上传");
@@ -5991,6 +6044,8 @@ function avPriceSync(){
 }
 async function avSubmit(btn){
   if(!AV_PHOTO) return toast("先上传照片");
+  if(!avConsentOk()) return;
+  if(($("#av-engine")?.value||"")==="heygen" && !AV_OVERSEAS) return toast("HeyGen 是境外服务商:请勾选同意传输至境外,或改选可灵/基础版(国内)");
   const script = $("#av-script").value.trim();
   if(!script) return toast("口播稿必填");
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 开拍中…`;
@@ -5999,7 +6054,8 @@ async function avSubmit(btn){
     await api("/avatar/jobs",{method:"POST",body:{photo_name:AV_PHOTO.name,
       voice_id:$("#av-voice")?.value, script, prompt:$("#av-prompt").value.trim(),
       engine:$("#av-engine")?.value||"", duration:+($("#av-dur")?.value||30),
-      own_audio_name: AV_VOICE_MODE==="own"&&AV_OWN_AUDIO ? AV_OWN_AUDIO.name : ""}});
+      own_audio_name: AV_VOICE_MODE==="own"&&AV_OWN_AUDIO ? AV_OWN_AUDIO.name : "",
+      consent:AV_CONSENT, overseas_ok:AV_OVERSEAS}});
     toast(`已开拍${AV_VOICE_MODE==="own"?"(用您的原声)":""},可继续开新的任务`); render();
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🎬 开拍"; }
 }
@@ -6034,6 +6090,7 @@ async function adminView(){
   const daily=(ADM_FUNNEL.daily||[]).slice(-14).reverse();
   $("#main").innerHTML = `
   <div class="notice" style="margin-top:0">🛠 <b>管理者后台</b>:数字员工的提示词、模型路由、供应商配置都收在这里,前台员工面板只留业务操作。</div>
+  <div class="card" id="adm-features"><h2>🛡️ 高风险功能开关</h2><div class="sub">加载中…</div></div>
   <div class="card"><h2>📈 近 30 天产品转化漏斗</h2>
     <div class="sub">平台自托管统计，只保存事件、日期和不可逆匿名标识；不采集手机号、表单正文、提示词或口令。</div>
     <div class="stats" style="justify-content:flex-start;margin-top:12px">
@@ -6130,6 +6187,43 @@ async function adminView(){
         <td><button class="btn sm" onclick="admDetail(${e.idx})">🧰 技能/档案</button></td>
       </tr>`).join("")}</tbody></table></div></details>`).join("")}
     <div id="adm-prompt-box"></div><div id="adm-detail-box"></div></div>`;
+  admFeaturesLoad();
+}
+/* ---------- 第3期:高风险功能开关(平台级 + 企业单独设置,仅平台管理员) ---------- */
+async function admFeaturesLoad(){
+  const box=$("#adm-features"); if(!box) return;
+  let F; try{ F=await api("/admin/features"); }catch(e){ box.innerHTML=`<h2>🛡️ 高风险功能开关</h2><div class="notice red">${esc(e.message)}</div>`; return; }
+  box.innerHTML=`<h2>🛡️ 高风险功能开关</h2>
+    <div class="sub">这些功能有合规风险,默认关闭。关闭后前台入口隐藏、接口也会拒绝;已有任务和历史记录不受影响。可以给个别企业单独打开或关闭。</div>
+    ${F.features.map(f=>`<div class="topic" style="margin-top:10px">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <b style="flex:1;min-width:200px">${esc(f.name)}</b>
+        <span class="tag">${f.default?"默认开":"默认关"}</span>
+        <span class="switch ${f.enabled?"on":""}" title="平台整体开关" onclick="admFeatureSet(${cp(f.key)},${f.enabled?"false":"true"})"></span></div>
+      <div class="notice" style="font-size:12.5px;margin-top:6px">⚠️ <b>风险</b>:${esc(f.risk)}</div>
+      <div class="sub">关闭时老板看到:${esc(f.off_hint)}</div>
+      ${f.overrides.length?`<div class="sub" style="margin-top:4px">企业单独设置:${f.overrides.map(o=>`企业#${o.tenant_id} ${o.enabled?"开":"关"} <button class="btn sm" onclick="admFeatureSet(${cp(f.key)},null,${o.tenant_id})">取消</button>`).join(" · ")}</div>`:""}
+      <div class="row" style="margin-top:6px;align-items:flex-end">
+        <div style="flex:0 0 140px"><input id="adm-ft-${esc(f.key)}" placeholder="企业编号" inputmode="numeric"></div>
+        <button class="btn sm" onclick="admFeatureSet(${cp(f.key)},true,$('#adm-ft-${esc(f.key)}').value)">给该企业打开</button>
+        <button class="btn sm" onclick="admFeatureSet(${cp(f.key)},false,$('#adm-ft-${esc(f.key)}').value)">给该企业关闭</button></div>
+    </div>`).join("")}
+    <h3 style="margin:16px 0 4px">🔗 公开链接与素材清理</h3>
+    <div class="row">${F.config.map(c=>`<div style="flex:1;min-width:180px"><label>${esc(c.label)} <span class="sub">(${c.min}-${c.max},默认 ${c.default})</span></label>
+      <input id="adm-cc-${esc(c.key)}" type="number" min="${c.min}" max="${c.max}" value="${c.value}"></div>`).join("")}</div>
+    <div class="actions"><button class="btn pri" onclick="admComplianceSave(${cp(F.config.map(c=>c.key))})">💾 保存</button></div>`;
+}
+async function admFeatureSet(key, enabled, tenantId){
+  const body={enabled};
+  if(tenantId!==undefined){ if(!String(tenantId||"").trim()) return toast("先填企业编号"); body.tenant_id=+tenantId; }
+  if(enabled===true&&tenantId===undefined&&!await uiConfirm("打开后所有企业都能用这个高风险功能,确认已评估风险?",{title:"打开高风险功能",confirmText:"确认打开"})) return;
+  try{ await api(`/admin/features/${encodeURIComponent(key)}`,{method:"PUT",body}); FEAT=null; toast("已保存"); admFeaturesLoad(); }
+  catch(e){ toast(e.message); }
+}
+async function admComplianceSave(keys){
+  const body={}; keys.forEach(k=>{ body[k]=$("#adm-cc-"+k).value; });
+  try{ await api("/admin/compliance-config",{method:"PUT",body}); toast("已保存"); admFeaturesLoad(); }
+  catch(e){ toast(e.message); }
 }
 async function admSaveProvider(){
   const body = {yunwu_base:$("#adm-base").value.trim()};
@@ -7954,6 +8048,7 @@ function setMatrixFilter(key,value){
   MATRIX_FILTER[key]=value; resetListPage("publish"); render();
 }
 async function channelsView(){
+  await featFlags();
   const [wc,pstyles,wh,mx,mtasksPayload] = await Promise.all([
     api("/channels/wechat").catch(optionalResult(null)), api("/pstyles").catch(optionalResult({})),
     api("/channels/webhook").catch(optionalResult(null)), api("/matrix/accounts").catch(optionalResult({platforms:[],accounts:[]})),
@@ -7991,7 +8086,7 @@ async function channelsView(){
       <button class="btn" onclick="whTest(this)">📨 发条测试消息</button></div>
     <div id="wh-out" style="margin-top:8px"></div></div>`:""}
   <div class="card"><h3 style="margin-top:0">🚀 矩阵发布中心 <span class="tag">beta</span></h3>
-    <div class="sub">绑定小红书/抖音账号后,交付包里可<b>一键真发布</b>(服务器自动开浏览器带您的登录态填好并提交)。行业通行做法是"代持登录态",平台改版可能偶尔失灵——<b>失败必有出路</b>:自动给人话原因和现场截图,可一键转「🪄 半自动发布」或重试;发成功自动登记发布台账,到点自动复盘。建议每账号每天 ≤5 条,内容先过审查官。</div>
+    ${featOn("matrix_autopub")?`<div class="sub">绑定小红书/抖音账号后,交付包里可<b>一键真发布</b>(服务器自动开浏览器带您的登录态填好并提交)。行业通行做法是"代持登录态",平台改版可能偶尔失灵——<b>失败必有出路</b>:自动给人话原因和现场截图,可一键转「🪄 半自动发布」或重试;发成功自动登记发布台账,到点自动复盘。建议每账号每天 ≤5 条,内容先过审查官。</div>
     <details style="margin:8px 0"><summary style="cursor:pointer"><b>🧭 取 Cookie 向导(2分钟)</b></summary>
       <ol class="list" style="margin-top:6px">
         <li>电脑 Chrome 登录 creator.xiaohongshu.com(或 creator.douyin.com);</li>
@@ -8003,7 +8098,8 @@ async function channelsView(){
       <div style="flex:0 0 130px"><label>平台</label><select id="mx-pf">${(mx.platforms||[]).map(pf=>`<option value="${pf.key}">${pf.emoji} ${pf.name}</option>`).join("")}</select></div>
       <div style="flex:0 0 150px"><label>备注名</label><input id="mx-name" placeholder="如:主号"></div>
       <div style="flex:1;min-width:240px"><label>Cookie <span class="sub">(等于登录密码,勿外传)</span></label><input id="mx-cookie" type="password" autocomplete="off" placeholder="按向导复制整行 cookie 粘这里"></div>
-      <button class="btn pri" onclick="mxAdd(this)">🔗 绑定并验证</button></div>
+      <button class="btn pri" onclick="mxAdd(this)">🔗 绑定并验证</button></div>`
+    :`<div class="notice">⛔ ${esc(featHint("matrix_autopub"))}<div class="sub" style="margin-top:4px">交付包里每个平台都有「🪄 半自动发布」:复制标题正文 → 下载素材包 → 打开平台发布页。以前绑定的账号可以在下面删除。</div></div>`}
     <div id="mx-list" style="margin-top:10px">${(mx.accounts||[]).map(a=>`<div class="topic">
       <span style="font-size:16px">${a.emoji}</span> <b>${esc(a.name)}</b> <span class="sub">${esc(a.platform_name)}${a.nickname?` · ${esc(a.nickname)}`:""}</span>
       <span class="tag" style="${a.status==="ok"?"background:#a7ecc9":a.status==="expired"?"background:#ffc2c5":""}">${{ok:`✅ ${a.checked_at?new Date(a.checked_at*1000).toLocaleDateString("zh-CN")+" 验证有效":"有效"}`,expired:"⚠️ 已失效",unchecked:"未验证"}[a.status]||a.status}</span>
@@ -8104,7 +8200,7 @@ async function tvCreate(jobId, btn){
 }
 function tvListCard(TVS, MX, jobId){
   if(!(TVS||[]).length) return "";
-  const dy = (MX.accounts||[]).find(a=>a.platform==="douyin");
+  const dy = featOn("matrix_autopub") && (MX.accounts||[]).find(a=>a.platform==="douyin");
   return `<div class="card"><h3 style="margin-top:0">🎬 视频成片(图文转视频)</h3>
     ${TVS.map(t=>{
       const last = (t.steps||[]).slice(-1)[0];
@@ -8323,6 +8419,7 @@ async function toolsView(tab,preserveDraft=false){
   }
   if(TOOL_TABS.some(([key])=>key===tab)) TS.tab=tab;
   loadTools();
+  await featFlags();
   let meta=TOOLS_META_CACHE, jobs=TOOLS_JOBS_CACHE;
   if(!meta||!jobs||Date.now()-TOOLS_FETCH_AT>15000){
     const [metaPayload,jobsPayload] = await Promise.all([
@@ -8440,6 +8537,7 @@ async function toolsView(tab,preserveDraft=false){
     <div id="wm-out" style="margin-top:10px">${TS.warm?warmHtml(TS.warm):""}</div>`;
   } else if(TS.tab==="leads"){
     body = `<div class="sub">侦察兵联网扫知乎/微博/小红书等公开帖子:谁在求推荐、吐槽同行、找攻略——这些就是您能去承接的线索,附承接话术。<b>合规提示:话术生成后人工去回复,别用软件群发。</b></div>
+    ${featOn("lead_search_scrape")?"":`<div class="notice" style="font-size:12.5px">ℹ️ ${esc(featHint("lead_search_scrape"))}</div>`}
     <div class="row">
       <div style="flex:1;min-width:160px"><label>行业</label>${indChips("ld-ind", TS.ldInd)}
         <input id="ld-ind-c" placeholder="✏️ 或自己输入" value="${esc(TS.ldIndC||"")}" oninput="TS.ldIndC=this.value" style="margin-top:6px"></div>
