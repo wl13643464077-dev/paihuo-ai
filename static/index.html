@@ -261,17 +261,6 @@ details.log .steps{margin-top:8px}
 .spec .dt2{font-size:11px;color:#8b7355;margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .grouphead{display:flex;align-items:center;gap:8px;margin:18px 0 8px;font-weight:900}
 .grouphead .gline{flex:1;border-top:2.5px dashed #d8c9a8}
-/* V27 首页聚焦:今天想干点啥 三大动作卡 */
-.todo3{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin:12px 0 4px}
-.todocard{display:flex;align-items:center;gap:13px;background:var(--card);border:2.5px solid var(--ink);
-  border-radius:18px;padding:16px 17px;cursor:pointer;box-shadow:var(--shadow);transition:transform .1s}
-.todocard:hover{transform:translateY(-3px) rotate(-.3deg)}
-.todocard:active{transform:translateY(-1px)}
-.todocard .tc-emoji{font-size:31px;line-height:1;flex:none}
-.todocard .tc-body{flex:1;min-width:0;display:flex;flex-direction:column}
-.todocard .tc-t{font-weight:900;font-size:16.5px}
-.todocard .tc-d{font-size:12.5px;color:var(--ink2);margin-top:3px;font-weight:600;line-height:1.35}
-.todocard .tc-arrow{font-size:20px;font-weight:900;color:var(--ink);flex:none}
 /* V27 部门楼层:折叠标题行 */
 .deptsec{border:2.5px solid var(--ink);border-radius:16px;overflow:hidden;margin-top:12px;background:#fffdf7;box-shadow:var(--shadow)}
 .depthead{display:flex;align-items:center;gap:10px;padding:13px 16px;cursor:pointer;font-weight:900;user-select:none}
@@ -284,7 +273,6 @@ details.log .steps{margin-top:8px}
 .depthead .dh-caret{flex:none;font-size:16px;color:var(--ink2)}
 .deptbody{padding:12px 14px 14px}
 @media (max-width:640px){
-  .todo3{grid-template-columns:1fr;gap:10px}
   .depthead{flex-wrap:wrap}
   .depthead .dh-caret{margin-left:auto;order:1}
   .depthead .dh-tag{flex:1 1 100%;order:2;white-space:normal;font-size:12px}

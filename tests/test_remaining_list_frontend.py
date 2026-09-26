@@ -17,10 +17,12 @@ class RemainingListFrontendTests(unittest.TestCase):
         return self.app_js[start:end]
 
     def test_dashboard_jobs_use_state_pagination_and_show_total(self):
-        source = self._function_source("dashboard", "notificationReadAll")
+        # 第 1 期:内容任务列表随行业专家楼层从「今天」页挪到「派活 → 找行业专家」(expertsView),
+        # 分页契约不变;显示文案「内容工单」改成大白话「内容任务」。
+        source = self._function_source("expertsView", "industryPickCard")
         self.assertIn('listPath("/state","jobs")', source)
         self.assertIn("normalizeListContract(", source)
-        self.assertIn('listContractNotice(jobsContract,"内容工单")', source)
+        self.assertIn('listContractNotice(jobsContract,"内容任务")', source)
         self.assertIn('listPager(jobsContract,"jobs")', source)
 
     def test_avatar_jobs_use_server_pagination_and_show_total(self):

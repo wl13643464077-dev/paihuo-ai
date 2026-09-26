@@ -105,7 +105,8 @@ class Schema55FrontendContractTests(unittest.TestCase):
         self.assertIn('bindingScope==="admin"?"window.__ADM_DETAIL":"SPEC"', panel)
         self.assertIn("employeeStartLearning", panel)
         self.assertIn("employeeApproveLearning", panel)
-        self.assertIn("修理厂", panel)
+        # 第 1 期去术语:「修理厂」改名「员工进修管理」
+        self.assertIn("员工进修管理", panel)
         self.assertIn('employee?.catalog_version==="2026.08.v4"', learn)
         self.assertIn("employeeStartLearning", learn)
 
@@ -125,10 +126,16 @@ class Schema55FrontendContractTests(unittest.TestCase):
             self.assertNotIn("fmtN(", block)
         self.assertIn("toggleEmployeeLearningBatchReviews", manager)
         self.assertIn("employeeLearningBatchReviewList", manager)
-        self.assertIn("修理厂", manager)
-        dashboard = function(self.source, "dashboard")
-        self.assertIn("修理厂", dashboard)
-        self.assertIn("openEmployeeLearningBatchManager", dashboard)
+        self.assertIn("员工进修管理", manager)
+        # 第 1 期:入口从办公室首页挪到「我的」中转页最下面(仅平台 root 的 isBoss 可见)
+        nav_groups = self.source[
+            self.source.index("const NAV_GROUPS = ["):self.source.index("function navGroupOf(")
+        ]
+        entry = nav_groups[nav_groups.index('action:"openEmployeeLearningBatchManager()"'):]
+        entry = entry[:entry.index("\n")]
+        self.assertIn("员工进修管理", entry)
+        self.assertIn("isBoss()", entry)
+        self.assertIn("rootOnly:true", entry)
         self.assertIn("employeeRejectLearning", review_list)
         self.assertIn("'batch'", review_list)
         self.assertIn("/employee-learning/batches/${Number(batch.id)}", load)

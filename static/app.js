@@ -1162,7 +1162,7 @@ function roomCard(s){
   const capsN = isBoss() ? (e.capabilities||[]).filter(c=>c.enabled).length : 0;
   return `<div class="room ${st==="work"?"working":""}" data-room="${s.idx}" onclick="openEmp(${s.idx})">
     <div class="roof" style="background:${s.color}"><span class="lamp"></span>${esc(s.dept)}<span style="flex:1"></span>${s.emoji}</div>
-    ${job?`<span class="jobtag">工单#${job.id}</span>`:""}
+    ${job?`<span class="jobtag">任务#${job.id}</span>`:""}
     <div class="scene">${charSVG(s.color, s.emoji, st, 108)}</div>
     <div class="meta">
       <div class="nm"><span>${esc(s.name)}${e.is_custom?` <span title="老板改过提示词">📝</span>`:""}${capsN?` <span class="sub" style="font-weight:700" title="启用能力项">🧰${capsN}</span>`:""}${skillsN?` <span class="sub" style="font-weight:700" title="进修技能数">⚡${skillsN}</span>`:""}</span>
@@ -1184,10 +1184,10 @@ function gateRoom(){
   const st = blocked?"await":"idle";
   return `<div class="room" data-room="gate" onclick="location.hash='#/censor'">
     <div class="roof" style="background:#ef476f;color:#fff"><span class="lamp"></span>合规审查部<span style="flex:1"></span>🛡️</div>
-    ${blocked?`<span class="jobtag">工单#${blocked.id}</span>`:""}
+    ${blocked?`<span class="jobtag">任务#${blocked.id}</span>`:""}
     <div class="scene">${charSVG("#ef476f","🛡️",st,108)}</div>
     <div class="meta"><div class="nm"><span>审查官</span><span class="stpill ${blocked?"fail":"idle"}">${blocked?"拦下了内容":"铁面待命"}</span></div>
-      <div class="live">${blocked?"有工单被审查拦截,去工单里处理":"发前审查 · 发布终审 · 发后数据复盘"}</div>
+      <div class="live">${blocked?"有任务被审查拦截,去任务里处理":"发前审查 · 发布终审 · 发后数据复盘"}</div>
       <div class="actions" style="margin-top:8px;gap:6px">
         <button class="btn sm" onclick="event.stopPropagation();location.hash='#/censor'">🪪 工作台</button>
         ${blocked?`<button class="btn sm blue" onclick="event.stopPropagation();location.hash='#/job/${blocked.id}'">去处理</button>`
@@ -1605,34 +1605,34 @@ function jobRow(j){
   const dots = (j.stations||[]).map((st,i)=>{
     const s = META.stations[i];
     const eff = st || (i===j.current_idx && j.status==="running" ? "running" : "");
-    return `<span class="dot ${eff}" title="工位${i+1} ${s?s.name:""}:${RUN_LABEL[eff]||"未开始"}"></span>`;
+    return `<span class="dot ${eff}" title="步骤${i+1} ${s?s.name:""}:${RUN_LABEL[eff]||"未开始"}"></span>`;
   }).join("");
   return `<div class="jobrow" onclick="location.hash='#/job/${j.id}'">
     <span style="font-size:22px">${stn?stn.emoji:"📦"}</span>
     <div class="t">#${j.id} ${esc(j.title!=="(未产出标题)"?j.title:j.brief.direction)}
       <div class="sub" style="font-weight:400">${esc(j.brief.template||"")} · ${esc(MODE_LABEL[j.mode]||j.mode)} · ${(j.brief.platforms||[]).map(esc).join("/")}</div></div>
     <div class="dots">${dots}</div>
-    <span class="sub">工位${j.current_idx+1}/10 ${stn?stn.name:""}</span>
+    <span class="sub">步骤${j.current_idx+1}/10 ${stn?stn.name:""}</span>
     <span class="pill ${j.status}">${ST_LABEL[j.status]||j.status}</span>
     ${isAdmin()?`<button class="btn sm" style="padding:2px 8px" title="移入回收站" onclick="event.stopPropagation();deleteJob(${j.id})">🗑</button>`:""}</div>`;
 }
 async function deleteJob(id){
   const j = (STATE.jobs||[]).find(x=>x.id===id);
-  const activeMsg = j && !["done","cancelled","failed"].includes(j.status) ? "该工单还在进行中,删除会先停工。" : "";
-  if(!await uiConfirm(`${activeMsg}把工单 #${id} 移入回收站?\n记录与交付物会保留，可从回收站恢复。`,{
+  const activeMsg = j && !["done","cancelled","failed"].includes(j.status) ? "该任务还在进行中,删除会先停工。" : "";
+  if(!await uiConfirm(`${activeMsg}把任务 #${id} 移入回收站?\n记录与交付物会保留，可从回收站恢复。`,{
     title:"移入回收站",confirmText:"移入回收站"
   })) return;
   try{
     await api(`/jobs/${id}`,{method:"DELETE"});
-    toast("🗑 工单已移入回收站");
+    toast("🗑 任务已移入回收站");
     if(location.hash.startsWith(`#/job/${id}`)||location.hash.startsWith(`#/delivery/${id}`)) location.hash="#/";
     else render();
   }catch(e){ toast("删除失败:"+e.message, true); }
 }
 
 /* ---------- V42:可恢复回收站 ---------- */
-const TRASH_KIND_LABEL = {job:"内容工单",task:"数字员工任务",knowledge:"知识沉淀",avatar:"数字人任务",
-  profile:"人设档案",asset:"资产"};
+const TRASH_KIND_LABEL = {job:"内容任务",task:"数字员工任务",knowledge:"知识沉淀",avatar:"数字人任务",
+  profile:"品牌人设",asset:"资产"};
 let TRASH_ITEMS=[];
 async function trashView(offset=0){
   if(!isAdmin()){ $("#main").innerHTML='<div class="empty">需要企业主账号权限</div>'; return; }
@@ -1645,7 +1645,7 @@ async function trashView(offset=0){
   $("#main").innerHTML=`<div class="card" style="background:linear-gradient(120deg,#f4edde,#fffaf0)">
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <div style="flex:1;min-width:220px"><h2 style="margin:0">🗑 回收站</h2>
-        <div class="sub" style="margin-top:5px">误删的工单、员工任务、知识沉淀、资产、人设档案和数字人任务可在这里恢复；交付物不会在移入回收站时被销毁,内容<b>长期保留、暂无自动清理</b>。含敏感客户信息的记录可在此「⛔ 彻底删除」,连同交付文件一并销毁。</div></div>
+        <div class="sub" style="margin-top:5px">误删的内容任务、员工任务、经验、资料、品牌人设和数字人任务可在这里恢复；交付物不会在移入回收站时被销毁,内容<b>长期保留、暂无自动清理</b>。含敏感客户信息的记录可在此「⛔ 彻底删除」,连同交付文件一并销毁。</div></div>
       <button class="btn" onclick="trashView()">↻ 刷新</button></div>
     ${data.truncated?`<div class="notice">当前已展示 ${rows.length} 条，下面还能加载更早记录。</div>`:""}</div>
   <div class="card">${rows.length?rows.map(item=>`<div class="topic" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
@@ -1692,7 +1692,7 @@ async function trashPurge(kind,id,btn){
 const TC_PAGE_SIZE=100;
 let TC_DATA = null, TC_DATA_Q = "", TC_STATUS = "open", TC_KIND = "all", TC_QUERY = "", TC_LOADING_MORE = false;
 let TC_REQUEST_SEQ = 0, TC_SEARCH_TIMER = null;
-const TC_KIND_LABEL = {expert:"数字员工任务",content:"内容工单",meeting:"AI会议",avatar:"数字人视频",
+const TC_KIND_LABEL = {expert:"数字员工任务",content:"内容任务",meeting:"AI会议",avatar:"数字人视频",
   video:"图文成片",tool:"营销工具",publish:"发布任务",wechat:"公众号草稿投递"};
 function tcPill(group){ return group==="done"?"done":group==="failed"?"failed":
   group==="waiting"?"awaiting_review":group==="cancelled"?"cancelled":"running"; }
@@ -1788,7 +1788,7 @@ function tcStatusCard(key,emoji,label,n,color){
 function tcNewButton(){
   if(canWork("content")) return `<a class="btn pri" href="#/new">➕ 派一个任务</a>`;
   if(canWork("avatar")) return `<a class="btn pri" href="#/avatar">➕ 新建数字人任务</a>`;
-  return `<a class="btn pri" href="#/">➕ 去办公室找员工派活</a>`;
+  return `<a class="btn pri" href="#/experts">➕ 去找行业专家派活</a>`;
 }
 function taskCenterDraw(){
   const d=TC_DATA||{counts:{},items:[],kind_counts:{}}, c=d.counts||{}, rows=tcVisibleItems();
@@ -1797,7 +1797,7 @@ function taskCenterDraw(){
   const hasMore = d.has_more===true || (d.has_more===undefined && d.truncated===true);
   $("#main").innerHTML = `<div class="card" style="background:linear-gradient(120deg,#fff2bd,#fffaf0 65%)">
     <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-      <div style="flex:1;min-width:240px"><h2 style="font-size:22px;margin:0">📋 任务中心</h2>
+      <div style="flex:1;min-width:240px"><h2 style="font-size:22px;margin:0">📦 派出去的活</h2>
         <div class="sub" style="margin-top:5px">您派出去的活都在这里。先看谁正在干、卡在哪里，再点开任务或追到它的生成来源。</div></div>
       ${tcNewButton()}</div></div>
   <div class="grid3 tc-stats" style="grid-template-columns:repeat(auto-fit,minmax(145px,1fr));margin-bottom:18px">
@@ -1817,7 +1817,7 @@ function taskCenterDraw(){
       <span class="tag" id="tc-count">${filteredTotal} 条</span>${hasMore?`<span class="sub">已加载 ${d.items.length} / ${filteredTotal} 条</span><button class="btn sm" id="tc-load-more" onclick="tcLoadMore(this)">加载更早任务</button>`:""}
       <button class="btn sm" style="margin-left:auto" onclick="tasksView()">↻ 刷新</button></div>
     ${TC_QUERY.trim()?`<div class="notice" style="margin:0 0 9px">🔍 已按「${esc(TC_QUERY.trim())}」<b>全局搜索</b>全部历史记录,命中 ${c.all||0} 条${hasMore?",下方还有更多可加载":""}。</div>`:""}
-    <div id="tc-list">${rows.length?rows.map(tcRow).join(""):`<div class="empty">${(c.all||0)===0?`还没有任务。<div class="actions" style="margin-top:10px;justify-content:center"><a class="btn sm pri" href="#/new">✍️ 发第一单内容</a><a class="btn sm" href="#/">🧑‍🔧 找行业专家派活</a></div>`:"这个筛选下没有任务。换个状态或关键词看看。"}</div>`}</div>
+    <div id="tc-list">${rows.length?rows.map(tcRow).join(""):`<div class="empty">${(c.all||0)===0?`还没有任务。<div class="actions" style="margin-top:10px;justify-content:center"><a class="btn sm pri" href="#/new">✍️ 下达第一个内容任务</a><a class="btn sm" href="#/experts">🧑‍🔧 找行业专家派活</a></div>`:"这个筛选下没有任务。换个状态或关键词看看。"}</div>`}</div>
   </div>`;
 }
 function tcRow(x){
@@ -2414,7 +2414,7 @@ function soloTab(s,e){
           <span class="sub">不再次扣点 · 还可重试 ${t.free_retries_remaining} 次</span>`
           :`<span class="sub">免费重试次数已用完</span>`}</div></div>${taskRevisionPanel(t,"solo")}`:""}</div>`;
   }
-  return `<div class="notice" style="margin-top:0">📋 <b>不走流水线,单独用 ${esc(s.name)}</b>:一句话派活,TA 独立交付(自动进资产库)。适合只需要 ${esc(s.name)} 完成一个明确环节的任务。</div>
+  return `<div class="notice" style="margin-top:0">📋 <b>不走整套制作流程,单独用 ${esc(s.name)}</b>:一句话派活,TA 独立交付(自动进资产库)。适合只需要 ${esc(s.name)} 完成一个明确环节的任务。</div>
   ${taskGuideCard(guide)}
   <label>任务内容 *</label>
   <textarea id="solo-dir" placeholder="${esc(guide.task_placeholder)}"></textarea>
@@ -2501,7 +2501,7 @@ function methodTab(s,e){
   return `
   <div class="flow">
     <div class="fnode"><b>📥 接单输入</b><div class="sub" style="margin-top:3px">
-      ${prev?`来自工位${s.idx}「${esc(prev.name)}」的产出`:"老板的 Brief(内容方向/平台/人设)"} + 老板 Brief + 人设档案 + 公司知识沉淀</div></div>
+      ${prev?`来自步骤${s.idx}「${esc(prev.name)}」的产出`:"老板的需求(内容方向/平台/人设)"} + 老板的需求 + 品牌人设 + 公司经验库</div></div>
     <div class="farrow">⬇️</div>
     <div class="fnode" style="border-color:${s.color}"><b>🧰 逐项运用 ${caps.length} 项能力</b>
       <div class="capgrid">${caps.map(c=>`<span class="chip on" title="${esc(c.desc)}">${c.emoji} ${esc(c.name)}</span>`).join("")||`<span class="sub">全部能力被停用了!</span>`}</div>
@@ -2513,9 +2513,9 @@ function methodTab(s,e){
     <div class="fnode"><b>🚦 放行方式</b><div class="sub" style="margin-top:3px">${appr}</div></div>
     ${s.idx===7?`<div class="farrow">⬇️</div><div class="fnode" style="border-color:#ef476f"><b>🛡️ 质检关卡</b><div class="sub" style="margin-top:3px">发布前自动质检,高风险内容会被拦下等老板定夺</div></div>`:""}
     <div class="farrow">⬇️</div>
-    <div class="fnode" style="opacity:.85"><b>➡️ 交棒</b><div class="sub" style="margin-top:3px">${next?`交给工位${next.idx+1}「${esc(next.name)}」继续`:"全部完成,进交付包,复盘经验自动写入沉淀库"}</div></div>
+    <div class="fnode" style="opacity:.85"><b>➡️ 交棒</b><div class="sub" style="margin-top:3px">${next?`交给步骤${next.idx+1}「${esc(next.name)}」继续`:"全部完成,进交付包,复盘经验自动写入沉淀库"}</div></div>
   </div>
-  <div class="sub" style="margin-top:10px">工作时的每一步(检索/读网页/写了多少字)都会实时打在办公室房间和工单页的工作日志里。</div>`;
+  <div class="sub" style="margin-top:10px">工作时的每一步(检索/读网页/写了多少字)都会实时显示在员工卡片和任务页的工作日志里。</div>`;
 }
 
 function skillsTab(s,e){
@@ -2735,7 +2735,7 @@ function specTaskTab(e){
           ${cur.thread?.status==="standalone"?`<button class="btn sm" onclick="taskEdit(${cur.id})">✏️ 编辑</button>`:""}
           <a class="btn sm" href="/api/tasks/${cur.id}/export.pdf">⬇️ PDF</a>
           <a class="btn sm" href="/api/tasks/${cur.id}/export.docx">⬇️ Word</a>
-          <button class="btn sm" onclick="taskToKnow(${cur.id})">📚 存入沉淀库</button>`:""}
+          <button class="btn sm" onclick="taskToKnow(${cur.id})">📚 存入经验库</button>`:""}
         <button class="btn sm" onclick="SPEC_TASK=null;drawSpec()">收起</button></div>
       <div class="sub">任务书:${esc(cur.brief?.direction||"")}</div>
       ${["queued","running"].includes(cur.status)?`<div class="steps" id="spec-steps" style="margin-top:8px">${(cur.steps||[]).map((s,i)=>stepRow(s,i+1)).join("")||`<div class="step"><span class="ic">⏳</span><span class="lb">专家上线中…</span></div>`}</div>`:""}
@@ -3259,7 +3259,7 @@ async function pauseJob(id){
   catch(e){ toast(e.message); }
 }
 async function resumeJob(id){
-  try{ await api(`/jobs/${id}/resume`,{method:"POST"}); toast("▶️ 已恢复,被打断的工位自动重跑"); render(); }
+  try{ await api(`/jobs/${id}/resume`,{method:"POST"}); toast("▶️ 已恢复,被打断的步骤自动重跑"); render(); }
   catch(e){ toast(e.message); }
 }
 
@@ -3361,7 +3361,7 @@ async function newBrief(){
   $("#main").innerHTML = `<div class="card" id="brief-form" style="max-width:820px;margin:0 auto">
     <h2>➕ 下达任务</h2>
     <div id="brief-draft-notice"></div>
-    <div class="notice" style="margin-top:8px">👔 <b>老板只需要三步</b>:①选行业 ②说方向 ③点提交。剩下的交给流水线:趋势官找热点 → 情报员查资料 → 拆解师学爆款 → 撰稿改稿配图封面 → 质检 → 各平台发布包。关键节点会停下来等您拍板。</div>
+    <div class="notice" style="margin-top:8px">👔 <b>老板只需要三步</b>:①选行业 ②说方向 ③点提交。剩下的交给制作流程:趋势官找热点 → 情报员查资料 → 拆解师学爆款 → 撰稿改稿配图封面 → 质检 → 各平台发布包。关键节点会停下来等您拍板。</div>
     <label>① 行业/赛道(内容会贴着这个行业做:渠道、黑话、案例、对标)</label>
     <div class="chips" id="b-ind">${META.industries.map((t,i)=>`<span class="chip${i===0?" on":""}" onclick="pick(this)">${t}</span>`).join("")}</div>
     <input id="b-ind-c" value="${esc(PRE?.industry||"")}" placeholder="✏️ 或自己输入行业/赛道(如:宠物烘焙、二手奢侈品)——填了就用您输入的" style="margin-top:6px">
@@ -3369,7 +3369,7 @@ async function newBrief(){
     <textarea id="b-dir" placeholder="例:${esc(BRIEF_EXAMPLES[0])}">${esc(PRE?.direction||"")}</textarea>
     ${PRE?`<div class="notice green">🔥 来自「今日必发」:${esc(PRE.why||"")}</div>`:""}
     <div class="chips" style="margin-top:4px">${BRIEF_EXAMPLES.map(x=>`<span class="chip" style="font-size:11px" onclick="$('#b-dir').value=this.textContent;scheduleBriefDraftSave()">${esc(x)}</span>`).join("")}</div>
-    <label>③ 内容类型 <span class="sub">(决定整条流水线的打法)</span></label>
+    <label>③ 内容类型 <span class="sub">(决定整个制作流程的打法)</span></label>
     <div class="chips" id="b-tpl">${META.brief_templates.map((t,i)=>`<span class="chip${i===1?" on":""}" onclick="pick(this)" title="${{蹭热点:"追当下热点,时效优先",日更选题:"从趋势里挑题,稳定日更",产品软文:"带货种草,卖点前置",观点输出:"独到观点,人设优先",教程干货:"手把手教程,信息密度高",二创改写:"对标内容二次创作"}[t]||t}">${t}</span>`).join("")}</div>
     <input id="b-tpl-c" value="${esc(PRE?.template||"")}" placeholder="✏️ 或自己输入内容类型(如:门店探访日记、老板问答)——填了就用您输入的" style="margin-top:6px">
     <label>④ 配图 · 张数</label>
@@ -3387,14 +3387,14 @@ async function newBrief(){
       ${DY_ALL.map((s,i)=>`<option value="${i}">${esc(s.name)}${s.preset?" · 预设":" · 自定义"}</option>`).join("")}</select></div>
     </div>
     <div class="row">
-      <div><label>⑥ 用哪个账号人设 <span class="sub">(写出来像您本人)</span></label><select id="b-profile"><option value="">(不使用人设档案)</option>
+      <div><label>⑥ 用哪个账号人设 <span class="sub">(写出来像您本人)</span></label><select id="b-profile"><option value="">(不使用品牌人设)</option>
         ${profiles.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join("")}</select>
         <div class="sub" style="margin-top:4px">还没档案?<a href="#/profiles" style="text-decoration:underline">30秒去建一个 →</a></div></div>
       <div><label>⑦ 您想管多少 <span class="sub">(随时可打断)</span></label><select id="b-mode">
         <option value="copilot">关键审批(推荐)— 选题/初稿/视觉/发布 4 处等您拍板</option>
         <option value="fullauto">完全托管 — 一停不停,员工接力干到交付(质检仍生效)</option>
         <option value="autopilot">全自动 — 只在发布前终审等您</option>
-        <option value="manual">逐站审批 — 10 个工位每一步都等您</option></select></div>
+        <option value="manual">逐站审批 — 10 个步骤每一步都等您</option></select></div>
     </div>
     <details style="margin-top:12px"><summary class="sub" style="cursor:pointer">📎 高级选项:参考链接 / 附加素材 / 演绎稿(选填)</summary>
       <label>参考链接</label><input id="b-ref" placeholder="热点新闻/对标文章链接,情报员会精读" value="${esc(PRE?.ref_link||"")}">
@@ -3409,7 +3409,7 @@ async function newBrief(){
   </div>`;
   const restored=!PRE&&restoreBriefDraft();
   if(restored) $("#brief-draft-notice").innerHTML=`<div class="notice green" role="status">
-    已恢复您上次未提交的 Brief 草稿。
+    已恢复您上次未提交的需求草稿。
     <button class="btn sm" type="button" onclick="discardBriefDraft()">清空草稿</button></div>`;
   const form=$("#brief-form");
   form.addEventListener("input",scheduleBriefDraftSave,true);
@@ -3818,11 +3818,11 @@ async function deliveryView(id){
 /* ---------- 人设档案 ---------- */
 async function profilesView(){
   const ps = STATE.profiles;
-  $("#main").innerHTML = `<div class="card"><h2>🎭 账号人设档案</h2>
-    <div class="sub">定义"为谁生产"。人设会注入全流水线:选题偏好、撰稿、文风固定、视觉规范。</div>
+  $("#main").innerHTML = `<div class="card"><h2>🎭 品牌人设</h2>
+    <div class="sub">定义"为谁生产"。人设会用在整个制作流程里:选题偏好、撰稿、文风固定、视觉规范。</div>
     <div class="actions"><button class="btn pri" onclick="newProfile()">➕ 新建档案</button>
       ${isAdmin()?`<a class="btn" href="/api/records/export.xlsx?kind=profiles">⬇️ 导出全部档案(含语料)</a>`:""}</div></div>
-  <div id="plist">${ps.map(profileCard).join("")||`<div class="empty">还没有人设档案</div>`}</div>`;
+  <div id="plist">${ps.map(profileCard).join("")||`<div class="empty">还没有品牌人设</div>`}</div>`;
 }
 function profileCard(p){
   const s = p.persona||{};
@@ -3838,7 +3838,7 @@ function profileCard(p){
 function profileForm(p){
   const s = (p&&p.persona)||{};
   return `<div class="card pform" style="max-width:780px">
-    <h2>${p?"编辑":"新建"}人设档案</h2>
+    <h2>${p?"编辑":"新建"}品牌人设</h2>
     <label>账号名称 *</label><input id="p-name" value="${esc(p?.name||"")}" placeholder="如:阿磊聊AI">
     <div class="row">
       <div><label>账号定位</label><input id="p-pos" value="${esc(s.positioning||"")}" placeholder="如:普通人视角的 AI 工具测评"></div>
@@ -3864,7 +3864,7 @@ async function loadProfileFiles(input){
 }
 function closeProfileForms(){ document.querySelectorAll(".pform").forEach(f=>f.remove()); }
 async function profileDel(id,name){
-  if(!await uiConfirm(`把人设档案「${name}」移入回收站?\n历史作品语料会保留,可从回收站恢复。正在跑的工单不受影响。`,{
+  if(!await uiConfirm(`把品牌人设「${name}」移入回收站?\n历史作品语料会保留,可从回收站恢复。正在跑的任务不受影响。`,{
     title:"移入回收站",confirmText:"移入回收站"
   })) return;
   try{ await api("/profiles/"+id,{method:"DELETE"}); toast("已移入回收站"); SHELL_DIRTY=true; render(); }
@@ -3918,7 +3918,7 @@ async function assetsView(){
   const rows=assetContract.items;
   const shown = rows;
   const action = a => ASSET_TAB==="topic"
-    ? `<button class="btn sm" onclick="fromTopic(${a.id})">🚀 发起工单</button>`
+    ? `<button class="btn sm" onclick="fromTopic(${a.id})">🚀 用它下达任务</button>`
     : ASSET_TAB==="final" ? `<a class="btn sm" href="#/delivery/${a.job_id}">交付包</a>`
     : `<button class="btn sm" onclick="openReport(${a.payload.task_id})">📄 看报告</button>`;
   const title = a => ASSET_TAB==="report"
@@ -3951,7 +3951,7 @@ async function assetsView(){
           <button class="btn sm" onclick="reAnalyze('assets',${a.id},this)">🔁 重评</button>
           ${isAdmin()?`<button class="btn sm bad" onclick="assetDel(${a.id})" title="移入回收站">🗑</button>`:""}</div>
       </div>`).join("")}</div>`
-      :`<div class="empty">空的。汽车、美容、酒店等行业专家交付的报告会沉淀到这里;工具箱的报告在工具箱当页看,点「💾 沉淀」的会进沉淀库。</div>`)
+      :`<div class="empty">空的。汽车、美容、酒店等行业专家交付的报告会沉淀到这里;获客工具的报告在工具页里看,点「💾 存进经验库」的会进经验库。</div>`)
     : shown.length?`<div class="dimwrap"><table class="dimtable"><thead><tr>
       <th>标题</th><th>类别</th><th>平台</th><th>行业</th><th>主题</th><th>关键词</th>
       <th>质量</th><th>匹配</th><th>复用</th><th>时效</th><th>情绪</th><th>摘要</th><th>操作</th>
@@ -3962,7 +3962,7 @@ async function assetsView(){
         <button class="btn sm" onclick="reAnalyze('assets',${a.id},this)" title="重新评估">🔁</button>
         ${isAdmin()?`<button class="btn sm bad" onclick="assetDel(${a.id})" title="移入回收站">🗑</button>`:""}</td>
     </tr>`).join("")}</tbody></table></div>`
-    :`<div class="empty">空的。${{topic:"趋势官没被选中的选题会自动沉淀到这里",final:"完成的工单会沉淀到这里",report:"汽车、美容、酒店等行业专家交付的报告会沉淀到这里"}[ASSET_TAB]}</div>`}
+    :`<div class="empty">空的。${{topic:"趋势官没被选中的选题会自动沉淀到这里",final:"完成的内容任务会存到这里",report:"汽车、美容、酒店等行业专家交付的报告会沉淀到这里"}[ASSET_TAB]}</div>`}
     ${listPager(assetContract,"assets")}
   </div>`;
 }
@@ -3979,7 +3979,7 @@ async function openReport(tid){
     <div class="pbody">${taskBody(t)}</div></div></div>`);
 }
 async function assetDel(id){
-  if(!await uiConfirm("把这条资产移入回收站? 之后可以恢复;关联工单的交付物不受影响。",{
+  if(!await uiConfirm("把这条资产移入回收站? 之后可以恢复;关联任务的交付物不受影响。",{
     title:"移入回收站",confirmText:"移入回收站"
   })) return;
   try{ await api("/assets/"+id,{method:"DELETE"}); toast("已移入回收站"); render(); }
@@ -4126,7 +4126,7 @@ function employeeLearningPanel(employee,{readonly=false,bindingScope="spec"}={})
     <div class="actions" style="margin-top:10px">
       <span class="tag ${status==="activated"?"green":""}">${esc(stateText)}</span>
       ${readonly?`<span class="tag readonly">只读</span>`:`<button class="btn pri" ${canStart?"":"disabled"} onclick="employeeStartLearning(${Number(employee?.idx)||0},${bindingExpr})">${employee?.learning?`<span class="spin"></span> 研究中…`:"🔎 发起证据研究"}</button>`}
-      ${!readonly&&isBoss()?`<button class="btn" onclick="openEmployeeLearningBatchManager()">🏭 修理厂 · 全员进修</button>`:""}
+      ${!readonly&&isBoss()?`<button class="btn" onclick="openEmployeeLearningBatchManager()">🏭 员工进修管理 · 全员进修</button>`:""}
       ${status==="awaiting_approval"&&!readonly?`<button class="btn blue" ${hasReviewBinding?"":"disabled"} onclick="employeeApproveLearning(${Number(latest.run_id||latest.id)||0},${cp(bindingScope)},${Number(latest.batch_id)||0},${Number(employee?.idx)||0})">✅ 审核并激活</button>`:""}
       ${status==="awaiting_approval"&&isBoss()?`<button class="btn bad" ${hasReviewBinding?"":"disabled"} onclick="employeeRejectLearning(${Number(latest.run_id||latest.id)||0},${cp(bindingScope)},${Number(latest.batch_id)||0},${Number(employee?.idx)||0})">✕ 拒绝提案</button>`:""}
     </div>
@@ -4351,8 +4351,8 @@ function drawEmployeeLearningBatchManager(){
       ${employeeLearningBatchReviewList(batch)}</div>`;}).join("");
   document.body.insertAdjacentHTML("beforeend",`<div class="overlay" id="employee-learning-batch-dialog" role="presentation" onclick="if(event.target===this)closeEmployeeLearningBatchManager()">
     <div class="panel" role="dialog" aria-modal="true" aria-labelledby="employee-learning-batch-title" style="max-width:900px">
-      <div class="phead"><div style="flex:1"><h2 id="employee-learning-batch-title" style="margin:0">🏭 修理厂 · 全员进修</h2>
-        <div class="sub">把行业专属员工送进修理厂做全网证据研究。先预览四元组和预算，确认后再开工；暂停不会打断已在核验的来源。</div></div>
+      <div class="phead"><div style="flex:1"><h2 id="employee-learning-batch-title" style="margin:0">🏭 员工进修管理 · 全员进修</h2>
+        <div class="sub">把行业专属员工送去进修,做全网证据研究。先预览四元组和预算，确认后再开工；暂停不会打断已在核验的来源。</div></div>
         <button class="btn sm" onclick="closeEmployeeLearningBatchManager()">✕</button></div>
       <div class="pbody"><div class="grid2"><label>进修范围<select id="learning-batch-scope" onchange="employeeLearningBatchScopeChanged(this.value)">
         ${EMPLOYEE_LEARNING_INDUSTRIES.map(([value,label])=>`<option value="${esc(value)}" ${state.scope===value?"selected":""}>${esc(label)}</option>`).join("")}</select></label>
@@ -5247,7 +5247,7 @@ async function companyView(){
   const p = c.profile || {};
   const f = (k,label,ph)=>`<label>${esc(label)}</label><input id="cp-${k}" value="${esc(p[k]||"")}" placeholder="${esc(ph)}">`;
   $("#main").innerHTML = `<div class="card"><h2>🏢 企业档案</h2>
-    <div class="sub">把企业介绍/品牌手册/产品说明/话术规范粘进来,点「提炼并同步」——AI 会压成一份固定档案,<b>自动注入每一个数字员工</b>(内容工位 / 行业专家 / 圆桌会议),让他们产出更懂你的企业、更贴品牌调性、不踩表达禁忌。也会自动带上沉淀库里的企业知识。</div>
+    <div class="sub">把企业介绍/品牌手册/产品说明/话术规范粘进来,点「提炼并同步」——AI 会压成一份固定档案,<b>自动注入每一个数字员工</b>(内容团队 / 行业专家 / 专家商量),让他们产出更懂你的企业、更贴品牌调性、不踩表达禁忌。也会自动带上经验库里的企业知识。</div>
     ${c.injected?(c.filled>=(c.total_fields||7)
       ?`<div class="notice" style="background:#e7f6ec;border-color:#8fd3a6">✅ 企业档案已生效(7/7 项齐全),正注入全部数字员工</div>`
       :`<div class="notice" style="background:#fff3d6">🟡 企业档案部分生效:已填 ${c.filled}/${c.total_fields||7} 项。员工只知道已填的部分——<b>空着的字段(如调性/禁忌)不会凭空生效</b>,建议补全后重新保存。</div>`)
@@ -5324,7 +5324,7 @@ async function knowledgeView(){
   const rows=knowledgeContract.items;
   KNOW_CACHE = rows;
   const shown = rows;
-  $("#main").innerHTML = `<div class="card"><h2>📚 公司沉淀库</h2>
+  $("#main").innerHTML = `<div class="card"><h2>📚 公司经验库</h2>
     <div class="sub">交付自动沉淀 + 老板手记。每条自动做 <b>11 维评估</b>(类别/平台/行业/主题/关键词/质量/匹配/复用/时效/情绪/摘要);📌 置顶的会注入员工每次工作(<b>每次最多带 12 条、每条取前 800 字</b>,置顶优先)。</div>
     ${(n=>n>12?`<div class="notice red" style="margin-top:8px">📌 已置顶 ${n} 条,超过单次注入上限 <b>12 条</b>:每次开工只有最新置顶的 12 条会带上,建议把最关键的留在置顶、其余取消。</div>`:"")(rows.filter(k=>k.pinned).length)}
     ${listContractNotice(knowledgeContract,"沉淀")}
@@ -5448,7 +5448,7 @@ function schedRow(s,selected=false){
       <button class="btn sm" onclick="schedRunNow(${s.id})">▶️ 立即来一单</button>
       <button class="btn sm bad" onclick="schedDel(${s.id})">🗑</button></div>
     <div class="sub" style="margin-top:6px">方向:${esc(s.brief.direction||"")} · ${(s.brief.platforms||[]).map(esc).join("/")} · ${esc(MODE_LABEL[s.mode]||s.mode)}</div>
-    ${s.last_note?`<div class="sub" style="margin-top:3px">📝 ${esc(s.last_note).replace(/工单 #(\d+)/,'工单 <a href="#/job/$1" style="text-decoration:underline;font-weight:800">#$1</a>')}</div>`:""}
+    ${s.last_note?`<div class="sub" style="margin-top:3px">📝 ${esc(s.last_note).replace(/工单 #(\d+)/,'任务 <a href="#/job/$1" style="text-decoration:underline;font-weight:800">#$1</a>')}</div>`:""}
   </div>`;
 }
 function schedForm(s){
@@ -5462,7 +5462,7 @@ function schedForm(s){
   const anyPf = s && META.platforms.some(pfOn);
   $("#sform").innerHTML = `<div class="card" style="background:#fff6dc">
     <h3 style="margin-top:0">${s?`✏️ 编辑定时任务 #${s.id}`:"新建定时任务"}</h3>
-    ${s?"":`<div class="notice" style="margin-top:6px">💡 <b>定好主题,以后每天全自动</b>:到点自动走完整条流水线(<b>每次自动开工扣 ${META?.job_points??18}点</b>,点数不足自动暂停)。建议先跑两单手动任务,满意了再定时。</div>`}
+    ${s?"":`<div class="notice" style="margin-top:6px">💡 <b>定好主题,以后每天全自动</b>:到点自动走完整个制作流程(<b>每次自动开工扣 ${META?.job_points??18}点</b>,点数不足自动暂停)。建议先跑两单手动任务,满意了再定时。</div>`}
     <label>任务名</label><input id="s-name" value="${esc(s?.name||"")}" placeholder="如:每日行业选题">
     <label>行业/赛道</label>
     <div class="chips" id="s-ind">${META.industries.map((t,i)=>`<span class="chip${(anyInd?indOn(t):i===0)?" on":""}" onclick="pick(this)">${t}</span>`).join("")}</div>
@@ -5539,9 +5539,9 @@ async function schedToggle(id,enabled){
   try{ await api("/schedules/"+id,{method:"PUT",body:{enabled:!!enabled}}); render(); }catch(e){ toast(e.message); }
 }
 async function schedRunNow(id){
-  if(!await uiConfirm(`立即按该主题跑一单完整流水线,将扣 ${META?.job_points??18} 点?`,{okText:"🚀 开工",okClass:"pri"})) return;
+  if(!await uiConfirm(`立即按该主题按完整制作流程跑一次,将扣 ${META?.job_points??18} 点?`,{okText:"🚀 开工",okClass:"pri"})) return;
   try{ const r = await api(`/schedules/${id}/run-now`,{method:"POST"});
-    toast("已开工 → 工单 #"+r.job_id); location.hash="#/job/"+r.job_id;
+    toast("已开工 → 任务 #"+r.job_id); location.hash="#/job/"+r.job_id;
   }catch(e){ toast(e.message); }
 }
 async function schedDel(id){
@@ -7005,11 +7005,11 @@ async function meetingsView(mid){
     </label>
     <label style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;cursor:pointer">
       <input id="mt-team" type="checkbox" style="width:auto;margin-top:3px">
-      <span><b>🤝 Agent 团队协作执行</b><span class="sub" style="display:block">不再各干各的：成员按分工接力开工，每一棒自动拿到前面队友的交付内容，最后由队长把全部交付整合成一份最终交付包。适合需要多人共创一个成果的议题；包含在本次会议中，不重复扣点。</span></span>
+      <span><b>🤝 多位专家接力完成</b><span class="sub" style="display:block">不再各干各的：成员按分工接力开工，每一棒自动拿到前面队友的交付内容，最后由队长把全部交付整合成一份最终交付包。适合需要多人共创一个成果的议题；包含在本次会议中，不重复扣点。</span></span>
     </label>
     <div class="actions"><button class="btn pri" onclick="mtStart(this)">🎯 开会并收敛(每人1点)</button></div></div>
   ${cur?`<div class="card" style="background:#fffaf0"><h2>会议 #${cur.id} ${{queued:"排队",running:"🗣 进行中…",done:"✅ 已收口",failed:"中断"}[cur.status]||cur.status}
-    ${cur.team_execute?`<span class="tag" style="background:#e7d9ff;font-weight:900">🤝 Agent 团队</span>`:""}
+    ${cur.team_execute?`<span class="tag" style="background:#e7d9ff;font-weight:900">🤝 专家接力</span>`:""}
     ${cur.status==="done"?`<span style="float:right"><a class="btn sm" href="/api/meetings/${cur.id}/export.pdf">⬇️ PDF</a>
     <a class="btn sm" href="/api/meetings/${cur.id}/export.docx">⬇️ Word</a></span>`:""}</h2>
     <div class="sub" style="margin-bottom:6px">议题:${esc(cur.question)}</div>
@@ -7018,7 +7018,7 @@ async function meetingsView(mid){
     ${mtConsensus(cur)}
     ${mtStructured(cur)}
     ${mtBody(cur)}
-    ${(cur.actions||[]).length?`<div class="card" style="background:#fff;margin-top:12px"><h3 style="margin-top:0">${cur.team_execute?"🤝 Agent 团队分工 · 接力执行":"📋 已锁定行动 · 责任到人"}</h3>
+    ${(cur.actions||[]).length?`<div class="card" style="background:#fff;margin-top:12px"><h3 style="margin-top:0">${cur.team_execute?"🤝 专家分工 · 接力完成":"📋 已锁定行动 · 责任到人"}</h3>
       ${cur.team_execute?`<div class="sub" style="margin-bottom:6px">每一棒自动拿到前面队友的交付内容；最后一棒是队长整合，输出一份最终交付包。</div>`:""}
       ${cur.actions.map((a,i)=>`<div class="topic" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         ${cur.team_execute?`<span class="tag" style="background:${a.team_role==="integrate"?"#e7d9ff":"#ffe59a"};font-weight:900">${a.team_role==="integrate"?"🧩 队长整合":`第 ${i+1} 棒`}</span>`:""}
@@ -7136,7 +7136,7 @@ async function mtAssignAll(mid, btn){
 async function mtExecute(mid, btn){
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 正在启动任务…`;
   try{ const r=await api(`/meetings/${mid}/execute`,{method:"POST"});
-    toast(r.team?"🤝 Agent 团队已开工，接力进度看会议消息流":`已启动 ${r.task_ids.length} 个执行任务`); render();
+    toast(r.team?"🤝 专家接力已开工，接力进度看会议消息流":`已启动 ${r.task_ids.length} 个执行任务`); render();
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🚀 执行会议决定"; }
 }
 function mtOpenTask(tid){
@@ -7471,7 +7471,7 @@ async function censorView(){
       ${charSVG("#e63946","🛡️","idle",92)}
       <div style="flex:1;min-width:min(100%,240px)"><div class="sub" style="font-weight:800">🎬 内容生产部 · 合规审查部</div>
       <h2 style="margin:2px 0 0">🛡️ 审查官的工作台</h2>
-      <div class="sub" style="margin-top:5px">流水线质检关卡就是他;发布前把关(广告法/平台规范/敏感违禁),发布后复盘(数据判读/限流体检)。公众号、小红书等平台规范逐条对照,发草稿箱前会自动终审。</div></div>
+      <div class="sub" style="margin-top:5px">内容制作流程里的质检关就是他;发布前把关(广告法/平台规范/敏感违禁),发布后复盘(数据判读/限流体检)。公众号、小红书等平台规范逐条对照,发草稿箱前会自动终审。</div></div>
       <a class="btn sm" href="#/">← 回办公室</a></div></div>
   <div class="card">
     <div class="tabs">${tabs.map(([k,l])=>`<span class="tb ${CEN_TAB===k?"on":""}" onclick="CEN_TAB=${cp(k)};resetListPage('censor');resetListPage('publog');render()">${l}</span>`).join("")}</div>
@@ -7872,7 +7872,7 @@ async function toolRun(key, btn, fn){
 }
 function keepReport(title, md){
   api("/knowledge",{method:"POST",body:{title, content:md}})
-    .then(()=>toast("✅ 已沉淀到「📚 沉淀库」")).catch(e=>toast(e.message));
+    .then(()=>toast("✅ 已存进「📚 经验库」")).catch(e=>toast(e.message));
 }
 const TOOL_TABS = [["hot","🔥 今日必发"],["remix","🎞️ 视频混剪"],["pcal","📅 私域日历"],["bench","👀 竞品盯梢"],["warm","🚀 起号军师"],["leads","🎯 线索雷达"],["shot","📸 产品图/文案"],["vars","📣 口播矩阵"]];
 let TOOL_HISTORY_FILTER={kind:"",status:""};
@@ -7909,7 +7909,7 @@ async function toolHistory(offset=0){
 }
 async function toolsView(tab,preserveDraft=false){
   if(ME?.role==="tour"||!can("content")){
-    $("#main").innerHTML=`<div class="card"><h2>该页面需要内容生产权限</h2><div class="sub">当前账号不能使用营销工具箱。</div><div class="actions"><a class="btn" href="#/">返回办公室</a></div></div>`;
+    $("#main").innerHTML=`<div class="card"><h2>该页面需要内容生产权限</h2><div class="sub">当前账号不能使用获客工具。</div><div class="actions"><a class="btn" href="#/">返回办公室</a></div></div>`;
     return;
   }
   if(TOOL_TABS.some(([key])=>key===tab)) TS.tab=tab;
@@ -8005,7 +8005,7 @@ async function toolsView(tab,preserveDraft=false){
     <div id="pc-out" style="margin-top:10px">${c?pcalHtml(c):""}</div>`;
   } else if(TS.tab==="bench"){
     const b = TOOLS_META.bench||{targets:[]};
-    body = `<div class="sub">把要盯的对标账号加进来,<b>每周一上午</b>自动出《竞品盯梢周报》(3点/期,自动扣):对手做了什么+值得抄的作业,存进沉淀库并推微信。也可随时手动出一期。</div>
+    body = `<div class="sub">把要盯的对标账号加进来,<b>每周一上午</b>自动出《竞品盯梢周报》(3点/期,自动扣):对手做了什么+值得抄的作业,存进经验库并推微信。也可随时手动出一期。</div>
     <div id="bw-list">${(b.targets||[]).map(t=>bwRow(t)).join("")||bwRow()}</div>
     <div class="actions" style="margin-top:8px"><button class="btn" onclick="bwAdd()">➕ 加对标</button>
       <label style="display:inline-flex;align-items:center;font-weight:700;margin:0 8px"><input type="checkbox" id="bw-en" style="width:auto;margin-right:6px" ${b.enabled?"checked":""}>每周自动</label>
@@ -8013,7 +8013,7 @@ async function toolsView(tab,preserveDraft=false){
       <button class="btn pri" ${TS.busy.bench||TS.running?.bench?"disabled":""} onclick="bwRun(this)">📰 立即出一期(3点)</button></div>
     ${etaHint("bench","通常2-5分钟，最迟6分钟自动结束")}
     ${busyBar("bench","情报官正在逐个盯对标的近7天动态")}
-    <div class="sub" style="margin-top:6px">${b.last_run?`上次出报:${new Date(b.last_run*1000).toLocaleString("zh-CN")}(每周一自动出的那期在<a href="#/knowledge" style="text-decoration:underline">沉淀库</a>)`:""}</div>
+    <div class="sub" style="margin-top:6px">${b.last_run?`上次出报:${new Date(b.last_run*1000).toLocaleString("zh-CN")}(每周一自动出的那期在<a href="#/knowledge" style="text-decoration:underline">经验库</a>)`:""}</div>
     <div id="bw-out" style="margin-top:8px">${TS.bench?benchResHtml(TS.bench):""}</div>`;
   } else if(TS.tab==="warm"){
     body = `<div class="sub">新账号从 0 起:军师先联网调研您行业在该平台的头部打法,再给《30天冷启动作战计划》——定位诊断/账号名/简介/对标账号/分周打法/30天逐日选题。</div>
@@ -8021,8 +8021,8 @@ async function toolsView(tab,preserveDraft=false){
       <div style="flex:0 0 150px"><label>平台</label><select id="wm-pf" onchange="TS.wmPf=this.value">${["小红书","抖音","公众号","视频号"].map(x=>`<option ${TS.wmPf===x?"selected":""}>${x}</option>`).join("")}</select></div>
       <div style="flex:1;min-width:200px"><label>行业</label>${indChips("wm-ind", TS.wmInd)}</div></div>
     <input id="wm-ind-c" placeholder="✏️ 或自己输入行业(填了就用这个)" value="${esc(TS.wmIndC||"")}" oninput="TS.wmIndC=this.value" style="margin-top:6px">
-    <label>挂哪个人设档案 <span class="sub">(强烈建议选:账号名/简介/选题全按这个人设来;<a href="#/profiles" style="text-decoration:underline">没有就先建 →</a>)</span></label>
-    <select id="wm-profile" onchange="TS.wmProfile=this.value"><option value="">(不用人设档案)</option>
+    <label>挂哪个品牌人设 <span class="sub">(强烈建议选:账号名/简介/选题全按这个人设来;<a href="#/profiles" style="text-decoration:underline">没有就先建 →</a>)</span></label>
+    <select id="wm-profile" onchange="TS.wmProfile=this.value"><option value="">(不用品牌人设)</option>
       ${(STATE.profiles||[]).map(p=>`<option value="${p.id}" ${String(TS.wmProfile||"")===String(p.id)?"selected":""}>${esc(p.name)}</option>`).join("")}</select>
     <label>您的定位想法(选填)</label><input id="wm-pos" placeholder="如:社区宝妈客群的轻食店,想走老板娘人设" value="${esc(TS.wmPos||"")}" oninput="TS.wmPos=this.value">
     <div class="actions"><button class="btn pri" ${TS.busy.warm||TS.running?.warm?"disabled":""} onclick="warmGo(this)">🚀 出30天起号计划(3点)</button></div>
@@ -8075,7 +8075,7 @@ async function toolsView(tab,preserveDraft=false){
   }
   const snapshot=preserveDraft?captureFormState():null;
   $("#main").innerHTML = `<div class="card" style="background:linear-gradient(120deg,#fff6dc,#f4f9f4 65%)">
-    <h2 style="margin:0">🧰 营销工具箱</h2>
+    <h2 style="margin:0">🧰 获客工具</h2>
     <div class="sub" style="margin-top:5px">老板的日常武器库:每个工具都是「填两个空 → 点一下 → 拿走就能用」。</div>
     <div class="actions"><button class="btn sm" onclick="toolHistory(0)">🧾 查看全部工具任务</button></div></div>
   <div class="card"><div class="tabs" style="flex-wrap:wrap">${TOOL_TABS.map(([k,l])=>`<a class="tb ${TS.tab===k?"on":""}" href="#/tools/${k}">${l}</a>`).join("")}</div>
@@ -8222,7 +8222,7 @@ function benchResHtml(r){
       <div class="sub" style="margin-top:4px">✂️ 抄作业:${esc(it.steal||"")}</div></div>`).join("")
     +(r.actions||[]).map(a=>`<div class="sub" style="margin-top:4px">→ ${esc(a)}</div>`).join("")
     +`<div class="actions" style="margin-top:8px">
-      <button class="btn sm pri" onclick="keepReport('竞品盯梢周报 '+new Date().toLocaleDateString('zh-CN'), TS.bench.md||'')">💾 有价值,沉淀到沉淀库</button>
+      <button class="btn sm pri" onclick="keepReport('竞品盯梢周报 '+new Date().toLocaleDateString('zh-CN'), TS.bench.md||'')">💾 有价值,存进经验库</button>
       <button class="btn sm" onclick="copyText(TS.bench.md||'')">📋 复制全文</button></div>`;
 }
 function warmHtml(w){
@@ -8308,7 +8308,7 @@ function leadsHtml(L, context={}){
   ${(L.followup||[]).length?`<div class="card" style="background:#f4f9f4;margin-top:8px"><b>📆 未来3天跟进清单</b>
     ${L.followup.map((f,i)=>`<div class="sub" style="margin-top:4px">${i+1}. ${esc(f)}</div>`).join("")}</div>`:""}
   <div class="notice" style="margin-top:6px">⚠️ ${esc(L.note||"人工逐条回复,别群发")}</div>
-  <div class="actions" style="margin-top:8px"><button class="btn sm pri" onclick="keepReport(${cp(reportTitle)},${cp(reportMd)})">💾 有价值,沉淀到沉淀库</button>
+  <div class="actions" style="margin-top:8px"><button class="btn sm pri" onclick="keepReport(${cp(reportTitle)},${cp(reportMd)})">💾 有价值,存进经验库</button>
     <button class="btn sm" onclick="copyText(${cp(reportMd)})">📋 复制全文</button></div>`;
 }
 function leadsMd(L, city=TS.ldCity||"", industry=TS.ldInd||""){
