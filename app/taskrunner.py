@@ -9,7 +9,7 @@ import logging
 import re
 import time
 
-from . import billing, db, departments, employeeidentity, employees, llm, providers
+from . import billing, bossbrief, db, departments, employeeidentity, employees, llm, providers
 
 log = logging.getLogger("taskrunner")
 
@@ -400,8 +400,11 @@ def _meeting_delivery_section(
         elif row["status"] == "done":
             delivered += 1
             state = "已交付"
-            body = (row["summary_md"] or row["output_md"] or "").strip()
-            detail = " ".join(body.split())[:500]
+            if (row["summary_md"] or "").strip():
+                # 速览是「结论 + 行动 + 留意」的结构化卡片，压成一行引用。
+                detail = bossbrief.one_line(row["summary_md"], 500)
+            else:
+                detail = " ".join((row["output_md"] or "").split())[:500]
         elif row["status"] == "failed":
             failed += 1
             state = "执行失败，可免费重试"
@@ -1066,8 +1069,9 @@ async def run_task(task_id: int, broadcast):
         await cleanup()
     if md_done:
         await _notify_task_outcome_async(task_id, True)
-    # 任务已交付(done)后再补「老板速览」——绝不拖慢交付感知,失败也不回退状态
-    if md_done and len(md_done) > DIGEST_MIN_CHARS:
+    # 任务已交付(done)后再补「老板速览」——绝不拖慢交付感知,失败也不回退状态。
+    # 不论长短都生成:老板只看结论卡,全文默认折叠。
+    if md_done:
         await _gen_summary(
             task_id,
             md_done,
@@ -1080,6 +1084,7 @@ async def run_task(task_id: int, broadcast):
         )
 
 
+# 历史常量:以前只有超过这个字数才生成速览;现在不论长短都生成,保留名字给旧引用。
 DIGEST_MIN_CHARS = 1500
 
 # 篇幅硬保障:提示词软约束压不住 6000 字岗位手册的输出惯性,超过容忍线就再走一道压缩。
@@ -1137,7 +1142,11 @@ def _decision_summary_lines(
     employee: dict,
     decision_gate: dict | None = None,
 ) -> list[str]:
-    """从已门禁正文生成 V2 摘要，不再让二次模型改写安全字段。"""
+    """从已门禁正文生成 V2 速览，不再让二次模型改写安全字段。
+
+    结构与普通速览一致（一句话结论 + 3 条行动 + 要留意），结论和行动由门禁
+    状态决定；审批边界、禁止动作等把关信息用大白话放进「补充说明」。
+    """
     if decision_gate is not None:
         gate = decision_gate
     else:
@@ -1159,55 +1168,57 @@ def _decision_summary_lines(
     gap_state = departments._decision_gap_state(gap_sections)
     gap_detail = " ".join(" ".join(str(item).split()) for item in gap_sections).strip()
     if gap_state == "none":
-        gap_line = "已声明无未闭合数据缺口（仍需人工复核）"
+        gap_line = "专家说资料已经齐了（仍需您人工复核）"
     elif gap_state == "present":
-        gap_line = f"存在未闭合数据缺口：{gap_detail[:320] or '见原始输出'}"
+        gap_line = f"还缺这些资料：{gap_detail[:320] or '见完整报告'}"
     else:
-        gap_line = "数据缺口声明缺失，必须补齐后重审"
+        gap_line = "专家没说明还缺哪些资料，需补齐后重新复核"
     approval = str(contract.get("approval_boundary") or "未加载有效审批边界；必须人工复核").strip()
     forbidden = "；".join(str(item).strip() for item in contract.get("forbidden_actions") or () if str(item).strip())
     if not forbidden:
         forbidden = "不得执行任何业务写操作"
-    lines = [
-        f"- 决策状态：{gate.get('status') or 'HOLD'}",
-        "- 人工审批语义：GO 仅表示可进入人工审批，不代表允许系统自动执行任何业务写操作。",
-        "- 用户提交覆盖：" + str(
+    status = str(gate.get("status") or "HOLD")
+    extra = [
+        f"决策状态：{status}",
+        "人工审批：GO 只代表可以进入人工审批，系统不会自动替您执行任何操作。",
+        "您提供的资料：" + str(
             gate.get("coverage_text")
-            or "覆盖状态不可用；内容未核验"
+            or "暂时统计不到；内容未核验"
         ),
-        f"- 数据缺口：{gap_line}",
-        f"- 审批边界：{approval}",
-        f"- 禁止动作：{forbidden}",
+        f"数据缺口：{gap_line}",
+        f"审批边界（哪些事必须您点头）：{approval}",
+        f"禁止动作：{forbidden}",
     ]
     reasons = [str(reason).strip() for reason in gate.get("reasons") or () if str(reason).strip()]
     if reasons:
-        lines.append(f"- 门禁原因：{'；'.join(dict.fromkeys(reasons))}")
-    return lines
+        extra.append(f"为什么先别动：{'；'.join(dict.fromkeys(reasons))}")
+    brief = bossbrief.decision_brief(
+        status, gap_detail if gap_state == "present" else ""
+    )
+    text = bossbrief.format_brief(
+        brief["verdict"], brief["actions"], brief["watch"], extra
+    )
+    return text.split("\n")
 
 
 def _summary_points(raw) -> list[str]:
-    """把模型给的 points 规整成 ≤5 条要点。
+    """把模型给的 points 规整成 ≤5 条要点（字符串不逐字拆开）。"""
+    return bossbrief.as_items(raw, 5, 60)
 
-    模型偶尔把 points 返回成一整段字符串;直接迭代会被逐字拆成几十条单字
-    要点。字符串按换行/分号切条,并去掉常见的列表前缀。
-    """
-    if isinstance(raw, str):
-        items = [
-            re.sub(r"^\s*(?:[-*•·]|\d+[.、)）])\s*", "", part)
-            for part in re.split(r"[\n；;]+", raw)
-        ]
-    elif isinstance(raw, (list, tuple)):
-        items = raw
-    else:
-        items = []
-    points = []
-    for item in items:
-        if isinstance(item, (dict, list, tuple)) or item is None:
-            continue
-        text = str(item).strip()
-        if text:
-            points.append(text[:60])
-    return points[:5]
+
+def _boss_brief_prompt(md: str) -> str:
+    return (
+        "你是给「很忙的实体店老板」做速览的助理。下面是数字员工刚交付的完整产出(Markdown)。\n"
+        "老板只看手机上的一张卡片,请压缩成:\n"
+        "1)verdict:一句话结论,不超过 40 字,直接说做不做/怎么判断;\n"
+        "2)actions:正好 3 条今天或本周就能做的具体动作,每条不超过 40 字,"
+        "写成「谁:做什么」(如「店长:周六前把引流品换到门口货架」),必须具体到人、动作、数字;\n"
+        "3)watch:一条最需要提防的风险(可选,没有就给空字符串)。\n"
+        "不要空话套话,不要专业术语。\n"
+        '只输出 JSON:{"verdict":"一句话结论","actions":["谁:做什么","谁:做什么","谁:做什么"],'
+        '"watch":"风险提醒"}\n\n'
+        "【完整产出】\n" + md[:8000]
+    )
 
 
 async def _gen_summary(
@@ -1220,10 +1231,11 @@ async def _gen_summary(
     decision_gate: dict | None = None,
     config: dict | None = None,
 ):
-    """给「很忙的老板」补一张十秒读完的速览卡:3-5 条要点 + 一句话行动建议。
+    """给「很忙的老板」补一张十秒读完的速览卡:一句话结论 + 3 条行动 + 风险提醒。
 
-    全程 try/except,失败静默(summary_md 留空),绝不影响已交付的产出;
-    走通用文本模型(非联网),不额外扣用户点数。
+    不论篇幅长短都生成。先走通用文本模型(非联网,不额外扣用户点数);
+    模型失败或结果不完整时从正文按规则兜底抽取,保证总有行动。
+    全程 try/except,绝不影响已交付的产出。
     """
     try:
         expert = employee or employeeidentity.any_employee(idx)
@@ -1252,33 +1264,31 @@ async def _gen_summary(
                 "idx": idx,
             })
             return
-        from . import providers
-        prompt = (
-            "你是给「很忙的老板」做速览的助理。下面是数字员工刚交付的完整产出(Markdown)。\n"
-            "请把它压缩成手机上十秒能读完的「老板速览」:\n"
-            "1)3-5 条要点,每条不超过 40 字,必须具体到数字 / 动作 / 结论,不要空话套话;\n"
-            "2)再单独给一句可直接落地的行动建议(告诉老板下一步该干什么)。\n"
-            '只输出 JSON:{"points":["要点", ...], "action":"一句话行动建议"}\n\n'
-            "【完整产出】\n" + md[:8000])
-        identity_args = ({
-            "identity_ref": config["identity_ref"],
-            "config_revision": config["config_revision"],
-            "config_sha256": config["config_sha256"],
-            "bundle_sha256": config["bundle_sha256"],
-        } if config else {})
-        r = await providers.call_text_json(
-            idx, prompt, web=False, timeout=240, **identity_args
+        data, model_cost = {}, 0.0
+        try:
+            from . import providers
+            identity_args = ({
+                "identity_ref": config["identity_ref"],
+                "config_revision": config["config_revision"],
+                "config_sha256": config["config_sha256"],
+                "bundle_sha256": config["bundle_sha256"],
+            } if config else {})
+            r = await providers.call_text_json(
+                idx, _boss_brief_prompt(md), web=False, timeout=240, **identity_args
+            )
+            data = r.get("data") or {}
+            model_cost = r.get("cost_usd") or 0
+        except Exception as exc:
+            # 模型通道失败不放弃:下面用正文规则兜底,老板照样拿到 3 条行动。
+            log.warning(
+                "老板速览生成失败 task=%s error_type=%s",
+                task_id,
+                type(exc).__name__,
+            )
+        brief, _used_model = bossbrief.merge_model_brief(data, md)
+        summary = bossbrief.format_brief(
+            brief["verdict"], brief["actions"], brief["watch"]
         )
-        data = r.get("data") or {}
-        if not isinstance(data, dict):
-            data = {}
-        points = _summary_points(data.get("points"))
-        action = str(data.get("action") or "").strip()[:80]
-        if not points:
-            return
-        lines = [f"- {p}" for p in points]
-        if action:
-            lines.append(f"- 👉 **一句话行动建议**:{action}")
         # 生成期间(~几十秒)老板可能已手动编辑过正文:重读比对,变了就放弃,不给编辑后的正文盖旧速览
         cur = await db.aone(
             "SELECT output_md, cost_usd FROM task WHERE id=?", (task_id,)
@@ -1289,10 +1299,8 @@ async def _gen_summary(
             "task",
             task_id,
             {
-                "summary_md": "\n".join(lines),
-                "cost_usd": (
-                    (cur.get("cost_usd") or 0) + (r.get("cost_usd") or 0)
-                ),
+                "summary_md": summary,
+                "cost_usd": (cur.get("cost_usd") or 0) + model_cost,
             },
         )
         await db.arun(sync_meeting_delivery_for_task, task_id)

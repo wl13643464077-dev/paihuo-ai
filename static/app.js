@@ -898,6 +898,7 @@ function sse(){
             box.scrollTop = box.scrollHeight;
           }
         }
+        refreshTaskStage(ev.task_id);
         const tcBox = document.querySelector(`[data-tasksteps="${ev.task_id}"]`);
         if(tcBox){
           const old = tcBox.querySelector(`.step[data-n="${ev.n}"]`);
@@ -1054,7 +1055,16 @@ function empState(idx){
 const PILL_CLS = {work:"work",await:"await",fail:"fail",learn:"learn",idle:"idle"};
 
 /* ---------- 办公室(工作台) ---------- */
-const MODE_LABEL = {fullauto:"完全托管",autopilot:"全自动",copilot:"关键审批",manual:"逐站审批"};
+const MODE_LABEL = {autopilot:"全交给 AI，发之前我看一眼",fullauto:"全交给 AI，发之前我看一眼",copilot:"关键几步我把关",manual:"每一步我都看"};
+// 新表单缺省:全交给 AI,只在发布前终审等老板(与后端 engine.DEFAULT_JOB_MODE 一致);已保存的偏好不动。
+const DEFAULT_JOB_MODE = "autopilot";
+const JOB_MODE_OPTIONS = [["autopilot","全交给 AI，发之前我看一眼（推荐）"],["copilot","关键几步我把关（选题、初稿、配图、发布都等您点头）"],["manual","每一步我都看"]];
+function jobModeOptions(selected){
+  // 旧的「完全托管」与全自动行为一致:已保存的旧值照样显示并保留,新表单不再单列。
+  const cur=selected||DEFAULT_JOB_MODE;
+  const opts=JOB_MODE_OPTIONS.concat(cur==="fullauto"?[["fullauto","全交给 AI，发之前我看一眼（原完全托管）"]]:[]);
+  return opts.map(([v,t])=>`<option value="${v}"${v===cur?" selected":""}>${t}</option>`).join("");
+}
 const ST_LABEL = {running:"进行中",awaiting_review:"待您审批",gate_blocked:"质检拦截",failed:"已失败",
   done:"已交付",cancelled:"已终止",paused:"已暂停"};
 const RUN_LABEL = {queued:"排队中",running:"工作中…",awaiting_review:"待您审批",done:"已完成",
@@ -1790,6 +1800,8 @@ async function taskDetailView(tid){
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><h2 style="margin:0;flex:1">📋 任务 #${t.id}</h2>
       <span class="pill ${tcPill(group)}">${esc(statusLabel)}</span></div>
     <div style="font-size:18px;font-weight:900;margin-top:14px">${esc(t.brief?.direction||"未命名任务")}</div>
+    ${t.status==="done"?taskVerdictHtml(t):""}
+    ${["queued","running"].includes(t.status)?taskWaitHtml(t,`<div class="steps" data-tasksteps="${t.id}">${(t.steps||[]).map((s,i)=>stepRow(s,i+1)).join("")||`<div class="step"><span class="ic">⏳</span><span class="lb">员工正在上线…</span></div>`}</div>`):""}
     <div class="kv"><span>👤 ${esc(t.emp_name||"数字员工")}</span><span>🏢 ${esc(t.dept_name||"")}</span>
       <span>发起人:${esc(t.created_by_name||"—")}</span>
       <span>🕒 ${tcFmt(t.created_at)}</span>${t.cost_usd?`<span>模型成本 ${rmb(t.cost_usd)}</span>`:""}</div>
@@ -1797,10 +1809,9 @@ async function taskDetailView(tid){
     ${Object.keys(t.professional_profile||{}).length?employeeProfessionalProfile(t,{readonly:true,compact:true}):""}
     <div class="notice violet" style="margin-top:12px"><b>↳ 生成来源：${esc(t.source?.label||"直接派活")}</b>
       ${t.source?.detail?`<div class="sub" style="margin-top:3px">${esc(t.source.detail)}</div>`:""}</div>
-    ${["queued","running"].includes(t.status)?`<h3>实时进度</h3><div class="steps" data-tasksteps="${t.id}">${(t.steps||[]).map((s,i)=>stepRow(s,i+1)).join("")||`<div class="step"><span class="ic">⏳</span><span class="lb">员工正在上线…</span></div>`}</div>`:""}
     ${t.status==="done"?`<div class="actions"><button class="btn sm" onclick="copyText(${cp(t.output_md||"")})">📋 复制</button>
       <a class="btn sm" href="/api/tasks/${t.id}/export.pdf">⬇️ PDF</a><a class="btn sm" href="/api/tasks/${t.id}/export.docx">⬇️ Word</a>
-      <button class="btn sm" onclick="taskToKnow(${t.id})">📚 存入沉淀库</button></div>${taskBody(t)}${taskRevisionPanel(t,"page")}`:""}
+      <button class="btn sm" onclick="taskToKnow(${t.id})">📚 存入沉淀库</button></div>${taskFullHtml(t)}${taskRevisionPanel(t,"page")}`:""}
     ${t.status==="failed"?`<div class="notice red">${esc(t.output_md||"任务执行失败")}
       <div class="actions">${t.retryable?`<button class="btn sm pri" onclick="retryExpertTask(${t.id},this)">🔁 免费重试</button>
         <span class="sub">沿用原任务，不会再次扣点 · 还可重试 ${t.free_retries_remaining} 次</span>`
@@ -2132,25 +2143,161 @@ function decisionEvidencePanelKeydown(event,panel){
   panel.querySelector("summary")?.focus();
 }
 const TASK_DATA_PRIVACY_NOTE = "仅上传您有权使用的资料；会员、患者、员工等信息请先删除姓名、手机号、证件号等个人标识。";
-const TB_STATE = {};  // task_id -> 用户手动展开/收起
-const TB_LIVE = {};   // task_id -> 本页曾以全文形态见过(速览晚到时不许把正在读的正文折走)
-function taskBody(t){
-  const fullMd = `<div class="md" style="margin-top:10px">${md(t.output_md||"")}</div>`;
-  if(!(t.summary_md||"").trim()){ setBoundedState(TB_LIVE,t.id,true); return fullMd; }
-  const open = (t.id in TB_STATE) ? TB_STATE[t.id] : !!TB_LIVE[t.id];
-  return `<div style="margin-top:10px;background:linear-gradient(120deg,#fff3d6,#ffe7c0);border:2.5px solid var(--ink);border-radius:13px;padding:12px 14px;box-shadow:3px 3px 0 #ffd16699">
-      <div style="font-weight:900;font-size:15px;margin-bottom:4px">⚡ 老板速览</div>
-      <div class="md">${md(t.summary_md||"")}</div></div>
-    <div style="margin-top:10px">
-      <button class="btn sm" onclick="tbToggle(${t.id},this)">${open?"📖 收起全文":"📖 展开全文"}</button>
-      <div class="md" id="tb-full-${t.id}" style="display:${open?"block":"none"};margin-top:10px">${md(t.output_md||"")}</div></div>`;
+const TB_STATE = {};  // task_id -> 用户手动展开/收起完整报告
+/* ---------- 结论卡:所有 AI 交付统一「一句话结论 + 3 条行动 + 要留意」,全文默认折叠 ----------
+   下面 parseBossBrief / briefFromMarkdown / renderVerdictCard / renderStageProgress / deliveryBrief
+   都是无 DOM 依赖的纯函数(只用 esc),tests/test_verdict_card.py 用 node 直接跑。 */
+function vcClean(value){
+  return String(value??"").replace(/!\[[^\]]*\]\([^)]*\)/g,"").replace(/\[([^\]]+)\]\([^)]*\)/g,"$1")
+    .replace(/\*\*|__|`/g,"").replace(/\s+/g," ").trim()
+    .replace(/^(?:[-*+•·]|\d{1,2}[.、)）]|[（(]\d{1,2}[)）])\s*/,"").replace(/^[👉✅❗🔥📌💡]+\s*/u,"")
+    .replace(/^[\s：:;；]+|[\s：:;；]+$/g,"");
 }
-function tbToggle(id,btn){
-  const el = $("#tb-full-"+id); if(!el) return;
-  const open = el.style.display==="none";
-  el.style.display = open?"block":"none";
-  btn.textContent = open?"📖 收起全文":"📖 展开全文";
-  setBoundedState(TB_STATE,id,open);
+function vcShort(value,limit){
+  const s=vcClean(value);
+  return s.length<=limit?s:s.slice(0,limit-1).replace(/[，,、\s]+$/,"")+"…";
+}
+function parseBossBrief(text){
+  // 与 app/bossbrief.py 的 parse_brief 同口径;兼容旧版「要点 + 👉 行动建议」速览。
+  const out={verdict:"",actions:[],watch:"",extra:[]}, legacy=[];
+  let section="";
+  for(const raw of String(text||"").replace(/\r/g,"").split("\n")){
+    const line=raw.trim(); if(!line) continue;
+    const bare=line.replace(/\*\*/g,"");
+    if(bare.startsWith("一句话结论")){ out.verdict=vcClean(bare.slice(5)); section=""; continue; }
+    if(bare.startsWith("今天/本周就做这 3 件事")){ section="actions"; continue; }
+    if(bare.slice(0,8).includes("要留意")){ out.watch=vcClean(bare.split("要留意").slice(1).join("要留意")); section=""; continue; }
+    if(bare.startsWith("补充说明")){ section="extra"; continue; }
+    const old=bare.match(/(?:一句话行动建议|下一步)\s*[：:]\s*(.+)$/);
+    if(old){ out.actions.push(vcClean(old[1])); continue; }
+    const item=vcClean(line); if(!item) continue;
+    if(section==="actions"&&/^\s{0,3}(?:[-*+•·]|\d{1,2}[.、)）])/.test(raw)) out.actions.push(item);
+    else if(section==="extra") out.extra.push(item);
+    else legacy.push(item);
+  }
+  if(!out.verdict&&legacy.length) out.verdict=legacy.shift();
+  out.extra=legacy.concat(out.extra);
+  out.actions=out.actions.filter(Boolean).slice(0,3);
+  return (out.verdict||out.actions.length||out.watch||out.extra.length)?out:null;
+}
+function briefFromMarkdown(src){
+  // 旧任务没有速览时,按规则从正文里摘:「下一步」章节的列表项优先。
+  const sections=[{h:"",lines:[]}];
+  let code=false;
+  for(const raw of String(src||"").replace(/\r/g,"").split("\n")){
+    if(raw.trim().startsWith("```")){ code=!code; continue; }
+    if(code) continue;
+    const h=raw.match(/^\s{0,3}#{1,6}\s*(.+?)\s*#*\s*$/)||raw.match(/^\s*\*\*([^*]{1,30})\*\*\s*[：:]?\s*$/);
+    if(h){ sections.push({h:vcClean(h[1]),lines:[]}); continue; }
+    sections[sections.length-1].lines.push(raw);
+  }
+  const listRe=/^\s{0,3}(?:[-*+•·]|\d{1,2}[.、)）]|[（(]\d{1,2}[)）])\s*(.+)$/;
+  const items=lines=>lines.filter(l=>!l.trim().startsWith("|")).map(l=>l.match(listRe)).filter(Boolean)
+    .map(m=>vcClean(m[1])).filter(s=>s.length>=4);
+  const paras=lines=>lines.map(l=>l.trim()).filter(l=>l&&!/^(\||>|---|<!--)/.test(l)&&!listRe.test(l))
+    .map(vcClean).filter(s=>s.length>=6);
+  const first=s=>{ const m=String(s).match(/^(.+?[。！!？?])/); return m?m[1]:s; };
+  const verdictRe=/结论|总结|摘要|一句话|核心|判断|概要|要点|概览/, actionRe=/下一步|行动|怎么做|执行|落地|建议|待办|清单|步骤|动作|计划|安排/, watchRe=/风险|注意|提醒|避坑|警惕|隐患|雷区|留意/;
+  let verdict="";
+  for(const s of sections){ if(s.h&&verdictRe.test(s.h)&&!actionRe.test(s.h)){ const c=paras(s.lines).concat(items(s.lines)); if(c.length){ verdict=first(c[0]); break; } } }
+  if(!verdict) for(const s of sections){ const c=paras(s.lines); if(c.length){ verdict=first(c[0]); break; } }
+  if(!verdict) verdict=(sections.find(s=>s.h)||{}).h||"报告已完成，重点见下方行动";
+  const ordered=sections.filter(s=>s.h&&/下一步/.test(s.h)).concat(sections.filter(s=>s.h&&actionRe.test(s.h)&&!/下一步/.test(s.h)&&!watchRe.test(s.h)));
+  const actions=[];
+  for(const s of ordered){
+    for(const it of (items(s.lines).length?items(s.lines):paras(s.lines))){
+      const a=vcShort(it,40); if(a&&!actions.includes(a)) actions.push(a); if(actions.length>=3) break; }
+    if(actions.length>=3) break;
+  }
+  if(!actions.length) actions.push("老板：花 3 分钟看完整报告，挑一件今天就能做的事交给店员");
+  let watch="";
+  for(const s of sections){ if(s.h&&watchRe.test(s.h)){ const c=items(s.lines).concat(paras(s.lines)); if(c.length){ watch=c[0]; break; } } }
+  return {verdict:vcShort(verdict,80),actions,watch:vcShort(watch,80),extra:[]};
+}
+function renderVerdictCard(data){
+  const d=data||{};
+  const verdict=String(d.verdict||"").trim(), watch=String(d.watch||"").trim();
+  const actions=(Array.isArray(d.actions)?d.actions:[]).map(x=>String(x??"").trim()).filter(Boolean).slice(0,3);
+  const extra=(Array.isArray(d.extra)?d.extra:[]).map(x=>String(x??"").trim()).filter(Boolean);
+  if(!verdict&&!actions.length&&!watch&&!extra.length) return "";
+  return `<section class="verdict-card" data-verdict-card style="margin-top:10px;background:linear-gradient(120deg,#fff3d6,#ffe7c0);border:2.5px solid var(--ink);border-radius:14px;padding:14px;box-shadow:3px 3px 0 #ffd16699">
+    <div class="sub" style="font-weight:800;margin-bottom:4px">${esc(d.title||"⚡ 结论")}</div>
+    ${verdict?`<div class="vc-verdict" style="font-size:19px;font-weight:900;line-height:1.45">${esc(verdict)}</div>`:""}
+    ${actions.length?`<div style="font-weight:800;margin-top:12px">今天/本周就做这 ${actions.length} 件事</div>
+    <ol class="vc-actions" style="margin:6px 0 0;padding:0;list-style:none">${actions.map((a,i)=>`<li style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#fffdf7;border:2px solid var(--ink);border-radius:11px;padding:8px 10px;margin-top:6px">
+      <b style="flex:none">${i+1}.</b><span class="vc-text" style="flex:1;min-width:160px">${esc(a)}</span>
+      <button type="button" class="btn sm" data-text="${esc(a)}" onclick="verdictDispatch(this)" aria-label="把第 ${i+1} 条派给店员">📤 派给店员</button></li>`).join("")}</ol>`:""}
+    ${watch?`<div class="vc-watch" style="margin-top:10px;background:#ffe3e3;border-radius:10px;padding:8px 10px;font-weight:700">⚠️ 要留意：${esc(watch)}</div>`:""}
+    ${extra.length?`<details class="vc-extra" style="margin-top:8px"><summary class="sub" style="cursor:pointer">补充说明（${extra.length} 条）</summary>
+      <ul style="margin:6px 0 0 18px">${extra.map(x=>`<li class="sub">${esc(x)}</li>`).join("")}</ul></details>`:""}
+    ${d.note?`<div class="sub" style="margin-top:8px">${esc(d.note)}</div>`:""}
+  </section>`;
+}
+function renderStageProgress(p){
+  if(!p||!Array.isArray(p.stages)||!p.stages.length) return "";
+  const cur=Number.isInteger(p.current)?p.current:-1, elapsed=Math.max(0,Number(p.elapsed_seconds)||0);
+  const used=elapsed<60?"不到 1 分钟":`${Math.round(elapsed/60)} 分钟`;
+  return `<div class="stage-progress" role="status" aria-live="polite" style="margin-top:10px;background:#fffdf7;border:2.5px solid var(--ink);border-radius:13px;padding:12px 14px">
+    <div style="font-weight:900;font-size:17px">${cur<0?"⏳":"⚙️"} ${esc(p.label||"")}</div>
+    <div style="display:grid;grid-template-columns:repeat(${p.stages.length},minmax(0,1fr));gap:5px;margin-top:10px">${p.stages.map((s,i)=>
+      `<div style="border:2px solid var(--ink);border-radius:9px;padding:6px 4px;text-align:center;font-size:12px;font-weight:800;background:${i<cur?"#dff6e9":i===cur?"#fff1bd":"#f2eee5"};opacity:${i>cur?".6":"1"}"${i===cur?' aria-current="step"':""}>${i<cur?"✓ ":""}${esc(s)}</div>`).join("")}</div>
+    <div class="sub" style="margin-top:8px">已用 ${used} · ${esc(p.hint||"")}</div>
+    <div class="sub">可以先去忙别的，做完会通知您。</div></div>`;
+}
+function deliveryBrief(d){
+  // 内容交付包 → 结论卡:写好了没有、先发哪几个平台、质检提醒。
+  const packs=Array.isArray(d?.packs)?d.packs.filter(p=>p&&p.platform):[];
+  const gate=d?.gate||null, bad=!!gate&&gate.passed===false;
+  const title=vcShort(d?.title||"这篇内容",20);
+  const verdict=bad?`《${title}》写好了，但质检提示有问题，发之前先看一眼`
+    :packs.length?`《${title}》写好了，${packs.length} 个平台的发布版本都备齐了，可以发`:`《${title}》写好了，可以发`;
+  const actions=packs.slice(0,3).map(p=>vcShort(`店员：复制「${p.platform}」版本，${p.best_time?`${p.best_time} 发出去`:"发到店里的账号上"}`,40));
+  const more=["店员：复制正文，发到店里常用的平台","店员：挑一张配图当封面，再发出去","老板：发完两天后，把阅读和点赞数据拿去复盘"];
+  for(const a of more){ if(actions.length>=3) break; if(!(packs.length&&a.includes("复制正文"))) actions.push(a); }
+  const issue=bad?((gate.issues||[]).map(i=>i&&i.detail).find(Boolean)||gate.report||"质检没通过"):(packs.map(p=>p.note).find(Boolean)||"");
+  return {title:"⚡ 交付结论",verdict,actions:actions.slice(0,3),watch:vcShort(issue,80),extra:[]};
+}
+function verdictDispatch(btn){
+  // 第 2 期接真人派活;现在先复制这条行动,方便老板转给店员。
+  const text=btn?.dataset?.text||""; if(!text) return;
+  const done=()=>toast("已复制，可以发给店员");
+  const fallback=()=>{ const ta=document.createElement("textarea"); ta.value=text; document.body.appendChild(ta); ta.select();
+    try{ document.execCommand("copy"); }catch(_){} ta.remove(); done(); };
+  if(navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(done).catch(fallback);
+  else fallback();
+}
+function taskVerdictHtml(t){
+  if(!t||t.status!=="done") return "";
+  let data=parseBossBrief(t.summary_md||""), note="";
+  if(!data){
+    data=briefFromMarkdown(t.output_md||"");
+    const doneAt=Number(t.terminal_at||t.updated_at)||0;
+    note=Date.now()/1000-doneAt<180?"AI 正在提炼更准的 3 条行动，稍后自动更新":"根据报告自动摘录";
+  }
+  return renderVerdictCard({...data,note});
+}
+function taskFullHtml(t){
+  const open=!!TB_STATE[t.id];
+  return `<details class="vc-full" style="margin-top:10px"${open?" open":""} ontoggle="setBoundedState(TB_STATE,${Number(t.id)},this.open)">
+    <summary class="btn sm" style="display:inline-flex;cursor:pointer">📖 看完整报告</summary>
+    <div class="md" style="margin-top:10px">${md(t.output_md||"")}</div></details>`;
+}
+function taskBody(t){ return taskVerdictHtml(t)+taskFullHtml(t); }
+function taskWaitHtml(t, stepsHtml){
+  // 老板看大白话阶段进度;原始步骤(平台超管能看到明细)收进「工作记录」。
+  if(!t?.boss_progress) return stepsHtml;
+  return `<div data-taskstage="${Number(t.id)}">${renderStageProgress(t.boss_progress)}</div>
+    <details style="margin-top:8px"><summary class="sub" style="cursor:pointer">查看工作记录</summary>${stepsHtml}</details>`;
+}
+const TASK_STAGE_AT = {};  // task_id -> 上次刷新阶段进度的时间(节流)
+function refreshTaskStage(id){
+  const boxes=document.querySelectorAll(`[data-taskstage="${id}"]`);
+  if(!boxes.length||Date.now()-(TASK_STAGE_AT[id]||0)<10000) return;
+  setBoundedState(TASK_STAGE_AT,id,Date.now());
+  api("/tasks/"+id,{routeScoped:false}).then(t=>{
+    if(!t?.boss_progress) return;
+    document.querySelectorAll(`[data-taskstage="${id}"]`).forEach(el=>{ el.innerHTML=renderStageProgress(t.boss_progress); });
+  }).catch(err=>reportClientError("task_stage_refresh",err));
 }
 
 /* ---------- V51:数字员工连续多轮协作 ---------- */
@@ -2260,7 +2407,7 @@ function soloTab(s,e){
           <a class="btn sm" href="/api/tasks/${t.id}/export.docx">⬇️ Word</a>
           <button class="btn sm" onclick="taskToKnow(${t.id})">📚 存沉淀</button>`:""}
         <button class="btn sm" onclick="stopSoloWatch();SOLO_TASK=null;drawModal()">收起</button></div>
-      ${["queued","running"].includes(t.status)?`<div class="steps" data-tasksteps="${t.id}" style="margin-top:8px">${(t.steps||[]).map((x,i)=>stepRow(x,i+1)).join("")||`<div class="step"><span class="ic">⏳</span><span class="lb">员工上线中…</span></div>`}</div>`:""}
+      ${["queued","running"].includes(t.status)?taskWaitHtml(t,`<div class="steps" data-tasksteps="${t.id}" style="margin-top:8px">${(t.steps||[]).map((x,i)=>stepRow(x,i+1)).join("")||`<div class="step"><span class="ic">⏳</span><span class="lb">员工上线中…</span></div>`}</div>`):""}
       ${t.status==="done"?taskBody(t)+taskRevisionPanel(t,"solo"):""}
       ${t.status==="failed"?`<div class="notice red">${esc(t.output_md||"失败")}
         <div class="actions">${t.retryable?`<button class="btn sm pri" onclick="retryExpertTask(${t.id},this)">🔁 免费重试</button>
@@ -2591,7 +2738,7 @@ function specTaskTab(e){
           <button class="btn sm" onclick="taskToKnow(${cur.id})">📚 存入沉淀库</button>`:""}
         <button class="btn sm" onclick="SPEC_TASK=null;drawSpec()">收起</button></div>
       <div class="sub">任务书:${esc(cur.brief?.direction||"")}</div>
-      ${["queued","running"].includes(cur.status)?`<div class="steps" id="spec-steps" style="margin-top:8px">${(cur.steps||[]).map((s,i)=>stepRow(s,i+1)).join("")||`<div class="step"><span class="ic">⏳</span><span class="lb">专家上线中…</span></div>`}</div>`:""}
+      ${["queued","running"].includes(cur.status)?taskWaitHtml(cur,`<div class="steps" id="spec-steps" style="margin-top:8px">${(cur.steps||[]).map((s,i)=>stepRow(s,i+1)).join("")||`<div class="step"><span class="ic">⏳</span><span class="lb">专家上线中…</span></div>`}</div>`):""}
       ${cur.status==="done"?`${taskBody(cur)}${taskRevisionPanel(cur,"spec")}`:""}
       ${cur.status==="failed"?`<div class="notice red">${esc(cur.output_md||"执行失败")}
         <div class="actions">${cur.retryable?`<button class="btn sm pri" onclick="retryExpertTask(${cur.id},this)">🔁 免费重试</button>
@@ -3187,7 +3334,7 @@ function restoreBriefDraft(draft=readBriefDraft()){
   };
   assign("#b-ind-c",f.industryCustom); assign("#b-dir",f.direction);
   assign("#b-tpl-c",f.templateCustom); assign("#b-xhs",f.xhs); assign("#b-dy",f.dy);
-  assign("#b-profile",f.profile); assign("#b-mode",f.mode);
+  assign("#b-profile",f.profile); assign("#b-mode",f.mode==="fullauto"?DEFAULT_JOB_MODE:f.mode);
   assign("#b-ref",f.ref); assign("#b-mat",f.material);
   if($("#b-deck")) $("#b-deck").checked=!!f.deck;
   const c=draft.chips||{};
@@ -3214,7 +3361,7 @@ async function newBrief(){
   $("#main").innerHTML = `<div class="card" id="brief-form" style="max-width:820px;margin:0 auto">
     <h2>➕ 下达任务</h2>
     <div id="brief-draft-notice"></div>
-    <div class="notice" style="margin-top:8px">👔 <b>老板只需要三步</b>:①选行业 ②说方向 ③点提交。剩下的交给流水线:趋势官找热点 → 情报员查资料 → 拆解师学爆款 → 撰稿改稿配图封面 → 质检 → 各平台发布包。关键节点会停下来等您拍板。</div>
+    <div class="notice" style="margin-top:8px">👔 <b>老板只需要三步</b>:①选行业 ②说方向 ③点提交。剩下的交给流水线:趋势官找热点 → 情报员查资料 → 拆解师学爆款 → 撰稿改稿配图封面 → 质检 → 各平台发布包。默认全交给 AI,只在发出去之前请您看一眼。</div>
     <label>① 行业/赛道(内容会贴着这个行业做:渠道、黑话、案例、对标)</label>
     <div class="chips" id="b-ind">${META.industries.map((t,i)=>`<span class="chip${i===0?" on":""}" onclick="pick(this)">${t}</span>`).join("")}</div>
     <input id="b-ind-c" value="${esc(PRE?.industry||"")}" placeholder="✏️ 或自己输入行业/赛道(如:宠物烘焙、二手奢侈品)——填了就用您输入的" style="margin-top:6px">
@@ -3244,10 +3391,7 @@ async function newBrief(){
         ${profiles.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join("")}</select>
         <div class="sub" style="margin-top:4px">还没档案?<a href="#/profiles" style="text-decoration:underline">30秒去建一个 →</a></div></div>
       <div><label>⑦ 您想管多少 <span class="sub">(随时可打断)</span></label><select id="b-mode">
-        <option value="copilot">关键审批(推荐)— 选题/初稿/视觉/发布 4 处等您拍板</option>
-        <option value="fullauto">完全托管 — 一停不停,员工接力干到交付(质检仍生效)</option>
-        <option value="autopilot">全自动 — 只在发布前终审等您</option>
-        <option value="manual">逐站审批 — 10 个工位每一步都等您</option></select></div>
+        ${jobModeOptions(DEFAULT_JOB_MODE)}</select></div>
     </div>
     <details style="margin-top:12px"><summary class="sub" style="cursor:pointer">📎 高级选项:参考链接 / 附加素材 / 演绎稿(选填)</summary>
       <label>参考链接</label><input id="b-ref" placeholder="热点新闻/对标文章链接,情报员会精读" value="${esc(PRE?.ref_link||"")}">
@@ -3616,11 +3760,13 @@ async function deliveryView(id){
       <a class="btn" href="/api/jobs/${id}/export.docx" download>⬇️ Word</a>
       ${d.packs?.length?`<a class="btn pri" href="/api/jobs/${id}/pack.zip" download>🚀 全平台发布包 zip</a>`
         :(d.images?.length?`<a class="btn" href="/api/jobs/${id}/pack.zip" download>🖼 正文+全部配图打包 zip</a>`:"")}</div>
+    ${renderVerdictCard(deliveryBrief(d))}
     ${ME.role==="root"?`<div class="kv"><span>成本:${rmb(d.cost_usd)}</span><span>${((d.tokens||0)/1000).toFixed(1)}k tokens</span></div>`:""}</div>
   <div class="row" style="align-items:flex-start">
     <div class="card" style="flex:2;min-width:min(340px,100%)"><h3 style="margin-top:0">终稿正文</h3>
       <div class="actions" style="margin:0 0 10px"><button class="btn sm" onclick="copyText(${cp((d.title||"")+"\n\n"+(d.body||""))})">📋 复制正文</button></div>
-      <div class="md">${md(d.body)}</div>
+      <details class="vc-full"><summary class="btn sm" style="display:inline-flex;cursor:pointer">📖 看完整正文</summary>
+      <div class="md" style="margin-top:10px">${md(d.body)}</div></details>
       <div style="margin-top:10px">${(d.tags||[]).map(t=>`<span class="tag">#${esc(t)}</span>`).join("")}</div></div>
     <div style="flex:1;min-width:260px">
       ${cover&&cover.file?`<div class="card"><h3 style="margin-top:0">封面</h3><div class="thumb sel">${coverThumb(cover.file)}</div></div>`:""}
@@ -5331,8 +5477,8 @@ function schedForm(s){
     <div class="row">
       <div><label>账号人设</label><select id="s-profile"><option value="">(不使用)</option>
         ${profiles.map(p=>`<option value="${p.id}"${s?.profile_id===p.id?" selected":""}>${esc(p.name)}</option>`).join("")}</select></div>
-      <div><label>驾驶模式</label><select id="s-mode">
-        ${[["copilot","关键审批(推荐)"],["fullauto","完全托管(一停不停)"],["autopilot","全自动"],["manual","逐站审批"]].map(([v,t])=>`<option value="${v}"${s?.mode===v?" selected":""}>${t}</option>`).join("")}</select></div>
+      <div><label>您想管多少</label><select id="s-mode">
+        ${jobModeOptions(s?.mode||DEFAULT_JOB_MODE)}</select></div>
     </div>
     <div class="actions"><button class="btn pri" onclick="schedSave(${s?s.id:"null"})">💾 ${s?"保存修改":"创建"}</button>
       <button class="btn" onclick="$('#sform').innerHTML=''">取消</button></div></div>`;
@@ -6787,6 +6933,12 @@ function mtStructured(cur){
       ${v.condition?`<div class="sub">✅ 放行条件:${esc(v.condition)}</div>`:""}</div></div>`).join("")}</div>`:"";
   return propCards+valCards;
 }
+function mtVerdict(cur){
+  // 会议结论卡:与专家任务同一结构(一句话结论 + 3 条行动 + 要留意),放在会议详情最上面。
+  if(cur?.status!=="done") return "";
+  const data=parseBossBrief(cur.summary_md||"");
+  return data?renderVerdictCard({...data,title:"⚡ 会议结论"}):"";
+}
 function mtBody(cur){
   const msgsBox = open => `<div id="mt-msgs" style="max-height:520px;overflow:auto;margin-top:10px;display:${open?"block":"none"}">${(cur.messages||[]).map(mtBubble).join("")||`<div class="empty">等员工进群…</div>`}</div>`;
   if(["failed","cancelled"].includes(cur.status)){
@@ -6798,22 +6950,14 @@ function mtBody(cur){
     setBoundedState(MT_LIVE,cur.id,true);
     const eta = ["queued","running"].includes(cur.status)
       ? `<div class="sub" style="margin-top:8px">⏱ 三轮会议一般 3-8 分钟。可以离开本页办别的,结束会自动提醒;点数只在开会时扣一次。</div>` : "";
-    return eta + msgsBox(true);
+    return mtConsensus(cur) + mtStructured(cur) + eta + msgsBox(true);
   }
+  // 收口后:共识、提案、验证、逐字讨论都收进「看完整报告」,默认折叠;
+  // 老板若在直播中一直看着讨论,结论晚到时不把正在读的内容折走。
   const open = (cur.id in MT_STATE) ? MT_STATE[cur.id] : !!MT_LIVE[cur.id];
-  return `<div style="margin-top:10px;background:linear-gradient(120deg,#fff3d6,#ffe7c0);border:2.5px solid var(--ink);border-radius:13px;padding:12px 14px;box-shadow:3px 3px 0 #ffd16699">
-      <div style="font-weight:900;font-size:15px;margin-bottom:4px">⚡ 老板速览</div>
-      <div class="md">${md(cur.summary_md||"")}</div></div>
-    <div style="margin-top:10px"><button class="btn sm" id="mt-fold" onclick="mtToggleMsgs(${cur.id},this)">${open?"💬 收起完整讨论":`💬 展开完整讨论(${(cur.messages||[]).length}条)`}</button></div>
-    ${msgsBox(open)}`;
-}
-function mtToggleMsgs(id,btn){
-  const el = $("#mt-msgs"); if(!el) return;
-  const open = el.style.display==="none";
-  el.style.display = open?"block":"none";
-  btn.textContent = open?"💬 收起完整讨论":`💬 展开完整讨论(${el.children.length}条)`;
-  setBoundedState(MT_STATE,id,open);
-  if(open) el.scrollTop = el.scrollHeight;
+  return `<details id="mt-full" style="margin-top:10px"${open?" open":""} ontoggle="setBoundedState(MT_STATE,${Number(cur.id)},this.open)">
+    <summary class="btn sm" style="display:inline-flex;cursor:pointer">📖 看完整报告（共识、方案对比、${(cur.messages||[]).length} 条讨论）</summary>
+    ${mtConsensus(cur)}${mtStructured(cur)}${msgsBox(true)}</details>`;
 }
 function mtBubble(m){
   const boss = m.who==="老板", host = m.who==="会议主持人", sys = m.who==="系统";
@@ -6841,35 +6985,14 @@ async function meetingsView(mid){
   const groups = {};
   pool.forEach(p=>(groups[p.group]=groups[p.group]||[]).push(p));
   $("#main").innerHTML = `
-  <div class="notice" style="margin-top:0">🪑 <b>AI 结果型会议</b>:不是让数字员工无限聊天，而是强制走完「每人一案并按有效方案排 Top N（最多 3 个）→ 失败/市场/单位经济反向验证 → GO / NO-GO 并执行」。每人 1 点。</div>
-  <div class="card"><h2>🎯 发起结果型会议</h2>
-    <label>议题 *</label><textarea id="mt-q" placeholder="例:我们准备在新城市开第二个直营网点,预算 40 万,请判断 GO / NO-GO、最大风险和本周验证动作"></textarea>
-    <div class="row"><div><label>已知约束(选填)</label><input id="mt-constraints" placeholder="例:预算40万；30天内开业；不能增加全职员工"></div>
-      <div><label>什么算有结果(选填)</label><input id="mt-acceptance" placeholder="例:必须给明确GO/NO-GO、最大风险和本周可执行动作"></div></div>
-    <div class="actions" style="margin-top:8px"><button class="btn blue" onclick="mtSuggest(this)">🤖 按议题自动选人</button>
-      <span class="sub">或在下面手动勾选</span></div>
-    <label>拉谁进群(2-6 人,已选 <b id="mt-n">0</b> 人)</label>
-    <div id="mt-picked" style="margin:6px 0">${mtPickedHtml(pool)}</div>
-    ${Object.entries(groups).map(([g,ps])=>`<details ${g==="内容生产部"?"":""} style="margin-top:6px"><summary style="cursor:pointer;font-weight:800;font-size:13px">${esc(g)}(${ps.length})</summary>
-      <div class="chips" style="margin-top:6px">${ps.map(p=>`<span class="chip mt-chip${MT_SEL.has(p.idx)?" on":""}" data-i="${p.idx}" onclick="mtToggle(this)">${p.emoji} ${esc(p.label)}</span>`).join("")}</div></details>`).join("")}
-    <label style="display:flex;gap:8px;align-items:flex-start;margin-top:12px;cursor:pointer">
-      <input id="mt-auto" type="checkbox" checked style="width:auto;margin-top:3px">
-      <span><b>决策后自动执行</b><span class="sub" style="display:block">GO 或 NEED INFO 后，自动启动最多 3 个真实员工任务；包含在本次会议中，不重复扣点。取消勾选则等您看完共识后再点执行。</span></span>
-    </label>
-    <label style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;cursor:pointer">
-      <input id="mt-team" type="checkbox" style="width:auto;margin-top:3px">
-      <span><b>🤝 Agent 团队协作执行</b><span class="sub" style="display:block">不再各干各的：成员按分工接力开工，每一棒自动拿到前面队友的交付内容，最后由队长把全部交付整合成一份最终交付包。适合需要多人共创一个成果的议题；包含在本次会议中，不重复扣点。</span></span>
-    </label>
-    <div class="actions"><button class="btn pri" onclick="mtStart(this)">🎯 开会并收敛(每人1点)</button></div></div>
   ${cur?`<div class="card" style="background:#fffaf0"><h2>会议 #${cur.id} ${{queued:"排队",running:"🗣 进行中…",done:"✅ 已收口",failed:"中断"}[cur.status]||cur.status}
     ${cur.team_execute?`<span class="tag" style="background:#e7d9ff;font-weight:900">🤝 Agent 团队</span>`:""}
     ${cur.status==="done"?`<span style="float:right"><a class="btn sm" href="/api/meetings/${cur.id}/export.pdf">⬇️ PDF</a>
     <a class="btn sm" href="/api/meetings/${cur.id}/export.docx">⬇️ Word</a></span>`:""}</h2>
     <div class="sub" style="margin-bottom:6px">议题:${esc(cur.question)}</div>
     <div class="chips">${(cur.members||[]).map(b=>`<span class="tag">${b.emoji||"🧑‍💼"} ${esc(meetingMemberLabel(b))}</span>`).join("")}</div>
+    ${mtVerdict(cur)}
     ${mtFlow(cur)}
-    ${mtConsensus(cur)}
-    ${mtStructured(cur)}
     ${mtBody(cur)}
     ${(cur.actions||[]).length?`<div class="card" style="background:#fff;margin-top:12px"><h3 style="margin-top:0">${cur.team_execute?"🤝 Agent 团队分工 · 接力执行":"📋 已锁定行动 · 责任到人"}</h3>
       ${cur.team_execute?`<div class="sub" style="margin-bottom:6px">每一棒自动拿到前面队友的交付内容；最后一棒是队长整合，输出一份最终交付包。</div>`:""}
@@ -6890,6 +7013,26 @@ async function meetingsView(mid){
         <div><button class="btn pri" ${(cur.intervention_count||0)>=2?"disabled":""} onclick="mtAsk(${cur.id},this)">重新验证(${(cur.members||[]).length}点)</button></div></div>
       <div class="sub" style="margin-top:4px">这不是继续闲聊：员工只补新证据，主持人立即重做决定并更新 Next Action。每场最多 2 次，已用 ${cur.intervention_count||0} 次。</div></div>`:""}
   </div>`:""}
+  <div class="notice"${cur?"":' style="margin-top:0"'}>🪑 <b>AI 结果型会议</b>:不是让数字员工无限聊天，而是强制走完「每人一案并按有效方案排 Top N（最多 3 个）→ 失败/市场/单位经济反向验证 → GO / NO-GO 并执行」。每人 1 点。</div>
+  <div class="card"><h2>🎯 发起结果型会议</h2>
+    <label>议题 *</label><textarea id="mt-q" placeholder="例:我们准备在新城市开第二个直营网点,预算 40 万,请判断 GO / NO-GO、最大风险和本周验证动作"></textarea>
+    <div class="row"><div><label>已知约束(选填)</label><input id="mt-constraints" placeholder="例:预算40万；30天内开业；不能增加全职员工"></div>
+      <div><label>什么算有结果(选填)</label><input id="mt-acceptance" placeholder="例:必须给明确GO/NO-GO、最大风险和本周可执行动作"></div></div>
+    <div class="actions" style="margin-top:8px"><button class="btn blue" onclick="mtSuggest(this)">🤖 按议题自动选人</button>
+      <span class="sub">或在下面手动勾选</span></div>
+    <label>拉谁进群(2-6 人,已选 <b id="mt-n">0</b> 人)</label>
+    <div id="mt-picked" style="margin:6px 0">${mtPickedHtml(pool)}</div>
+    ${Object.entries(groups).map(([g,ps])=>`<details ${g==="内容生产部"?"":""} style="margin-top:6px"><summary style="cursor:pointer;font-weight:800;font-size:13px">${esc(g)}(${ps.length})</summary>
+      <div class="chips" style="margin-top:6px">${ps.map(p=>`<span class="chip mt-chip${MT_SEL.has(p.idx)?" on":""}" data-i="${p.idx}" onclick="mtToggle(this)">${p.emoji} ${esc(p.label)}</span>`).join("")}</div></details>`).join("")}
+    <label style="display:flex;gap:8px;align-items:flex-start;margin-top:12px;cursor:pointer">
+      <input id="mt-auto" type="checkbox" checked style="width:auto;margin-top:3px">
+      <span><b>决策后自动执行</b><span class="sub" style="display:block">GO 或 NEED INFO 后，自动启动最多 3 个真实员工任务；包含在本次会议中，不重复扣点。取消勾选则等您看完共识后再点执行。</span></span>
+    </label>
+    <label style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;cursor:pointer">
+      <input id="mt-team" type="checkbox" style="width:auto;margin-top:3px">
+      <span><b>🤝 Agent 团队协作执行</b><span class="sub" style="display:block">不再各干各的：成员按分工接力开工，每一棒自动拿到前面队友的交付内容，最后由队长把全部交付整合成一份最终交付包。适合需要多人共创一个成果的议题；包含在本次会议中，不重复扣点。</span></span>
+    </label>
+    <div class="actions"><button class="btn pri" onclick="mtStart(this)">🎯 开会并收敛(每人1点)</button></div></div>
   ${list.length||meetingsContract.offset>0?`<div class="card"><h2>历史会议(${meetingsContract.total??list.length})</h2>
     ${listContractNotice(meetingsContract,"历史会议")}${list.length?list.map(x=>`
     <div class="topic" style="cursor:pointer" onclick="location.hash='#/meetings/${x.id}'">

@@ -45,6 +45,22 @@ JOB_WORKING_STATUSES = (
     "pending_charge", "running", "awaiting_review", "gate_blocked", "paused",
 )
 JOB_EXECUTABLE_STATUSES = ("running", "awaiting_review", "gate_blocked")
+# 内容工单「您想管多少」。老板最怕被频繁打扰:新单缺省走全自动,
+# 只有发布前终审(强制审批工位)停下来等老板看一眼;已保存的偏好原样沿用。
+JOB_MODES = ("autopilot", "copilot", "manual", "fullauto")
+DEFAULT_JOB_MODE = "autopilot"
+JOB_MODE_LABELS = {
+    "autopilot": "全交给 AI，发之前我看一眼",
+    "copilot": "关键几步我把关",
+    "manual": "每一步我都看",
+    "fullauto": "全交给 AI，发之前我看一眼",
+}
+
+
+def job_mode_or_default(value) -> str | None:
+    """空值取缺省模式;非法值返回 None 由调用方拒绝。"""
+    mode = str(value or DEFAULT_JOB_MODE).strip()
+    return mode if mode in JOB_MODES else None
 
 
 class Engine:
