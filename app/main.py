@@ -64,7 +64,14 @@ logging.basicConfig(
 # contain a customer's brand/store hint, so never emit those URLs to journals.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("main")
-app = FastAPI(title="派活 PaiHuo — 老板会派活，数字员工去干活")
+# 完整接口地图不对公网暴露；本地联调可设 CONTENTCREW_PUBLIC_API_DOCS=1 打开。
+_PUBLIC_API_DOCS = os.environ.get("CONTENTCREW_PUBLIC_API_DOCS") == "1"
+app = FastAPI(
+    title="派活 PaiHuo — 老板会派活，数字员工去干活",
+    docs_url="/docs" if _PUBLIC_API_DOCS else None,
+    redoc_url="/redoc" if _PUBLIC_API_DOCS else None,
+    openapi_url="/openapi.json" if _PUBLIC_API_DOCS else None,
+)
 
 
 def _sync_platform_industry_scope() -> int:
@@ -15098,7 +15105,7 @@ def login_page():
 @app.get("/promo")
 def promo_page():
     with open(os.path.join(ROOT, "static", "promo.html"), encoding="utf-8") as f:
-        return HTMLResponse(f.read())
+        return HTMLResponse(f.read(), headers=_HTML_ENTRY_NO_CACHE_HEADERS)
 
 
 _ENTRY_ASSET_VERSION: str | None = None

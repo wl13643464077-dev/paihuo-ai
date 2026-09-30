@@ -3,90 +3,222 @@
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>派活 — 老板会派活，数字员工去干活</title>
+<meta name="description" content="派活 PaiHuo：11 个连锁行业的专属决策员工听您调遣，从内容营销到门店经营，一句话派活即出可落地方案。">
+<meta name="theme-color" content="#120d08">
+<link rel="modulepreload" href="/static/promo-3d.js?v=20260930">
+<script>document.documentElement.classList.add("js")</script>
 <style>
-:root{--ink:#33291f;--cream:#f6efdd;--gold:#ffd166;--pink:#f28cb1;--blue:#4cc9f0;--green:#90be6d;--purple:#9b5de5}
+:root{
+  --ink:#1f1810;--ink-2:#5b4c39;--ink-3:#8b7a62;
+  --cream:#faf6ee;--paper:#fffdf8;--line:rgba(31,24,16,.1);
+  --gold:#f5b82e;--gold-2:#ffd978;--teal:#5ee6d0;--rose:#ef476f;
+  --night:#120d08;--night-2:#1c150d;
+  --r-lg:24px;--r-md:16px;--shadow:0 1px 2px rgba(31,24,16,.05),0 12px 32px -12px rgba(31,24,16,.18);
+}
 *{margin:0;padding:0;box-sizing:border-box}
-html{scroll-behavior:smooth}
-body{font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;background:var(--cream);color:var(--ink);overflow-x:hidden}
-body:before{content:"";position:fixed;inset:0;background-image:radial-gradient(rgba(51,41,31,.05) 1.2px,transparent 1.2px);background-size:22px 22px;pointer-events:none}
-.wrap{max-width:1080px;margin:0 auto;padding:0 22px;position:relative}
-nav{position:sticky;top:0;z-index:10;background:#2b2317;color:#fffaf0;padding:0 22px}
-nav .in{max-width:1080px;margin:0 auto;height:58px;display:flex;align-items:center;gap:14px}
-nav b{letter-spacing:2px;font-size:17px}
-.bulb{width:9px;height:9px;border-radius:50%;background:var(--gold);box-shadow:0 0 9px 2px #ffd16688;animation:neon 2.1s infinite}
-@keyframes neon{0%,100%{opacity:1}50%{opacity:.35}}
-nav a{color:#fffaf0;text-decoration:none;font-size:14px;opacity:.85;margin-left:14px}
-nav .cta{margin-left:auto;background:var(--gold);color:var(--ink);font-weight:900;padding:8px 18px;border-radius:10px;border:2px solid #fffaf0;opacity:1}
-.hero{text-align:center;padding:86px 0 60px;position:relative}
-.hero h1{font-size:min(56px,9vw);font-weight:900;letter-spacing:6px;line-height:1.25}
-.hero h1 span{background:linear-gradient(transparent 60%,var(--gold) 60%)}
-.hero p{font-size:19px;color:#8b7355;margin:20px 0 34px;letter-spacing:2px}
-.hero .big{display:inline-block;background:var(--gold);border:3px solid var(--ink);border-radius:16px;padding:15px 42px;
-  font-size:19px;font-weight:900;letter-spacing:4px;color:var(--ink);text-decoration:none;box-shadow:6px 6px 0 rgba(51,41,31,.2);transition:.15s}
-.hero .big:hover{transform:translateY(-3px);box-shadow:8px 8px 0 rgba(51,41,31,.2)}
-.crew{display:flex;justify-content:center;gap:6px;margin-top:52px;flex-wrap:wrap}
-.crew svg{animation:floaty 5s ease-in-out infinite}
-.crew svg:nth-child(2n){animation-delay:1.2s}.crew svg:nth-child(3n){animation-delay:2.4s}
-@keyframes floaty{0%,100%{transform:translateY(0)}50%{transform:translateY(-12px)}}
-.stats{display:flex;justify-content:center;gap:14px;flex-wrap:wrap;margin-top:44px}
-.stat{background:#fffdf7;border:3px solid var(--ink);border-radius:16px;padding:16px 26px;box-shadow:4px 4px 0 rgba(51,41,31,.15)}
-.stat b{font-size:30px;display:block}
-.stat span{font-size:13px;color:#8b7355}
-h2.sec{font-size:32px;text-align:center;margin:90px 0 12px;letter-spacing:3px}
-p.sub{text-align:center;color:#8b7355;margin-bottom:36px;font-size:15px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:18px}
-.grid.who{grid-template-columns:repeat(2,1fr)}
-@media(max-width:640px){.grid.who{grid-template-columns:1fr}}
-.feat{background:#fffdf7;border:3px solid var(--ink);border-radius:20px;padding:24px;box-shadow:5px 5px 0 rgba(51,41,31,.15);
-  opacity:0;transform:translateY(30px);transition:.6s}
-.feat.show{opacity:1;transform:none}
-.feat .ic{font-size:38px}
-.feat h3{margin:10px 0 8px;font-size:19px}
-.feat p{font-size:14px;color:#6b5d49;line-height:1.75}
-.feat .tagline{display:inline-block;margin-top:10px;background:#2b2317;color:var(--gold);border-radius:8px;padding:2px 10px;font-size:12px}
-.feat.ind{padding:18px 18px 16px}
-.feat.ind .ic{font-size:30px}
-.feat.ind h3{font-size:16.5px;margin:8px 0 6px}
-.feat.ind p{font-size:13px;line-height:1.7}
-.flow{display:flex;align-items:stretch;gap:0;overflow-x:auto;padding:10px 4px 22px}
-.fstep{min-width:150px;flex:1;background:#fffdf7;border:3px solid var(--ink);border-radius:16px;padding:16px 14px;text-align:center;
-  box-shadow:4px 4px 0 rgba(51,41,31,.15);position:relative;margin-right:34px;opacity:0;transform:scale(.85);transition:.5s}
-.fstep.show{opacity:1;transform:scale(1)}
-.fstep:last-child{margin-right:0}
-.fstep:not(:last-child):after{content:"➜";position:absolute;right:-27px;top:50%;transform:translateY(-50%);font-size:19px;color:#a4947c;animation:pulse 1.6s infinite}
-@keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}
-.fstep .e{font-size:30px}
-.fstep b{display:block;margin-top:6px;font-size:14.5px}
-.fstep span{font-size:12px;color:#8b7355}
-.plans{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:18px;align-items:stretch}
-.plan{background:#fffdf7;border:3px solid var(--ink);border-radius:20px;padding:26px 22px;text-align:center;box-shadow:5px 5px 0 rgba(51,41,31,.15);position:relative;opacity:0;transform:translateY(30px);transition:.6s}
-.plan.show{opacity:1;transform:none}
-.plan.hot{background:linear-gradient(160deg,#fff6dc,#fffdf7);border-width:4px}
-.plan .hotbadge{position:absolute;top:-14px;left:50%;transform:translateX(-50%);background:#ef476f;color:#fff;border:2.5px solid var(--ink);border-radius:99px;padding:3px 16px;font-size:12.5px;font-weight:900}
-.plan h3{font-size:20px}
-.plan .old{color:#a4947c;text-decoration:line-through;font-size:14px;margin-top:12px}
-.plan .price{font-size:38px;font-weight:900;margin:2px 0 2px}
-.plan .price small{font-size:14px;font-weight:400;color:#8b7355}
-.plan select{width:100%;min-height:44px;margin-top:14px;border:2px solid var(--ink);border-radius:11px;padding:8px 10px;background:#fffdf7;color:var(--ink);font:inherit}
-.plan-action{width:100%;min-height:46px;margin-top:10px;border:3px solid var(--ink);border-radius:12px;background:var(--gold);color:var(--ink);font-size:15px;font-weight:900;cursor:pointer;box-shadow:4px 4px 0 rgba(51,41,31,.18)}
-.plan-action:hover{transform:translateY(-2px);box-shadow:6px 6px 0 rgba(51,41,31,.18)}
-.plan .quote{min-height:20px;margin-top:8px;color:#7d6549;font-size:13px;font-weight:700}
+html{scroll-behavior:smooth;-webkit-text-size-adjust:100%}
+body{font-family:"PingFang SC","Microsoft YaHei",system-ui,-apple-system,sans-serif;background:var(--cream);color:var(--ink);overflow-x:hidden;line-height:1.6}
+a{color:inherit}
+.wrap{max-width:1160px;margin:0 auto;padding:0 24px;position:relative}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+
+/* ---------- 导航 ---------- */
+nav{position:fixed;top:0;left:0;right:0;z-index:20;padding:0 24px;transition:background .3s,backdrop-filter .3s,border-color .3s;border-bottom:1px solid transparent}
+nav.solid{background:rgba(18,13,8,.78);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-color:rgba(255,255,255,.06)}
+nav .in{max-width:1160px;margin:0 auto;height:64px;display:flex;align-items:center;gap:6px;color:#fff4dc}
+nav .logo{display:flex;align-items:center;gap:10px;text-decoration:none;margin-right:18px}
+nav .logo b{letter-spacing:2px;font-size:17px}
+.bulb{width:10px;height:10px;border-radius:50%;background:var(--gold);box-shadow:0 0 12px 3px rgba(245,184,46,.6);animation:neon 2.4s infinite}
+@keyframes neon{0%,100%{opacity:1}50%{opacity:.4}}
+nav a.lk{color:#fff4dc;text-decoration:none;font-size:14px;opacity:.72;padding:8px 10px;border-radius:8px;transition:.2s}
+nav a.lk:hover{opacity:1;background:rgba(255,255,255,.06)}
+nav .cta{margin-left:auto;background:var(--gold);color:var(--ink);font-weight:800;font-size:14px;padding:9px 18px;border-radius:999px;text-decoration:none;transition:.2s;white-space:nowrap}
+nav .cta:hover{background:var(--gold-2);transform:translateY(-1px)}
+
+/* ---------- 3D 首屏 ---------- */
+.hero{position:relative;min-height:100vh;min-height:100svh;background:radial-gradient(120% 90% at 70% 45%,#3a2912 0%,#1c150d 45%,var(--night) 100%);color:#fff4dc;overflow:hidden;display:flex;align-items:center}
+.hero canvas{position:absolute;inset:0;width:100%;height:100%;display:block;opacity:0;transition:opacity 1.2s ease}
+.hero.ready canvas{opacity:1}
+.hero:before{content:"";position:absolute;inset:0;z-index:1;background:linear-gradient(90deg,rgba(18,13,8,.7) 0%,rgba(18,13,8,.35) 38%,transparent 60%);pointer-events:none}
+.hero:after{content:"";position:absolute;left:0;right:0;bottom:0;height:90px;z-index:1;background:linear-gradient(rgba(250,246,238,0),var(--cream));pointer-events:none}
+.hero .fallback{position:absolute;inset:0;background:radial-gradient(circle at 72% 48%,rgba(245,184,46,.35),transparent 22%),radial-gradient(circle at 72% 48%,transparent 30%,rgba(94,230,208,.08) 31%,transparent 33%),radial-gradient(circle at 72% 48%,transparent 42%,rgba(245,184,46,.08) 43%,transparent 45%);transition:opacity 1s}
+.hero.ready .fallback{opacity:0}
+.hero .copy{position:relative;z-index:2;max-width:600px;padding:120px 0 150px;pointer-events:none}
+.hero .copy *{pointer-events:auto}
+.eyebrow{display:inline-flex;align-items:center;gap:8px;font-size:13px;letter-spacing:2px;color:var(--gold-2);background:rgba(245,184,46,.1);border:1px solid rgba(245,184,46,.3);padding:6px 14px;border-radius:999px}
+.hero h1{font-size:clamp(40px,6.4vw,76px);font-weight:900;letter-spacing:3px;line-height:1.14;margin:22px 0 20px}
+.hero h1 .g{background:linear-gradient(100deg,var(--gold-2),var(--gold) 45%,#ff9d4d);-webkit-background-clip:text;background-clip:text;color:transparent}
+.hero .lead{font-size:clamp(16px,1.6vw,19px);color:rgba(255,244,220,.78);max-width:520px}
+.hero .lead b{color:#fff4dc}
+.btns{display:flex;gap:12px;flex-wrap:wrap;margin-top:34px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:50px;padding:0 28px;border-radius:999px;font-size:16px;font-weight:800;text-decoration:none;cursor:pointer;border:0;transition:transform .2s,box-shadow .2s,background .2s;font-family:inherit}
+.btn.pri{background:linear-gradient(100deg,var(--gold-2),var(--gold));color:var(--ink);box-shadow:0 10px 30px -8px rgba(245,184,46,.7)}
+.btn.pri:hover{transform:translateY(-2px);box-shadow:0 14px 36px -8px rgba(245,184,46,.85)}
+.btn.ghost{background:rgba(255,255,255,.06);color:#fff4dc;border:1px solid rgba(255,255,255,.18)}
+.btn.ghost:hover{background:rgba(255,255,255,.12)}
+.hero .sub-links{margin-top:18px;font-size:14px;color:rgba(255,244,220,.6)}
+.hero .sub-links a{color:#fff4dc;font-weight:700}
+.orbit-caption{position:absolute;z-index:2;right:32px;bottom:130px;max-width:340px;background:rgba(18,13,8,.62);border:1px solid rgba(245,184,46,.25);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-radius:var(--r-md);padding:14px 18px;font-size:13.5px;color:rgba(255,244,220,.85);transition:opacity .4s}
+.orbit-caption .k{font-size:12px;letter-spacing:1.5px;color:var(--teal);display:flex;align-items:center;gap:6px}
+.orbit-caption .k:before{content:"";width:7px;height:7px;border-radius:50%;background:var(--teal);box-shadow:0 0 8px var(--teal)}
+.orbit-caption b{display:block;font-size:16px;color:#fff4dc;margin:4px 0 2px}
+.hero:not(.ready) .orbit-caption{opacity:0}
+.scroll-hint{position:absolute;z-index:2;left:50%;bottom:104px;transform:translateX(-50%);font-size:12px;letter-spacing:3px;color:rgba(255,244,220,.55);display:flex;flex-direction:column;align-items:center;gap:8px}
+.scroll-hint i{width:1px;height:28px;background:linear-gradient(rgba(255,244,220,.55),transparent);animation:drop 1.8s infinite}
+@keyframes drop{0%{transform:scaleY(0);transform-origin:top}50%{transform:scaleY(1);transform-origin:top}51%{transform-origin:bottom}100%{transform:scaleY(0);transform-origin:bottom}}
+
+/* ---------- 数据条 ---------- */
+.stats{position:relative;z-index:3;margin-top:-70px;display:grid;grid-template-columns:repeat(4,1fr);background:var(--paper);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--shadow);overflow:hidden}
+.stat{padding:24px 26px;border-right:1px solid var(--line)}
+.stat:last-child{border-right:0}
+.stat b{font-size:clamp(22px,2.4vw,30px);font-weight:900;display:block;letter-spacing:1px}
+.stat span{font-size:13px;color:var(--ink-3)}
+
+/* ---------- 通用段落 ---------- */
+section{padding:110px 0 0}
+.sec-head{text-align:center;max-width:720px;margin:0 auto 44px}
+.sec-head .tag{display:inline-block;font-size:12.5px;font-weight:800;letter-spacing:3px;color:#b7820f;margin-bottom:12px}
+.sec-head h2{font-size:clamp(28px,3.4vw,42px);font-weight:900;letter-spacing:1.5px;line-height:1.25}
+.sec-head p{color:var(--ink-2);margin-top:14px;font-size:15.5px}
+.card{background:var(--paper);border:1px solid var(--line);border-radius:var(--r-lg);padding:28px;box-shadow:var(--shadow);transition:transform .35s cubic-bezier(.2,.8,.2,1),box-shadow .35s,border-color .35s}
+.card:hover{transform:translateY(-4px);box-shadow:0 1px 2px rgba(31,24,16,.05),0 22px 44px -16px rgba(31,24,16,.28);border-color:rgba(245,184,46,.45)}
+.ic{width:52px;height:52px;border-radius:14px;display:grid;place-items:center;font-size:26px;background:linear-gradient(140deg,#fff3d1,#ffe6a6)}
+.card h3{font-size:19px;margin:16px 0 8px;line-height:1.4}
+.card p{font-size:14.5px;color:var(--ink-2);line-height:1.8}
+.tagline{display:inline-block;margin-top:14px;background:var(--night-2);color:var(--gold-2);border-radius:999px;padding:4px 12px;font-size:12px}
+.grid{display:grid;gap:18px}
+.g2{grid-template-columns:repeat(2,1fr)}
+.g3{grid-template-columns:repeat(3,1fr)}
+.g4{grid-template-columns:repeat(4,1fr)}
+html.js .rv{opacity:0;transform:translateY(28px);transition:opacity .8s cubic-bezier(.2,.8,.2,1),transform .8s cubic-bezier(.2,.8,.2,1)}
+html.js .rv.show{opacity:1;transform:none}
+
+/* 品牌宣言 */
+.manifesto{margin-top:90px;display:grid;grid-template-columns:1.1fr 1fr;gap:18px}
+.manifesto .quote-card{background:linear-gradient(150deg,var(--night-2),#2d2112);color:#fff4dc;border:0;padding:40px}
+.manifesto .quote-card p{color:rgba(255,244,220,.78);font-size:16px;line-height:2}
+.manifesto .quote-card p b{color:#fff4dc}
+.manifesto .quote-card .slogan{display:block;margin-top:18px;font-size:22px;font-weight:900;color:var(--gold-2);letter-spacing:2px}
+.manifesto .kit h3{font-size:20px;margin:0 0 6px}
+.kit-list{list-style:none;margin-top:18px;display:grid;gap:12px}
+.kit-list li{display:flex;gap:14px;align-items:flex-start;padding:14px;border-radius:14px;background:var(--cream)}
+.kit-list li .ic{width:42px;height:42px;font-size:21px;flex:none}
+.kit-list b{display:block;font-size:15px}
+.kit-list span{font-size:13.5px;color:var(--ink-2)}
+
+/* 宣传片 */
+.film{background:var(--night);color:#fff4dc;margin-top:110px;padding:100px 0;border-radius:40px}
+.film .sec-head h2{color:#fff4dc}
+.film .sec-head p{color:rgba(255,244,220,.65)}
+.film .sec-head .tag{color:var(--gold)}
+.film .player{max-width:960px;margin:0 auto;padding:10px;border-radius:26px;background:linear-gradient(140deg,rgba(245,184,46,.5),rgba(94,230,208,.25));box-shadow:0 30px 80px -30px rgba(245,184,46,.45)}
+.film video{display:block;width:100%;border-radius:18px;background:#000;aspect-ratio:16/9}
+.film .after{text-align:center;margin-top:22px;color:rgba(255,244,220,.65)}
+.film .after a{color:var(--gold-2);font-weight:800}
+.showcase{margin-top:90px;display:grid;grid-template-columns:1.4fr 1fr;gap:40px;align-items:center}
+.showcase .shot img{width:100%;height:auto;border-radius:20px;border:1px solid rgba(255,255,255,.1);box-shadow:0 30px 80px -30px rgba(0,0,0,.8)}
+.showcase h3{font-size:clamp(22px,2.4vw,30px);line-height:1.35;font-weight:900}
+.showcase p{color:rgba(255,244,220,.7);margin-top:12px}
+.checks{list-style:none;margin-top:18px;display:grid;gap:10px}
+.checks li{padding-left:26px;position:relative;color:rgba(255,244,220,.85);font-size:14.5px}
+.checks li:before{content:"✓";position:absolute;left:0;color:var(--teal);font-weight:900}
+
+/* 行业 */
+.ind{padding:22px;cursor:default}
+.ind .top{display:flex;align-items:center;gap:12px}
+.ind .ic{width:46px;height:46px;font-size:23px}
+.ind h3{margin:0;font-size:16.5px}
+.ind h3 small{display:block;font-size:12.5px;font-weight:600;color:#b7820f;margin-top:2px}
+.ind p{margin-top:12px;font-size:13.5px;line-height:1.75}
+.ind.more{background:linear-gradient(150deg,#fff3d1,var(--paper));border-style:dashed;border-color:rgba(183,130,15,.45)}
+
+/* 流程 */
+.flow{display:grid;grid-template-columns:repeat(5,1fr);gap:16px;position:relative}
+.flow:before{content:"";position:absolute;left:10%;right:10%;top:34px;height:2px;background:linear-gradient(90deg,var(--gold),var(--teal));opacity:.5}
+.fstep{text-align:center;position:relative}
+.fstep .n{width:68px;height:68px;border-radius:50%;margin:0 auto;display:grid;place-items:center;font-size:28px;background:var(--paper);border:2px solid var(--gold);box-shadow:0 0 0 6px var(--cream),var(--shadow);position:relative}
+.fstep .n:after{content:attr(data-i);position:absolute;top:-4px;right:-6px;width:22px;height:22px;border-radius:50%;background:var(--ink);color:var(--gold-2);font-size:11px;font-weight:800;display:grid;place-items:center}
+.fstep b{display:block;margin-top:16px;font-size:16px}
+.fstep span{font-size:13px;color:var(--ink-3)}
+
+/* 数字人 */
+.avatar-band{margin-top:100px;display:grid;grid-template-columns:1fr 1.2fr;gap:44px;align-items:center}
+.avatar-band img{width:100%;height:auto;border-radius:24px;box-shadow:var(--shadow)}
+.avatar-band h2{font-size:clamp(26px,3vw,38px);font-weight:900;line-height:1.3}
+.avatar-band p{color:var(--ink-2);margin-top:14px}
+
+/* 参观 */
+.try{margin-top:110px;background:linear-gradient(140deg,var(--night-2),#2d2112);border-radius:32px;padding:56px;color:#fff4dc;display:grid;grid-template-columns:1fr 1.1fr;gap:40px;align-items:center;position:relative;overflow:hidden}
+.try:before{content:"";position:absolute;right:-120px;top:-120px;width:360px;height:360px;border-radius:50%;background:radial-gradient(circle,rgba(245,184,46,.35),transparent 70%)}
+.try h2{font-size:clamp(26px,3vw,36px);font-weight:900;line-height:1.3}
+.try p{color:rgba(255,244,220,.72);margin-top:12px}
+.try-form{position:relative;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);border-radius:20px;padding:24px}
+.trial-fields{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.trial-fields input:first-of-type{grid-column:1/-1}
+.trial-fields input{min-height:48px;width:100%;border:1px solid rgba(255,255,255,.18);background:rgba(0,0,0,.25);color:#fff4dc;border-radius:12px;padding:0 14px;font-size:15px;font-family:inherit;outline:none;transition:border-color .2s,box-shadow .2s}
+.trial-fields input::placeholder{color:rgba(255,244,220,.45)}
+.trial-fields input:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(245,184,46,.2)}
+.try-form .btn{width:100%;margin-top:14px}
+.try-form .btn:disabled{opacity:.6;cursor:wait}
+#g-err{color:#ff8fa3;font-size:13px;margin-top:10px;min-height:18px;font-weight:700}
+
+/* 套餐 */
+.plans{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;align-items:stretch}
+.plan{background:var(--paper);border:1px solid var(--line);border-radius:var(--r-lg);padding:28px 22px;text-align:center;box-shadow:var(--shadow);position:relative;display:flex;flex-direction:column;transition:transform .35s,box-shadow .35s}
+.plan:hover{transform:translateY(-4px)}
+.plan.hot{background:linear-gradient(170deg,#fff3d1,var(--paper) 55%);border:2px solid var(--gold);box-shadow:0 24px 50px -22px rgba(245,184,46,.7)}
+.plan .hotbadge{position:absolute;top:-13px;left:50%;transform:translateX(-50%);background:var(--rose);color:#fff;border-radius:99px;padding:4px 16px;font-size:12.5px;font-weight:800;white-space:nowrap}
+.plan h3{font-size:19px}
+.plan .old{color:var(--ink-3);text-decoration:line-through;font-size:13.5px;margin-top:12px}
+.plan .price{font-size:38px;font-weight:900;margin:2px 0;letter-spacing:.5px}
+.plan .price small{font-size:14px;font-weight:500;color:var(--ink-3)}
+.plan .pts{background:var(--night-2);color:var(--gold-2);display:inline-block;align-self:center;border-radius:999px;padding:3px 14px;font-size:13px;margin:8px 0 12px}
+.plan p{font-size:13.5px;color:var(--ink-2);line-height:1.7;flex:1}
+.plan select{width:100%;min-height:44px;margin-top:14px;border:1px solid var(--line);border-radius:12px;padding:8px 10px;background:var(--cream);color:var(--ink);font:inherit}
+.plan-action{width:100%;min-height:46px;margin-top:10px;border:0;border-radius:999px;background:var(--ink);color:#fff4dc;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit;transition:.2s}
+.plan.hot .plan-action{background:linear-gradient(100deg,var(--gold-2),var(--gold));color:var(--ink)}
+.plan-action:hover{transform:translateY(-2px)}
 .plan .old{min-height:20px}
 /* 提示语单独一行，不能套 .old 的删除线 */
 .plan .price-note{min-height:18px;margin-top:4px;color:#b45309;font-size:12px;font-weight:700;text-decoration:none}
-.plan .pts{background:#2b2317;color:var(--gold);display:inline-block;border-radius:9px;padding:3px 14px;font-size:13px;margin:8px 0 12px}
-.plan p{font-size:13px;color:#6b5d49;line-height:1.7}
-.trial-fields{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
-.trial-fields input{min-height:44px;width:100%}
-.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
-footer{margin-top:100px;background:#2b2317;color:#cbb994;text-align:center;padding:36px 20px;font-size:13px;line-height:2}
-footer a{color:var(--gold)}
+.plan .quote{min-height:20px;margin-top:8px;color:#8a6a2c;font-size:13px;font-weight:700}
+.price-note-all{text-align:center;color:var(--ink-3);font-size:13.5px;margin-top:22px}
+
+footer{margin-top:120px;background:var(--night);color:rgba(255,244,220,.6);padding:52px 24px;font-size:13.5px;line-height:2}
+footer .in{max-width:1160px;margin:0 auto;display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;align-items:center}
+footer b{color:#fff4dc;letter-spacing:2px}
+footer a{color:var(--gold-2)}
+
+a:focus-visible,button:focus-visible,select:focus-visible,video:focus-visible{outline:3px solid var(--gold);outline-offset:3px}
+
+@media(max-width:980px){
+  .g3,.g4,.plans{grid-template-columns:repeat(2,1fr)}
+  .manifesto,.showcase,.avatar-band,.try{grid-template-columns:1fr}
+  .stats{grid-template-columns:repeat(2,1fr)}
+  .stat:nth-child(2){border-right:0}
+  .stat:nth-child(-n+2){border-bottom:1px solid var(--line)}
+  .flow{grid-template-columns:repeat(3,1fr);row-gap:32px}
+  .flow:before{display:none}
+  .orbit-caption{display:none}
+  .hero{align-items:flex-start}
+  .hero .copy{padding:110px 0 52vh;text-shadow:0 2px 18px rgba(18,13,8,.8)}
+  .hero:before{background:linear-gradient(180deg,rgba(18,13,8,.75) 0%,rgba(18,13,8,.2) 45%,transparent 60%)}
+}
 @media(max-width:720px){
-  nav .in a:not(.cta):not(.logo){display:none}
-  nav .in{gap:8px}
+  .wrap{padding:0 16px}
+  nav{padding:0 16px}
+  nav a.lk{display:none}
+  .hero .copy{padding:92px 0 50vh}
+  .btn{flex:1;padding:0 18px}
+  .g2,.g3,.g4,.plans{grid-template-columns:1fr}
+  .stat{padding:18px}
+  .try{padding:30px 20px;border-radius:24px}
   .trial-fields{grid-template-columns:1fr}
-  .hero{padding-top:64px}
-  .hero .big{padding:14px 22px;letter-spacing:2px}
+  .film{padding:72px 0;border-radius:28px}
+  .flow{grid-template-columns:repeat(2,1fr)}
+  section{padding-top:80px}
+  .manifesto .quote-card{padding:28px}
+  .scroll-hint{display:none}
 }
 @media(prefers-reduced-motion:reduce){
   html{scroll-behavior:auto}
@@ -95,190 +227,252 @@ footer a{color:var(--gold)}
 </style>
 </head>
 <body>
-<nav><div class="in"><span class="bulb"></span><b>派活 PaiHuo</b>
-  <a href="#film">宣传片</a><a href="#depts">产业部门</a><a href="#flow">怎么干活</a><a href="#try">免费体验</a><a href="#plans">套餐</a>
+<nav id="nav"><div class="in">
+  <a class="logo" href="#top"><span class="bulb"></span><b>派活 PaiHuo</b></a>
+  <a class="lk" href="#film">宣传片</a><a class="lk" href="#depts">产业部门</a><a class="lk" href="#flow">怎么干活</a><a class="lk" href="#try">免费体验</a><a class="lk" href="#plans">套餐</a>
   <a class="cta" href="/login">登录集团 →</a></div></nav>
 
-<div class="wrap">
-  <div class="hero">
-    <h1><span>老板会派活</span><br>数字员工去干活</h1>
-    <p>派活 PaiHuo · <b>11 个连锁行业</b>的专属决策员工听您调遣,从内容营销到门店经营,一句话派活即出方案</p>
-    <a class="big" href="/login">📝 免费申请开通</a>
-    <div style="margin-top:8px"><a href="/login" style="font-weight:800;text-decoration:underline">已有账号?直接登录 →</a>
-      <span style="margin:0 6px;opacity:.5">·</span>
-      <a href="#try" style="font-weight:800;text-decoration:underline">先进来参观看看 →</a></div>
-    <div style="margin-top:46px;opacity:0;transform:translateY(30px);transition:.8s" class="heroimg">
-      <picture>
-        <source srcset="/static/img/hero-1280.webp" type="image/webp">
-        <img src="/static/img/hero.png" alt="派活数字员工协作办公室界面预览" width="1280" height="853" loading="eager" fetchpriority="high" decoding="async" style="width:min(880px,94%);height:auto;border:4px solid var(--ink);border-radius:26px;box-shadow:10px 10px 0 rgba(51,41,31,.18)">
-      </picture>
-    </div>
-    <div class="crew" id="crew"></div>
-    <div class="stats">
-      <div class="stat"><b>专属决策</b><span>每个行业按真实痛点分工</span></div>
-      <div class="stat"><b>11 个</b><span>连锁行业专家团</span></div>
-      <div class="stat"><b>10 工位</b><span>内容流水线全自动</span></div>
-      <div class="stat"><b>3-8 分钟</b><span>数字人视频出片</span></div>
+<header class="hero" id="top">
+  <div class="fallback" aria-hidden="true"></div>
+  <canvas id="hero3d" aria-label="派活核心向 11 个行业专家团派发任务的三维动画" role="img"></canvas>
+  <div class="wrap" style="width:100%">
+    <div class="copy">
+      <span class="eyebrow">✦ AI 数字员工协作平台</span>
+      <h1><span class="g">老板会派活</span><br>数字员工去干活</h1>
+      <p class="lead">派活 PaiHuo · <b>11 个连锁行业</b>的专属决策员工听您调遣，从内容营销到门店经营，一句话派活即出方案。</p>
+      <div class="btns">
+        <a class="btn pri" href="/login">免费申请开通 →</a>
+        <a class="btn ghost" href="#try">先进来参观</a>
+      </div>
+      <div class="sub-links">已有账号？<a href="/login">直接登录 →</a></div>
     </div>
   </div>
+  <div class="orbit-caption" id="orbit-caption" aria-live="off">
+    <span class="k">示例派活</span>
+    <b id="oc-title">🍜 餐饮 · 60 位专家</b>
+    <span id="oc-task">“外卖满减怎么设才不亏？”→ 已派给菜单工程专家</span>
+  </div>
+  <div class="scroll-hint" aria-hidden="true">向下了解<i></i></div>
+</header>
 
-  <div class="wrap" style="max-width:820px;margin:40px auto 0;text-align:center">
-    <div class="feat" style="opacity:1;transform:none;background:linear-gradient(160deg,#fff6dc,#fffdf7)">
-      <div class="ic" style="font-size:30px">📣 品牌宣言</div>
-      <p style="font-size:16px;line-height:2;margin-top:10px">
-      每个连锁老板都缺人:缺懂行的策划、缺会做内容的、缺能出镜的、缺算得清账的。<br>
-      <b>派活,把一整支专家团装进你的手机。</b>不用招人、不用培训、不用等——<br>
-      开一家茶饮店、一家健身房、一家宠物店,还是一家连锁餐饮,<br>
-      <b>你只管派活,专家团联网核实、按你的生意出可落地的方案。</b><br>
-      <span style="color:#c47f1a;font-weight:900;font-size:18px">老板会派活，数字员工去干活。</span></p>
+<main class="wrap">
+  <div class="stats rv">
+    <div class="stat"><b>专属决策</b><span>每个行业按真实痛点分工</span></div>
+    <div class="stat"><b>11 个</b><span>连锁行业专家团</span></div>
+    <div class="stat"><b>10 工位</b><span>内容流水线全自动</span></div>
+    <div class="stat"><b>3-8 分钟</b><span>数字人视频出片</span></div>
+  </div>
+
+  <div class="manifesto">
+    <div class="card quote-card rv">
+      <span class="tag" style="color:var(--gold);font-size:12.5px;font-weight:800;letter-spacing:3px">品牌宣言</span>
+      <p style="margin-top:14px">每个连锁老板都缺人：缺懂行的策划、缺会做内容的、缺能出镜的、缺算得清账的。<br>
+      <b>派活，把一整支专家团装进你的手机。</b>不用招人、不用培训、不用等——
+      开一家茶饮店、一家健身房、一家宠物店，还是一家连锁餐饮，
+      <b>你只管派活，专家团联网核实、按你的生意出可落地的方案。</b></p>
+      <span class="slogan">老板会派活，数字员工去干活。</span>
+    </div>
+    <div class="card kit rv">
+      <h3>🔥 老板们上手第一周用得最多的「发布三件套」</h3>
+      <p>写完就能发、发前有人把关、发出去像大号——这一条龙，单点工具给不了。</p>
+      <ul class="kit-list">
+        <li><span class="ic">🎬</span><div><b>图文一键成片</b><span>自动配音 + 字幕 + 抓真实图，不用出镜</span></div></li>
+        <li><span class="ic">🪪</span><div><b>审查官发前把关</b><span>广告法极限词 / 平台规范，发出去才安心</span></div></li>
+        <li><span class="ic">📰</span><div><b>公众号 12 套排版</b><span>一键复制或直接进草稿箱</span></div></li>
+      </ul>
     </div>
   </div>
+</main>
 
-  <div class="feat" style="max-width:880px;margin:22px auto 0;text-align:center">
-    <b style="font-size:19px">🔥 老板们上手第一周用得最多的「发布三件套」</b>
-    <p style="margin-top:8px;line-height:1.9">🎬 <b>图文一键成片</b>(自动配音+字幕+抓真实图,不用出镜) ·
-      🪪 <b>审查官发前把关</b>(广告法极限词/平台规范,发出去才安心) ·
-      📰 <b>公众号 12 套排版</b>(一键复制或直接进草稿箱)</p>
-    <p class="sub" style="margin-top:4px">写完就能发、发前有人把关、发出去像大号——这一条龙,单点工具给不了。</p>
-  </div>
-
-  <h2 class="sec" id="film">🎬 5 分钟看懂派活</h2>
-  <p class="sub">从老板的深夜,到行业专属数字员工开工——花 5 分钟,看完您就知道活该怎么派</p>
-  <div style="max-width:880px;margin:0 auto">
-    <div class="feat" style="padding:10px;background:#2b2317">
-      <video id="promofilm" controls preload="none" playsinline poster="/static/img/promo_poster.jpg"
-        style="display:block;width:100%;border-radius:12px;background:#000">
+<section class="film" id="film">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <span class="tag">宣传片</span>
+      <h2>🎬 5 分钟看懂派活</h2>
+      <p>从老板的深夜，到行业专属数字员工开工——花 5 分钟，看完您就知道活该怎么派</p>
+    </div>
+    <div class="player rv">
+      <video id="promofilm" controls preload="none" playsinline poster="/static/img/promo_poster.jpg">
         <source src="/pub/paihuo-promo-31-web.mp4" type="video/mp4">
-        您的浏览器不支持视频播放,<a href="/pub/paihuo-promo-31-web.mp4" style="color:#ffd166">点此下载观看</a>
+        您的浏览器不支持视频播放，<a href="/pub/paihuo-promo-31-web.mp4" style="color:#ffd978">点此下载观看</a>
       </video>
     </div>
-    <p class="sub" style="margin-top:12px">看完想上手?<a href="#try" style="font-weight:900;text-decoration:underline">先免费进办公室参观 →</a></p>
-  </div>
+    <p class="after">看完想上手？<a href="#try">先免费进办公室参观 →</a></p>
 
-  <h2 class="sec" id="who">👔 谁在用派活</h2>
-  <p class="sub">连锁品牌老板 · 单店/多店门店老板 · 想创业开店的人 · 代运营/咨询服务商</p>
-  <div class="grid who" style="max-width:900px;margin:0 auto">
-    <div class="feat"><div class="ic">🏪</div><h3>门店/连锁老板</h3><p>选址、商品/服务设计、经营合规、供应链、门店运营、活动策划、财务复盘——整条经营链都有专家兜着,决策不再靠拍脑袋。</p></div>
-    <div class="feat"><div class="ic">📱</div><h3>做内容/私域的老板</h3><p>10 工位流水线全自动出多平台成品,公众号排版+草稿箱一键进,文案一键变短视频,vlog 智能混剪,发完还有自动复盘。</p></div>
-    <div class="feat"><div class="ic">🚀</div><h3>想创业开店的人</h3><p>还没开店就能先让「市场机会/选址/单店模型」专家帮你算清楚能不能干、怎么干,少交学费。</p></div>
-    <div class="feat"><div class="ic">🤝</div><h3>代运营/咨询服务商</h3><p>给客户做方案、做内容、做诊断的服务商,把派活当自己的后台军团:一个人同时服务十个客户,交付又快又专业。</p></div>
-  </div>
-
-  <h2 class="sec" id="depts">🏢 覆盖 11 个连锁行业,每一行都有一支专家团</h2>
-  <p class="sub">每个行业 36-60 位成建制专家、一人一岗;您这行老板天天愁的事,都有专人接活,联网核实后交付可落地方案</p>
-  <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(250px,1fr))">
-    <div class="feat ind"><div class="ic">🍜</div><h3>餐饮 · 60 位专家</h3><p>翻台率上不去?外卖不赚钱?——选址商圈、菜单工程、食安合规、供应链、连锁扩张,8 大分部整链兜底,还有超级店长盯全国同行的活动打法。</p></div>
-    <div class="feat ind"><div class="ic">🧋</div><h3>茶饮咖啡 · 36 位专家</h3><p>上新不断、联名不翻车:新品研发、杯量与坪效提升、外卖平台打法、季节营销日历,旺季来临前专家先把仗排好。</p></div>
-    <div class="feat ind"><div class="ic">🏪</div><h3>便利零售 · 36 位专家</h3><p>小店也配总部班子:选品汰换、动线与陈列、鲜食引流、24 小时排班、社区会员——把每一平米都卖出钱。</p></div>
-    <div class="feat ind"><div class="ic">🍿</div><h3>零食量贩 · 36 位专家</h3><p>低毛利怎么活?爆品选品、供应链议价、定价与损耗管控、开店节奏测算,量贩生意的细账有人替您算。</p></div>
-    <div class="feat ind"><div class="ic">🛒</div><h3>商超生鲜 · 36 位专家</h3><p>生鲜损耗降一个点就是纯利润:档口坪效、库存周转、社区团购、会员复购,数据说话的经营复盘。</p></div>
-    <div class="feat ind"><div class="ic">💊</div><h3>医药健康 · 36 位专家</h3><p>合规是生命线:处方药管理、GSP 合规、专业药事服务转型、会员健康档案与慢病复购,稳着把店开大。</p></div>
-    <div class="feat ind"><div class="ic">🏨</div><h3>酒店住宿 · 36 位专家</h3><p>入住率与房价的平衡术:OTA 运营与点评口碑、动态定价、淡旺季营收管理、连锁标准化,每间夜都不白空。</p></div>
-    <div class="feat ind"><div class="ic">🚗</div><h3>汽车后市场 · 36 位专家</h3><p>进店客从哪来?集客活动、会员卡项设计、工位效率、配件供应链与技师培训,把一次保养做成长期生意。</p></div>
-    <div class="feat ind"><div class="ic">🧘</div><h3>健身瑜伽 · 36 位专家</h3><p>拓客、锁客、续卡三件事:私教课包设计、续卡率提升、教练排班与绩效、社群运营,会员留下来生意才成立。</p></div>
-    <div class="feat ind"><div class="ic">💇</div><h3>美容美业 · 36 位专家</h3><p>手艺人生意也能标准化:拓客卡项、复购锁客、门店合规、员工带教与分成设计,不再被大工离职卡脖子。</p></div>
-    <div class="feat ind"><div class="ic">🐾</div><h3>宠物 · 36 位专家</h3><p>活体+洗美+零售怎么组合赚钱:洗美预约与产能、会员粘性、社群运营、异业合作,毛孩子经济一店吃透。</p></div>
-    <div class="feat ind" style="background:#fff6dc"><div class="ic">➕</div><h3>您的行业?</h3><p>行业部门持续入驻中。按您的业务开通,账号里只看您这行的专家团,不被无关信息打扰。</p></div>
-  </div>
-
-  <h2 class="sec">⚙️ 行业专家之外,还给您配了整套班子</h2>
-  <p class="sub">内容部队、数字人出镜、越用越值钱的知识资产——一个账号全都有</p>
-  <div class="grid">
-    <div class="feat"><div class="ic">🎬</div><h3>内容生产部 · 10 工位流水线 + 审查官</h3>
-      <p>趋势官找热点 → 情报员查资料 → 拆解师学爆款 → 撰稿改稿 → 真实图/AI 配图封面 → <b>审查官把关</b>(广告法极限词/平台规范,发布前拦截风险) → 六平台发布包。公众号 <b>12 套精美排版</b>,一键复制或直接进草稿箱。</p>
-      <span class="tagline">定时自动开工 · 公众号排版+草稿箱 · 发前审查</span></div>
-    <div class="feat"><div class="ic">🎞️</div><h3>视频工厂:成片 + 混剪 + 数字人</h3>
-      <p>一篇文案一键变竖版短视频(自动配音/字幕/转场/BGM);手机拍的 vlog 片段丢进来,AI 看懂画面按文案智能混剪;一张照片+口播稿=会动会说的数字人,声音克隆成您本人的。</p>
-      <span class="tagline">图文成片 · Vlog智能混剪 · 数字人+声音克隆</span></div>
-    <div class="feat"><div class="ic">🧰</div><h3>老板营销工具箱</h3>
-      <p>今日必发(只扫您勾选的渠道,3 个当天就该发的选题一键开工)、私域朋友圈日历(整月排好还能同步飞书)、竞品盯梢周报(每周一自动出)、30 天起号计划、获客线索雷达、随手拍变海报+文案。</p>
-      <span class="tagline">热点 · 私域 · 盯梢 · 起号 · 线索 · 素材</span></div>
-    <div class="feat"><div class="ic">📊</div><h3>发完不是结束:自动复盘</h3>
-      <p>发布台账自动记账,T+1/3/7 审查官自动上岗复盘:数据判读、限流体检、合规回看、下一步行动清单;公众号配好接口连数据都自动拉。等拍板/交付/复盘提醒,全部推到您微信。</p>
-      <span class="tagline">发布台账 · 自动复盘 · 微信通知</span></div>
-    <div class="feat"><div class="ic">📚</div><h3>越用越值钱的公司资产</h3>
-      <p>每一单交付自动沉淀经验入知识库,11 维自动评估打标(质量/匹配度/关键词/时效…),按平台类别筛选。员工全网进修,平台规则一变他们先知道。</p>
-      <span class="tagline">知识沉淀 · 资产库 · 全网进修</span></div>
-    <div class="feat"><div class="ic">👔</div><h3>老板视角,拍板就行</h3>
-      <p>办公室楼层实时直播每个员工在干什么、写了多少字;关键节点等您拍板,也可以完全托管。企业主账号可开副账号,按板块分配权限,数据完全隔离。</p>
-      <span class="tagline">多账号 · 板块权限 · 数据隔离</span></div>
-    <div class="feat"><div class="ic">⚡</div><h3>开箱即用,无需配置</h3>
-      <p>不用申请任何 API、不用懂技术。在登录页在线申请即可开通；按点数计费透明可查，套餐月付季付年付随选。</p>
-      <span class="tagline">在线申请 · 计费透明 · 无需 API 配置</span></div>
-  </div>
-
-  <div style="text-align:center;margin-top:70px">
-    <picture class="heroimg">
-      <source srcset="/static/img/avatar-1152.webp" type="image/webp">
-      <img src="/static/img/avatar.png" alt="派活数字人制作与出镜功能预览" width="1152" height="768" loading="lazy" decoding="async" style="width:min(760px,94%);height:auto;border:4px solid var(--ink);border-radius:26px;box-shadow:10px 10px 0 rgba(51,41,31,.18);opacity:0;transform:translateY(30px);transition:.8s">
-    </picture>
-    <p class="sub" style="margin-top:14px">一张照片+一段稿子 = 会动会说的数字人;声音还能克隆成您本人的</p></div>
-  <h2 class="sec" id="flow">🚀 老板只需要三步</h2>
-  <p class="sub">剩下的交给数字员工们接力</p>
-  <div class="flow">
-    <div class="fstep"><div class="e">🏭</div><b>选板块</b><span>内容生产 / 产业专家 / 数字人</span></div>
-    <div class="fstep"><div class="e">🗣</div><b>说需求</b><span>一句话+选行业</span></div>
-    <div class="fstep"><div class="e">🤖</div><b>员工接力</b><span>检索·撰写·设计·质检</span></div>
-    <div class="fstep"><div class="e">👍</div><b>您拍板</b><span>或完全托管不打扰</span></div>
-    <div class="fstep"><div class="e">📦</div><b>拿交付</b><span>发布包/报告/视频</span></div>
-  </div>
-
-  <h2 class="sec" id="try">🎁 免费进来参观</h2>
-  <p class="sub">留个联系方式,直接进办公室逛:11 个行业的数字员工怎么分工、怎么干活,一目了然</p>
-  <div style="max-width:640px;margin:0 auto">
-    <div id="try-form" style="background:#fffdf7;border:3px solid var(--ink);border-radius:20px;padding:24px;box-shadow:5px 5px 0 rgba(51,41,31,.15)">
-      <div class="trial-fields">
-        <label class="sr-only" for="g-phone">手机号</label>
-        <input id="g-phone" placeholder="手机号 *" inputmode="tel" autocomplete="tel" style="border:2.5px solid var(--ink);border-radius:11px;padding:10px 12px;font-size:14px">
-        <label class="sr-only" for="g-name">怎么称呼您</label>
-        <input id="g-name" placeholder="怎么称呼您" autocomplete="name" style="border:2.5px solid var(--ink);border-radius:11px;padding:10px 12px;font-size:14px">
-        <label class="sr-only" for="g-co">您的企业或行业</label>
-        <input id="g-co" placeholder="您的企业/行业" autocomplete="organization" style="border:2.5px solid var(--ink);border-radius:11px;padding:10px 12px;font-size:14px">
+    <div class="showcase">
+      <div class="shot rv">
+        <picture>
+          <source srcset="/static/img/hero-1280.webp" type="image/webp">
+          <img src="/static/img/hero.png" alt="派活数字员工协作办公室界面预览" width="1280" height="853" loading="eager" fetchpriority="high" decoding="async">
+        </picture>
       </div>
-      <button onclick="guestTry(this)" style="margin-top:12px;width:100%;border:3px solid var(--ink);border-radius:13px;padding:12px;font-size:16px;font-weight:900;background:var(--gold);cursor:pointer;box-shadow:4px 4px 0 rgba(51,41,31,.2)">🎁 进入办公室参观</button>
-      <div id="g-err" role="status" aria-live="polite" style="color:#e5484d;font-size:13px;margin-top:8px;min-height:16px;font-weight:700"></div>
+      <div class="rv">
+        <span class="eyebrow">老板视角</span>
+        <h3 style="margin-top:16px">办公室楼层实时直播，<br>每个员工在干什么一目了然</h3>
+        <p>关键节点等您拍板，也可以完全托管。企业主账号可开副账号，按板块分配权限，数据完全隔离。</p>
+        <ul class="checks">
+          <li>派活、执行、交付全程可追踪</li>
+          <li>异步任务超时、失败自动退点</li>
+          <li>多租户隔离，员工只看您这行</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<main class="wrap">
+  <section id="who">
+    <div class="sec-head rv">
+      <span class="tag">适用人群</span>
+      <h2>👔 谁在用派活</h2>
+      <p>连锁品牌老板 · 单店/多店门店老板 · 想创业开店的人 · 代运营/咨询服务商</p>
+    </div>
+    <div class="grid g4">
+      <div class="card rv"><div class="ic">🏪</div><h3>门店/连锁老板</h3><p>选址、商品/服务设计、经营合规、供应链、门店运营、活动策划、财务复盘——整条经营链都有专家兜着，决策不再靠拍脑袋。</p></div>
+      <div class="card rv"><div class="ic">📱</div><h3>做内容/私域的老板</h3><p>10 工位流水线全自动出多平台成品，公众号排版+草稿箱一键进，文案一键变短视频，vlog 智能混剪，发完还有自动复盘。</p></div>
+      <div class="card rv"><div class="ic">🚀</div><h3>想创业开店的人</h3><p>还没开店就能先让「市场机会/选址/单店模型」专家帮你算清楚能不能干、怎么干，少交学费。</p></div>
+      <div class="card rv"><div class="ic">🤝</div><h3>代运营/咨询服务商</h3><p>给客户做方案、做内容、做诊断的服务商，把派活当自己的后台军团：一个人同时服务十个客户，交付又快又专业。</p></div>
+    </div>
+  </section>
+
+  <section id="depts">
+    <div class="sec-head rv">
+      <span class="tag">产业部门</span>
+      <h2>🏢 覆盖 11 个连锁行业，每一行都有一支专家团</h2>
+      <p>每个行业 36-60 位成建制专家、一人一岗；您这行老板天天愁的事，都有专人接活，联网核实后交付可落地方案</p>
+    </div>
+    <div class="grid g4" id="ind-grid">
+      <div class="card ind rv"><div class="top"><div class="ic">🍜</div><h3>餐饮<small>60 位专家</small></h3></div><p>翻台率上不去？外卖不赚钱？——选址商圈、菜单工程、食安合规、供应链、连锁扩张，8 大分部整链兜底，还有超级店长盯全国同行的活动打法。</p></div>
+      <div class="card ind rv"><div class="top"><div class="ic">🧋</div><h3>茶饮咖啡<small>36 位专家</small></h3></div><p>上新不断、联名不翻车：新品研发、杯量与坪效提升、外卖平台打法、季节营销日历，旺季来临前专家先把仗排好。</p></div>
+      <div class="card ind rv"><div class="top"><div class="ic">🏪</div><h3>便利零售<small>36 位专家</small></h3></div><p>小店也配总部班子：选品汰换、动线与陈列、鲜食引流、24 小时排班、社区会员——把每一平米都卖出钱。</p></div>
+      <div class="card ind rv"><div class="top"><div class="ic">🍿</div><h3>零食量贩<small>36 位专家</small></h3></div><p>低毛利怎么活？爆品选品、供应链议价、定价与损耗管控、开店节奏测算，量贩生意的细账有人替您算。</p></div>
+      <div class="card ind rv"><div class="top"><div class="ic">🛒</div><h3>商超生鲜<small>36 位专家</small></h3></div><p>生鲜损耗降一个点就是纯利润：档口坪效、库存周转、社区团购、会员复购，数据说话的经营复盘。</p></div>
+      <div class="card ind rv"><div class="top"><div class="ic">💊</div><h3>医药健康<small>36 位专家</small></h3></div><p>合规是生命线：处方药管理、GSP 合规、专业药事服务转型、会员健康档案与慢病复购，稳着把店开大。</p></div>
+      <div class="card ind rv"><div class="top"><div class="ic">🏨</div><h3>酒店住宿<small>36 位专家</small></h3></div><p>入住率与房价的平衡术：OTA 运营与点评口碑、动态定价、淡旺季营收管理、连锁标准化，每间夜都不白空。</p></div>
+      <div class="card ind rv"><div class="top"><div class="ic">🚗</div><h3>汽车后市场<small>36 位专家</small></h3></div><p>进店客从哪来？集客活动、会员卡项设计、工位效率、配件供应链与技师培训，把一次保养做成长期生意。</p></div>
+      <div class="card ind rv"><div class="top"><div class="ic">🧘</div><h3>健身瑜伽<small>36 位专家</small></h3></div><p>拓客、锁客、续卡三件事：私教课包设计、续卡率提升、教练排班与绩效、社群运营，会员留下来生意才成立。</p></div>
+      <div class="card ind rv"><div class="top"><div class="ic">💇</div><h3>美容美业<small>36 位专家</small></h3></div><p>手艺人生意也能标准化：拓客卡项、复购锁客、门店合规、员工带教与分成设计，不再被大工离职卡脖子。</p></div>
+      <div class="card ind rv"><div class="top"><div class="ic">🐾</div><h3>宠物<small>36 位专家</small></h3></div><p>活体+洗美+零售怎么组合赚钱：洗美预约与产能、会员粘性、社群运营、异业合作，毛孩子经济一店吃透。</p></div>
+      <div class="card ind more rv"><div class="top"><div class="ic">➕</div><h3>您的行业？<small>持续入驻中</small></h3></div><p>行业部门持续入驻中。按您的业务开通，账号里只看您这行的专家团，不被无关信息打扰。</p></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head rv">
+      <span class="tag">全能班子</span>
+      <h2>⚙️ 行业专家之外，还给您配了整套班子</h2>
+      <p>内容部队、数字人出镜、越用越值钱的知识资产——一个账号全都有</p>
+    </div>
+    <div class="grid g3">
+      <div class="card rv"><div class="ic">🎬</div><h3>内容生产部 · 10 工位流水线 + 审查官</h3>
+        <p>趋势官找热点 → 情报员查资料 → 拆解师学爆款 → 撰稿改稿 → 真实图/AI 配图封面 → <b>审查官把关</b>（广告法极限词/平台规范，发布前拦截风险）→ 六平台发布包。公众号 <b>12 套精美排版</b>，一键复制或直接进草稿箱。</p>
+        <span class="tagline">定时自动开工 · 公众号排版+草稿箱 · 发前审查</span></div>
+      <div class="card rv"><div class="ic">🎞️</div><h3>视频工厂：成片 + 混剪 + 数字人</h3>
+        <p>一篇文案一键变竖版短视频（自动配音/字幕/转场/BGM）；手机拍的 vlog 片段丢进来，AI 看懂画面按文案智能混剪；一张照片+口播稿=会动会说的数字人，声音克隆成您本人的。</p>
+        <span class="tagline">图文成片 · Vlog智能混剪 · 数字人+声音克隆</span></div>
+      <div class="card rv"><div class="ic">🧰</div><h3>老板营销工具箱</h3>
+        <p>今日必发（只扫您勾选的渠道，3 个当天就该发的选题一键开工）、私域朋友圈日历（整月排好还能同步飞书）、竞品盯梢周报（每周一自动出）、30 天起号计划、获客线索雷达、随手拍变海报+文案。</p>
+        <span class="tagline">热点 · 私域 · 盯梢 · 起号 · 线索 · 素材</span></div>
+      <div class="card rv"><div class="ic">📊</div><h3>发完不是结束：自动复盘</h3>
+        <p>发布台账自动记账，T+1/3/7 审查官自动上岗复盘：数据判读、限流体检、合规回看、下一步行动清单；公众号配好接口连数据都自动拉。等拍板/交付/复盘提醒，全部推到您微信。</p>
+        <span class="tagline">发布台账 · 自动复盘 · 微信通知</span></div>
+      <div class="card rv"><div class="ic">📚</div><h3>越用越值钱的公司资产</h3>
+        <p>每一单交付自动沉淀经验入知识库，11 维自动评估打标（质量/匹配度/关键词/时效…），按平台类别筛选。员工全网进修，平台规则一变他们先知道。</p>
+        <span class="tagline">知识沉淀 · 资产库 · 全网进修</span></div>
+      <div class="card rv"><div class="ic">⚡</div><h3>开箱即用，无需配置</h3>
+        <p>不用申请任何 API、不用懂技术。在登录页在线申请即可开通；按点数计费透明可查，套餐月付季付年付随选。</p>
+        <span class="tagline">在线申请 · 计费透明 · 无需 API 配置</span></div>
+    </div>
+  </section>
+
+  <div class="avatar-band">
+    <div class="rv">
+      <picture class="heroimg">
+        <source srcset="/static/img/avatar-1152.webp" type="image/webp">
+        <img src="/static/img/avatar.png" alt="派活数字人制作与出镜功能预览" width="1152" height="768" loading="lazy" decoding="async">
+      </picture>
+    </div>
+    <div class="rv">
+      <span class="tag" style="font-size:12.5px;font-weight:800;letter-spacing:3px;color:#b7820f">数字人</span>
+      <h2 style="margin-top:10px">一张照片 + 一段稿子<br>= 会动会说的数字人</h2>
+      <p>声音还能克隆成您本人的。不用出镜、不用布光，3-8 分钟出片，门店上新、活动预告、老板说两句，天天都能发。</p>
     </div>
   </div>
 
-  <h2 class="sec" id="plans">💎 套餐与定价</h2>
-  <p class="sub">按点数计费,1 点 = ¥1 · <span id="point-examples">内容整单 18 点 / 专家任务 1 点 / 数字人视频 12 点</span> · 季付 9 折,年付 8 折</p>
-  <p class="sub" id="pay-notice" style="margin-top:8px">这里提交的是购买意向,不是在线支付；平台联系并确认线下到账后,才会开通套餐和积分。</p>
-  <div class="plans">
-    <div class="plan" data-plan="trial"><h3>体验版</h3><div class="old"></div>
-      <div class="price">—<small>/月</small></div><div class="pts"></div>
-      <p class="desc">先试试水:每月约 5 单内容 + 3 条数字人视频</p>
-      <label class="sr-only" for="period-trial">体验版购买周期</label><select id="period-trial" class="plan-period" aria-label="体验版购买周期" disabled><option value="month">月付</option></select>
-      <div class="quote" aria-live="polite"></div><div class="price-note"></div><button class="plan-action" type="button" onclick="startPurchase('trial')">登录并购买</button></div>
-    <div class="plan hot" data-plan="startup"><div class="hotbadge">🔥 最多人选</div><h3>创业版</h3><div class="old"></div>
-      <div class="price">—<small>/月</small></div><div class="pts"></div>
-      <p class="desc">一人公司日更标配:每月约 15 单内容 + 10 条数字人 + 专家任务按需派发</p>
-      <label class="sr-only" for="period-startup">创业版购买周期</label><select id="period-startup" class="plan-period" aria-label="创业版购买周期" disabled><option value="month">月付</option></select>
-      <div class="quote" aria-live="polite"></div><div class="price-note"></div><button class="plan-action" type="button" onclick="startPurchase('startup')">登录并购买</button></div>
-    <div class="plan" data-plan="biz"><h3>企业版</h3><div class="old"></div>
-      <div class="price">—<small>/月</small></div><div class="pts"></div>
-      <p class="desc">小团队矩阵运营:多账号分权,内容矩阵 + 数字人矩阵</p>
-      <label class="sr-only" for="period-biz">企业版购买周期</label><select id="period-biz" class="plan-period" aria-label="企业版购买周期" disabled><option value="month">月付</option></select>
-      <div class="quote" aria-live="polite"></div><div class="price-note"></div><button class="plan-action" type="button" onclick="startPurchase('biz')">登录并购买</button></div>
-    <div class="plan" data-plan="flagship"><h3>旗舰版</h3><div class="old"></div>
-      <div class="price">—<small>/月</small></div><div class="pts"></div>
-      <p class="desc">MCN / 连锁多门店:全板块放开跑,专属服务</p>
-      <label class="sr-only" for="period-flagship">旗舰版购买周期</label><select id="period-flagship" class="plan-period" aria-label="旗舰版购买周期" disabled><option value="month">月付</option></select>
-      <div class="quote" aria-live="polite"></div><div class="price-note"></div><button class="plan-action" type="button" onclick="startPurchase('flagship')">登录并购买</button></div>
-  </div>
-</div>
+  <section id="flow">
+    <div class="sec-head rv">
+      <span class="tag">怎么干活</span>
+      <h2>🚀 老板只需要三步</h2>
+      <p>剩下的交给数字员工们接力</p>
+    </div>
+    <div class="flow">
+      <div class="fstep rv"><div class="n" data-i="1">🏭</div><b>选板块</b><span>内容生产 / 产业专家 / 数字人</span></div>
+      <div class="fstep rv"><div class="n" data-i="2">🗣</div><b>说需求</b><span>一句话+选行业</span></div>
+      <div class="fstep rv"><div class="n" data-i="3">🤖</div><b>员工接力</b><span>检索·撰写·设计·质检</span></div>
+      <div class="fstep rv"><div class="n" data-i="4">👍</div><b>您拍板</b><span>或完全托管不打扰</span></div>
+      <div class="fstep rv"><div class="n" data-i="5">📦</div><b>拿交付</b><span>发布包/报告/视频</span></div>
+    </div>
+  </section>
 
-<footer>派活 PaiHuo · 老板会派活，数字员工去干活<br>
-开通与咨询请联系您的渠道顾问 · <a href="/login">已有账号?登录 →</a></footer>
+  <div class="try rv" id="try">
+    <div>
+      <span class="eyebrow">免费体验</span>
+      <h2 style="margin-top:16px">🎁 免费进来参观</h2>
+      <p>留个联系方式，直接进办公室逛：11 个行业的数字员工怎么分工、怎么干活，一目了然。</p>
+    </div>
+    <div class="try-form" id="try-form">
+      <div class="trial-fields">
+        <label class="sr-only" for="g-phone">手机号</label>
+        <input id="g-phone" placeholder="手机号 *" inputmode="tel" autocomplete="tel" maxlength="11" required>
+        <label class="sr-only" for="g-name">怎么称呼您</label>
+        <input id="g-name" placeholder="怎么称呼您" autocomplete="name" maxlength="30">
+        <label class="sr-only" for="g-co">您的企业或行业</label>
+        <input id="g-co" placeholder="您的企业/行业" autocomplete="organization" maxlength="60">
+      </div>
+      <button class="btn pri" type="button" onclick="guestTry(this)">🎁 进入办公室参观</button>
+      <div id="g-err" role="status" aria-live="polite"></div>
+    </div>
+  </div>
+
+  <section id="plans">
+    <div class="sec-head rv">
+      <span class="tag">套餐与定价</span>
+      <h2>💎 套餐与定价</h2>
+      <p>按点数计费,1 点 = ¥1 · <span id="point-examples">内容整单 18 点 / 专家任务 1 点 / 数字人视频 12 点</span> · 季付 9 折,年付 8 折</p>
+    </div>
+    <div class="plans">
+      <div class="plan rv" data-plan="trial"><h3>体验版</h3><div class="old"></div>
+        <div class="price">—<small>/月</small></div><div class="pts"></div>
+        <p class="desc">先试试水:每月约 5 单内容 + 3 条数字人视频</p>
+        <label class="sr-only" for="period-trial">体验版购买周期</label><select id="period-trial" class="plan-period" aria-label="体验版购买周期" disabled><option value="month">月付</option></select>
+        <div class="quote" aria-live="polite"></div><div class="price-note"></div><button class="plan-action" type="button" onclick="startPurchase('trial')">登录并购买</button></div>
+      <div class="plan hot rv" data-plan="startup"><div class="hotbadge">🔥 最多人选</div><h3>创业版</h3><div class="old"></div>
+        <div class="price">—<small>/月</small></div><div class="pts"></div>
+        <p class="desc">一人公司日更标配:每月约 15 单内容 + 10 条数字人 + 专家任务按需派发</p>
+        <label class="sr-only" for="period-startup">创业版购买周期</label><select id="period-startup" class="plan-period" aria-label="创业版购买周期" disabled><option value="month">月付</option></select>
+        <div class="quote" aria-live="polite"></div><div class="price-note"></div><button class="plan-action" type="button" onclick="startPurchase('startup')">登录并购买</button></div>
+      <div class="plan rv" data-plan="biz"><h3>企业版</h3><div class="old"></div>
+        <div class="price">—<small>/月</small></div><div class="pts"></div>
+        <p class="desc">小团队矩阵运营:多账号分权,内容矩阵 + 数字人矩阵</p>
+        <label class="sr-only" for="period-biz">企业版购买周期</label><select id="period-biz" class="plan-period" aria-label="企业版购买周期" disabled><option value="month">月付</option></select>
+        <div class="quote" aria-live="polite"></div><div class="price-note"></div><button class="plan-action" type="button" onclick="startPurchase('biz')">登录并购买</button></div>
+      <div class="plan rv" data-plan="flagship"><h3>旗舰版</h3><div class="old"></div>
+        <div class="price">—<small>/月</small></div><div class="pts"></div>
+        <p class="desc">MCN / 连锁多门店:全板块放开跑,专属服务</p>
+        <label class="sr-only" for="period-flagship">旗舰版购买周期</label><select id="period-flagship" class="plan-period" aria-label="旗舰版购买周期" disabled><option value="month">月付</option></select>
+        <div class="quote" aria-live="polite"></div><div class="price-note"></div><button class="plan-action" type="button" onclick="startPurchase('flagship')">登录并购买</button></div>
+    </div>
+    <p class="price-note-all" id="pay-notice">这里提交的是购买意向,不是在线支付；平台联系并确认线下到账后,才会开通套餐和积分。</p>
+  </section>
+</main>
+
+<footer><div class="in">
+  <div><b>派活 PaiHuo</b><br>老板会派活，数字员工去干活</div>
+  <div>开通与咨询请联系您的渠道顾问 · <a href="/login">已有账号？登录 →</a></div>
+</div></footer>
 
 <script type="application/json" id="plan-reference">{"periods":[{"discount":1.0,"key":"month","label":"月付","months":1},{"discount":0.9,"key":"quarter","label":"季付(9折)","months":3},{"discount":0.8,"key":"year","label":"年付(8折)","months":12}],"plans":[{"desc":"适合先试试水:每月约 5 单内容 + 3 条数字人","key":"trial","name":"体验版","points":150,"price":99,"sale":69},{"desc":"一人公司日更:含 500 点，专家任务按 1 点/次计费","key":"startup","name":"创业版","points":500,"price":299,"sale":199},{"desc":"小团队多账号:内容矩阵 + 数字人矩阵","key":"biz","name":"企业版","points":1800,"price":899,"sale":599},{"desc":"MCN/多门店连锁:全板块放开跑","key":"flagship","name":"旗舰版","points":7000,"price":2999,"sale":1999}],"point_examples":[{"action":"content_job","label":"写一整篇带配图的营销内容","points":18},{"action":"expert_task","label":"请行业专家办一件事或答一个问题","points":1},{"action":"avatar_video","label":"做一条 30 秒数字人口播视频","points":12},{"action":"link_extract","label":"把一条爆款视频拆成口播稿","points":1}],"quotes":[{"months":1,"period":"month","period_label":"月付","plan":"trial","plan_name":"体验版","points":150,"price":69},{"months":3,"period":"quarter","period_label":"季付(9折)","plan":"trial","plan_name":"体验版","points":450,"price":186},{"months":12,"period":"year","period_label":"年付(8折)","plan":"trial","plan_name":"体验版","points":1800,"price":662},{"months":1,"period":"month","period_label":"月付","plan":"startup","plan_name":"创业版","points":500,"price":199},{"months":3,"period":"quarter","period_label":"季付(9折)","plan":"startup","plan_name":"创业版","points":1500,"price":537},{"months":12,"period":"year","period_label":"年付(8折)","plan":"startup","plan_name":"创业版","points":6000,"price":1910},{"months":1,"period":"month","period_label":"月付","plan":"biz","plan_name":"企业版","points":1800,"price":599},{"months":3,"period":"quarter","period_label":"季付(9折)","plan":"biz","plan_name":"企业版","points":5400,"price":1617},{"months":12,"period":"year","period_label":"年付(8折)","plan":"biz","plan_name":"企业版","points":21600,"price":5750},{"months":1,"period":"month","period_label":"月付","plan":"flagship","plan_name":"旗舰版","points":7000,"price":1999},{"months":3,"period":"quarter","period_label":"季付(9折)","plan":"flagship","plan_name":"旗舰版","points":21000,"price":5397},{"months":12,"period":"year","period_label":"年付(8折)","plan":"flagship","plan_name":"旗舰版","points":84000,"price":19190}]}</script>
 <script>
-// 悬浮员工天团
-const colors=["#f4a261","#4cc9f0","#e76f51","#ffd166","#cdb4db","#90be6d","#f28cb1","#43aa8b","#577590","#9b5de5"];
-document.getElementById("crew").innerHTML = colors.map(c=>`
-<svg width="64" height="68" viewBox="0 0 120 128"><path d="M28 112 Q22 46 60 41 Q98 46 92 112 Z" fill="${c}" stroke="#33291f" stroke-width="3.5"/>
-<circle cx="47" cy="64" r="4" fill="#33291f"/><circle cx="73" cy="64" r="4" fill="#33291f"/>
-<path d="M52 76 q8 8 16 0" stroke="#33291f" stroke-width="3" fill="none" stroke-linecap="round"/>
-<path d="M40 88 Q40 112 40 112 L80 112 Q80 88 80 88 Q70 96 60 96 Q50 96 40 88 Z" fill="#fffaf0" stroke="#33291f" stroke-width="2.6"/></svg>`).join("");
 function publicFunnel(event,dimension){
   fetch("/api/funnel/events",{method:"POST",keepalive:true,
     headers:{"Content-Type":"application/json"},
@@ -397,9 +591,45 @@ async function guestTry(btn){
     location.href = '/';
   }catch(e){ err.textContent = e.message; btn.disabled=false; btn.textContent='🎁 进入办公室参观'; }
 }
+document.getElementById('g-phone').addEventListener('keydown',e=>{ if(e.key==='Enter') guestTry(document.querySelector('.try-form .btn')); });
+// 导航滚动变实底
+const nav=document.getElementById("nav");
+const syncNav=()=>nav.classList.toggle("solid",window.scrollY>40);
+window.addEventListener("scroll",syncNav,{passive:true}); syncNav();
 // 进场动画
-const io = new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add("show");e.target.style.opacity=1;e.target.style.transform="none";io.unobserve(e.target);}}),{threshold:.12});
-document.querySelectorAll(".feat,.fstep,.plan,.heroimg").forEach((el,i)=>{el.style.transitionDelay=(i%6)*80+"ms";io.observe(el);});
+const io = new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add("show");io.unobserve(e.target);}}),{threshold:.12,rootMargin:"0px 0px -40px 0px"});
+document.querySelectorAll(".rv").forEach((el,i)=>{el.style.transitionDelay=(i%4)*70+"ms";io.observe(el);});
+</script>
+<script type="module">
+// 首屏 3D：动态加载，失败时保留 CSS 背景，页面其余功能不受影响
+const INDUSTRIES = [
+  {icon:"🍜",name:"餐饮",color:"#ff8a5b",n:60,task:"“外卖满减怎么设才不亏？”→ 已派给菜单工程专家"},
+  {icon:"🧋",name:"茶饮咖啡",color:"#f5b82e",n:36,task:"“夏季上新排期怎么定？”→ 已派给新品研发专家"},
+  {icon:"🏪",name:"便利零售",color:"#5ee6d0",n:36,task:"“鲜食损耗太高怎么办？”→ 已派给鲜食运营专家"},
+  {icon:"🍿",name:"零食量贩",color:"#ffd166",n:36,task:"“新店开业备货怎么算？”→ 已派给开店测算专家"},
+  {icon:"🛒",name:"商超生鲜",color:"#90be6d",n:36,task:"“档口坪效怎么提升？”→ 已派给档口经营专家"},
+  {icon:"💊",name:"医药健康",color:"#4cc9f0",n:36,task:"“慢病会员复购怎么做？”→ 已派给会员健康专家"},
+  {icon:"🏨",name:"酒店住宿",color:"#9b8cff",n:36,task:"“淡季房价怎么调？”→ 已派给收益管理专家"},
+  {icon:"🚗",name:"汽车后市场",color:"#6fa8ff",n:36,task:"“保养客怎么变会员？”→ 已派给会员卡项专家"},
+  {icon:"🧘",name:"健身瑜伽",color:"#43d6a0",n:36,task:"“续卡率怎么提上来？”→ 已派给续卡增长专家"},
+  {icon:"💇",name:"美容美业",color:"#f28cb1",n:36,task:"“拓客卡项怎么设计？”→ 已派给卡项设计专家"},
+  {icon:"🐾",name:"宠物",color:"#ffb36b",n:36,task:"“洗美预约总排不开？”→ 已派给洗美产能专家"},
+];
+const hero = document.querySelector(".hero");
+const canvas = document.getElementById("hero3d");
+const title = document.getElementById("oc-title"), task = document.getElementById("oc-task");
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+function webglOK(){ try{ const c=document.createElement("canvas"); return !!(window.WebGLRenderingContext && (c.getContext("webgl2")||c.getContext("webgl"))); }catch(_){ return false; } }
+if (webglOK() && !(navigator.connection && navigator.connection.saveData)) {
+  import("/static/promo-3d.js?v=20260930").then(({ mountHero }) => {
+    mountHero(canvas, {
+      industries: INDUSTRIES,
+      reducedMotion: reduced,
+      onFocus(i){ const d=INDUSTRIES[i]; title.textContent=`${d.icon} ${d.name} · ${d.n} 位专家`; task.textContent=d.task; },
+    });
+    requestAnimationFrame(()=>hero.classList.add("ready"));
+  }).catch(()=>{ /* 保留 CSS 背景 */ });
+}
 </script>
 </body>
 </html>

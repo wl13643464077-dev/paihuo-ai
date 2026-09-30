@@ -61,6 +61,30 @@ class PromoAssetContractCase(unittest.TestCase):
         self.assertGreater(_asset_size(hero.group(2)), _asset_size(hero.group(1)))
         self.assertGreater(_asset_size(avatar.group(2)), _asset_size(avatar.group(1)))
 
+    def test_promo_3d_hero_is_self_hosted_and_optional(self) -> None:
+        page = PROMO.read_text(encoding="utf-8")
+        scene = (ROOT / "static" / "promo-3d.js").read_text(encoding="utf-8")
+        # 国内访问不依赖外网 CDN：three.js 随站点发布
+        self.assertIn('from "./vendor/three.module.min.js"', scene)
+        self.assertGreater(_asset_size("/static/vendor/three.module.min.js"), 100_000)
+        self.assertTrue((ROOT / "static" / "vendor" / "three.LICENSE.txt").is_file())
+        for cdn in ("cdn.jsdelivr", "unpkg.com", "cdnjs.cloudflare"):
+            self.assertNotIn(cdn, page + scene)
+        # 3D 是渐进增强：WebGL/省流量/加载失败都退回 CSS 背景，减少动效用户只渲染静帧
+        self.assertIn('import("/static/promo-3d.js', page)
+        self.assertIn("webglOK()", page)
+        self.assertIn("saveData", page)
+        self.assertIn("prefers-reduced-motion: reduce", page)
+        self.assertIn('class="fallback"', page)
+
+    def test_promo_entry_is_not_cached_and_api_docs_are_private(self) -> None:
+        main_py = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+        promo_route = main_py[main_py.index('@app.get("/promo")'):]
+        promo_route = promo_route[:promo_route.index("\n\n")]
+        self.assertIn("_HTML_ENTRY_NO_CACHE_HEADERS", promo_route)
+        self.assertIn('os.environ.get("CONTENTCREW_PUBLIC_API_DOCS") == "1"', main_py)
+        self.assertIn('openapi_url="/openapi.json" if _PUBLIC_API_DOCS else None', main_py)
+
 
 if __name__ == "__main__":
     unittest.main()
