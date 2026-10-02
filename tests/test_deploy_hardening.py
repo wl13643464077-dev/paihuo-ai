@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -284,19 +285,203 @@ class DeploymentHardeningContractCase(unittest.TestCase):
         self.assertIn("deploy/BACKUP_RECOVERY.md", guide)
         self.assertIn("不能作为生产操作手册", guide)
 
-    def test_recovery_guide_uses_root_owned_fixed_backup_contract(self):
+    def test_recovery_guide_uses_simple_units_and_paired_restore_contract(self):
         guide = (ROOT / "deploy" / "BACKUP_RECOVERY.md").read_text()
         for contract in (
             "/var/backups/paihuo",
-            "/var/lib/paihuo-upgrade/latest-periodic-backup.json",
-            "PYTHONPATH=/usr/local/lib/paihuo-ops",
+            "PYTHONPATH=/srv/paihuo/current",
             "/usr/bin/python3 -m deploy.verify_backup",
-            "systemctl stop paihuo-backup.timer",
+            "systemctl stop paihuo-backup-simple.timer",
+            "systemctl stop paihuo-backup-simple.service",
             "systemctl stop caddy.service",
+            "systemctl stop paihuo.service",
+            "systemctl start paihuo.service",
+            "MainPID --value",
+            "flock -n 9",
+            "--check-backup \"$key_backup\"",
+            "--backup-to \"$saved_env\"",
+            "--check-backup \"$saved_env\"",
+            "backup_path",
+            "restore_drill",
+            "ExecMainStatus=75",
         ):
             self.assertIn(contract, guide)
         self.assertNotIn("/var/lib/paihuo/data/backups", guide)
         self.assertNotIn("sudo -u paihuo", guide)
+        self.assertNotIn("PYTHONPATH=/usr/local/lib/paihuo-ops", guide)
+        self.assertNotIn("systemctl stop contentcrew.service", guide)
+        self.assertNotIn("systemctl start contentcrew.service", guide)
+        self.assertNotIn("systemctl start paihuo-backup-health", guide)
+        self.assertNotIn("/var/lib/paihuo-upgrade/manual-restore", guide)
+
+        restore = guide.split("## 生产恢复", 1)[1].split("## 恢复失败时撤回", 1)[0]
+        for stop in (
+            "systemctl stop paihuo-backup-simple.timer",
+            "systemctl stop paihuo-backup-simple.service",
+            "systemctl stop caddy.service",
+            "systemctl stop paihuo.service",
+        ):
+            self.assertLess(restore.index(stop), restore.index('ln /var/lib/paihuo/data/contentcrew.db'))
+        self.assertLess(restore.index('--backup-to "$saved_env"'), restore.index('mv -T -- "$prepared"'))
+        withdraw = guide.split("## 恢复失败时撤回", 1)[1]
+        self.assertIn('install -o root -g root -m 0600 "$saved_env" "$restore_env"', withdraw)
+        self.assertLess(withdraw.index('mv -T -- "$restore_env"'), withdraw.index('restore_quarantined_db "$quarantine/contentcrew.db"'))
+
+    def test_simple_guide_does_not_claim_legacy_chain_is_still_available(self):
+        guide = (ROOT / "deploy" / "simple" / "README.md").read_text()
+        self.assertIn("当前唯一维护的生产部署通道", guide)
+        self.assertIn("旧的不可变发布链已退役", guide)
+        self.assertIn("不会自动恢复", guide)
+        self.assertNotIn("旧体系的文件一个没删", guide)
+        self.assertNotIn("体系并存", guide)
+
+    def test_documented_restore_quiescence_check_fails_closed(self):
+        guide = (ROOT / "deploy" / "BACKUP_RECOVERY.md").read_text()
+        helpers = re.findall(
+            r"assert_restore_quiescent\(\) \{\n.*?\n\}", guide, re.DOTALL
+        )
+        self.assertEqual(2, len(helpers))
+        self.assertEqual(helpers[0], helpers[1], "restore and withdrawal must use the same gate")
+        helper = helpers[0]
+        self.assertIn("lsof -nP --", helper)
+        self.assertNotIn("lsof -t", helper)
+        fake_tools = r'''
+ss() {
+  case "$FAKE_SS" in
+    clear) return 0 ;;
+    occupied) printf '%s\n' 'LISTEN fake-app'; return 0 ;;
+    error) printf '%s\n' 'fake ss failure' >&2; return 2 ;;
+  esac
+}
+lsof() {
+  test "$1" = -nP && test "$2" = -- || return 2
+  shift 2
+  for file in "$@"; do
+    test -f "$file" && test ! -L "$file" || return 2
+  done
+  case "$FAKE_LSOF" in
+    clear) return 1 ;;
+    occupied) printf '%s\n' 'fake-app 123'; return 0 ;;
+    error) printf '%s\n' 'fake lsof failure' >&2; return 2 ;;
+    warning) printf '%s\n' 'fake lsof warning' >&2; return 1 ;;
+    silent_error) return 2 ;;
+  esac
+}
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "fixture.db"
+            database.write_bytes(b"fixture: no real database or service operation")
+            wal = Path(str(database) + "-wal")
+            wal.write_bytes(b"fixture sidecar")
+
+            def check(ss_mode="clear", lsof_mode="clear", path=database):
+                return subprocess.run(
+                    ["bash", "-c", "set -euo pipefail\n" + fake_tools + helper
+                     + '\nassert_restore_quiescent "$1"', "fixture", str(path)],
+                    env={**os.environ, "FAKE_SS": ss_mode, "FAKE_LSOF": lsof_mode},
+                    capture_output=True, text=True, timeout=10,
+                )
+
+            self.assertEqual(0, check().returncode)
+            for ss_mode, lsof_mode in (
+                ("occupied", "clear"), ("error", "clear"),
+                ("clear", "occupied"), ("clear", "error"),
+                ("clear", "warning"), ("clear", "silent_error"),
+            ):
+                with self.subTest(ss=ss_mode, lsof=lsof_mode):
+                    self.assertNotEqual(0, check(ss_mode, lsof_mode).returncode)
+            symlink = Path(tmp) / "linked.db"
+            symlink.symlink_to(database)
+            self.assertNotEqual(0, check(path=symlink).returncode)
+            self.assertNotEqual(0, check(path=Path(tmp) / "missing.db").returncode)
+            wal.unlink()
+            wal.symlink_to(database)
+            self.assertNotEqual(0, check().returncode)
+            wal.unlink()
+            wal.mkdir()
+            self.assertNotEqual(0, check().returncode)
+            self.assertEqual(b"fixture: no real database or service operation", database.read_bytes())
+
+    def test_documented_withdrawal_handles_pre_and_post_database_swap(self):
+        guide = (ROOT / "deploy" / "BACKUP_RECOVERY.md").read_text()
+        helper = re.search(
+            r"restore_quarantined_db\(\) \{\n.*?\n\}", guide, re.DOTALL
+        ).group(0)
+        self.assertIn('test "$saved" -ef "$live"', helper)
+        # macOS mv has no -T. A fixture-only adapter preserves exact argument
+        # checking and delegates only the two explicit temporary test paths.
+        adapter = r'''
+mv() {
+  if test "$1" = -T; then
+    test "$2" = -- || return 2
+    command mv -- "$3" "$4"
+  else
+    test "$1" = -- || return 2
+    command mv -- "$2" "$3"
+  fi
+}
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            for state in ("before-sidecars", "midway-sidecars", "post-swap"):
+                pre_swap = state != "post-swap"
+                with self.subTest(state=state):
+                    base = Path(tmp) / state
+                    base.mkdir()
+                    quarantine = base / "quarantine"
+                    quarantine.mkdir()
+                    live = base / "contentcrew.db"
+                    saved = quarantine / "contentcrew.db"
+                    saved.write_bytes(b"original database")
+                    if pre_swap:
+                        os.link(saved, live)
+                    else:
+                        live.write_bytes(b"rejected replacement")
+                    saved_wal = Path(str(saved) + "-wal")
+                    if state == "before-sidecars":
+                        Path(str(live) + "-wal").write_bytes(b"original WAL")
+                    else:
+                        saved_wal.write_bytes(b"original WAL")
+                    # A pre-swap failure may leave a sidecar at its original
+                    # path if that individual move had not yet completed.
+                    untouched_shm = Path(str(live) + "-shm")
+                    if pre_swap:
+                        untouched_shm.write_bytes(b"unmoved original SHM")
+                    result = subprocess.run(
+                        ["bash", "-c", "set -euo pipefail\n" + adapter + helper
+                         + '\nrestore_quarantined_db "$1" "$2"',
+                         "fixture", str(saved), str(live)],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertEqual(b"original database", live.read_bytes())
+                    self.assertEqual(b"original WAL", Path(str(live) + "-wal").read_bytes())
+                    self.assertFalse(saved_wal.exists())
+                    if pre_swap:
+                        self.assertTrue(saved.exists())
+                        self.assertEqual(saved.stat().st_ino, live.stat().st_ino)
+                        self.assertEqual(b"unmoved original SHM", untouched_shm.read_bytes())
+                    else:
+                        self.assertFalse(saved.exists())
+
+            base = Path(tmp) / "sidecar-collision"
+            base.mkdir()
+            live = base / "contentcrew.db"
+            saved = base / "quarantined.db"
+            saved.write_bytes(b"original database")
+            os.link(saved, live)
+            saved_wal = Path(str(saved) + "-wal")
+            live_wal = Path(str(live) + "-wal")
+            saved_wal.write_bytes(b"original captured WAL")
+            live_wal.write_bytes(b"ambiguous live WAL")
+            result = subprocess.run(
+                ["bash", "-c", "set -euo pipefail\n" + adapter + helper
+                 + '\nrestore_quarantined_db "$1" "$2"',
+                 "fixture", str(saved), str(live)],
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertEqual(b"original captured WAL", saved_wal.read_bytes())
+            self.assertEqual(b"ambiguous live WAL", live_wal.read_bytes())
 
     def test_backup_health_rejects_missing_stale_and_low_space(self):
         with tempfile.TemporaryDirectory() as tmp:
