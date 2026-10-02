@@ -328,7 +328,7 @@ class BackupCliExtraStepsTests(unittest.TestCase):
 
     def test_unit_treats_75_as_success_and_declares_sources(self) -> None:
         unit = (Path(__file__).resolve().parents[1] / "deploy"
-                / "paihuo-backup.service").read_text()
+                / "simple" / "paihuo-backup-simple.service").read_text()
         self.assertIn(f"SuccessExitStatus={backup_db.OFFSITE_EXIT_CODE}", unit)
         self.assertIn("--asset-source assets=/var/lib/paihuo/data/assets", unit)
         self.assertIn("--asset-source pub=/srv/paihuo-pub", unit)

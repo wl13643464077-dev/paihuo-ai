@@ -4,15 +4,13 @@ import json
 import re
 import shutil
 import sqlite3
-import subprocess
 import tempfile
 import unittest
-from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 from deploy import (
-    backup_health, build_release, failure_alert, preflight, start_guard,
+    backup_health, build_release, failure_alert, preflight,
     verify_release,
 )
 
@@ -228,21 +226,15 @@ class DeploymentHardeningContractCase(unittest.TestCase):
             self.assertIn(contract, caddy)
 
     def test_systemd_runs_as_dedicated_user_with_sandbox_and_limits(self):
-        unit = (ROOT / "deploy" / "contentcrew.service").read_text()
+        unit = (ROOT / "deploy" / "simple" / "paihuo.service").read_text()
         for contract in (
             "User=paihuo",
             "CONTENTCREW_PYTHON=/srv/paihuo/current/venv/bin/python",
             "CONTENTCREW_DB_PATH=/var/lib/paihuo/data/contentcrew.db",
-            "CONTENTCREW_YTDLP_PATH=/srv/paihuo/current/venv/bin/yt-dlp",
-            "CONTENTCREW_FFMPEG_PATH=/usr/bin/ffmpeg",
-            "CONTENTCREW_CLAUDE_PATH=/srv/paihuo/bin/claude",
             "CONTENTCREW_PUBLIC_DIR=/srv/paihuo-pub",
             "EnvironmentFile=/etc/paihuo/paihuo.env",
             "CONTENTCREW_REQUIRE_SESSION_SECRET=1",
-            "PLAYWRIGHT_BROWSERS_PATH=/var/lib/paihuo/ms-playwright",
-            "ExecStartPre=/srv/paihuo/current/venv/bin/python -m deploy.preflight",
-            "ExecStartPre=+/usr/bin/env PYTHONPATH=/usr/local/lib/paihuo-ops "
-            "/usr/bin/python3 -m deploy.session_secret_env --check",
+            "CONTENTCREW_REQUIRE_CONFIG_KEY=1",
             "NoNewPrivileges=yes",
             "ProtectSystem=strict",
             "ProtectHome=yes",
@@ -250,111 +242,33 @@ class DeploymentHardeningContractCase(unittest.TestCase):
             "CapabilityBoundingSet=",
             "MemoryMax=3G",
             "TasksMax=512",
-            "StartLimitBurst=12",
+            "StartLimitBurst=10",
             "OnFailure=paihuo-failure-alert@%n.service",
         ):
             self.assertIn(contract, unit)
         self.assertNotIn("User=root", unit)
         self.assertIn("/srv/paihuo-pub", (ROOT / "deploy" / "Caddyfile").read_text())
-        caddy_drop_in = (
-            ROOT / "deploy" / "caddy-paihuo-guard.conf"
-        ).read_text()
-        self.assertIn("SupplementaryGroups=paihuo-public", caddy_drop_in)
-        self.assertFalse((ROOT / "deploy" / "contentcrew-public.service").exists())
-        self.assertFalse((ROOT / "deploy" / "contentcrew-tunnel.service").exists())
 
     def test_backup_unit_uses_fixed_root_owned_ops_and_runs_hourly(self):
-        unit = (ROOT / "deploy" / "paihuo-backup.service").read_text()
-        timer = (ROOT / "deploy" / "paihuo-backup.timer").read_text()
+        unit = (ROOT / "deploy" / "simple" / "paihuo-backup-simple.service").read_text()
+        timer = (ROOT / "deploy" / "simple" / "paihuo-backup-simple.timer").read_text()
         for contract in (
             "User=root",
             "Group=root",
-            "WorkingDirectory=/usr/local/lib/paihuo-ops",
+            "WorkingDirectory=/srv/paihuo/current",
             "/usr/bin/python3",
             "--database /var/lib/paihuo/data/contentcrew.db",
             "--backup-dir /var/backups/paihuo",
             "OnFailure=paihuo-failure-alert@%n.service",
-            "-m deploy.backup_health",
-            "--success-attestation",
-            "/var/lib/paihuo-upgrade/latest-periodic-backup.json",
-            "RequiresMountsFor=/var/backups/paihuo /var/lib/paihuo-upgrade",
-            "start_guard.py --mode backup",
+            "-m deploy.backup_db",
+            "--asset-source assets=/var/lib/paihuo/data/assets",
+            "--asset-source pub=/srv/paihuo-pub",
+            "SuccessExitStatus=75",
         ):
             self.assertIn(contract, unit)
-        self.assertNotIn("/root/contentcrew", unit)
-        self.assertNotIn("/srv/paihuo/current/venv/bin/python", unit)
+        self.assertNotIn("start_guard.py", unit)
+        self.assertNotIn("/var/lib/paihuo-upgrade", unit)
         self.assertIn("OnCalendar=hourly", timer)
-
-    def test_boot_guards_block_uncommitted_app_proxy_and_backup(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            control = root / "control"
-            control.mkdir(mode=0o700)
-            permit = root / "permit.json"
-            receipt_path = control / "upgrade-fixture.json"
-            receipt = {"status": "in_progress", "phase": "candidate_selected"}
-            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
-            receipt_path.chmod(0o600)
-
-            for mode in ("application", "proxy", "backup"):
-                with self.assertRaises(start_guard.GuardError):
-                    start_guard.check_start(
-                        control_dir=control,
-                        permit=permit,
-                        mode=mode,
-                    )
-
-            permit.write_text(
-                json.dumps({
-                    "receipt_path": str(receipt_path),
-                    "issued_at_utc": datetime.now(
-                        tz=timezone.utc
-                    ).isoformat(),
-                }),
-                encoding="utf-8",
-            )
-            permit.chmod(0o600)
-            self.assertTrue(start_guard.check_start(
-                control_dir=control,
-                permit=permit,
-                mode="application",
-            )["ok"])
-            with self.assertRaises(start_guard.GuardError):
-                start_guard.check_start(
-                    control_dir=control,
-                    permit=permit,
-                    mode="proxy",
-                )
-
-            receipt["status"] = "cutover_committed"
-            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
-            receipt_path.chmod(0o600)
-            self.assertTrue(start_guard.check_start(
-                control_dir=control,
-                permit=permit,
-                mode="proxy",
-            )["ok"])
-            self.assertTrue(start_guard.check_start(
-                control_dir=control,
-                permit=root / "missing-permit",
-                mode="backup",
-            )["ok"])
-
-    def test_systemd_guards_run_before_candidate_preflight(self):
-        app_unit = (ROOT / "deploy" / "contentcrew.service").read_text()
-        guard = "start_guard.py --mode application"
-        preflight_call = (
-            "/srv/paihuo/current/venv/bin/python -m deploy.preflight"
-        )
-        self.assertIn(guard, app_unit)
-        secret_check = "-m deploy.session_secret_env --check"
-        self.assertIn(secret_check, app_unit)
-        self.assertLess(app_unit.index(guard), app_unit.index(secret_check))
-        self.assertLess(app_unit.index(guard), app_unit.index(preflight_call))
-        proxy_dropin = (
-            ROOT / "deploy" / "caddy-paihuo-guard.conf"
-        ).read_text()
-        self.assertIn("start_guard.py --mode proxy", proxy_dropin)
 
     def test_backup_cli_defaults_to_root_owned_backup_directory(self):
         source = (ROOT / "deploy" / "backup_db.py").read_text()
@@ -363,288 +277,12 @@ class DeploymentHardeningContractCase(unittest.TestCase):
         self.assertIn("/var/backups/paihuo", source)
         self.assertIn("--success-attestation", source)
 
-    def test_upgrade_entry_enforces_checkpoint_smoke_and_rollback(self):
-        source = (ROOT / "deploy" / "upgrade_release.py").read_text()
-        wrapper = ROOT / "deploy" / "upgrade.sh"
+    def test_legacy_deployment_guide_points_to_simple_channel(self):
         guide = (ROOT / "deploy" / "DEPLOYMENT.md").read_text()
-        for contract in (
-            "create_upgrade_checkpoint",
-            "run_restore_drill=True",
-            "final-stopped",
-            'control_dir or "/var/lib/paihuo-upgrade"',
-            "_atomic_symlink",
-            "_restore_live_database",
-            "_authenticated_smoke",
-            "candidate_may_have_run",
-            "CONTENTCREW_QUIESCENT=1",
-            "rollback_failed",
-        ):
-            self.assertIn(contract, source)
-        self.assertTrue(os.access(wrapper, os.X_OK))
-        wrapper_source = wrapper.read_text()
-        self.assertIn("-m deploy.session_secret_env", wrapper_source)
-        self.assertIn("/etc/paihuo/paihuo.env", wrapper_source)
-        self.assertIn("--backup-to", wrapper_source)
-        self.assertIn("--check-backup", wrapper_source)
-        self.assertIn(
-            "$CONTROL_DIR/credentials/paihuo-env-$RELEASE_ID.backup",
-            wrapper_source,
-        )
-        self.assertLess(
-            wrapper_source.index("--check-backup"),
-            wrapper_source.index("-m deploy.upgrade_release"),
-        )
-        self.assertIn("常规升级唯一入口", guide)
-        self.assertIn("--adopt-venv", guide)
-        self.assertIn("--require-hashes", guide)
-        self.assertIn("--no-index", guide)
-        self.assertIn("--no-deps", guide)
-        self.assertNotIn("chown -R", guide)
-        self.assertNotIn("chmod -R", guide)
-        self.assertNotIn("cp -aL", guide)
-        self.assertIn("/var/lib/paihuo-upgrade", guide)
-
-    def test_upgrade_wrapper_orders_locked_control_and_fixed_secret_gates(self):
-        # The production wrapper deliberately uses Linux root-only absolute
-        # tools (install/stat/flock and the system Python).  Do not execute it
-        # on the macOS test host; the transactional behavior is exercised via
-        # test_control_plane with injected systemd/Caddy runners.
-        source = (ROOT / "deploy" / "upgrade.sh").read_text(encoding="utf-8")
-        bootstrap_tool = source.index(
-            '/usr/bin/python3 -I "$BOOTSTRAP_TOOL"'
-        )
-        lock = source.index("/usr/bin/flock -n 9")
-        bootstrap_check = source.index(
-            '"${TRUSTED_PYTHON[@]}" -m deploy.control_plane bootstrap-check'
-        )
-        gate = source.index(
-            '"${TRUSTED_PYTHON[@]}" -m deploy.control_plane gate'
-        )
-        begin = source.index(
-            '"${TRUSTED_PYTHON[@]}" -m deploy.control_plane begin'
-        )
-        armed = source.index("CONTROL_PREPARED=1")
-        prepare = source.index(
-            '"${TRUSTED_PYTHON[@]}" -m deploy.control_plane prepare'
-        )
-        release_evidence = source.index(
-            '"${TRUSTED_PYTHON[@]}" -m deploy.control_plane release-evidence'
-        )
-        ensure = source.index(
-            '"${TRUSTED_PYTHON[@]}" -m deploy.session_secret_env \\\n  --path'
-        )
-        backup = source.index("--backup-to")
-        check = source.index("--check-backup")
-        state_machine = source.index(
-            '"${TRUSTED_PYTHON[@]}" -m deploy.upgrade_release'
-        )
-        self.assertLess(bootstrap_tool, bootstrap_check)
-        self.assertLess(lock, armed)
-        self.assertLess(lock, bootstrap_check)
-        self.assertLess(bootstrap_check, release_evidence)
-        self.assertLess(release_evidence, gate)
-        self.assertLess(gate, begin)
-        self.assertLess(begin, armed)
-        self.assertLess(armed, prepare)
-        self.assertLess(prepare, ensure)
-        self.assertLess(ensure, backup)
-        self.assertLess(backup, check)
-        self.assertLess(check, state_machine)
-        self.assertIn("trap on_exit EXIT", source)
-        self.assertIn("trap on_signal INT TERM HUP", source)
-        self.assertIn('"PYTHONPATH=$TRUSTED_OPS"', source)
-        self.assertIn('FIXED_LAUNCHER="/usr/local/sbin/paihuo-upgrade"', source)
-        self.assertIn(
-            'BOOTSTRAP_TOOL="$CONTROL_DIR/bootstrap/bootstrap_release.py"',
-            source,
-        )
-        self.assertIn('PAIHUO_BOOTSTRAP_LAUNCHED:-', source)
-        self.assertIn('--check-stage', source)
-        self.assertIn('/usr/bin/python3 -I "$BOOTSTRAP_TOOL"', source)
-        self.assertIn('/usr/bin/env -i', source)
-        self.assertIn('"PYTHONDONTWRITEBYTECODE=1"', source)
-        self.assertNotIn('RELEASE_ROOT/venv/bin/python', source)
-        self.assertNotIn('"$PYTHON" -m', source)
-        self.assertIn(
-            "--control-plane-attestation \"$CONTROL_ATTESTATION\"", source
-        )
-        for binding in (
-            '--archive "$RELEASE_ARCHIVE"',
-            '--receipt "$BUILD_RECEIPT"',
-            '--artifact-attestation "$ARTIFACT_ATTESTATION"',
-            '--materialized-attestation "$MATERIALIZED_ATTESTATION"',
-            '--release-archive "$RELEASE_ARCHIVE"',
-            '--release-build-receipt "$BUILD_RECEIPT"',
-            '--release-artifact-attestation "$ARTIFACT_ATTESTATION"',
-            '--materialized-release-attestation "$MATERIALIZED_ATTESTATION"',
-            '--bootstrap-stage-attestation "$BOOTSTRAP_ATTESTATION"',
-        ):
-            self.assertIn(binding, source)
-        self.assertIn(
-            'ARTIFACT_DIR="$CONTROL_DIR/incoming/$RELEASE_ID"', source
-        )
-        self.assertIn("-m deploy.control_plane reconcile", source)
-        self.assertIn("-m deploy.control_plane finish", source)
-        self.assertIn("--control-dir \"$CONTROL_DIR\"", source)
-        self.assertIn('UPGRADE_ARGS=()', source)
-        self.assertNotIn('CONTENTCREW_CONTROL_DIR:-', source)
-
-    def test_wrapper_double_reconcile_failure_never_finishes_marker(self):
-        source = (ROOT / "deploy" / "upgrade.sh").read_text(encoding="utf-8")
-        start = source.index("restore_control_plane() {")
-        end = source.index("\n}\n\non_exit()", start) + 3
-        function = source[start:end]
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            control = base / "control"
-            attestation = (
-                control / "control-plane" / "fixture" / "attestation.json"
-            )
-            attestation.parent.mkdir(parents=True)
-            attestation.write_text("{}\n", encoding="utf-8")
-            marker = control / "wrapper-transaction.json"
-            marker.write_text("{}\n", encoding="utf-8")
-            log = base / "calls.log"
-            fake_python = base / "candidate-python"
-            fake_python.write_text(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_LOG\"\nexit 1\n",
-                encoding="utf-8",
-            )
-            fake_python.chmod(0o755)
-            script = (
-                "set -u\n"
-                + function
-                + "\nWRAPPER_LOCK_HELD=1\n"
-                "WRAPPER_TRANSACTION_STARTED=1\n"
-                "CONTROL_PREPARED=1\n"
-                "UPGRADE_SUCCEEDED=0\n"
-                f"CONTROL_ATTESTATION={attestation!s}\n"
-                f"CONTROL_DIR={control!s}\n"
-                "RELEASE_ID=fixture\n"
-                f"TRUSTED_PYTHON=({fake_python!s})\n"
-                "if restore_control_plane; then exit 0; else exit 7; fi\n"
-            )
-            completed = subprocess.run(
-                ["/bin/bash", "-c", script],
-                cwd="/",
-                env={**os.environ, "FAKE_LOG": str(log)},
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-            )
-            self.assertEqual(7, completed.returncode)
-            self.assertTrue(marker.exists())
-            calls = log.read_text(encoding="utf-8")
-            self.assertIn("deploy.control_plane reconcile", calls)
-            self.assertNotIn("deploy.control_plane finish", calls)
-
-    def test_wrapper_without_lock_ownership_cannot_touch_active_marker(self):
-        source = (ROOT / "deploy" / "upgrade.sh").read_text(encoding="utf-8")
-        start = source.index("restore_control_plane() {")
-        end = source.index("\n}\n\non_exit()", start) + 3
-        function = source[start:end]
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            control = base / "control"
-            control.mkdir()
-            marker = control / "wrapper-transaction.json"
-            marker.write_text('{"status":"active"}\n', encoding="utf-8")
-            fake_python = base / "candidate-python"
-            fake_python.write_text(
-                "#!/bin/sh\nexit 99\n", encoding="utf-8"
-            )
-            fake_python.chmod(0o755)
-            script = (
-                "set -u\n"
-                + function
-                + "\nWRAPPER_LOCK_HELD=0\n"
-                "WRAPPER_TRANSACTION_STARTED=0\n"
-                "CONTROL_PREPARED=0\n"
-                "UPGRADE_SUCCEEDED=0\n"
-                f"CONTROL_ATTESTATION={base / 'missing'}\n"
-                f"CONTROL_DIR={control}\n"
-                "RELEASE_ID=fixture\n"
-                f"TRUSTED_PYTHON=({fake_python})\n"
-                "restore_control_plane\n"
-            )
-            completed = subprocess.run(
-                ["/bin/bash", "-c", script],
-                cwd="/",
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-            )
-            self.assertEqual(0, completed.returncode, completed.stderr)
-            self.assertTrue(marker.exists())
-
-    def test_deployment_installs_every_fixed_guard_and_builds_venv_in_place(self):
-        guide = (ROOT / "deploy" / "DEPLOYMENT.md").read_text()
-        for contract in (
-            "useradd --system",
-            "--user-group",
-            "paihuo-build",
-            "paihuo-smoke",
-            "deploy/smoke_readonly.py",
-            "deploy/start_guard.py",
-            "-m deploy.session_secret_env",
-            "deploy/contentcrew.service",
-            "deploy/caddy-paihuo-guard.conf",
-            "/etc/systemd/system/caddy.service.d/10-paihuo-guard.conf",
-            '/usr/bin/python3 -m venv --copies "$release/venv"',
-            'test -L "$release/venv/lib64"',
-            'readlink "$release/venv/lib64"',
-            '/usr/bin/unlink "$release/venv/lib64"',
-            'test ! -e "$release/venv/lib64"',
-            "不得跟随、复制或泛化删除其他链接",
-            "--require-hashes",
-            "--find-links",
-            "--no-index",
-            "--no-deps",
-            "--adopt-venv",
-            'paihuo-build -g paihuo-build -m 0755 "$release/venv"',
-            "umask 0022",
-            "sudo -u paihuo-build /bin/sh -c",
-            "venv 根必须是 `root:root 0755`",
-            "`paihuo` 服务账号可只读",
-            "/var/cache/paihuo-wheelhouse/$release_id",
-            "/usr/local/sbin/paihuo-upgrade",
-            'test "$build_uid" -ne 0',
-            'test "$build_gid" -ne 0',
-            'test "$build_uid" != "$app_uid"',
-            'test "$build_gid" != "$app_gid"',
-            'test "$(id -G paihuo-build)" = "$build_gid"',
-            "sudo -u paihuo-build test ! -r /var/lib/paihuo/data",
-            "sudo -u paihuo-build test ! -r /etc/paihuo/paihuo.env",
-            "sudo -u paihuo-build test ! -r /var/lib/paihuo-upgrade",
-            "不得自动",
-            "而改由固定 launcher 启动",
-        ):
-            self.assertIn(contract, guide)
-        regular_upgrade = guide.split(
-            "## 8. r6后唯一入口（常规升级唯一入口）",
-            1,
-        )[1].split("## 9.", 1)[0]
-        self.assertIn("--prepare-stage", regular_upgrade)
-        self.assertIn(
-            "/usr/local/sbin/paihuo-upgrade",
-            regular_upgrade,
-        )
-        self.assertNotIn('"$release/venv/bin/yt-dlp" --version', guide)
-        self.assertNotIn('sudo "$release/venv/bin/python"', guide)
-        self.assertNotIn('sudo "$release/venv/bin/pip"', guide)
-        self.assertNotIn('find "$release/venv" -type l -delete', guide)
-        self.assertNotIn(
-            'paihuo-build -g paihuo-build -m 0700 "$release/venv"',
-            guide,
-        )
-        self.assertNotIn(
-            "mktemp -d /var/tmp/paihuo-release", guide
-        )
-        self.assertNotIn('rmdir "$release/data/public"', guide)
-        self.assertIn('test ! -e "$release/data"', guide)
-        self.assertIn('test ! -L "$release/data"', guide)
+        self.assertIn("已停用", guide)
+        self.assertIn("deploy/simple/README.md", guide)
+        self.assertIn("deploy/BACKUP_RECOVERY.md", guide)
+        self.assertIn("不能作为生产操作手册", guide)
 
     def test_recovery_guide_uses_root_owned_fixed_backup_contract(self):
         guide = (ROOT / "deploy" / "BACKUP_RECOVERY.md").read_text()
@@ -659,20 +297,6 @@ class DeploymentHardeningContractCase(unittest.TestCase):
             self.assertIn(contract, guide)
         self.assertNotIn("/var/lib/paihuo/data/backups", guide)
         self.assertNotIn("sudo -u paihuo", guide)
-
-    def test_backup_freshness_monitor_alerts_and_runs_hourly(self):
-        unit = (ROOT / "deploy" / "paihuo-backup-health.service").read_text()
-        timer = (ROOT / "deploy" / "paihuo-backup-health.timer").read_text()
-        for contract in (
-            "OnFailure=paihuo-failure-alert@%n.service",
-            "-m deploy.backup_health",
-            "--max-age-hours 24",
-            "User=root",
-            "--attestation /var/lib/paihuo-upgrade/latest-periodic-backup.json",
-        ):
-            self.assertIn(contract, unit)
-        self.assertIn("OnCalendar=hourly", timer)
-        self.assertIn("Persistent=true", timer)
 
     def test_backup_health_rejects_missing_stale_and_low_space(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1360,7 +984,7 @@ class DeploymentHardeningContractCase(unittest.TestCase):
             clear=False,
         ):
             with self.assertRaises(ValueError):
-                failure_alert.send_failure_alert("contentcrew.service")
+                failure_alert.send_failure_alert("paihuo.service")
 
 
 if __name__ == "__main__":
