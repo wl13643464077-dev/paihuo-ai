@@ -93,6 +93,19 @@
     scrollTo({ top: y, behavior: reduced ? "auto" : "smooth" }); history.replaceState(null, "", id);
   }));
 
+  // ---------- 声音（默认关闭，点击后才创建音频上下文） ----------
+  let snd = null; const sndBtn = $(".snd");
+  sndBtn && sndBtn.addEventListener("click", async () => {
+    try {
+      if (!snd) { const m = await import("/static/promo-sound.js?v=20261004"); snd = m.createSound(); }
+      if (snd.on) await snd.disable(); else await snd.enable();
+      sndBtn.setAttribute("aria-pressed", snd.on); sndBtn.setAttribute("aria-label", snd.on ? "关闭声音" : "开启声音");
+    } catch (_) { sndBtn.hidden = true; }
+  });
+  document.addEventListener("pointerover", (e) => { if (snd && e.target.closest("a,button,.ind-row,.cap,.plan,.persona,.step")) snd.hover(); });
+  document.addEventListener("click", (e) => { if (snd && e.target.closest("a,button:not(.snd),select")) snd.click(); });
+  let typed = 0, sent = false; const doneSet = new Set();
+
   // ---------- 3D 世界：分段形态 ----------
   const stageEls = $$("[data-stage]");
   let world = window.__paihuoWorld || null;
@@ -119,9 +132,11 @@
       const r = dispatch.getBoundingClientRect();
       const p = clamp((-r.top) / (r.height - vh));
       const tp = clamp((p - .04) / .26);
-      promptQ.textContent = Q.slice(0, Math.round(tp * Q.length));
-      prompt.classList.toggle("sent", p > .33);
-      stages.forEach((s) => { const at = parseFloat(s.dataset.at); const k = clamp((p - at) / .12); s.style.setProperty("--p", k); s.classList.toggle("on", k > 0); s.classList.toggle("done", k >= 1); });
+      const nTyped = Math.round(tp * Q.length); if (snd && nTyped > typed) snd.type(); typed = nTyped;
+      promptQ.textContent = Q.slice(0, nTyped);
+      const isSent = p > .33; if (snd && isSent && !sent) snd.send(); sent = isSent;
+      prompt.classList.toggle("sent", isSent);
+      stages.forEach((s) => { const at = parseFloat(s.dataset.at); const k = clamp((p - at) / .12); s.style.setProperty("--p", k); s.classList.toggle("on", k > 0); s.classList.toggle("done", k >= 1); const si = stages.indexOf(s); if (k >= 1 && !doneSet.has(si)) { doneSet.add(si); snd && snd.chime(si * 2); } else if (k < 1) doneSet.delete(si); });
       deliver.classList.toggle("on", p > .93);
     }
     // 横向
@@ -147,6 +162,7 @@
       }
       if (innerWidth <= 860) off = 0;
       world.setStage(stage, off, dim);
+      snd && snd.stage(stage);
     }
     if (hudFlow) hudFlow.textContent = String(Math.floor(performance.now() / 37) % 10000).padStart(4, "0");
   }
@@ -183,8 +199,9 @@
   else {
     let p = 0, ready = false; const t0 = performance.now();
     const done = () => { ready = true; };
-    if (document.readyState === "complete") done(); else addEventListener("load", done);
-    addEventListener("paihuo:world", done);
+    const fontsReady = document.fonts ? document.fonts.load('400 1em "PaiHuo Display"').catch(() => {}) : Promise.resolve();
+    const pageReady = new Promise((r) => document.readyState === "complete" ? r() : addEventListener("load", r));
+    Promise.all([fontsReady, pageReady]).then(done);
     (function step() {
       const el = performance.now() - t0;
       const target = ready ? Math.min(100, el / 13) : Math.min(88, el / 18);

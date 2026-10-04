@@ -102,6 +102,22 @@ class PromoAssetContractCase(unittest.TestCase):
         self.assertIn('matchMedia("(prefers-reduced-motion: reduce)")', app)
         self.assertIn(".caps .track{flex-wrap:wrap;transform:none!important}", page)
 
+    def test_display_font_is_licensed_subset_and_sound_is_opt_in(self) -> None:
+        page = PROMO.read_text(encoding="utf-8")
+        app = (ROOT / "static" / "promo-app.js").read_text(encoding="utf-8")
+        sound = (ROOT / "static" / "promo-sound.js").read_text(encoding="utf-8")
+        fonts = ROOT / "static" / "fonts"
+        # 得意黑 OFL：子集必须更名并随附许可证
+        self.assertIn("SIL Open Font License", (fonts / "paihuo-display.OFL.txt").read_text(encoding="utf-8"))
+        self.assertIn('font-family:"PaiHuo Display"', page)
+        self.assertNotIn('font-family:"Smiley', page)
+        self.assertLessEqual(_asset_size("/static/fonts/paihuo-display.woff2"), 160_000)
+        self.assertIn("font-display:swap", page)
+        # 声音默认关闭，只有用户点击后才创建音频上下文
+        self.assertIn('class="snd" type="button" aria-pressed="false"', page)
+        self.assertIn('import("/static/promo-sound.js', app)
+        self.assertIn("master.gain.value = 0", sound)
+
 
 if __name__ == "__main__":
     unittest.main()
