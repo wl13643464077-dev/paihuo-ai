@@ -280,7 +280,7 @@ def _validate_entry(value: object) -> dict:
     path = _safe_payload_path(value["path"])
     expected_mode = "0755" if kind == "dir" else (
         "0755"
-        if path in {"run.sh", "deploy/upgrade.sh", "tests/run.sh"}
+        if path in {"run.sh", "tests/run.sh"}
         else "0644"
     )
     _require(value.get("mode") == expected_mode, "manifest entry mode is invalid")

@@ -24,7 +24,7 @@ def send_failure_alert(unit: str) -> bool:
         raise ValueError("PAIHUO_ALERT_WEBHOOK is not an approved WeCom webhook")
     content = (
         "**🚨 派活 AI 服务异常**\n"
-        f"systemd 单元 `{(unit or 'contentcrew.service')[:120]}` 启动失败或异常退出。\n"
+        f"systemd 单元 `{(unit or 'paihuo.service')[:120]}` 启动失败或异常退出。\n"
         "请立即检查服务器上的 `systemctl status` 与 `journalctl`。"
     )
     request = urllib.request.Request(
@@ -45,7 +45,7 @@ def send_failure_alert(unit: str) -> bool:
 
 def main() -> int:
     try:
-        send_failure_alert(sys.argv[1] if len(sys.argv) > 1 else "contentcrew.service")
+        send_failure_alert(sys.argv[1] if len(sys.argv) > 1 else "paihuo.service")
         return 0
     except Exception as exc:
         print(f"paihuo failure alert failed: {type(exc).__name__}", file=sys.stderr)
