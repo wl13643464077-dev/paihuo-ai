@@ -85,6 +85,39 @@ class PromoAssetContractCase(unittest.TestCase):
         self.assertIn('os.environ.get("CONTENTCREW_PUBLIC_API_DOCS") == "1"', main_py)
         self.assertIn('openapi_url="/openapi.json" if _PUBLIC_API_DOCS else None', main_py)
 
+    def test_promo_interaction_layer_stays_accessible(self) -> None:
+        page = PROMO.read_text(encoding="utf-8")
+        app = (ROOT / "static" / "promo-app.js").read_text(encoding="utf-8")
+        scene = (ROOT / "static" / "promo-3d.js").read_text(encoding="utf-8")
+        # 交互层自托管、延迟加载；3D 世界提供分段形态接口
+        self.assertIn('src="/static/promo-app.js?v=', page)
+        self.assertIn("export function mountWorld", scene)
+        self.assertIn("setStage(", app)
+        # 无障碍：跳到正文、关闭的菜单不可聚焦、拆字标题保留完整读屏文本
+        self.assertIn('class="skip" href="#main"', page)
+        self.assertIn('id="sheet" aria-hidden="true" inert', page)
+        self.assertIn("sheet.inert = !open", app)
+        self.assertIn('el.setAttribute("aria-label", label)', app)
+        # 减少动态效果：跳过预加载与磁吸光标，横向能力轴改为静态网格
+        self.assertIn('matchMedia("(prefers-reduced-motion: reduce)")', app)
+        self.assertIn(".caps .track{flex-wrap:wrap;transform:none!important}", page)
+
+    def test_display_font_is_licensed_subset_and_sound_is_opt_in(self) -> None:
+        page = PROMO.read_text(encoding="utf-8")
+        app = (ROOT / "static" / "promo-app.js").read_text(encoding="utf-8")
+        sound = (ROOT / "static" / "promo-sound.js").read_text(encoding="utf-8")
+        fonts = ROOT / "static" / "fonts"
+        # 得意黑 OFL：子集必须更名并随附许可证
+        self.assertIn("SIL Open Font License", (fonts / "paihuo-display.OFL.txt").read_text(encoding="utf-8"))
+        self.assertIn('font-family:"PaiHuo Display"', page)
+        self.assertNotIn('font-family:"Smiley', page)
+        self.assertLessEqual(_asset_size("/static/fonts/paihuo-display.woff2"), 160_000)
+        self.assertIn("font-display:swap", page)
+        # 声音默认关闭，只有用户点击后才创建音频上下文
+        self.assertIn('class="snd" type="button" aria-pressed="false"', page)
+        self.assertIn('import("/static/promo-sound.js', app)
+        self.assertIn("master.gain.value = 0", sound)
+
 
 if __name__ == "__main__":
     unittest.main()
