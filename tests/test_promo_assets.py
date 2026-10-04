@@ -85,6 +85,23 @@ class PromoAssetContractCase(unittest.TestCase):
         self.assertIn('os.environ.get("CONTENTCREW_PUBLIC_API_DOCS") == "1"', main_py)
         self.assertIn('openapi_url="/openapi.json" if _PUBLIC_API_DOCS else None', main_py)
 
+    def test_promo_interaction_layer_stays_accessible(self) -> None:
+        page = PROMO.read_text(encoding="utf-8")
+        app = (ROOT / "static" / "promo-app.js").read_text(encoding="utf-8")
+        scene = (ROOT / "static" / "promo-3d.js").read_text(encoding="utf-8")
+        # 交互层自托管、延迟加载；3D 世界提供分段形态接口
+        self.assertIn('src="/static/promo-app.js?v=', page)
+        self.assertIn("export function mountWorld", scene)
+        self.assertIn("setStage(", app)
+        # 无障碍：跳到正文、关闭的菜单不可聚焦、拆字标题保留完整读屏文本
+        self.assertIn('class="skip" href="#main"', page)
+        self.assertIn('id="sheet" aria-hidden="true" inert', page)
+        self.assertIn("sheet.inert = !open", app)
+        self.assertIn('el.setAttribute("aria-label", label)', app)
+        # 减少动态效果：跳过预加载与磁吸光标，横向能力轴改为静态网格
+        self.assertIn('matchMedia("(prefers-reduced-motion: reduce)")', app)
+        self.assertIn(".caps .track{flex-wrap:wrap;transform:none!important}", page)
+
 
 if __name__ == "__main__":
     unittest.main()
