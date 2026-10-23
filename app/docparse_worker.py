@@ -8,6 +8,8 @@ import sys
 
 
 MAX_CHARS = 12_000
+# 知识库入库允许更长的正文（切段检索，不会整段塞进提示词）；硬上限仍由父进程钳制。
+KB_MAX_CHARS = 60_000
 
 
 def _apply_resource_limits() -> bool:
@@ -122,8 +124,14 @@ def extract(path: Path, ext: str) -> str:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 3 or argv[2] not in {".pdf", ".docx", ".xlsx", ".pptx"}:
+    global MAX_CHARS
+    if len(argv) not in (3, 4) or argv[2] not in {".pdf", ".docx", ".xlsx", ".pptx"}:
         return 2
+    if len(argv) == 4:
+        try:
+            MAX_CHARS = max(1000, min(KB_MAX_CHARS, int(argv[3])))
+        except ValueError:
+            return 2
     if not _apply_resource_limits():
         return 2
     try:

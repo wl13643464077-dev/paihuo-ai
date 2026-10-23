@@ -21,11 +21,26 @@ from . import db
 
 log = logging.getLogger(__name__)
 
-FACT_KEYS = frozenset({
-    "brand_name", "store_name", "store_address", "slogan", "philosophy", "signature",
-    "logo_url", "tone", "business", "audience", "selling_points",
-    "taboo", "keywords",
-})
+# 24 维品牌画像（移植自纳米Work企业版「品牌知识包」）：前 13 项是原有字段，
+# 后 16 项补齐故事、价格带、渠道、近三个月活动/新闻/内容、竞品、口碑等维度。
+# 每一项仍走原有的「原文逐字可核验」闸门，没有证据就留空等老板补。
+DIMENSION_LABELS = {
+    "brand_name": "品牌名", "store_name": "门店名", "store_address": "门店具体地址",
+    "slogan": "品牌口号", "philosophy": "品牌理念与使命", "signature": "招牌产品/服务",
+    "logo_url": "Logo 图片", "tone": "品牌调性与视觉风格", "business": "主营品类/业务",
+    "audience": "目标客群", "selling_points": "核心卖点", "taboo": "表达禁忌",
+    "keywords": "常用话术/关键词",
+    "story": "品牌故事与创立背景", "price": "价格带/人均", "channels": "门店与渠道布局",
+    "campaigns": "近三个月活动", "news": "近三个月新闻与舆情", "competitors": "竞品对照",
+    "service": "服务承诺与售后", "official": "官方渠道（官网/公众号/旗舰店）",
+    "people": "创始人与公开管理层", "franchise": "加盟与招商政策",
+    "compliance": "资质与食品安全等公开信息", "reviews": "用户口碑关键词",
+    "seasonal": "季节与节日打法", "supply": "产地与供应链故事",
+    "esg": "社会责任与公开承诺", "content": "近三个月内容热点",
+}
+FACT_KEYS = frozenset(DIMENSION_LABELS)
+# 时效维度：只认近三个月的公开资料，升级时优先重抓。
+TIME_SENSITIVE_KEYS = ("campaigns", "news", "content")
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _DISPLAY_FIELDS = ("store_name", "store_address", "logo_url", "tone")
 _LOGO_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
@@ -336,9 +351,11 @@ async def _default_extract(brand_name: str, sources: list[dict],
         "仅返回 JSON：{\"facts\":[{\"key\":\"slogan\",\"value\":\"...\","
         "\"source_index\":0,\"quote\":\"原文连续片段\"}]}。"
         "value 必须逐字出现在 quote 中；quote 必须逐字出现在指定来源正文中，"
-        "并同时含品牌名称，确保不是其他品牌的主张。最多提取 6 项，"
+        "并同时含品牌名称，确保不是其他品牌的主张。最多提取 12 项，"
         "quote 尽量不超过 120 字；不要解释。"
-        f"允许字段：{','.join(sorted(FACT_KEYS))}。{key_instruction}\n"
+        "允许字段（key=含义）："
+        + "；".join(f"{k}={v}" for k, v in DIMENSION_LABELS.items())
+        + f"。活动/新闻/内容热点只收近三个月。{key_instruction}\n"
         f"品牌名称：{brand_name}\n"
         "来源：\n" + json.dumps(
             [
@@ -552,7 +569,9 @@ async def collect(
     prompt = (
         f"调查品牌『{name}』公开的官方或可核验资料。"
         "聚焦准确品牌名称、店名、口号、理念、招牌、Logo 原图、"
-        "品牌调性、主营业务、客群、卖点；不同名品牌不得混用。"
+        "品牌调性、主营业务、客群、卖点，以及品牌故事、价格带/人均、门店渠道、"
+        "近三个月活动与新闻、竞品、服务承诺、官方渠道、创始人、加盟政策、"
+        "公开资质、用户口碑、节日打法、供应链、社会责任；不同名品牌不得混用。"
         "只搜索并提供来源，不得猜测。"
         + (f"\n辅助区分同名门店的用户线索（仅作检索条件，不是事实）：{hint}" if hint else "")
     )
@@ -704,7 +723,8 @@ async def recrawl_fact(
         raise BrandConflict("这条品牌资料已被删除或替换，请刷新后重新发起重抓")
     researcher = research or _default_research
     prompt = (
-        f"重新核验品牌『{name}』的 {field} 字段。老板指出原结果可能有错：{note}。"
+        f"重新核验品牌『{name}』的「{DIMENSION_LABELS.get(field, field)}」（{field}）字段。"
+        f"老板说明：{note}。"
         "请重点找官方或可核验原始页面，不要沿用旧结论，不得猜测。"
         + (f"\n辅助区分同名门店的原始线索：{hint}" if hint else "")
     )
@@ -832,3 +852,19 @@ def confirm(tenant_id: int, package_id: int, *, actor_id: int | None = None) -> 
             (actor_id, now, now, row["id"]),
         )
     return get_package(tenant_id, package_id)
+
+
+def coverage(package: dict | None) -> dict:
+    """24 维覆盖情况：已有哪些、还缺哪些，前端据此给出「补抓」按钮。"""
+    have = {str(item.get("key")) for item in (package or {}).get("facts") or []}
+    missing = [
+        {"key": key, "label": label}
+        for key, label in DIMENSION_LABELS.items() if key not in have
+    ]
+    return {
+        "total": len(DIMENSION_LABELS),
+        "filled": len(DIMENSION_LABELS) - len(missing),
+        "missing": missing,
+        "time_sensitive": list(TIME_SENSITIVE_KEYS),
+    }
+

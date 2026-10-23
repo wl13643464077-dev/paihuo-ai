@@ -26,6 +26,7 @@ DEFAULT_PRICES = {
     "avatar_basic": {"points": 6, "label": "数字人视频·基础版(RunningHub)", "cost": "成本≈¥2"},
     "avatar_video": {"points": 12, "label": "数字人视频(≤30秒)", "cost": "成本≈¥4(HeyGen+配音)"},
     "avatar_video_60": {"points": 20, "label": "数字人视频(31-60秒)", "cost": "成本≈¥7"},
+    "avatar_sales": {"points": 24, "label": "AI带货视频(15秒·Seedance 2.5/可灵3.0)", "cost": "成本≈¥8(图生视频+原生配音)"},
     "voice_clone": {"points": 9, "label": "声音克隆", "cost": "成本≈¥3"},
     "learn": {"points": 3, "label": "员工全网进修", "cost": "成本≈¥1.1"},
     "link_extract": {"points": 1, "label": "爆款链接提取口播稿", "cost": "成本≈¥0.4"},

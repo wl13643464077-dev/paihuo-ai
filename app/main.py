@@ -189,6 +189,11 @@ _TRANSIENT_UPLOAD_ROUTES = {
         "*work",
         20 * 1024 * 1024 + _UPLOAD_MULTIPART_OVERHEAD_BYTES,
     ),
+    ("POST", "/api/knowledge/upload"): (
+        "knowledge-upload",
+        "library",
+        20 * 1024 * 1024 + _UPLOAD_MULTIPART_OVERHEAD_BYTES,
+    ),
     ("POST", "/api/tools/menu-copy"): (
         "menu-copy",
         "content",
@@ -1903,6 +1908,7 @@ SECRET_SETTINGS = (
     "smtp_authcode",
     "runninghub_key",
     "tinyfish_key",
+    "zhuque_key",
 )
 PLAIN_SETTINGS = ("yunwu_base", "default_text_model", "default_image_model",
                   "avatar_engine", "heygen_voice_id", "feishu_app_id", "smtp_user", "lead_email", "runninghub_workflow", "runninghub_quality")
@@ -2066,7 +2072,8 @@ def admin_overview():
     rows = [row for row in rows if row]
     return {"provider": {"yunwu_base": db.get_setting("yunwu_base") or "https://yunwu.ai",
                          "yunwu_key": mask(secureconfig.get_secret("yunwu_key")),
-                         "tinyfish_key": mask(secureconfig.get_secret("tinyfish_key"))},
+                         "tinyfish_key": mask(secureconfig.get_secret("tinyfish_key")),
+                         "zhuque_key": mask(secureconfig.get_secret("zhuque_key"))},
             "avatar": {"engine_active": avatar.engine_name(),
                        "engine_forced": db.get_setting("avatar_engine") or "",
                        "heygen_key": mask(secureconfig.get_secret("heygen_key"))},
@@ -8937,6 +8944,83 @@ def knowledge_create(body: dict):
     return {"id": kid}
 
 
+KB_UPLOAD_MAX_CHARS = 60000
+_KB_DOC_EXTS = (".pdf", ".docx", ".xlsx", ".pptx")
+_KB_TEXT_EXTS = (".txt", ".md", ".markdown", ".csv", ".json")
+
+
+@app.post("/api/knowledge/upload")
+async def knowledge_upload(
+    file: UploadFile = File(...),
+    title: str = Form(""),
+    category: str = Form("内部资料"),
+    pinned: str = Form(""),
+):
+    """微型知识库：上传菜单/价格表/SOP/培训资料，抽取全文后入库。
+
+    入库后由 minikb 切段检索，员工每次只读与任务相关的几段，不受旧版 800 字截断。
+    """
+    _need_module("library")
+    name = (file.filename or "资料").strip()[:120]
+    ext = os.path.splitext(name)[1].lower()
+    if ext in _KB_DOC_EXTS:
+        async with _document_parse_slot(TEN()):
+            data = await _read_limited(file, 20 * 1024 * 1024, "文件超过20MB")
+            try:
+                text = await asyncio.to_thread(
+                    _extract_document_isolated, data, ext, KB_UPLOAD_MAX_CHARS
+                )
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+    elif ext in _KB_TEXT_EXTS:
+        data = await _read_limited(file, 5 * 1024 * 1024, "文本文件超过5MB")
+        raw = data.decode("utf-8", errors="replace")
+        if raw.count("\ufffd") > max(20, len(raw) // 50):
+            raw = data.decode("gb18030", errors="replace")
+        text = raw
+    else:
+        raise HTTPException(
+            400, "知识库支持 txt/md/csv/json/pdf/docx/xlsx/pptx；图片请先用「识别图片文字」"
+        )
+    text = re.sub(r"\n{3,}", "\n\n", (text or "").replace("\x00", "")).strip()
+    if len(text) < 20:
+        raise HTTPException(400, "没有提取到足够的文字；扫描件请截图后识别图片文字")
+    truncated = len(text) > KB_UPLOAD_MAX_CHARS
+    text = text[:KB_UPLOAD_MAX_CHARS]
+    clean_title = (title or "").strip()[:80] or os.path.splitext(name)[0][:80] or "上传资料"
+    clean_category = (category or "").strip()[:20] or "内部资料"
+    from . import minikb
+    chunks = len(minikb.chunk_text(text))
+    kid = await db.arun(db.insert, "knowledge", {
+        "title": clean_title, "tenant_id": TEN(), "content": text,
+        "tags_json": json.dumps([clean_category, "上传资料", ext.lstrip(".")],
+                                ensure_ascii=False),
+        "source": "upload",
+        "pinned": 1 if str(pinned).lower() in ("1", "true", "on", "yes") else 0,
+    })
+    return {"id": kid, "title": clean_title, "chars": len(text),
+            "chunks": chunks, "truncated": truncated}
+
+
+@app.get("/api/knowledge-stats")
+def knowledge_stats():
+    """知识库体检：资料数、上传数、可检索段落数，前端顶部展示。"""
+    _need_module("library")
+    from . import minikb
+    rows = db.q(
+        "SELECT id,source,content FROM knowledge WHERE tenant_id=? "
+        "AND deleted_at IS NULL ORDER BY id DESC LIMIT 1000",
+        (TEN(),),
+    )
+    chunks = sum(len(minikb.chunk_text(r.get("content") or "")) for r in rows)
+    return {
+        "docs": len(rows),
+        "uploads": sum(1 for r in rows if r.get("source") == "upload"),
+        "chunks": chunks,
+        "chars": sum(len(r.get("content") or "") for r in rows),
+    }
+
+
 @app.put("/api/knowledge/{kid}")
 def knowledge_update(kid: int, body: dict):
     _need_module("library")
@@ -10160,11 +10244,12 @@ def brand_packages_get(package_id: int):
         active = brand_package.get_active(tenant)
         if not active or int(active["id"]) != package_id:
             raise HTTPException(403, "只有企业主可以审阅未确认的品牌资料")
-        return active
+        return {**active, "coverage": brand_package.coverage(active)}
     try:
-        return brand_package.get_package(tenant, package_id)
+        package = brand_package.get_package(tenant, package_id)
     except brand_package.BrandPackageError as exc:
         _brand_error(exc)
+    return {**package, "coverage": brand_package.coverage(package)}
 
 
 @app.post("/api/brand-packages/collect")
@@ -10298,6 +10383,28 @@ async def brand_packages_recrawl(package_id: int, fact_id: int, body: dict):
             )
     except brand_package.BrandPackageError as exc:
         _brand_error(exc)
+
+
+@app.post("/api/brand-packages/{package_id}/fill")
+async def brand_packages_fill(package_id: int, body: dict):
+    """补抓 24 维里还缺的一维：定向检索 + 原文核验，找不到就不改动。"""
+    _need_admin()
+    tenant = TEN()
+    key = str((body or {}).get("key") or "").strip()
+    if key not in brand_package.FACT_KEYS or key == "logo_url":
+        raise HTTPException(400, "不支持补抓这一维；Logo 请直接上传")
+    hint = str((body or {}).get("hint") or "").strip()[:300]
+    try:
+        _brand_research_quota(tenant)
+        async with _free_ai_slot("brand-research"):
+            package = await brand_package.recrawl_fact(
+                tenant, package_id, key,
+                f"补抓缺失维度「{brand_package.DIMENSION_LABELS[key]}」"
+                + (f"；老板补充线索：{hint}" if hint else ""),
+            )
+    except brand_package.BrandPackageError as exc:
+        _brand_error(exc)
+    return {**package, "coverage": brand_package.coverage(package)}
 
 
 @app.post("/api/brand-packages/{package_id}/confirm")
@@ -11240,7 +11347,7 @@ def _validate_office_archive(data: bytes) -> None:
                 raise ValueError("Office 文件压缩比异常")
 
 
-def _extract_document_isolated(data: bytes, ext: str) -> str:
+def _extract_document_isolated(data: bytes, ext: str, max_chars: int = 12000) -> str:
     if ext in {".docx", ".xlsx", ".pptx"}:
         _validate_office_archive(data)
     descriptor, path = tempfile.mkstemp(prefix="paihuo-parse-", suffix=ext)
@@ -11258,7 +11365,8 @@ def _extract_document_isolated(data: bytes, ext: str) -> str:
         }
         try:
             result = subprocess.run(
-                [sys.executable, "-I", worker, path, ext],
+                [sys.executable, "-I", worker, path, ext,
+                 *([str(int(max_chars))] if int(max_chars) != 12000 else [])],
                 cwd=tempfile.gettempdir(),
                 env=env,
                 capture_output=True,
@@ -11277,12 +11385,34 @@ def _extract_document_isolated(data: bytes, ext: str) -> str:
         text = payload.get("text") if isinstance(payload, dict) else None
         if not isinstance(text, str):
             raise ValueError("文档解析器未返回文本")
-        return text[:12000]
+        return text[:max(1000, min(60000, int(max_chars)))]
     finally:
         try:
             os.unlink(path)
         except FileNotFoundError:
             pass
+
+
+@app.post("/api/tools/ai-smell")
+async def tools_ai_smell(body: dict):
+    """测「AI 味」：本地 AI 腔体检（免费）+ 朱雀官方检测（管理后台配置后可用）。"""
+    _need_module("content")
+    from . import zhuque
+    text = str((body or {}).get("text") or "").strip()
+    if len(text) < 20:
+        raise HTTPException(400, "至少需要 20 字")
+    text = text[:zhuque.MAX_CHARS]
+    result = {"local": zhuque.local_lint(text), "zhuque": None,
+              "configured": False, "zhuque_error": ""}
+    key = await db.arun(secureconfig.get_secret, "zhuque_key")
+    if key:
+        result["configured"] = True
+        try:
+            async with _free_ai_slot("zhuque"):
+                result["zhuque"] = await zhuque.zhuque_classify(text, key)
+        except zhuque.ZhuqueError as exc:
+            result["zhuque_error"] = str(exc)
+    return result
 
 
 @app.post("/api/parse-file")
@@ -12424,6 +12554,79 @@ def build_delivery(job_id: int):
     }
 
 
+_XHS_COVER_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+
+
+@app.post("/api/jobs/{job_id}/xhs-cards")
+async def job_xhs_cards(job_id: int, body: dict):
+    """小红书图文卡：老板改字/换配色/选真实照片做封面后重新出图（本地渲染，不扣点）。"""
+    from . import platformcheck, xhscards
+    tid = TEN()
+    _job_or_404(job_id)
+    raw_cards = (body or {}).get("cards")
+    if not isinstance(raw_cards, list) or not raw_cards:
+        raise HTTPException(400, "卡片内容不能为空")
+    spec = xhscards.normalize_spec({"cards": raw_cards, "theme": (body or {}).get("theme")})
+    if len(spec["cards"]) < xhscards.MIN_CARDS:
+        raise HTTPException(400, f"至少需要 {xhscards.MIN_CARDS} 张有效卡片")
+    cover_bytes = None
+    cover_url = str((body or {}).get("cover_image") or "").strip()
+    if cover_url:
+        try:
+            cover_path = assetfiles.resolve_tenant_asset(
+                cover_url, tid, expected_job_id=job_id,
+                allowed_extensions=_XHS_COVER_EXTS,
+            )
+        except assetfiles.AssetAccessError as exc:
+            raise HTTPException(400, "封面照片必须是本工单的配图/素材图") from exc
+        if os.path.getsize(cover_path) > 15 * 1024 * 1024:
+            raise HTTPException(400, "封面照片太大")
+        with open(cover_path, "rb") as handle:
+            cover_bytes = handle.read()
+    run = await db.aone(
+        "SELECT id,output_json FROM station_run WHERE job_id=? AND station_idx=8 "
+        "AND status IN ('done','awaiting_review') ORDER BY version DESC, id DESC LIMIT 1",
+        (job_id,),
+    )
+    if not run:
+        raise HTTPException(400, "分发官还没出发布包")
+    output = db.jloads(run["output_json"], {}) or {}
+    versions = output.get("versions") or []
+    index = next((i for i, v in enumerate(versions)
+                  if isinstance(v, dict) and v.get("platform") == "小红书"), None)
+    if index is None:
+        raise HTTPException(400, "这个工单没有小红书版本")
+    try:
+        async with _free_ai_slot("xhs-cards"):
+            images = await asyncio.to_thread(
+                xhscards.render_cards, spec, cover_image=cover_bytes,
+            )
+    except xhscards.CardRenderError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    import uuid as _uuid_cards
+    stamp = _uuid_cards.uuid4().hex[:8]
+    folder = os.path.join(registry.ASSET_DIR, f"job{job_id}")
+    os.makedirs(folder, exist_ok=True)
+    files = []
+    for page, data in enumerate(images, start=1):
+        name = f"xhs_edit_{stamp}_{page:02d}.png"
+        with open(os.path.join(folder, name), "wb") as handle:
+            handle.write(data)
+        files.append(f"/files/job{job_id}/{name}")
+    version = {**versions[index], "cards": spec["cards"], "card_theme": spec["theme"],
+               "card_files": files, "card_cover_image": cover_url or ""}
+    version.pop("checks", None)
+    version.pop("check_summary", None)
+    versions[index] = platformcheck.check_versions([version])[0]
+    output["versions"] = versions
+    await db.aexecute(
+        "UPDATE station_run SET output_json=?,updated_at=? WHERE id=?",
+        (json.dumps(output, ensure_ascii=False), time.time(), run["id"]),
+    )
+    return {"card_files": files, "cards": spec["cards"], "theme": spec["theme"],
+            "check_summary": versions[index]["check_summary"]}
+
+
 @app.get("/api/jobs/{job_id}/delivery")
 def delivery(job_id: int):
     return build_delivery(job_id)
@@ -12470,7 +12673,25 @@ def pack_zip(job_id: int, platform: str = ""):
                     "操作清单:"] + [f"  {i+1}. {c}" for i, c in enumerate(pk.get("checklist", []))]
             if pk.get("upload_url"):
                 info.append(f"发布后台:{pk['upload_url']}")
+            if pk.get("first_comment"):
+                info.append(f"置顶首评:{pk['first_comment']}")
+            if pk.get("forward_reason"):
+                info.append(f"转发理由:{pk['forward_reason']}")
             z.writestr(f"{p}/发布指南.txt", "\n".join(info))
+            if pk.get("script"):
+                z.writestr(f"{p}/口播稿.txt", str(pk["script"]))
+            checks = pk.get("checks") or []
+            if checks:
+                summary = pk.get("check_summary") or {}
+                lines = [f"发布前红线体检:🔴 {summary.get('red', 0)} 项必须改 · "
+                         f"🟡 {summary.get('yellow', 0)} 项建议改", ""]
+                lines += [("🔴 " if c.get("level") == "red" else "🟡 ") + str(c.get("msg") or "")
+                          for c in checks]
+                z.writestr(f"{p}/发布前体检.txt", "\n".join(lines))
+            for i, card_url in enumerate(pk.get("card_files") or []):
+                fp = _local(card_url)
+                if fp:
+                    z.write(fp, f"{p}/图文卡片/xhs-{i + 1:02d}{os.path.splitext(fp)[1]}")
             if p == "公众号":
                 try:
                     mp = _mp_payload(job_id, mplayout.DEFAULT_THEME)
@@ -14313,16 +14534,26 @@ async def job_text_video(job_id: int, body: dict):
     bgm = _validated_tv_bgm(body)
     tid = TEN()
 
+    wanted = str((body or {}).get("platform") or "").strip()
+    if wanted and wanted not in ("抖音", "视频号"):
+        raise HTTPException(400, "成片平台只支持 抖音 / 视频号")
+
     def create_job_video() -> int:
         _job_or_404(job_id)
         delivery = build_delivery(job_id)
+        platforms = (wanted,) if wanted else ("抖音", "视频号")
         version = next(
             (
                 item for item in (delivery.get("versions") or [])
-                if item.get("platform") in ("抖音", "视频号")
+                if item.get("platform") in platforms
             ),
             None,
         )
+        if wanted and not version:
+            raise HTTPException(400, f"这个工单没有{wanted}版本，请先让分发官出{wanted}版")
+        # 一核三版：分发官已为该平台写好口播稿（抖音 180-300 字≈30-50 秒，
+        # 视频号 300-480 字≈50-80 秒），直接用它，不再把长文压成统一时长。
+        platform_script = str((version or {}).get("script") or "").strip()
         text = (version or {}).get("body") or delivery["body"]
         if not (text or "").strip():
             raise HTTPException(400, "工单还没有定稿正文")
@@ -14349,11 +14580,17 @@ async def job_text_video(job_id: int, body: dict):
             "image_query": delivery["title"][:16],
             "bgm": bgm,
         }
+        if len(platform_script) >= 20:
+            params["script"] = platform_script[:2000]
+            params["platform"] = version.get("platform")
+        note = delivery["title"][:12]
+        if params.get("platform"):
+            note = f"{params['platform']}·{note}"
         return _create_charged_tv_job(
             params,
             tenant_id=tid,
             job_id=job_id,
-            note=delivery["title"][:16],
+            note=note[:16],
         )
 
     tvid = await _run_db_then_start_worker_safely(
@@ -14826,6 +15063,32 @@ def publog_mark(pid: int):
     except ValueError as e:
         raise HTTPException(404, str(e))
     return {"ok": True}
+
+
+@app.get("/api/publog/{pid}/metrics")
+def publog_metrics_get(pid: int):
+    """v3 复盘口径：该平台要填哪些指标、及格线是多少、已填过的数据。"""
+    _need_module("content")
+    from . import retrometrics
+    row = db.one("SELECT platform FROM publish_log WHERE id=? AND tenant_id=?", (pid, TEN()))
+    if not row:
+        raise HTTPException(404)
+    return {"platform": row["platform"], "fields": retrometrics.fields_for(row["platform"]),
+            "saved": retrometrics.load(TEN(), pid)}
+
+
+@app.post("/api/publog/{pid}/metrics")
+def publog_metrics_save(pid: int, body: dict):
+    """老板抄来的 24h/72h 数据 → 按及格线体检（免费，不扣点）。"""
+    _need_module("content")
+    from . import retrometrics
+    try:
+        return retrometrics.save(TEN(), pid, str((body or {}).get("stage") or "24h"),
+                                 (body or {}).get("metrics") or {})
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.post("/api/publog/{pid}/pull")

@@ -44,6 +44,8 @@ SECRET_SETTING_KEYS = (
     "cn_ark_key",
     "bocha_search_key",
     "tinyfish_key",
+    # 腾讯朱雀 AI 检测（EdgeOne 官方 API），给口播稿/正文测「AI 味」
+    "zhuque_key",
 )
 _SECRET_SETTING_SET = frozenset(SECRET_SETTING_KEYS)
 

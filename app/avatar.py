@@ -2270,8 +2270,38 @@ async def kling_poll(task_id: str, progress, timeout: int = 1500, job_id: int = 
     raise providers.ProviderError("数字人渲染超时(25分钟)")
 
 
+async def _sales_video_url(p: dict, j: dict, job_id: int, photo_path: str, progress) -> str:
+    """AI 带货视频：台词 → Seedance 2.5（真人图自动改可灵 3.0）→ 返回成片 URL。"""
+    from . import salesvideo
+    from .skills.registry import company_block
+    tenant = j.get("tenant_id") or 1
+    brand_context = await db.arun(company_block, tenant)
+    progress("start", "撰写 15 秒带货台词…")
+    line = await salesvideo.write_line(p, brand_context)
+    if line != p.get("script"):
+        p["script"] = line
+        await db.aupdate("avatar_job", job_id,
+                         {"params_json": json.dumps(p, ensure_ascii=False)})
+    progress("done", f"台词：{line}")
+    image = await asyncio.to_thread(salesvideo.prepare_image,
+                                    await asyncio.to_thread(_read_bytes, photo_path))
+    prompt = salesvideo.build_prompt(p, line)
+    progress("start", "提交 Seedance 2.5 图生视频（原生口播+环境音）…")
+    channel, task_id = await salesvideo.submit(
+        prompt, salesvideo.image_data_uri(image), progress)
+    progress("tool", f"任务已受理（{'Seedance 2.5' if channel == 'seedance' else '可灵 3.0'}），开始渲染")
+
+    async def check_cancel():
+        if await db.arun(cancelled, job_id):
+            raise Cancelled()
+
+    return await salesvideo.poll(channel, task_id, progress, cancelled=check_cancel)
+
+
 def _charged_action(p: dict) -> str:
     """还原 avatar_job_create 当初扣的动作(按原始请求引擎+时长,不受运行中引擎回退影响)."""
+    if (p.get("engine") or "") == "sales":
+        return "avatar_sales"
     if (p.get("engine") or "") == "basic":
         return "avatar_basic"
     return "avatar_video" if int(p.get("duration") or 30) <= 30 else "avatar_video_60"
@@ -2406,7 +2436,7 @@ async def run_job(job_id: int, broadcast):
     try:
         if await db.arun(cancelled, job_id):
             raise Cancelled()
-        picked = p.get("engine") if p.get("engine") in ("heygen", "kling", "basic") else ""
+        picked = p.get("engine") if p.get("engine") in ("heygen", "kling", "basic", "sales") else ""
         eng = picked or await db.arun(engine_name)
         if eng == "heygen":
             heygen_ready = await db.arun(secureconfig.get_secret, "heygen_key")
@@ -2427,6 +2457,8 @@ async def run_job(job_id: int, broadcast):
             asset_path, p["photo_name"], {"photo"}, j.get("tenant_id") or 1
         )
         own_audio = p.get("own_audio_name")
+        if eng == "sales":
+            url = await _sales_video_url(p, j, job_id, photo_path, progress)
         if eng == "basic":
             from . import runninghub
             if own_audio:
