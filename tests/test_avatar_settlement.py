@@ -114,6 +114,118 @@ class AvatarSettlementCase(unittest.TestCase):
             )["n"],
         )
 
+    def test_sales_uses_default_price_when_saved_table_lacks_sales_entry(self):
+        """A legacy partial price table must not undercharge new sales jobs."""
+        from app import main
+
+        db.set_setting(
+            "prices",
+            json.dumps({"avatar_video": {"points": 12}}, ensure_ascii=False),
+        )
+        job_id = main._create_charged_avatar_job(
+            self._params(engine="sales", duration=15), 2)
+
+        self.assertEqual(
+            24,
+            db.one(
+                "SELECT billing_points FROM avatar_job WHERE id=?",
+                (job_id,),
+            )["billing_points"],
+        )
+        self.assertEqual(6, billing.balance(2))
+        self.assertTrue(avatar.settle_failure(job_id, "供应商失败"))
+        self.assertEqual(30, billing.balance(2))
+        self.assertEqual(
+            {"status": "failed", "billing_status": "refunded", "billing_points": 24},
+            db.one(
+                "SELECT status,billing_status,billing_points "
+                "FROM avatar_job WHERE id=?",
+                (job_id,),
+            ),
+        )
+        self.assertEqual(
+            1,
+            db.one(
+                "SELECT COUNT(*) AS n FROM billing_log "
+                "WHERE tenant_id=2 AND delta=-24"
+            )["n"],
+        )
+        self.assertEqual(
+            1,
+            db.one(
+                "SELECT COUNT(*) AS n FROM billing_log "
+                "WHERE tenant_id=2 AND delta=24"
+            )["n"],
+        )
+
+    def test_sales_uses_default_price_when_saved_sales_entry_lacks_points(self):
+        from app import main
+
+        for saved_price in ({"label": "旧配置"}, {"points": None}):
+            with self.subTest(saved_price=saved_price):
+                db.set_setting(
+                    "prices",
+                    json.dumps({"avatar_sales": saved_price}, ensure_ascii=False),
+                )
+                job_id = main._create_charged_avatar_job(
+                    self._params(engine="sales", duration=15), 2)
+
+                self.assertEqual(
+                    24,
+                    db.one(
+                        "SELECT billing_points FROM avatar_job WHERE id=?",
+                        (job_id,),
+                    )["billing_points"],
+                )
+                self.assertEqual(6, billing.balance(2))
+                self.assertTrue(avatar.settle_failure(job_id, "供应商失败"))
+                self.assertEqual(30, billing.balance(2))
+
+    def test_sales_admin_price_override_including_zero_is_preserved(self):
+        from app import main
+
+        for configured_points in (7, 0):
+            with self.subTest(configured_points=configured_points):
+                db.set_setting(
+                    "prices",
+                    json.dumps(
+                        {"avatar_sales": {"points": configured_points, "label": "管理员配置"}},
+                        ensure_ascii=False,
+                    ),
+                )
+                job_id = main._create_charged_avatar_job(
+                    self._params(engine="sales", duration=15), 2)
+                self.assertEqual(
+                    configured_points,
+                    db.one(
+                        "SELECT billing_points FROM avatar_job WHERE id=?",
+                        (job_id,),
+                    )["billing_points"],
+                )
+                self.assertEqual(30 - configured_points, billing.balance(2))
+                self.assertTrue(avatar.settle_failure(job_id, "供应商失败"))
+                self.assertEqual(30, billing.balance(2))
+
+    def test_non_sales_avatar_keeps_historical_missing_price_fallback(self):
+        from app import main
+
+        db.set_setting(
+            "prices",
+            json.dumps({"content_job": {"points": 18}}, ensure_ascii=False),
+        )
+        job_id = main._create_charged_avatar_job(self._params(), 2)
+
+        self.assertEqual(
+            1,
+            db.one(
+                "SELECT billing_points FROM avatar_job WHERE id=?",
+                (job_id,),
+            )["billing_points"],
+        )
+        self.assertEqual(29, billing.balance(2))
+        self.assertTrue(avatar.settle_failure(job_id, "供应商失败"))
+        self.assertEqual(30, billing.balance(2))
+
     def test_concurrent_heygen_photo_registration_keeps_both_owners(self):
         """平台级照片登记必须是单事务 RMW，并发租户不能互相覆盖。"""
         original_registry = avatar._hg_registry

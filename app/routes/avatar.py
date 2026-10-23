@@ -484,12 +484,31 @@ def avatar_clone_delete(vid: str):
     return {"ok": True}
 
 
+def _avatar_job_price(action: str) -> dict:
+    """Resolve a job price without changing the global saved-price semantics.
+
+    Older installations may persist a partial price table.  The sales action
+    was added later, so only that action gets its new default when its entry or
+    its points field is absent.  A configured zero remains a valid override;
+    all other avatar actions retain the historical one-point fallback.
+    """
+    saved = billing.prices()
+    price = saved.get(action) if isinstance(saved, dict) else None
+    if action == "avatar_sales" and (
+        not isinstance(price, dict)
+        or "points" not in price
+        or price.get("points") is None
+    ):
+        price = billing.DEFAULT_PRICES[action]
+    return price or {"points": 1}
+
+
 def _create_charged_avatar_job(params: dict, tid: int = None) -> int:
     """先落待计费工单，再把开工状态、余额与计费流水原子提交。"""
     tid = int(tid or TEN())
     action = avatar._charged_action(params)
     points = 0.0 if tid == 1 else float(
-        (billing.prices().get(action) or {"points": 1})["points"])
+        _avatar_job_price(action)["points"])
     job_id = db.insert("avatar_job", {
         "params_json": json.dumps(params, ensure_ascii=False),
         "tenant_id": tid,
