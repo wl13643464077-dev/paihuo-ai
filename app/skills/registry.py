@@ -93,17 +93,24 @@ def company_block(tid: int) -> str:
 
     facts = dict(active.get("fields") or {})
     facts.setdefault("brand_name", active.get("brand_name") or "")
-    labels = (
-        ("brand_name", "品牌名"), ("store_name", "门店名"),
-        ("store_address", "门店具体地址"),
-        ("slogan", "品牌口号"), ("philosophy", "品牌理念"),
-        ("signature", "招牌产品/服务"), ("tone", "品牌调性"),
-        ("business", "主营业务"), ("audience", "目标客群"),
-        ("selling_points", "核心卖点"), ("taboo", "表达禁忌"),
-        ("keywords", "常用话术/关键词"),
+    labels = tuple(
+        (key, label) for key, label in brand_package.DIMENSION_LABELS.items()
+        if key != "logo_url"
     )
-    lines = [f"- {label}: {str(facts[key]).strip()[:600]}"
-             for key, label in labels if str(facts.get(key) or "").strip()]
+    # 24 维全部注入会挤占提示词：核心维度每项 600 字，扩展维度每项 300 字，总量封顶。
+    core = {"brand_name", "store_name", "store_address", "slogan", "philosophy",
+            "signature", "tone", "business", "audience", "selling_points",
+            "taboo", "keywords"}
+    lines, used = [], 0
+    for key, label in labels:
+        value = str(facts.get(key) or "").strip()
+        if not value:
+            continue
+        line = f"- {label}: {value[:600 if key in core else 300]}"
+        if used + len(line) > 5200 and key not in core:
+            continue
+        lines.append(line)
+        used += len(line)
     supplemental = []
     for legacy_key, fact_key, label in (
         ("business", "business", "主营业务"),
@@ -124,19 +131,15 @@ def company_block(tid: int) -> str:
 
 def _search_terms(value: str) -> set[str]:
     """轻量中文/英文检索词；不依赖向量库也能按当前任务筛选知识。"""
-    normalized = re.sub(r"\s+", " ", str(value or "").lower())
-    terms = set(re.findall(r"[a-z0-9][a-z0-9_-]{1,40}", normalized))
-    for chunk in re.findall(r"[\u4e00-\u9fff]{2,}", normalized):
-        terms.add(chunk)
-        terms.update(chunk[index:index + 2] for index in range(len(chunk) - 1))
-    return {term for term in terms if len(term) >= 2}
+    from .. import minikb
+    return minikb.search_terms(value)
 
 
 def _knowledge_block(tid: int, query: str = "") -> tuple[str, dict]:
-    """按租户与当前任务相关性召回知识，返回提示块和可展示的召回元数据。"""
+    """微型知识库召回：长资料切段后按当前任务挑最相关的段落，返回提示块和元数据。"""
     if not tid:
         return "", {"selected": 0, "total": 0, "titles": []}
-    from .. import db
+    from .. import db, minikb
     rows = db.q(
         "SELECT id,title,content,tags_json,pinned FROM knowledge "
         "WHERE tenant_id=? AND deleted_at IS NULL "
@@ -146,52 +149,22 @@ def _knowledge_block(tid: int, query: str = "") -> tuple[str, dict]:
     if not rows:
         return "", {"selected": 0, "total": 0, "titles": []}
 
-    query_terms = _search_terms(query)
-    ranked = []
-    for position, row in enumerate(rows):
-        title = str(row.get("title") or "")
-        content = str(row.get("content") or "")
-        tags = " ".join(str(item) for item in db.jloads(
-            row.get("tags_json"), []
-        ))
-        title_terms = _search_terms(title)
-        tag_terms = _search_terms(tags)
-        content_terms = _search_terms(content[:12000])
-        score = (
-            len(query_terms & title_terms) * 12
-            + len(query_terms & tag_terms) * 7
-            + len(query_terms & content_terms) * 2
-        )
-        if row.get("pinned"):
-            score += 100
-        # 同分时近期知识优先；无关键词时仍给最近三条一个兜底机会。
-        if not query_terms and position < 3:
-            score += 1
-        ranked.append((score, int(row.get("pinned") or 0), row["id"], row))
-    ranked.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
-
-    selected = [
-        row for score, pinned, _row_id, row in ranked
-        if score > 0 or pinned
-    ][:12]
-    if not selected:
-        selected = [item[3] for item in ranked[:3]]
-
-    lines, used = [], 0
-    for row in selected:
-        content = re.sub(r"\s+", " ", str(row.get("content") or "")).strip()
-        line = f"- {row['title']}:{content[:800]}"
-        if used + len(line) > 7000:
-            break
-        lines.append(line)
-        used += len(line)
-    titles = [str(row.get("title") or "")[:80] for row in selected[:len(lines)]]
-    meta = {"selected": len(lines), "total": len(rows), "titles": titles}
-    if not lines:
+    result = minikb.retrieve(
+        rows, query,
+        tags_of=lambda row: " ".join(
+            str(item) for item in db.jloads(row.get("tags_json"), [])
+        ),
+    )
+    hits = result["hits"]
+    titles = list(dict.fromkeys(hit["title"][:80] for hit in hits))
+    meta = {"selected": result["docs"], "total": len(rows), "titles": titles,
+            "chunks": len(hits)}
+    if not hits:
         return "", meta
     return (
-        f"\n【本次公司知识召回（从 {len(rows)} 条中匹配 {len(lines)} 条）】\n"
-        + "\n".join(lines)
+        f"\n【本次公司知识召回（从 {len(rows)} 条中匹配 {result['docs']} 条，"
+        f"共 {len(hits)} 段原文；引用时写明出自哪份资料）】\n"
+        + "\n".join(minikb.format_hits(hits))
         + "\n",
         meta,
     )
@@ -401,6 +374,8 @@ CAPABILITIES = {
         {"name": "人设匹配筛选", "emoji": "🎯", "desc": "热点先过人设关:不贴合账号定位的再热也不报"},
         {"name": "同行选题监测", "emoji": "👀", "desc": "看同赛道账号最近在做什么题,找空位和差异化"},
         {"name": "节点借势", "emoji": "📅", "desc": "结合近期节日/发布会/大事件日历,提前埋借势选题"},
+        {"name": "选题五维打分", "emoji": "🧮", "desc": "热度30/痛点20/转发收藏20/老板相关20/时效10,按总分排序"},
+        {"name": "30天去重", "emoji": "♻️", "desc": "对照近30天做过的选题,同题换角度或直接剔除"},
     ],
     "research": [
         {"name": "新闻检索", "emoji": "📰", "desc": "权威媒体+门户报道,交叉验证事实与时间线"},
@@ -423,6 +398,8 @@ CAPABILITIES = {
         {"name": "平台文体适配", "emoji": "📱", "desc": "按目标平台规格写:字数/分段/emoji/标签习惯"},
         {"name": "标签策略", "emoji": "#️⃣", "desc": "大词+精准词+长尾词组合,5-8个话题标签"},
         {"name": "配图点位规划", "emoji": "🖼️", "desc": "写作同时规划哪里需要配图、配什么"},
+        {"name": "人性杠杆", "emoji": "🧲", "desc": "至少用2种人性杠杆:损失/恐惧/身份/好奇/反常识/利益,写清WIIFM"},
+        {"name": "去AI味", "emoji": "🗣️", "desc": "像对老板说话:不排比三连、不书面腔、一句一个主数字、有真人判断"},
     ],
     "style": [
         {"name": "口头禅移植", "emoji": "💬", "desc": "把人设档案的口头禅/句式习惯自然融进正文"},
@@ -453,6 +430,9 @@ CAPABILITIES = {
         {"name": "发布时机策略", "emoji": "⏰", "desc": "按平台流量高峰给出最佳发布时间"},
         {"name": "操作清单", "emoji": "✅", "desc": "每平台后台的具体操作步骤,照着点就能发"},
         {"name": "风险预警", "emoji": "⚠️", "desc": "提示该平台的限流词/敏感区/常见坑"},
+        {"name": "一核三版", "emoji": "🧬", "desc": "先定核心卡,抖音/视频号/小红书各自重写原生版本,不一稿多发"},
+        {"name": "小红书图文卡组", "emoji": "🗂️", "desc": "小红书出6-9张3:4图文卡:封面结论→步骤→避坑→收藏总结"},
+        {"name": "发布前红线体检", "emoji": "🩺", "desc": "网址/联系方式/私信导流/其他平台名/开头禁用语逐条自检清零"},
     ],
     "retro": [
         {"name": "指标计划", "emoji": "📋", "desc": "T+1/3/7 各看什么指标,达标线定多少"},
@@ -500,16 +480,16 @@ DEFAULT_DIMENSIONS = ["选题角度", "标题/钩子", "内容结构", "情绪�
 
 # ---------------- V3:平台规格表(多平台变体的统一依据) ----------------
 PLATFORM_SPECS = {
-    "小红书": {"emoji": "📕", "body": "≤1000字,emoji 分段,口语化,标签带#",
+    "小红书": {"emoji": "📕", "body": "图文笔记:标题≤20字含搜索关键词,正文300-600字先给结论,1️⃣2️⃣3️⃣分点,8-10个标签,配6-9张3:4图文卡,结尾给收藏理由",
               "cover": "1080×1440(3:4 竖版)", "cw": 1080, "ch": 1440,
               "url": "https://creator.xiaohongshu.com/publish/publish"},
     "公众号": {"emoji": "💬", "body": "完整长文,小标题分节,结尾引导关注",
               "cover": "900×383(2.35:1 头图)", "cw": 900, "ch": 383,
               "url": "https://mp.weixin.qq.com/"},
-    "抖音": {"emoji": "🎵", "body": "30-60秒口播脚本,口语化,前3秒钩子",
+    "抖音": {"emoji": "🎵", "body": "30-50秒口播(180-300字),第一句≤15字的冲突/结论,只讲1个观点,结尾回扣+评论区提问;描述≤100字,4-6个标签",
              "cover": "1080×1920(9:16 竖版)", "cw": 1080, "ch": 1920,
              "url": "https://creator.douyin.com/creator-micro/content/upload"},
-    "视频号": {"emoji": "📹", "body": "30-60秒口播脚本,更稳重,适配熟人转发",
+    "视频号": {"emoji": "📹", "body": "50-80秒口播(300-480字),第一人称判断开头,判断→发生了什么→我的经验→3条清单→转发理由;短标题6-16字",
               "cover": "1080×1260(6:7 竖版)", "cw": 1080, "ch": 1260,
               "url": "https://channels.weixin.qq.com/platform/post/create"},
     "B站": {"emoji": "📺", "body": "视频简介+置顶评论,可长,玩梗但信息密度高",
@@ -555,13 +535,20 @@ DEFAULT_PROMPTS = {
 【你的检索渠道矩阵(老板指定,必须逐个覆盖)】{channels}
 要求:对上面每个渠道都做针对性检索(善用"渠道名+方向关键词"、site: 限定、榜单页直查),
 每个渠道至少 1 次检索;渠道之间交叉印证热度,不要凭空编造热点。
+【选题五维打分(满分100)】热度30 / 痛点20 / 转发收藏价值20 / 与老板业务相关20 / 时效10,
+按总分从高到低排;每个选题写清 WIIFM(看的人能得到什么)和至少 2 个人性杠杆
+(损失/恐惧/身份/好奇/反常识/利益/故事)。删掉新闻热闹后如果剩不下老板能做的动作,就是自嗨题,不报。
+【30 天去重】运行参数里的 recent_topics 是本企业近 30 天已做过的选题:同题必须换全新角度并在
+reason 里说明差异,角度换不开就剔除;同类题提醒二选一。
 """ + JSON_RULE + """{
  "briefing": "今日趋势简报,markdown,200-400字,含你检索到的真实热点",
  "channel_scan": [{"channel": "渠道名", "finding": "该渠道扫到的热点/信号,60字内,没有就写'无明显信号'"}],
  "topics": [
    {"title": "选题标题", "angle": "切入角度", "hook": "开头钩子一句话",
      "reason": "推荐理由(结合人设与热度)", "heat": "预估热度 高/中/低",
-     "evidence": "热度证据:来自哪些渠道"}
+     "evidence": "热度证据:来自哪些渠道",
+     "score": 0, "score_detail": "热度x/痛点x/转发收藏x/相关x/时效x",
+     "levers": ["人性杠杆"], "dedupe": "与近30天选题的关系:新题/换角度(说明)"}
  ]  // 恰好 5 个,按推荐度排序
 }""",
 
@@ -606,12 +593,20 @@ DEFAULT_PROMPTS = {
 【素材包】{research}
 【对标报告】{benchmark}
 职责:写出初稿。要求:开头 3 秒钩子;信息密度高,用素材包里的真实事实与数据;
-结构借鉴对标报告;符合目标平台文体(小红书≤1000字带emoji,公众号可长文)。
+结构借鉴对标报告;符合目标平台文体(小红书300-600字图文笔记,公众号可长文)。
+【人性自检(硬性)】开头第一句不能是自我介绍/「今天聊聊」/「据XX报道」/日期;至少 2 个人性杠杆;
+必须有「回到你自己的店/公司」的动作段;给一个收藏点(清单/公式/三问)和一个转发句;
+狠话必须有事实撑腰,事实先核实再上标题。
+【去AI味(硬性)】出声读像对老板说话;禁止排比三连、「首先其次最后」、「值得注意的是」、
+「总而言之」等书面腔;一句话只放一个主数字;英文缩写≤3个;句子长短交错;写出真人判断,
+而不是四平八稳的总结。
 """ + JSON_RULE + """{
  "title_candidates": ["标题1", "标题2", "标题3"],
  "body": "正文 markdown(按首选平台文体)",
  "tags": ["话题标签,不带#号,5-8个"],
- "image_plan": [{"slot": "配图点位如'开头'", "desc": "画面描述"}]  // 2-4 个
+ "image_plan": [{"slot": "配图点位如'开头'", "desc": "画面描述"}],  // 2-4 个
+ "self_check": {"levers": ["本稿用到的人性杠杆"], "save_point": "收藏点", "share_line": "转发句",
+                "ai_smell_fixed": "改掉了哪些AI腔,一句话"}
 }""",
 
     "style": """【你的岗位】工位5 · 文风师(对应开源 Skill:nuwa-skill 人设文风固定)
@@ -684,11 +679,31 @@ SVG 里文字用系统字体,不引用外部资源。总数控制在 3-6 张。
 {body}
 职责:为每个目标平台产出一个"拿来即发"的完整发布包:适配标题、适配正文、
 标签、最佳发布时间、发布操作清单(该平台后台里要点什么/填什么/避什么坑)。
+【一核三版(硬性)】先写 core_card(一句话判断/冲突事实/老板能做的事/谁会转发给谁/谁会收藏),
+再按平台重写原生版本,严禁一稿多发:
+- 抖音:script 口播 180-300 字,第一句≤15字的冲突或结论;只讲1个观点+最多3条做法;结尾回扣开头+评论区提问。
+  描述(body)≤100字:一句判断+一句事实+一个问题,来源单起一行放最后。标签4-6个。
+- 视频号:script 口播 300-480 字,第一人称判断开头;判断→发生了什么→我的经验→3条清单→转发理由。
+  短标题6-16字;forward_reason 写清「转给谁」;语气稳,不冒犯人。标签3-5个。
+- 小红书:标题≤20字且含1个搜索关键词;正文300-600字,第一段直接给结论,1️⃣2️⃣3️⃣分点,结尾给收藏理由+评论区问题;
+  标签8-10个;cards 给 6-9 张 3:4 图文卡规格(第1张 cover:title 为1-3行大字结论每行≤12字、sub≤16字;
+  中间 fact/step:title≤18字、body≤80字、step 带 no 序号和 todo 怎么做;倒数第二张 pitfall 避坑 items;
+  最后一张 summary 收藏总结 items+ending)。卡片上不放网址/二维码/联系方式/其他平台名。
+- 其他平台按各自文体。
+【红线(所有平台)】不贴网址(来源写媒体名+日期)、不留微信/电话/二维码、不写「私信领」「扣1」、
+不出现其他平台账号名、不用「不配」「全网都在骂」等引战词、不对未终审案件下定论、AI 生成内容提醒勾选声明。
 """ + JSON_RULE + """{
- "versions": [{"platform": "平台名", "title": "适配标题", "body": "适配正文",
+ "core_card": {"judgement": "一句话判断", "conflict": "最反常识且已核验的事实",
+               "actions": ["老板能做的事,≤3条"], "share_to": "谁会转发给谁", "save_by": "谁会收藏"},
+ "versions": [{"platform": "平台名", "title": "适配标题", "body": "适配正文/描述",
                "tags": ["标签"], "best_time": "该平台最佳发布时间,如'工作日 12:00-13:00'",
                "checklist": ["发布操作清单,2-4条,具体到该平台后台"],
-               "note": "发布注意事项一句话"}],
+               "note": "发布注意事项一句话",
+               "script": "抖音/视频号的口播稿,其他平台留空字符串",
+               "first_comment": "置顶首评:一个让人想回答的问题",
+               "forward_reason": "视频号必填:转给谁、为什么",
+               "cards": [{"type": "cover|fact|step|pitfall|summary", "title": "...", "sub": "...",
+                          "no": "1", "body": "...", "todo": "...", "items": ["..."], "ending": "..."}]}],
  "publish_plan": "全平台发布节奏建议(先发哪个/间隔多久),60字"
 }""",
 
@@ -717,7 +732,8 @@ JSON 字段、照片主键和本次照片数量由运行时最终权威合同给
 
 # 各员工模板可用的 {占位符} 说明(前端编辑器图例)
 PLACEHOLDERS = {
-    "trend": {"today": "今天日期", "channels": "启用的检索渠道(工作配置里勾选)"},
+    "trend": {"today": "今天日期", "channels": "启用的检索渠道(工作配置里勾选)",
+              "recent_topics": "本企业近30天已做选题(自动去重)"},
     "research": {"topic": "选定选题(含角度/钩子)", "channels": "启用的情报源(工作配置里勾选)"},
     "benchmark": {"topic": "选定选题", "summary": "情报员素材包摘要",
                   "targets": "老板指定的对标账号/链接", "dimensions": "拆解维度(工作配置里定义)"},
@@ -749,9 +765,38 @@ async def _call_bundle_json(idx: int, bundle: providers.PromptBundle, **kwargs):
     )
 
 
+def recent_topics(tid, days: int = 30, limit: int = 40) -> list[str]:
+    """本企业近 N 天流水线选中的选题标题，供趋势官做 30 天去重。"""
+    if not tid:
+        return []
+    import time as _time
+    from .. import db
+    rows = db.q(
+        "SELECT sr.output_json FROM station_run sr JOIN job j ON j.id=sr.job_id "
+        "WHERE j.tenant_id=? AND j.deleted_at IS NULL AND sr.station_idx=0 "
+        "AND sr.status IN ('done','awaiting_review') AND j.created_at>=? "
+        "ORDER BY sr.id DESC LIMIT 200",
+        (tid, _time.time() - days * 86400),
+    )
+    titles = []
+    for row in rows:
+        output = db.jloads(row.get("output_json"), {}) or {}
+        topics = output.get("topics") or []
+        index = output.get("selected", 0)
+        if isinstance(index, int) and 0 <= index < len(topics) and isinstance(topics[index], dict):
+            title = str(topics[index].get("title") or "").strip()[:60]
+            if title and title not in titles:
+                titles.append(title)
+        if len(titles) >= limit:
+            break
+    return titles
+
+
 async def run_trend(ctx):
     prompt = build_prompt(ctx, "trend", {"today": ctx["today"],
-                                         "channels": _channels_text("trend")})
+                                         "channels": _channels_text("trend"),
+                                         "recent_topics": recent_topics(ctx.get("tenant_id"))
+                                         or "（近30天没有已做选题）"})
     return await _call_bundle_json(
         0, prompt, web=True, progress=ctx.get("progress"), token=ctx.get("token")
     )
@@ -953,15 +998,56 @@ async def run_deck(ctx):
     return r
 
 
+def _render_xhs_cards(ctx, version: dict, index: int) -> list[str]:
+    """把小红书版的 cards 规格本地渲染成 PNG；失败只记日志，不影响发布包。"""
+    from .. import xhscards
+    raw = version.get("cards")
+    if not raw:
+        return []
+    persona = (ctx.get("profile") or {}).get("persona") or {}
+    signature = str(persona.get("signature") or "")[:16]
+    images = xhscards.render_cards({"cards": raw}, signature=signature)
+    return [
+        _save_bytes(ctx, f"xhs_v{ctx.get('version', 1)}_{index}_{page:02d}.png", data)
+        for page, data in enumerate(images, start=1)
+    ]
+
+
 async def run_publish(ctx):
+    from .. import platformcheck
     title, body, tags = _final_body(ctx)
     platforms = ctx["brief"].get("platforms") or ["小红书"]
+    progress = ctx.get("progress") or (lambda *a: None)
     prompt = build_prompt(ctx, "publish", {
         "title": title, "tags": tags, "body": body,
         "platform_specs": _platform_specs_text(platforms)})
-    return await _call_bundle_json(
+    result = await _call_bundle_json(
         8, prompt, progress=ctx.get("progress"), token=ctx.get("token")
     )
+    data = result.get("data") if isinstance(result, dict) else None
+    if not isinstance(data, dict):
+        return result
+    versions = [v for v in (data.get("versions") or []) if isinstance(v, dict)]
+    for index, version in enumerate(versions):
+        if version.get("platform") != "小红书" or not version.get("cards"):
+            continue
+        try:
+            files = _render_xhs_cards(ctx, version, index)
+        except Exception as exc:  # 出图失败不能拖垮整个发布包。
+            progress("error", f"小红书图文卡片出图失败，已保留文字版：{type(exc).__name__}")
+            continue
+        if files:
+            version["card_files"] = files
+            progress("done", f"小红书图文卡片 {len(files)} 张已出图(本地渲染,零生图费用)")
+    checked = platformcheck.check_versions(versions)
+    reds = sum(v["check_summary"]["red"] for v in checked)
+    yellows = sum(v["check_summary"]["yellow"] for v in checked)
+    data["versions"] = checked
+    progress(
+        "done" if not reds else "retry",
+        f"发布前红线体检：🔴 {reds} 项必须改 · 🟡 {yellows} 项建议改",
+    )
+    return result
 
 
 async def run_retro(ctx):

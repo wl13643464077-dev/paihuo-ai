@@ -4268,14 +4268,15 @@ const OUT_RENDER = {
     return `<p class="sub">${esc(o.summary||"")}</p>${file?`<div class="actions"><a class="btn pri" href="${esc(file)}" target="_blank" rel="noopener noreferrer">🖥️ 打开演绎稿</a></div>
     <iframe src="${esc(file)}" sandbox referrerpolicy="no-referrer" style="width:100%;height:520px;border:2.5px solid var(--ink);border-radius:14px;margin-top:12px"></iframe>`:""}`;},
   publish(r,j){ const o=r.output;
-    return `<h3>各平台发布包</h3>`+(o.versions||[]).map((v,i)=>`<div class="topic">
-      <div style="display:flex;align-items:center;gap:8px"><span class="tag">${esc(v.platform)}</span>
-        <b style="flex:1">${esc(v.title)}</b>
+    return `<h3>各平台发布包</h3>`+pubCoreCardHtml(o.core_card)+(o.versions||[]).map((v,i)=>`<div class="topic">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="tag">${esc(v.platform)}</span>
+        <b style="flex:1">${esc(v.title)}</b>${pubCheckBadge(v)}
         ${v.best_time?`<span class="sub">🕐 ${esc(v.best_time)}</span>`:""}
         <button class="btn sm" onclick="copyText(${cp((v.title||"")+"\n\n"+(v.body||"")+"\n\n"+(v.tags||[]).map(t=>"#"+t).join(" "))})">📋 复制全文</button></div>
       <div class="md" style="margin-top:8px;max-height:260px;overflow:auto;border:2px solid var(--line);border-radius:10px;padding:10px">${md(v.body)}</div>
       <div style="margin-top:6px">${(v.tags||[]).map(t=>`<span class="tag">#${esc(t)}</span>`).join("")}</div>
       ${v.checklist?.length?`<ul class="list" style="margin-top:6px">${v.checklist.map(c=>`<li>${esc(c)}</li>`).join("")}</ul>`:""}
+      ${pubExtrasHtml(v)}
       <div class="sub" style="margin-top:4px">⚠️ ${esc(v.note||"")}</div></div>`).join("")+
     `<div class="notice">📅 发布节奏:${esc(o.publish_plan||"")}</div>
     <div class="impl">终审通过后,交付包页面可按平台一键复制/下载 zip/直达各平台发布后台。</div>`;},
@@ -4330,6 +4331,7 @@ async function deliveryView(id){
   const [d, TVS, MX] = await Promise.all([api(`/jobs/${id}/delivery`),
     api(`/text-video?job_id=${id}`).catch(optionalResult([])),
     api("/matrix/accounts").catch(optionalResult({accounts:[]})), featFlags()]);
+  DELIV_CUR = d;
   const cover = d.covers[d.cover_selected]||d.covers[0];
   $("#main").innerHTML = `<div class="card">
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
@@ -4363,11 +4365,15 @@ async function deliveryView(id){
         <span style="font-size:22px">${pk.emoji||"📄"}</span><b style="flex:1">${esc(pk.platform)}</b>
         ${pk.best_time?`<span class="sub">🕐 ${esc(pk.best_time)}</span>`:""}</div>
       <div class="sub" style="font-weight:700">${esc(pk.title)}</div>
+      <div>${pubCheckBadge(pk)}</div>
+      ${pubExtrasHtml(pk)}
       ${safeAssetUrl(pk.cover?.file)?`<div class="sub">封面:${esc(pk.cover.size||pk.cover.style||"已配")} · <a href="${esc(safeAssetUrl(pk.cover.file))}" target="_blank" rel="noopener noreferrer" style="text-decoration:underline">查看</a></div>`:""}
       ${pk.checklist?.length?`<details><summary class="sub">📋 发布操作清单(${pk.checklist.length})</summary><ul class="list">${pk.checklist.map(c=>`<li>${esc(c)}</li>`).join("")}</ul></details>`:""}
       <div class="actions" style="margin:0">
         <button class="btn sm pri" onclick="copyText(${cp((pk.title||"")+"\n\n"+(pk.body||"")+"\n\n"+(pk.tags||[]).map(t=>"#"+t).join(" "))})">📋 复制全文</button>
         ${pk.platform==="公众号"?`<button class="btn sm pri" onclick="mpOpen(${id})">📰 排版·发草稿箱</button>`:""}
+        ${pk.platform==="小红书"&&(pk.cards||[]).length?`<button class="btn sm pri" onclick="xhsCardEditor(${id})">✏️ 改字/换封面重出图</button>`:""}
+        ${(pk.platform==="抖音"||pk.platform==="视频号")&&pk.script?`<button class="btn sm pri" onclick="tvCreatePlatform(${id},${cp(pk.platform)},this)">🎬 按${esc(pk.platform)}口播出成片</button>`:""}
         ${pk.platform!=="公众号"?`<button class="btn sm pri" onclick="semiPub(${id},${cp(pk.platform)},${cp(pk.title||"")},${cp((pk.body||"")+"\n\n"+(pk.tags||[]).map(t=>"#"+t).join(" "))},${cp(pk.upload_url||"")})">🪄 半自动发布</button>`:""}
         ${featOn("matrix_autopub")&&pk.platform==="小红书"&&(MX.accounts||[]).some(a=>a.platform==="xhs")?`<button class="btn sm" onclick="mxQuickPub('xhs',${id},${cp(pk.title||"")},${cp(pk.body||"")})">🚀 全自动β</button>`:""}
         <button class="btn sm" onclick="censorQuick(${cp(pk.platform)},${cp(pk.title||"")},${cp(pk.body||"")})">🛡️ 审查</button>
@@ -5874,12 +5880,149 @@ async function prodDetail(idx,identityRef,btn){
     row.style.display=""; btn.textContent="收起";
   }catch(e){ toast(e.message); } btn.disabled=false; if(btn.textContent.includes("spin")) btn.textContent="看产出";
 }
+// 发布包扩展：红线体检 / 口播稿 / 首评 / 小红书图文卡（一核三版）
+function pubCheckBadge(v){
+  const sm=v&&v.check_summary; if(!sm) return "";
+  return sm.red?`<span class="tag" style="background:#fde2e1;color:#b42318">🔴 ${Number(sm.red)} 项必须改</span>`
+    :`<span class="tag" style="background:#e3f6e8;color:#1f6b45">🩺 红线体检通过${sm.yellow?` · 🟡${Number(sm.yellow)}`:""}</span>`;
+}
+function pubExtrasHtml(v){
+  if(!v) return "";
+  const cards=(v.card_files||[]).map(f=>safeAssetUrl(f)).filter(Boolean);
+  const checks=v.checks||[];
+  return `${cards.length?`<div style="margin-top:8px"><div class="sub">🗂️ 小红书图文卡 ${cards.length} 张（3:4，可直接上传）</div>
+      <div style="display:flex;gap:6px;overflow-x:auto;padding:6px 0">${cards.map((f,i)=>`<a href="${esc(f)}" target="_blank" rel="noopener noreferrer" title="第${i+1}张"><img src="${esc(f)}" loading="lazy" style="height:150px;border-radius:8px;border:1px solid var(--line)"></a>`).join("")}</div></div>`:""}
+    ${v.script?`<details style="margin-top:6px"><summary class="sub">🎙️ 口播稿（${String(v.script).replace(/\s/g,"").length} 字 ≈ ${Math.round(String(v.script).replace(/\s/g,"").length/6)} 秒）</summary>
+      <div style="white-space:pre-wrap;margin-top:6px">${esc(v.script)}</div>
+      <button class="btn sm" onclick="copyText(${cp(v.script)})">📋 复制口播稿</button>
+      <button class="btn sm" onclick="aiSmell(${cp(v.script)},this)">🔍 测AI味</button></details>`:""}
+    ${v.first_comment?`<div class="sub" style="margin-top:4px">💬 置顶首评：${esc(v.first_comment)}</div>`:""}
+    ${v.forward_reason?`<div class="sub" style="margin-top:4px">🔁 转发理由：${esc(v.forward_reason)}</div>`:""}
+    ${checks.length?`<details style="margin-top:6px" ${v.check_summary?.red?"open":""}><summary class="sub">🩺 发布前红线体检（${checks.length} 条）</summary>
+      <ul class="list">${checks.map(c=>`<li>${c.level==="red"?"🔴":"🟡"} ${esc(c.msg)}</li>`).join("")}</ul></details>`:""}`;
+}
+async function aiSmell(text,btn){
+  const t=btn?.textContent; if(btn){btn.disabled=true;btn.innerHTML='<span class="spin"></span> 检测中…';}
+  try{
+    const r=await api("/tools/ai-smell",{method:"POST",body:{text},timeout:120000});
+    const L=r.local||{}; const Z=r.zhuque;
+    const lines=[`本地 AI 腔指数:${Number(L.score)||0}(${L.level||"低"})`,...(L.issues||[]).map(i=>"· "+i)];
+    if(Z) lines.push("",`朱雀检测:${Z.verdict} · 人工 ${Math.round(Z.human*100)}% / AI ${Math.round(Z.ai*100)}% / 疑似 ${Math.round(Z.suspect*100)}%`);
+    else if(r.zhuque_error) lines.push("",`朱雀:${r.zhuque_error}`);
+    else if(!r.configured) lines.push("","朱雀未配置(管理后台可填 Key),当前只做了本地体检。");
+    lines.push("","提示:分数只是外部信号,把真人经历和判断写进去比压分数更重要。");
+    await uiAlert({title:"🔍 AI 味检测",message:lines.join("\n")});
+  }catch(e){toast(e.message);}
+  if(btn){btn.disabled=false;btn.textContent=t;}
+}
+async function plMetrics(pid){
+  let info; try{ info=await api(`/publog/${pid}/metrics`); }catch(e){ return toast(e.message); }
+  const last=(info.saved||{})["72h"]||(info.saved||{})["24h"]||{};
+  const box=document.createElement("div"); box.id="pl-metrics";
+  box.style.cssText="position:fixed;inset:0;z-index:999;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:16px";
+  box.innerHTML=`<div class="card" style="max-width:420px;width:100%;margin:0">
+    <h3 style="margin-top:0">📏 ${esc(info.platform)} 发布后数据体检</h3>
+    <div class="sub">从平台后台抄数字过来(发布 24 小时、72 小时各填一次),按三平台及格线自动诊断,不扣点。</div>
+    <label>哪一次</label><select id="plm-stage"><option value="24h">发布 24 小时</option><option value="72h">发布 72 小时</option></select>
+    ${info.fields.map(f=>`<label>${esc(f.label)}(${esc(f.unit)},及格线 ${esc(f.target)})</label>
+      <input id="plm-${esc(f.key)}" inputmode="decimal" value="${last.metrics&&last.metrics[f.key]!=null?esc(last.metrics[f.key]):""}">`).join("")}
+    <div id="plm-result" style="margin-top:10px"></div>
+    <div class="actions"><button class="btn pri" onclick="plMetricsSave(${pid},${cp(JSON.stringify(info.fields.map(f=>f.key)))},this)">体检</button>
+      <button class="btn" onclick="document.getElementById('pl-metrics').remove()">关闭</button></div></div>`;
+  document.body.appendChild(box);
+}
+async function plMetricsSave(pid,keysJson,btn){
+  const metrics={}; JSON.parse(keysJson).forEach(k=>{ const v=$("#plm-"+k)?.value.trim(); if(v) metrics[k]=v; });
+  btn.disabled=true;
+  try{
+    const r=await api(`/publog/${pid}/metrics`,{method:"POST",body:{stage:$("#plm-stage").value,metrics}});
+    $("#plm-result").innerHTML=`${(r.items||[]).map(i=>`<div>${i.pass?"✅":"❌"} ${esc(i.label)} ${esc(i.value)}${esc(i.unit)}(及格线 ${esc(i.target)})</div>`).join("")}
+      <div class="notice ${r.passed?"green":"red"}" style="margin-top:8px">${esc(r.advice||"")}</div>`;
+  }catch(e){ toast(e.message); }
+  btn.disabled=false;
+}
+var DELIV_CUR=null;
+const XHS_THEMES=["中国红","蓝白","黑金","墨绿","粉红"];
+function xhsCardEditor(jobId){
+  const pk=(DELIV_CUR?.packs||[]).find(p=>p.platform==="小红书"); if(!pk) return toast("没有小红书版本");
+  const photos=[...(DELIV_CUR.images||[]),...(DELIV_CUR.covers||[])].map(x=>x.file).filter(f=>/\.(png|jpe?g|webp)$/i.test(f||"")&&safeAssetUrl(f));
+  const field=(i,k,label,val,multi)=>`<label class="sub">${label}</label>${multi?`<textarea data-c="${i}" data-k="${k}" style="min-height:52px">${esc(val||"")}</textarea>`:`<input data-c="${i}" data-k="${k}" value="${esc(val||"")}">`}`;
+  const cardHtml=(c,i)=>{
+    const head=`<b>第${i+1}张 · ${({cover:"封面",fact:"事实",step:"步骤",pitfall:"避坑",summary:"收藏总结"})[c.type]||c.type}</b>`;
+    if(c.type==="cover") return head+field(i,"title","大字(每行一句,≤12字)",(c.title||[]).join("\n"),true)+field(i,"kicker","小标签",c.kicker)+field(i,"sub","副标题(≤18字)",c.sub);
+    if(c.type==="pitfall"||c.type==="summary") return head+field(i,"title","标题",c.title)+field(i,"items","要点(每行一条)",(c.items||[]).join("\n"),true)+field(i,"ending","结尾一句",c.ending);
+    return head+field(i,"title","标题(≤18字)",c.title)+field(i,"body","正文(≤90字)",c.body,true)+(c.type==="step"?field(i,"todo","怎么做",c.todo):"");
+  };
+  const box=document.createElement("div"); box.id="xhs-editor";
+  box.style.cssText="position:fixed;inset:0;z-index:999;background:rgba(0,0,0,.45);display:flex;align-items:flex-start;justify-content:center;padding:16px;overflow:auto";
+  box.innerHTML=`<div class="card" style="max-width:560px;width:100%;margin:0">
+    <h3 style="margin-top:0">✏️ 小红书图文卡 · 改字重出图</h3>
+    <div class="sub">本地重新出图,不扣点。卡片上不要放网址、微信号、二维码。</div>
+    <label>配色</label><select id="xe-theme">${XHS_THEMES.map(t=>`<option ${t===(pk.card_theme||"中国红")?"selected":""}>${t}</option>`).join("")}</select>
+    <label>封面照片(可选,选一张真实照片铺满封面)</label>
+    <div style="display:flex;gap:8px;overflow-x:auto;padding:4px 0">
+      <label style="text-align:center"><input type="radio" name="xe-photo" value="" ${pk.card_cover_image?"":"checked"}><div class="sub">纯文字封面</div></label>
+      ${photos.map(f=>`<label style="text-align:center"><input type="radio" name="xe-photo" value="${esc(f)}" ${pk.card_cover_image===f?"checked":""}><img src="${esc(safeAssetUrl(f))}" style="height:90px;border-radius:6px;display:block"></label>`).join("")}</div>
+    ${photos.length?"":`<div class="sub">本工单还没有配图;可在交付页「真实素材图库」搜图入库后再来选。</div>`}
+    <div id="xe-cards">${pk.cards.map((c,i)=>`<div class="topic">${cardHtml(c,i)}</div>`).join("")}</div>
+    <div class="actions"><button class="btn pri" onclick="xhsCardSave(${jobId},this)">🖨️ 重新出图</button>
+      <button class="btn" onclick="document.getElementById('xhs-editor').remove()">关闭</button></div></div>`;
+  box.dataset.cards=JSON.stringify(pk.cards);
+  document.body.appendChild(box);
+}
+async function xhsCardSave(jobId,btn){
+  const box=$("#xhs-editor"); const cards=JSON.parse(box.dataset.cards||"[]");
+  box.querySelectorAll("[data-c]").forEach(el=>{
+    const c=cards[Number(el.dataset.c)]; const k=el.dataset.k; const v=el.value;
+    c[k]=(k==="items"||(k==="title"&&c.type==="cover"))?v.split("\n").map(x=>x.trim()).filter(Boolean):v.trim();
+  });
+  btn.disabled=true; btn.innerHTML='<span class="spin"></span> 出图中…';
+  try{
+    const r=await api(`/jobs/${jobId}/xhs-cards`,{method:"POST",body:{cards,theme:$("#xe-theme").value,
+      cover_image:(box.querySelector('input[name="xe-photo"]:checked')||{}).value||""},timeout:120000});
+    toast(`已重新出图 ${r.card_files.length} 张${r.check_summary?.red?`,体检还有 🔴${r.check_summary.red} 项`:""}`);
+    box.remove(); render(true);
+  }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🖨️ 重新出图"; }
+}
+function pubCoreCardHtml(c){
+  if(!c||!c.judgement) return "";
+  return `<div class="notice" style="margin-bottom:10px"><b>🧬 核心卡（一核三版都从这里长出来）</b>
+    <div>判断：${esc(c.judgement)}</div>${c.conflict?`<div>冲突事实：${esc(c.conflict)}</div>`:""}
+    ${(c.actions||[]).length?`<div>老板能做的事：${c.actions.map(esc).join("；")}</div>`:""}
+    ${c.share_to?`<div class="sub">谁会转发：${esc(c.share_to)}</div>`:""}${c.save_by?`<div class="sub">谁会收藏：${esc(c.save_by)}</div>`:""}</div>`;
+}
 const BRAND_FACT_LABELS = {
   brand_name:"品牌名",store_name:"门店名",store_address:"门店完整地址（含城市）",slogan:"品牌口号",philosophy:"品牌理念",
   signature:"招牌产品 / 服务",logo_url:"Logo 图片链接",tone:"品牌调性",
   business:"主营业务",audience:"目标客群",selling_points:"核心卖点",
-  taboo:"表达禁忌",keywords:"常用话术"
+  taboo:"表达禁忌",keywords:"常用话术",
+  story:"品牌故事与创立背景",price:"价格带 / 人均",channels:"门店与渠道布局",campaigns:"近三个月活动",
+  news:"近三个月新闻与舆情",competitors:"竞品对照",service:"服务承诺与售后",official:"官方渠道",
+  people:"创始人与公开管理层",franchise:"加盟与招商政策",compliance:"资质与食品安全公开信息",
+  reviews:"用户口碑关键词",seasonal:"季节与节日打法",supply:"产地与供应链故事",esg:"社会责任与公开承诺",
+  content:"近三个月内容热点"
 };
+function brandCoverageHtml(p, editing){
+  const cv=p&&p.coverage; if(!cv) return "";
+  const pct=Math.round((Number(cv.filled)||0)/(Number(cv.total)||24)*100);
+  const timeKeys=new Set(cv.time_sensitive||[]);
+  return `<div class="topic" style="margin-top:12px"><b>📊 品牌画像覆盖 ${Number(cv.filled)||0}/${Number(cv.total)||24} 维</b>
+    <div style="height:8px;background:var(--line);border-radius:6px;margin:8px 0;overflow:hidden"><div style="height:100%;width:${pct}%;background:var(--pri,#ff7f2a)"></div></div>
+    ${(cv.missing||[]).length?`<div class="sub">还缺这些维度${editing?"：点一下就定向联网补抓（只收能在原网页逐字核对的内容，找不到不会乱写）":"（审阅草稿时可补抓）"}</div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">${cv.missing.map(m=>editing&&m.key!=="logo_url"
+      ?`<button class="btn sm" onclick="brandFill(${Number(p.id)},${cp(m.key)},this)">🔎 ${esc(m.label)}${timeKeys.has(m.key)?" ⏱":""}</button>`
+      :`<span class="tag">${esc(m.label)}</span>`).join("")}</div>
+    <div class="sub" style="margin-top:6px">⏱ = 时效维度，只收近三个月资料，建议每季度补抓一次。也可以在下方「手工补一项」直接填写。</div>`
+    :`<div class="sub">24 维已全部覆盖。</div>`}</div>`;
+}
+async function brandFill(packageId,key,btn){
+  if(brandHasUnsubmittedEdits()) return toast("当前知识包还有未保存的修改，请先保存");
+  btn.disabled=true; const t=btn.textContent; btn.innerHTML='<span class="spin"></span> 补抓中…';
+  try{
+    await api(`/brand-packages/${packageId}/fill`,{method:"POST",body:{key},timeout:390000,longRunning:true});
+    toast(`已补上「${BRAND_FACT_LABELS[key]||key}」，请审阅后再确认入库`); render(true);
+  }catch(e){ toast(e.message); btn.disabled=false; btn.textContent=t; }
+}
 function brandSourceHtml(source){
   if(!source) return '<span class="sub">未附来源</span>';
   if(source.kind==="manual") return '<span class="sub">✍️ 老板手工确认</span>';
@@ -5928,6 +6071,7 @@ async function brandView(packageId){
     ${p?`<div class="notice" style="margin-top:16px"><b>${esc(p.brand_name||"品牌")}</b> · v${Number(p.version)||1} · ${status[p.status]||esc(p.status)}
       ${Number(listed.active_id)===selectedId?" · 当前员工生效版":""}
       ${p.status==="failed"?`<div>${esc(p.failure_reason||"没有找到足以核验的公开资料。可换更完整的品牌名重试，或补充官网线索。")}</div>`:""}</div>
+      ${brandCoverageHtml(p, editing)}
       ${facts.length?factRows:p.status==="draft"?`<div class="empty">草稿没有有效事实，不能确认入库。</div>`:""}
       ${editing?`<div class="topic" style="margin-top:12px"><b>手工补一项</b>
         <div class="row"><div><label for="bp-add-key">资料类型</label><select id="bp-add-key">${Object.entries(BRAND_FACT_LABELS).map(([k,v])=>`<option value="${esc(k)}">${esc(v)}</option>`).join("")}</select></div>
@@ -6138,10 +6282,12 @@ async function knowledgeView(){
   KNOW_CACHE = rows;
   const shown = rows;
   $("#main").innerHTML = `<div class="card"><h2>📚 公司经验库</h2>
-    <div class="sub">交付自动沉淀 + 老板手记。每条自动做 <b>11 维评估</b>(类别/平台/行业/主题/关键词/质量/匹配/复用/时效/情绪/摘要);📌 置顶的会注入员工每次工作(<b>每次最多带 12 条、每条取前 800 字</b>,置顶优先)。</div>
+    <div class="sub">交付自动沉淀 + 老板手记 + <b>上传内部资料</b>(菜单/价格表/SOP/培训资料/品牌手册)。每条自动做 <b>11 维评估</b>;员工每次开工按任务内容<b>分段检索全文</b>,只带最相关的几段原文(每份资料最多 2 段),📌 置顶的永远带上。</div>
+    <div id="kb-stats" class="kv" style="margin-top:6px"></div>
     ${(n=>n>12?`<div class="notice red" style="margin-top:8px">📌 已置顶 ${n} 条,超过单次注入上限 <b>12 条</b>:每次开工只有最新置顶的 12 条会带上,建议把最关键的留在置顶、其余取消。</div>`:"")(rows.filter(k=>k.pinned).length)}
     ${listContractNotice(knowledgeContract,"沉淀")}
     <div class="actions"><button class="btn pri" onclick="knowForm()">➕ 手记一条</button>
+      <label class="btn pri" style="cursor:pointer">📎 上传资料入库<input type="file" accept=".pdf,.docx,.xlsx,.pptx,.txt,.md,.csv,.json" style="display:none" onchange="kbUpload(this)"></label>
       <button class="btn" onclick="feishuSync('knowledge',this)">📤 同步到飞书</button>
       <input id="kb-q" placeholder="🔍 搜标题/标签/来源" value="${esc(KB_Q||"")}" style="max-width:220px" onkeydown="if(event.key==='Enter'){KB_Q=this.value.trim();render();}">
       <a class="btn" href="/api/library/export.xlsx?kind=knowledge">⬇️ 导出Excel</a>
@@ -6156,7 +6302,7 @@ async function knowledgeView(){
       <td style="min-width:150px"><b style="cursor:pointer;text-decoration:underline dotted" onclick="kbOpen(${k.id})">${k.pinned?"📌 ":""}${esc(k.title)}</b>
         <div class="sub" style="font-size:11px">${new Date(k.created_at*1000).toLocaleDateString("zh-CN")}</div></td>
       ${metaCells(k.meta)}
-      <td>${k.source==="auto"?"🤖 自动":"✍️ 手记"}${k.job_id?`<br><a href="#/delivery/${k.job_id}" style="text-decoration:underline">看交付</a>`:""}</td>
+      <td>${k.source==="auto"?"🤖 自动":k.source==="upload"?"📎 上传":"✍️ 手记"}${k.job_id?`<br><a href="#/delivery/${k.job_id}" style="text-decoration:underline">看交付</a>`:""}</td>
       <td style="white-space:nowrap">
         <button class="btn sm pri" onclick="kbOpen(${k.id})">📄 看原件</button>
         <button class="btn sm" onclick="knowPin(${k.id},${k.pinned?0:1})" title="置顶注入员工工作">${k.pinned?"取消置顶":"📌"}</button>
@@ -6166,6 +6312,22 @@ async function knowledgeView(){
     </tr>`).join("")}</tbody></table></div>`
     :`<div class="empty">还没有沉淀。完成第一单交付后复盘官会自动写入;也可以点上面手记。</div>`}
     ${listPager(knowledgeContract,"knowledge")}</div>`;
+  api("/knowledge-stats").then(st=>{ const el=$("#kb-stats"); if(el) el.innerHTML=
+    `<span>资料 ${Number(st.docs)||0} 份</span><span>上传 ${Number(st.uploads)||0} 份</span><span>可检索段落 ${Number(st.chunks)||0} 段</span><span>${Math.round((Number(st.chars)||0)/1000)}k 字</span>`; }).catch(()=>{});
+}
+async function kbUpload(input){
+  const f=input.files[0]; if(!f) return;
+  const fd=new FormData(); fd.append("file", f);
+  let category=null;
+  try{ category=await uiPrompt({title:"资料分类",label:"这份资料属于哪一类？",value:"内部资料",
+    placeholder:"如 菜单 / 价格表 / SOP / 培训资料 / 品牌手册",required:false}); }catch(_){}
+  if(category===null||category===undefined){ input.value=""; return; }
+  fd.append("category", String(category).trim()||"内部资料");
+  try{
+    const r=await xhrUpload("/api/knowledge/upload", fd, input);
+    toast(`已入库「${r.title}」：${r.chars} 字,切成 ${r.chunks} 段${r.truncated?"(超长部分已截断)":""},员工开工会自动检索`);
+    render();
+  }catch(e){ toast(e.message); }
 }
 async function reAnalyze(kind,id,btn){
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span>`;
@@ -6224,7 +6386,7 @@ async function knowSave(id){
 async function knowPin(id,pinned){
   try{
     await api("/knowledge/"+id,{method:"PUT",body:{pinned:!!pinned}});
-    if(pinned) toast("📌 已置顶。员工每次开工最多带 12 条置顶知识(每条取前 800 字)");
+    if(pinned) toast("📌 已置顶。置顶资料每次开工都会带上最相关的段落");
     render();
   }catch(e){ toast(e.message); }
 }
@@ -6476,6 +6638,17 @@ async function avatarView(){
       </div>
     </div>
   </div>
+  <div class="card" style="background:#fff7ec"><h2>🛒 AI 带货视频(15 秒竖屏)</h2>
+    <div class="sub">一张<b>产品/菜品/门店照片</b> + 卖点 → 豆包 Seedance 2.5 直接生成带口播和环境音的 15 秒短片;照片里有真人时自动改走可灵 3.0。照片用上面 ① 的照片库(先上传产品照,再点选)。</div>
+    <div class="sub" style="margin-top:4px">当前选中照片:<b>${AV_PHOTO?"已选 1 张":"未选"}</b></div>
+    <div class="row" style="margin-top:8px">
+      <div style="flex:1;min-width:180px"><label>产品名 *</label><input id="sv-product" maxlength="40" placeholder="如:招牌水煮牛肉"></div>
+      <div style="flex:2;min-width:240px"><label>卖点(选填)</label><input id="sv-points" maxlength="160" placeholder="如:现切牛肉、红油现熬、两人份 68 元"></div></div>
+    <div class="row">
+      <div style="flex:1;min-width:180px"><label>场景(选填)</label><input id="sv-scene" maxlength="80" placeholder="如:下班后朋友聚餐的餐桌"></div>
+      <div style="flex:2;min-width:240px"><label>口播台词(选填,≤60字;留空由 AI 写)</label><input id="sv-script" maxlength="60" placeholder="如:红油一浇,牛肉片滑得停不下来,下班约上朋友来尝尝"></div></div>
+    <div class="actions"><button class="btn pri" onclick="svSubmit(this)">🛒 生成带货视频</button>
+      <span class="sub">💎 本单 <b>24 点</b>(失败自动退点) · 不写价格/联系方式,画面不加字,发布时记得勾选「AI 生成」</span></div></div>
   ${active.length?`<div class="card" style="background:#fffaf0"><h2>🎬 进行中(${active.length} 个并行)</h2>
     ${active.map(j=>`<div style="border:2px solid var(--ink);border-radius:14px;padding:12px;margin-bottom:10px;background:#fff">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -6637,6 +6810,18 @@ async function avSubmit(btn){
     toast(`已开拍${AV_VOICE_MODE==="own"?"(用您的原声)":""},可继续开新的任务`); render();
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🎬 开拍"; }
 }
+async function svSubmit(btn){
+  if(!AV_PHOTO) return toast("先在 ① 上传并点选一张产品照片");
+  if(!avConsentOk()) return;
+  const product=$("#sv-product").value.trim(); if(!product) return toast("填一下产品名");
+  btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 提交中…`;
+  try{
+    await api("/avatar/sales-jobs",{method:"POST",body:{photo_name:AV_PHOTO.name,product,
+      selling_points:$("#sv-points").value.trim(),scene:$("#sv-scene").value.trim(),
+      script:$("#sv-script").value.trim(),consent:AV_CONSENT}});
+    toast("🛒 带货视频已开工,约 3-8 分钟出片,完成后在下方任务列表查看"); render();
+  }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🛒 生成带货视频"; }
+}
 async function avCancel(id){
   if(!await uiConfirm(`取消这个数字人任务 #${id}? 未完成的渲染会退回。`,{
     title:"取消数字人任务",confirmText:"取消任务"
@@ -6708,6 +6893,12 @@ async function adminView(){
     <div class="row">
       <div><label>TinyFish API Key ${ADM.provider.tinyfish_key?`<span class="tag">当前:${esc(ADM.provider.tinyfish_key)}</span>`:`<span class="tag">未配置</span>`}</label>
         <input id="adm-tinyfish" type="password" placeholder="tf-…(留空不改)"></div>
+    </div>
+    <h3>🐦 朱雀 AI 检测(选配)</h3>
+    <div class="sub" style="margin-bottom:6px">腾讯朱雀官方 API(EdgeOne 控制台 → Makers → Models → API Key 创建,每月有免费额度)。配置后口播稿/正文的「测AI味」会加上朱雀的人工/AI占比;不配置也能用免费的本地 AI 腔体检。</div>
+    <div class="row">
+      <div><label>朱雀 API Key ${ADM.provider.zhuque_key?`<span class="tag">当前:${esc(ADM.provider.zhuque_key)}</span>`:`<span class="tag">未配置</span>`}</label>
+        <input id="adm-zhuque" type="password" placeholder="(留空不改)"></div>
     </div>
     <div class="actions"><button class="btn pri" onclick="admSaveProvider()">💾 保存供应商</button>
       <span class="sub">所有数字员工与工具能力统一使用此 API,不依赖服务器本地模型登录态。</span></div></div>
@@ -6878,6 +7069,7 @@ async function admSaveProvider(){
   const body = {yunwu_base:$("#adm-base").value.trim()};
   const k = $("#adm-key").value.trim(); if(k) body.yunwu_key = k;
   const tf = $("#adm-tinyfish")?.value.trim(); if(tf) body.tinyfish_key = tf;
+  const zq = $("#adm-zhuque")?.value.trim(); if(zq) body.zhuque_key = zq;
   try{ await api("/settings",{method:"PUT",body}); toast("供应商已保存"); render(); }catch(e){ toast(e.message); }
 }
 async function admSaveMail(){
@@ -8589,6 +8781,7 @@ async function censorView(){
         <span class="sub" style="float:right">${new Date((r.published_at||r.created_at)*1000).toLocaleDateString("zh-CN")} ${r.source==="draft"?"· 草稿箱推送":""}</span>
         <div class="sub" style="margin-top:5px">复盘:T+1 ${st("1")} · T+3 ${st("3")} · T+7 ${st("7")}
           <button class="btn sm" style="margin-left:8px" onclick="plPull(${r.id},this)">📥 自动拉数据复盘</button>
+          ${["抖音","视频号","小红书"].includes(r.platform)?`<button class="btn sm pri" onclick="plMetrics(${r.id})" title="按三平台及格线体检,免费">📏 填数据体检</button>`:""}
           <button class="btn sm" onclick="plMark(${r.id})" title="把复盘计时从现在重新起算">✔ 我刚群发</button>
           <button class="btn sm bad" onclick="plDel(${r.id})" title="删除后不再自动复盘扣点">🗑</button></div></div>`;}).join(""):`<div class="empty">还没有登记,发草稿箱会自动记一笔</div>`}</div>
     ${listPager(publogContract,"publog")}`;
@@ -8848,13 +9041,21 @@ async function tvCreate(jobId, btn){
     toast("🎬 已开工:配音+合成约2-4分钟,完成会推微信通知"); render();
   }catch(e){ toast(e.message); if(btn){ btn.disabled=false; btn.textContent="🎬 一键成片 3点"; } }
 }
+async function tvCreatePlatform(jobId, platform, btn){
+  const t=btn?.textContent;
+  if(btn){ btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 排队…`; }
+  try{
+    await api(`/jobs/${jobId}/text-video`,{method:"POST",body:{platform}});
+    toast(`🎬 ${platform}版已开工:按${platform}口播稿配音合成(${platform==="抖音"?"约30-50秒":"约50-80秒"}),3点`); render();
+  }catch(e){ toast(e.message); if(btn){ btn.disabled=false; btn.textContent=t; } }
+}
 function tvListCard(TVS, MX, jobId){
   if(!(TVS||[]).length) return "";
   const dy = featOn("matrix_autopub") && (MX.accounts||[]).find(a=>a.platform==="douyin");
   return `<div class="card"><h3 style="margin-top:0">🎬 视频成片(图文转视频)</h3>
     ${TVS.map(t=>{
       const last = (t.steps||[]).slice(-1)[0];
-      return `<div class="topic"><b>${esc(t.params?.title||"成片")}</b>
+      return `<div class="topic"><b>${t.params?.platform?`[${esc(t.params.platform)}] `:""}${esc(t.params?.title||"成片")}</b>
         <span class="pill ${t.status}">${{queued:"排队",running:"合成中",done:"已出片",failed:"失败"}[t.status]||t.status}</span>
         ${t.status==="running"&&last?`<span class="sub"> ${esc(last.msg)}</span>`:""}
         ${t.status==="failed"?`<div class="sub">❌ ${esc(t.error||"")}(点数已退)</div>`:""}

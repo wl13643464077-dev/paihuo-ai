@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -483,12 +484,31 @@ def avatar_clone_delete(vid: str):
     return {"ok": True}
 
 
+def _avatar_job_price(action: str) -> dict:
+    """Resolve a job price without changing the global saved-price semantics.
+
+    Older installations may persist a partial price table.  The sales action
+    was added later, so only that action gets its new default when its entry or
+    its points field is absent.  A configured zero remains a valid override;
+    all other avatar actions retain the historical one-point fallback.
+    """
+    saved = billing.prices()
+    price = saved.get(action) if isinstance(saved, dict) else None
+    if action == "avatar_sales" and (
+        not isinstance(price, dict)
+        or "points" not in price
+        or price.get("points") is None
+    ):
+        price = billing.DEFAULT_PRICES[action]
+    return price or {"points": 1}
+
+
 def _create_charged_avatar_job(params: dict, tid: int = None) -> int:
     """先落待计费工单，再把开工状态、余额与计费流水原子提交。"""
     tid = int(tid or TEN())
     action = avatar._charged_action(params)
     points = 0.0 if tid == 1 else float(
-        (billing.prices().get(action) or {"points": 1})["points"])
+        _avatar_job_price(action)["points"])
     job_id = db.insert("avatar_job", {
         "params_json": json.dumps(params, ensure_ascii=False),
         "tenant_id": tid,
@@ -624,6 +644,48 @@ async def avatar_job_create(body: dict):
                 "duration": dur,
                 "prompt": (body.get("prompt") or "").strip(),
                 "domestic_only": not overseas_ok,
+            }
+            return _create_charged_avatar_job(params, tid)
+
+    jid = await _run_db_then_start_worker_safely(
+        create_job,
+        start_worker=_start_avatar_job_worker,
+        settle_unstarted=_settle_unstarted_avatar_job,
+    )
+    return {"job_id": jid}
+
+
+@router.post("/api/avatar/sales-jobs")
+async def avatar_sales_job_create(body: dict):
+    """AI 带货视频：产品/门店照片 + 卖点 → 15 秒竖屏短片（Seedance 2.5，真人图自动改可灵 3.0）。"""
+    _need_module("avatar")
+    product = str(body.get("product") or "").strip()[:40]
+    if not body.get("photo_name") or not product:
+        raise HTTPException(400, "产品照片和产品名必填")
+    script = re.sub(r"\s+", "", str(body.get("script") or ""))
+    if len(script) > 60:
+        raise HTTPException(400, "15 秒台词最多 60 个字，请精简（留空由 AI 撰写）")
+    tid = TEN()
+
+    def create_job() -> int:
+        with avatar.asset_library_lock(tid):
+            photo_name = _avatar_asset_name(body.get("photo_name"), "photo_name", {"photo"})
+            try:
+                avatar.require_consent(
+                    tid, [photo_name], body.get("consent"), "avatar_job",
+                    user=auth.current(), kinds={photo_name: "photo"},
+                )
+            except avatar.ConsentRequired as exc:
+                raise HTTPException(400, str(exc)) from None
+            params = {
+                "engine": "sales",
+                "photo_name": photo_name,
+                "product": product,
+                "selling_points": str(body.get("selling_points") or "").strip()[:160],
+                "scene": str(body.get("scene") or "").strip()[:80],
+                "script": script,
+                "duration": 15,
+                "domestic_only": True,
             }
             return _create_charged_avatar_job(params, tid)
 
