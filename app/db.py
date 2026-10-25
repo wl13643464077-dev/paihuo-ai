@@ -10,6 +10,7 @@ import threading
 import time
 import atexit
 from contextlib import contextmanager
+from functools import lru_cache, wraps
 
 import fcntl
 
@@ -939,6 +940,45 @@ def employee_config_sha256(
     return hashlib.sha256(payload).hexdigest()
 
 
+def _memoize_scalar_row_validation(validate):
+    """Reuse only exact, immutable row content, never a stored digest alone.
+
+    Startup checks the retained catalog repeatedly. Bound both entry count and
+    key size; nested/mutable inputs still take the uncached validation path.
+    Every field and its type participates, so even a same-digest edit misses.
+    """
+    @lru_cache(maxsize=2048)
+    def cached(items):
+        return validate({key: float.fromhex(value) if kind is float else value
+                         for key, kind, value in items})
+
+    @wraps(validate)
+    def checked(raw):
+        try:
+            row = dict(raw or {})
+        except (TypeError, ValueError):
+            return validate(raw)
+        if not all(type(key) is str and type(value) in
+                   (str, int, float, bool, type(None))
+                   for key, value in row.items()):
+            return validate(row)
+        try:
+            size = sum(len(key) + len(str(value)) + 64
+                       for key, value in row.items())
+        except (ValueError, OverflowError):
+            return validate(row)
+        if size > 32768:
+            return validate(row)
+        # Python considers -0.0 == 0.0, but their canonical JSON hashes differ.
+        return cached(tuple((key, type(value), value.hex() if type(value) is float else value)
+                            for key, value in sorted(row.items())))
+
+    checked.cache_clear = cached.cache_clear
+    checked.cache_info = cached.cache_info
+    return checked
+
+
+@_memoize_scalar_row_validation
 def employee_role_config_row_valid(raw) -> bool:
     """Recompute both immutable identity and canonical config integrity.
 
@@ -1586,6 +1626,7 @@ def get_employee_role_bundle(
     return {**row, "baseline": baseline, "effective": effective}
 
 
+@_memoize_scalar_row_validation
 def employee_role_bundle_row_valid(row) -> bool:
     """Fail-closed integrity predicate for a stored role-bundle row."""
     try:
