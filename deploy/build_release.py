@@ -87,7 +87,6 @@ _IGNORED_DEPARTMENT_SEED_SOURCES = frozenset(
 _EXECUTABLE_PATHS = frozenset(
     {
         "run.sh",
-        "deploy/upgrade.sh",
         "tests/run.sh",
     }
 )

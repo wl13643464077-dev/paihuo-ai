@@ -315,7 +315,7 @@ def backup_warnings(
                 f"异地备份已超过 {offsite_max_age_hours:g} 小时没有成功同步"
             )
         if status.get("status") == "failed":
-            warnings.append("最近一次异地同步失败,详见 paihuo-backup.service 日志")
+            warnings.append("最近一次异地同步失败,详见 paihuo-backup-simple.service 日志")
     snapshot_root = Path(assets_dir) if assets_dir else directory / "assets"
     try:
         snapshots = list_asset_snapshots(snapshot_root)

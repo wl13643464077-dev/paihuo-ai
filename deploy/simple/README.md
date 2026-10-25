@@ -1,8 +1,8 @@
 # 派活 简易部署（1 台 Ubuntu 服务器，1–2 人就能维护）
 
-这是和 `deploy/DEPLOYMENT.md` 那套"不可变发布"体系并存的**简易通道**：一条命令发布、
-一条命令回滚，出问题自动回滚。旧体系的文件一个没删，已经在用旧体系的服务器可以继续用；
-新服务器、或者觉得旧体系太重的，用这里的步骤。
+这是当前唯一维护的生产部署通道：一条命令发布、一条命令回滚，出问题自动回滚。
+旧的不可变发布链已退役；`deploy/DEPLOYMENT.md` 只保留历史迁移说明，不能作为现用
+安装、发布或恢复手册。数据库、素材和配对密钥的恢复见 [备份与恢复手册](../BACKUP_RECOVERY.md)。
 
 | 文件 | 作用 |
 | --- | --- |
@@ -12,8 +12,9 @@
 | `paihuo.service` | systemd 服务单元（单进程、北京时间、内存上限、日志进 journald、安全沙箱） |
 | `paihuo-backup-simple.service` / `.timer` | 每小时备份数据库、每天快照素材、可选异地同步 |
 
-> **两套通道二选一**：简易通道的服务叫 `paihuo`，旧体系叫 `contentcrew`，它们用同一个
-> 数据库，绝不能同时启用。
+> **同一个数据库只能由一个应用进程使用**：当前服务是 `paihuo.service`。迁移尚未完成的
+> 旧服务器须先停用历史 `contentcrew.service` 和旧备份 units，不能与 simple 同时运行。
+> 仓库不再提供旧发布链；归档材料仅用于审计，不应重新启用。
 
 ## 目录布局
 
@@ -140,7 +141,7 @@ sudo caddy validate --config /etc/caddy/Caddyfile
 sudo systemctl reload caddy
 ```
 
-- 不要安装 `deploy/caddy-paihuo-guard.conf`，那是旧体系的启动闸门，简易通道用不上。
+- 不要接回旧 Caddy 启动闸门；迁移遗留 drop-in 的核对见第 五 节。
 - Caddyfile 里 `/pub/` 只直接放行 `paihuo-promo-*` 宣传片；数字人照片/声音走应用生成的
   **带过期时间的签名链接** `/pub/s/...`（反代到应用）。如果你以前的 Caddyfile 里有
   整目录公开的 `handle_path /pub/*`，一定要换成新版。
@@ -186,7 +187,9 @@ sudo systemctl enable --now paihuo-backup-simple.timer
   素材（`/var/lib/paihuo/data/assets`、`/srv/paihuo-pub`）约每天一份硬链接增量快照。
 - `ExecMainStatus=75` 表示数据库备份成功、但素材快照或异地同步失败，看
   `journalctl -u paihuo-backup-simple`。
-- 如果这台机器以前装过旧体系的 `paihuo-backup.timer`，二选一，别让两个备份同时跑。
+- 如果这台机器以前装过旧备份 units，先按第 五 节停用它们，再启用 simple timer；
+  别让两个备份同时跑。simple unit 的精确备份/恢复演练报告写入 journal，未安装旧
+  backup-health timer，也不会自动生成旧控制面的 attestation。
 
 **异地备份（强烈建议）**：服务器整机坏了，本机备份也就没了。在阿里云 OSS 或腾讯云 COS
 建一个私有桶、一个只有上传/读取/列举权限的子账号，然后：
@@ -271,6 +274,9 @@ sudo bash $R --to <release-id> --restore-backup /var/backups/paihuo/db-2026-09-2
   换下来的库保存在 `/var/lib/paihuo/data/rollback-quarantine-*`，需要时可以从里面捞数据，
   确认没问题前不要删。
 - 顺序固定为：停服 → 恢复数据库 → 切换 current → 启动 → 冒烟。
+- `rollback.sh` 不会自动恢复 `/etc/paihuo/paihuo.env`，也不会替你停备份 timer。
+  涉及密钥配对变化或人工 DB 恢复时，须先按 [生产恢复](../BACKUP_RECOVERY.md#生产恢复)
+  完成维护锁、simple timer/service 停止及 DB/env 配对校验，不能只加 `--restore-backup`。
 - 只想恢复素材文件：见 `deploy/BACKUP_RECOVERY.md「素材文件快照」`（先停服，再 rsync，不带 `--delete`）。
 
 ## 四、常见故障排查
@@ -295,19 +301,26 @@ sudo bash $R --to <release-id> --restore-backup /var/backups/paihuo/db-2026-09-2
 | 忘了 boss 密码 | 服务运行中执行 `sudo env PYTHONPATH=/srv/paihuo/current python3 -m deploy.rotate_boss_password --database /var/lib/paihuo/data/contentcrew.db --output /root/boss-password.txt`，新密码写在只有 root 能读的这个文件里（文件已存在会拒绝），`sudo cat` 看完就 `sudo rm` |
 | 需要看某次发布/回滚做了什么 | `cat /srv/paihuo/deploy-history.log`，各版本目录下的 `.paihuo-release` 记录了上一个版本和发布前快照 |
 
-## 五、从旧的不可变发布体系切换过来
+## 五、历史服务器迁移说明（旧发布链已退役）
 
-旧体系的目录布局（`/srv/paihuo/releases`、`current`、`/var/lib/paihuo/data`）和这里一致，
-切换时数据不用动：
+仅供尚未迁移的历史服务器核对。已完成 simple 迁移和归档的服务器不要重复执行。
+旧目录布局（`/srv/paihuo/releases`、`current`、`/var/lib/paihuo/data`）可保留，
+迁移不删除业务数据。先核对旧 units 是否实际存在，再停用存在的项：
 
 ```bash
-sudo systemctl disable --now contentcrew.service
+for unit in contentcrew.service paihuo-backup.timer paihuo-backup.service \
+  paihuo-backup-health.timer paihuo-backup-health.service; do
+  if systemctl cat "$unit" >/dev/null 2>&1; then
+    sudo systemctl disable --now "$unit"
+  fi
+done
 sudo install -m 644 /srv/paihuo/src/deploy/simple/paihuo.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable paihuo
 sudo bash /srv/paihuo/src/deploy/simple/deploy.sh --ref origin/main
 ```
 
-之后旧体系发布的版本也能作为 `rollback.sh --to` 的目标（它们没有 `.paihuo-release` 记录，
-按目录时间排序找"上一个"）。Caddy 如果装过 `caddy-paihuo-guard.conf`，删掉
-`/etc/systemd/system/caddy.service.d/` 里对应的 drop-in 并 `daemon-reload`，否则
-Caddy 会因为旧体系的启动闸门拒绝启动。
+保留的历史 release 只有在 `run.sh`、`venv/bin/python`、schema 与所选 DB/env 配对都核验
+兼容后，才能作为 `rollback.sh --to` 的目标；不能只按目录时间猜上一版，也不存在固定的
+`previous` 链接保证。先 `--list`，再显式 `--to` 演练。Caddy 曾使用旧启动闸门时，先用
+`systemctl cat caddy.service` 找出精确 drop-in，备份和核对引用后再移出该文件并
+`daemon-reload`；不要批量删除 `/etc/systemd/system/caddy.service.d/`。

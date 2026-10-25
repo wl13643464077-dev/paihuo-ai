@@ -285,11 +285,12 @@ class SecureConfigTests(unittest.TestCase):
         unit = (
             Path(__file__).resolve().parents[1]
             / "deploy"
-            / "contentcrew.service"
+            / "simple"
+            / "paihuo.service"
         ).read_text(encoding="utf-8")
         self.assertIn("EnvironmentFile=/etc/paihuo/paihuo.env", unit)
+        self.assertIn("Environment=CONTENTCREW_REQUIRE_SESSION_SECRET=1", unit)
         self.assertIn("Environment=CONTENTCREW_REQUIRE_CONFIG_KEY=1", unit)
-        self.assertIn("-m deploy.session_secret_env --check", unit)
 
     def test_corruption_aborts_migration_without_partial_plaintext_rewrite(self):
         with self._env():
