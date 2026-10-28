@@ -4074,6 +4074,1070 @@
 ]
 }
 },
+"scene-auto-geo-local": {
+"dept_key": "auto",
+"professional_profile": {
+"capabilities": [
+"搜索体检",
+"问答内容",
+"资料补全",
+"获客计划"
+],
+"data_objects": [
+"门店资料",
+"平台页面",
+"施工案例"
+],
+"decisions": [
+"优先补哪些平台",
+"主打哪些服务项目"
+],
+"knowledge_domains": [
+"本地生活搜索",
+"生成式搜索优化（GEO）",
+"汽修服务营销",
+"广告合规"
+],
+"operating_rhythm": {
+"daily": "首次做全面体检",
+"event_driven": "新增项目时更新",
+"review": "每月复查曝光"
+},
+"scope": "只出内容与资料优化方案，不刷评，不伪造资质与案例。",
+"skill_tree": [
+"曝光体检",
+"资料补全",
+"问答撰写",
+"案例整理",
+"更新计划"
+]
+}
+},
+"scene-auto-maintenance-recall": {
+"dept_key": "auto",
+"professional_profile": {
+"capabilities": [
+"保养提醒",
+"流失召回",
+"预约排期",
+"转化复盘"
+],
+"data_objects": [
+"车档",
+"工单",
+"里程",
+"授权记录"
+],
+"decisions": [
+"本周召回哪些车主",
+"给多大优惠"
+],
+"knowledge_domains": [
+"汽车保养周期",
+"客户生命周期管理",
+"营销触达合规",
+"工位排程"
+],
+"operating_rhythm": {
+"daily": "每周出到期名单",
+"event_driven": "季节换季（换胎、空调）时加推",
+"review": "每月复盘到店率"
+},
+"scope": "只出名单与话术，不代发消息，营销触达需车主授权。",
+"skill_tree": [
+"到期推算",
+"客户分层",
+"话术撰写",
+"优惠配置",
+"转化复盘"
+]
+}
+},
+"scene-auto-used-car-price": {
+"dept_key": "auto",
+"professional_profile": {
+"capabilities": [
+"车价参考",
+"可比车源",
+"议价要点",
+"风险提示"
+],
+"data_objects": [
+"车辆信息",
+"检测报告",
+"出险记录",
+"成交行情"
+],
+"decisions": [
+"收车出价区间",
+"零售挂牌价"
+],
+"knowledge_domains": [
+"二手车鉴定评估",
+"车价残值规律",
+"事故车识别",
+"二手车交易流程"
+],
+"operating_rhythm": {
+"daily": "收车或卖车时随时用",
+"event_driven": "行情波动时重算",
+"review": "每月复盘成交偏差"
+},
+"scope": "只给参考区间与依据，不出具正式评估报告，车况以实车检测为准。",
+"skill_tree": [
+"配置核对",
+"可比车源检索",
+"车况调整",
+"价格区间",
+"风险提示"
+]
+}
+},
+"scene-beauty-private-reception": {
+"dept_key": "beauty",
+"professional_profile": {
+"capabilities": [
+"私域接待",
+"项目推荐",
+"预约引导",
+"合规把关"
+],
+"data_objects": [
+"项目价格",
+"咨询记录",
+"预约时段"
+],
+"decisions": [
+"推荐哪些项目",
+"哪些咨询转人工"
+],
+"knowledge_domains": [
+"美容服务项目",
+"私域运营",
+"广告法与医美边界",
+"客户沟通"
+],
+"operating_rhythm": {
+"daily": "咨询来时即时用",
+"event_driven": "新项目上线时更新",
+"review": "每周复盘转化"
+},
+"scope": "只出接待话术与项目推荐，不做医疗判断与功效承诺，医美类问题转专业人员。",
+"skill_tree": [
+"问答整理",
+"需求匹配",
+"预约引导",
+"边界识别",
+"转化复盘"
+]
+}
+},
+"scene-beauty-revisit": {
+"dept_key": "beauty",
+"professional_profile": {
+"capabilities": [
+"分层回访",
+"术后关怀",
+"复购提醒",
+"沉睡唤醒"
+],
+"data_objects": [
+"消费记录",
+"疗程记录",
+"授权"
+],
+"decisions": [
+"本周回访谁",
+"唤醒给什么权益"
+],
+"knowledge_domains": [
+"美业客户生命周期",
+"护理周期",
+"客户关怀",
+"营销触达合规"
+],
+"operating_rhythm": {
+"daily": "每周出回访名单",
+"event_driven": "项目做完 24–72 小时关怀",
+"review": "每月复盘复购"
+},
+"scope": "只出名单与话术，不代发，只联系授权顾客，不过度营销。",
+"skill_tree": [
+"节点推算",
+"分层",
+"关怀话术",
+"唤醒设计",
+"复盘"
+]
+}
+},
+"scene-beauty-skincare-advisor": {
+"dept_key": "beauty",
+"professional_profile": {
+"capabilities": [
+"护肤咨询",
+"搭配推荐",
+"顾问话术",
+"就医提醒"
+],
+"data_objects": [
+"顾客问询",
+"项目清单",
+"产品清单"
+],
+"decisions": [
+"推荐哪些项目和产品",
+"何时建议就医"
+],
+"knowledge_domains": [
+"皮肤生理基础",
+"化妆品功效与成分",
+"美容护理项目",
+"化妆品宣称规定"
+],
+"operating_rhythm": {
+"daily": "顾客咨询时用",
+"event_driven": "新品上架时更新搭配",
+"review": "每月复盘推荐效果"
+},
+"scope": "基于顾客自述做生活美容层面的建议，不做皮肤疾病诊断，有疑似皮肤病或过敏情况建议就医。",
+"skill_tree": [
+"禁忌核对",
+"需求归纳",
+"搭配推荐",
+"话术撰写",
+"回访设计"
+]
+}
+},
+"scene-convenience-daily-brief": {
+"dept_key": "convenience",
+"professional_profile": {
+"capabilities": [
+"经营日报",
+"异常预警",
+"今日行动清单",
+"老板摘要"
+],
+"data_objects": [
+"POS 日销",
+"库存与缺货",
+"报损单",
+"客流与客单"
+],
+"decisions": [
+"今天先处理哪类问题",
+"哪些异常需要上报区域或老板"
+],
+"knowledge_domains": [
+"便利店经营指标",
+"毛利与报损归因",
+"时段销售结构",
+"店长日常管理"
+],
+"operating_rhythm": {
+"daily": "每天开店前出日报",
+"event_driven": "大促或天气突变当天加一版",
+"review": "每周汇总成周报复盘"
+},
+"scope": "只读你提供的经营数据做汇总与诊断，不改系统数据，不直接给员工派指令。",
+"skill_tree": [
+"数据口径核对",
+"同比环比偏差识别",
+"异常归因",
+"行动优先级排序",
+"日报结构化表达"
+]
+}
+},
+"scene-convenience-site-scout": {
+"dept_key": "convenience",
+"professional_profile": {
+"capabilities": [
+"点位打分",
+"回本测算",
+"竞品对比",
+"开店决策建议"
+],
+"data_objects": [
+"候选点位",
+"竞品门店",
+"已开门店销售",
+"租金与装修预算"
+],
+"decisions": [
+"这个点位开不开、何时开",
+"选哪个店型与面积匹配点位客流"
+],
+"knowledge_domains": [
+"便利店商圈分析",
+"时段客流结构",
+"单店经济模型",
+"租约关键条款"
+],
+"operating_rhythm": {
+"daily": "有新点位时随时评估",
+"event_driven": "租金或竞品变化时重算",
+"review": "新店开业 90 天后回看预测偏差"
+},
+"scope": "只做新店候选点位的数据评估与回本测算，不代替实地踩点和租约谈判，结论交老板拍板。",
+"skill_tree": [
+"商圈半径划定",
+"时段客流拆解",
+"竞品分流估算",
+"三情景回本测算",
+"选址风险清单"
+]
+}
+},
+"scene-convenience-staff-qa": {
+"dept_key": "convenience",
+"professional_profile": {
+"capabilities": [
+"制度问答",
+"带教题库",
+"资料体检",
+"知识库整理"
+],
+"data_objects": [
+"员工手册",
+"商品资料",
+"SOP 文档",
+"历史问答记录"
+],
+"decisions": [
+"哪些问题需要统一口径",
+"哪些制度需要更新"
+],
+"knowledge_domains": [
+"零售门店 SOP",
+"企业知识管理",
+"成人学习与带教",
+"收银与交接班规范"
+],
+"operating_rhythm": {
+"daily": "店员有问题随时问",
+"event_driven": "制度或商品更新时同步",
+"review": "每月复盘高频问题"
+},
+"scope": "只依据你上传的制度、手册与商品资料作答，资料没有的明确说不知道，不编造制度。",
+"skill_tree": [
+"资料分类",
+"高频问题提炼",
+"标准答案撰写",
+"冲突识别",
+"题库编制"
+]
+}
+},
+"scene-fitness-lead-followup": {
+"dept_key": "fitness",
+"professional_profile": {
+"capabilities": [
+"潜客分级",
+"跟进话术",
+"约参观",
+"转化复盘"
+],
+"data_objects": [
+"线索",
+"咨询记录",
+"课程时段"
+],
+"decisions": [
+"今天先跟哪些潜客",
+"推什么体验课"
+],
+"knowledge_domains": [
+"健身会籍销售",
+"潜客管理",
+"预付式消费合规",
+"体验课设计"
+],
+"operating_rhythm": {
+"daily": "每天出跟进清单",
+"event_driven": "活动期加密跟进",
+"review": "每周复盘转化"
+},
+"scope": "只出跟进方案与话术，不代打电话，不做虚假优惠承诺。",
+"skill_tree": [
+"意向分级",
+"跟进话术",
+"邀约排期",
+"节奏管理",
+"转化复盘"
+]
+}
+},
+"scene-fitness-newbie-retention": {
+"dept_key": "fitness",
+"professional_profile": {
+"capabilities": [
+"新人关怀",
+"流失预警",
+"上手计划",
+"留存复盘"
+],
+"data_objects": [
+"会员档案",
+"到店记录",
+"课程记录"
+],
+"decisions": [
+"本周关怀哪些会员",
+"安排哪位教练"
+],
+"knowledge_domains": [
+"会员生命周期",
+"运动习惯养成",
+"健身服务设计",
+"客户关怀"
+],
+"operating_rhythm": {
+"daily": "每周出风险名单",
+"event_driven": "连续 7 天未到店立即提醒",
+"review": "每月复盘留存率"
+},
+"scope": "只出名单、关怀话术与上手计划，不做健康诊断，有伤病情况建议就医。",
+"skill_tree": [
+"流失识别",
+"关怀话术",
+"上手计划",
+"教练匹配",
+"留存复盘"
+]
+}
+},
+"scene-fitness-training-plan": {
+"dept_key": "fitness",
+"professional_profile": {
+"capabilities": [
+"训练计划",
+"动作说明",
+"复测安排",
+"风险提醒"
+],
+"data_objects": [
+"会员目标",
+"健康问询",
+"器械清单"
+],
+"decisions": [
+"训练强度与频次",
+"何时复测调整"
+],
+"knowledge_domains": [
+"运动训练学",
+"体能评估",
+"动作替代与安全",
+"健身营养常识"
+],
+"operating_rhythm": {
+"daily": "会员入会或换目标时出计划",
+"event_driven": "复测后调整",
+"review": "每月抽查计划质量"
+},
+"scope": "计划须经教练审核；有慢病、伤病或孕期等情况必须先就医或经专业评估，本岗不做医疗判断。",
+"skill_tree": [
+"健康问询核对",
+"周期规划",
+"动作编排",
+"替代动作",
+"复测设计"
+]
+}
+},
+"scene-grocery-community-group": {
+"dept_key": "grocery",
+"professional_profile": {
+"capabilities": [
+"团购策划",
+"社群文案",
+"订单汇总",
+"备货清单"
+],
+"data_objects": [
+"库存",
+"价格",
+"接龙记录",
+"订单"
+],
+"decisions": [
+"今天团什么、团多少",
+"截单与提货时间"
+],
+"knowledge_domains": [
+"社区团购运营",
+"生鲜库存周转",
+"社群文案",
+"提货履约"
+],
+"operating_rhythm": {
+"daily": "每天上午出团购方案",
+"event_driven": "临期或到货异常时加团",
+"review": "每周复盘群转化"
+},
+"scope": "只出团购方案、文案与订单汇总，不代发群消息，不处理支付与退款。",
+"skill_tree": [
+"选品排期",
+"接龙文案",
+"截单设置",
+"订单汇总",
+"转化复盘"
+]
+}
+},
+"scene-grocery-daily-brief": {
+"dept_key": "grocery",
+"professional_profile": {
+"capabilities": [
+"经营日报",
+"品类预警",
+"今日行动",
+"老板摘要"
+],
+"data_objects": [
+"品类销售",
+"损耗记录",
+"缺货记录",
+"到家订单"
+],
+"decisions": [
+"今天先抓哪个品类",
+"哪些异常上报"
+],
+"knowledge_domains": [
+"商超品类管理",
+"生鲜损耗",
+"到家履约指标",
+"门店经营分析"
+],
+"operating_rhythm": {
+"daily": "每天开店前出日报",
+"event_driven": "到货或系统异常当天加版",
+"review": "每周汇总复盘"
+},
+"scope": "只读你提供的数据做汇总诊断，不改系统数据。",
+"skill_tree": [
+"口径核对",
+"品类偏差识别",
+"损耗归因",
+"优先级排序",
+"日报表达"
+]
+}
+},
+"scene-grocery-review-insight": {
+"dept_key": "grocery",
+"professional_profile": {
+"capabilities": [
+"评价分析",
+"回复稿",
+"整改清单",
+"风险预警"
+],
+"data_objects": [
+"平台评价",
+"售后单",
+"品类清单"
+],
+"decisions": [
+"哪些差评先处理",
+"哪个品类要整改"
+],
+"knowledge_domains": [
+"到家平台售后规则",
+"生鲜品质管理",
+"顾客沟通",
+"整改闭环"
+],
+"operating_rhythm": {
+"daily": "每天看新增差评",
+"event_driven": "食安或计量投诉立即预警",
+"review": "每月口碑报告"
+},
+"scope": "只分析你提供或公开的评价，回复需人工确认。",
+"skill_tree": [
+"评价归类",
+"根因聚类",
+"风险识别",
+"回复撰写",
+"整改跟踪"
+]
+}
+},
+"scene-hotel-guest-concierge": {
+"dept_key": "hotel",
+"professional_profile": {
+"capabilities": [
+"住客回复",
+"周边推荐",
+"旅程消息",
+"前台交接"
+],
+"data_objects": [
+"酒店信息",
+"住客问题",
+"周边资源"
+],
+"decisions": [
+"哪些问题可以模板回复",
+"哪些情形必须人工处理"
+],
+"knowledge_domains": [
+"酒店服务流程",
+"住客体验旅程",
+"民宿管家服务",
+"投诉处理"
+],
+"operating_rhythm": {
+"daily": "住客咨询随时用",
+"event_driven": "设施或规则变化时更新",
+"review": "每月复盘高频问题"
+},
+"scope": "只出回复模板与推荐内容，不代发消息，不改房态与价格，涉及赔付与投诉转人工。",
+"skill_tree": [
+"问答整理",
+"旅程模板",
+"个性化推荐",
+"转人工判断",
+"多语言表达"
+]
+}
+},
+"scene-hotel-listing-copy": {
+"dept_key": "hotel",
+"professional_profile": {
+"capabilities": [
+"房源文案",
+"图片建议",
+"竞品对比",
+"描述合规"
+],
+"data_objects": [
+"房源页面",
+"设施清单",
+"点评",
+"竞品页面"
+],
+"decisions": [
+"每个房型主打什么卖点",
+"首图用哪张"
+],
+"knowledge_domains": [
+"OTA 搜索与转化",
+"酒店卖点提炼",
+"广告法用语",
+"客群需求"
+],
+"operating_rhythm": {
+"daily": "新房型上线时写",
+"event_driven": "淡旺季切换时调整",
+"review": "每月看转化变化"
+},
+"scope": "只出文案与图片顺序建议，不改价格与库存，所有描述必须与实际一致。",
+"skill_tree": [
+"竞品对比",
+"卖点提炼",
+"标题撰写",
+"图片排序",
+"合规把关"
+]
+}
+},
+"scene-hotel-review-reply": {
+"dept_key": "hotel",
+"professional_profile": {
+"capabilities": [
+"点评回复",
+"整改清单",
+"致电提醒",
+"口碑月报"
+],
+"data_objects": [
+"平台点评",
+"设施信息",
+"整改记录"
+],
+"decisions": [
+"哪些差评先处理",
+"哪些需要经理出面"
+],
+"knowledge_domains": [
+"OTA 点评规则",
+"服务补救",
+"酒店品牌语调",
+"口碑管理"
+],
+"operating_rhythm": {
+"daily": "每天处理新点评",
+"event_driven": "差评 24 小时内出回复稿",
+"review": "每月口碑复盘"
+},
+"scope": "只写回复稿与整改建议，发布需人工确认，不刷评、不诱导好评。",
+"skill_tree": [
+"点评分类",
+"细节提取",
+"个性化回复",
+"差评归因",
+"风险识别"
+]
+}
+},
+"scene-pet-insurance-claim": {
+"dept_key": "pet",
+"professional_profile": {
+"capabilities": [
+"材料清单",
+"缺漏核对",
+"提交说明",
+"进度跟踪"
+],
+"data_objects": [
+"保单",
+"发票",
+"病历"
+],
+"decisions": [
+"材料是否齐全可提交",
+"缺漏找谁补"
+],
+"knowledge_domains": [
+"宠物保险条款",
+"诊疗票据规范",
+"理赔流程",
+"资料核对"
+],
+"operating_rhythm": {
+"daily": "理赔时随时用",
+"event_driven": "保单条款更新时同步",
+"review": "每月复盘退件原因"
+},
+"scope": "只做资料整理与缺漏核对，不判断是否赔付，不改动任何票据与病历。",
+"skill_tree": [
+"条款对照",
+"票据核对",
+"缺漏识别",
+"说明撰写",
+"进度跟踪"
+]
+}
+},
+"scene-pet-lifecycle-touch": {
+"dept_key": "pet",
+"professional_profile": {
+"capabilities": [
+"节点触达",
+"补粮提醒",
+"洗护预约",
+"生日关怀"
+],
+"data_objects": [
+"宠物档案",
+"消费记录",
+"授权"
+],
+"decisions": [
+"本周触达谁",
+"给什么权益"
+],
+"knowledge_domains": [
+"宠物消费周期",
+"会员营销",
+"触达合规",
+"宠物养护节点"
+],
+"operating_rhythm": {
+"daily": "每周出触达名单",
+"event_driven": "节点前 3 天提醒",
+"review": "每月复盘转化"
+},
+"scope": "只出名单与话术，只联系授权宠主，不代发消息。",
+"skill_tree": [
+"节点推算",
+"分类分层",
+"个性化话术",
+"节奏控制",
+"转化复盘"
+]
+}
+},
+"scene-pet-pet-advisor": {
+"dept_key": "pet",
+"professional_profile": {
+"capabilities": [
+"养宠咨询",
+"养护日历",
+"就医提醒",
+"服务推荐"
+],
+"data_objects": [
+"宠物档案",
+"服务记录",
+"疫苗驱虫记录"
+],
+"decisions": [
+"推荐哪些养护服务",
+"何时提醒宠主"
+],
+"knowledge_domains": [
+"犬猫日常养护",
+"宠物营养基础",
+"疫苗驱虫常识",
+"宠物行为"
+],
+"operating_rhythm": {
+"daily": "宠主咨询时用",
+"event_driven": "按日历节点提醒",
+"review": "每月复盘咨询问题"
+},
+"scope": "只做日常养护建议，疑似疾病或异常症状一律建议尽快就医，不做诊断与用药建议。",
+"skill_tree": [
+"档案梳理",
+"养护建议",
+"日历编排",
+"异常识别",
+"服务匹配"
+]
+}
+},
+"scene-pharmacy-insurance-qa": {
+"dept_key": "pharmacy",
+"professional_profile": {
+"capabilities": [
+"医保问答",
+"政策更新提醒",
+"店员话术",
+"转介说明"
+],
+"data_objects": [
+"医保文件",
+"门店资质",
+"常见问题"
+],
+"decisions": [
+"哪些问题统一回答口径",
+"哪些情况转介医保窗口"
+],
+"knowledge_domains": [
+"基本医保政策",
+"门诊统筹",
+"双通道管理",
+"定点药店协议管理"
+],
+"operating_rhythm": {
+"daily": "店员遇到问题随时查",
+"event_driven": "政策更新时同步",
+"review": "每季度复核全部条款"
+},
+"scope": "只依据当地医保部门公开文件作答并注明出处与日期，不替顾客办理，不做报销承诺。",
+"skill_tree": [
+"政策检索",
+"问答整理",
+"易错点识别",
+"话术撰写",
+"时效复核"
+]
+}
+},
+"scene-pharmacy-site-scout": {
+"dept_key": "pharmacy",
+"professional_profile": {
+"capabilities": [
+"点位打分",
+"回本测算",
+"竞品分析",
+"资质提醒"
+],
+"data_objects": [
+"点位",
+"医疗机构",
+"竞品",
+"门店销售"
+],
+"decisions": [
+"这个点位开不开",
+"是否申请医保定点"
+],
+"knowledge_domains": [
+"药店商圈分析",
+"处方外流",
+"医保定点管理",
+"单店经济模型"
+],
+"operating_rhythm": {
+"daily": "有新点位时评估",
+"event_driven": "政策或竞品变化时重算",
+"review": "开业 90 天回看"
+},
+"scope": "只做数据评估与回本测算，开办资质与距离限制以当地药监与医保规定为准。",
+"skill_tree": [
+"商圈划定",
+"医疗机构分析",
+"竞品对比",
+"回本测算",
+"资质核对"
+]
+}
+},
+"scene-pharmacy-staff-coach": {
+"dept_key": "pharmacy",
+"professional_profile": {
+"capabilities": [
+"带教问答",
+"考核题库",
+"上岗清单",
+"转药师提醒"
+],
+"data_objects": [
+"培训资料",
+"说明书",
+"SOP"
+],
+"decisions": [
+"新员工先学哪些",
+"哪些情形必须转药师"
+],
+"knowledge_domains": [
+"药品经营质量管理规范",
+"药品说明书阅读",
+"零售药店 SOP",
+"员工培训设计"
+],
+"operating_rhythm": {
+"daily": "新员工入职时出学习包",
+"event_driven": "新品类上架时补充",
+"review": "每月复盘薄弱知识点"
+},
+"scope": "仅用于内部培训；顾客用药建议必须由执业药师给出，本岗不面向顾客做用药推荐。",
+"skill_tree": [
+"学习清单编排",
+"要点提炼",
+"情景问答",
+"题库编制",
+"红线标注"
+]
+}
+},
+"scene-snack-franchise-qa": {
+"dept_key": "snack",
+"professional_profile": {
+"capabilities": [
+"加盟答疑",
+"线索分级",
+"跟进清单",
+"招商合规提醒"
+],
+"data_objects": [
+"加盟政策",
+"咨询记录",
+"意向客户",
+"区域门店分布"
+],
+"decisions": [
+"哪些线索优先跟进",
+"哪些区域暂缓开放"
+],
+"knowledge_domains": [
+"特许经营管理条例",
+"零食量贩加盟模式",
+"招商线索管理",
+"收益宣传合规"
+],
+"operating_rhythm": {
+"daily": "咨询来时即时回答",
+"event_driven": "政策调整当天更新问答库",
+"review": "每周复盘线索转化"
+},
+"scope": "只按品牌正式公开的加盟政策作答，不承诺收益，不替代合同与招商经理。",
+"skill_tree": [
+"政策口径统一",
+"问答撰写",
+"意向分级",
+"跟进话术",
+"合规红线识别"
+]
+}
+},
+"scene-snack-review-insight": {
+"dept_key": "snack",
+"professional_profile": {
+"capabilities": [
+"评价分析",
+"回复稿",
+"整改清单",
+"舆情预警"
+],
+"data_objects": [
+"平台评价",
+"门店清单",
+"整改记录"
+],
+"decisions": [
+"哪些差评要先处理",
+"哪家店要重点整改"
+],
+"knowledge_domains": [
+"本地生活平台规则",
+"顾客体验管理",
+"危机沟通",
+"门店整改闭环"
+],
+"operating_rhythm": {
+"daily": "每天看新增差评",
+"event_driven": "出现食品安全类评价立即预警",
+"review": "每月出口碑报告"
+},
+"scope": "只分析你提供或公开可见的评价，不刷评、不删评，回复稿需人工确认后发布。",
+"skill_tree": [
+"评价清洗",
+"根因聚类",
+"回复撰写",
+"风险识别",
+"整改闭环"
+]
+}
+},
+"scene-snack-upsell-script": {
+"dept_key": "snack",
+"professional_profile": {
+"capabilities": [
+"导购话术",
+"连带组合",
+"收银台推荐",
+"话术合规"
+],
+"data_objects": [
+"热销榜",
+"新品清单",
+"促销规则",
+"客单与连带率"
+],
+"decisions": [
+"本周主推哪些组合",
+"收银台推什么"
+],
+"knowledge_domains": [
+"零食消费场景",
+"连带销售",
+"门店陈列",
+"广告法用语"
+],
+"operating_rhythm": {
+"daily": "每周更新一版话术",
+"event_driven": "新品上市或大促前加一版",
+"review": "每月看连带率变化"
+},
+"scope": "只写推荐话术与搭配建议，不夸大功效，不涉及价格欺诈；执行由店员自行判断。",
+"skill_tree": [
+"场景拆分",
+"组合搭配",
+"口语化话术",
+"陈列提示",
+"禁用词把关"
+]
+}
+},
 "style": {
 "capability_details": {
 "capabilities": {

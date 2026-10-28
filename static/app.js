@@ -1244,14 +1244,81 @@ function specRoomCard(e){
       </div>
     </div></div>`;
 }
+/* ---------- 人才市场:行业员工楼层改成「搜索 + 分组筛选 + 简历卡片」,几十人也一屏看得清 ---------- */
+const TM_GROUP = {};   // 每个行业当前选中的分组(""=全部),只在本页会话内记忆
+function tmHeadlineTail(e){
+  const h=String(e.resume_card?.headline||"");
+  const i=h.indexOf("｜");
+  return i>=0?h.slice(i+1):(isBoss()?(e.duty||e.intro||""):(e.intro||""));
+}
+function tmCard(e){
+  const st = e.running_n?"work":e.learning?"learn":"idle";
+  const canAssign=employeeCanAssignNew(e), assignmentState=employeeAssignmentState(e);
+  const identity=employeeDisplayIdentity(e);
+  const rc=e.resume_card||{};
+  const tags=(rc.tags||[]).slice(0,3);
+  const search=[identity.person,identity.job,e.group,rc.headline,...tags].join(" ").toLowerCase();
+  return `<div class="tmcard ${st==="work"?"working":""} ${e.enabled===false?"off":""}" data-tm-text="${esc(search)}" data-tm-group="${esc(e.group||"")}"
+      role="button" tabindex="0" onclick="openSpec(${e.idx},'resume')" onkeydown="if(event.key==='Enter')openSpec(${e.idx},'resume')">
+    <div class="tmc-av" style="background:${esc(e.color)}22">${charSVG(e.color, e.emoji, st, 58)}</div>
+    <div class="tmc-main">
+      <div class="tmc-name"><b>${e.enabled===false?"⛔ ":""}${esc(identity.person)}</b>
+        ${e.scene_role?`<span class="tmc-new">新上岗</span>`:""}
+        <span class="stpill ${PILL_CLS[st]}">${{work:"干活中",learn:"进修中",idle:"待命"}[st]}</span></div>
+      <div class="tmc-job">${esc(identity.job)}${isBoss()&&e.skills_n?` <span title="已审批进修技能">⚡${e.skills_n}</span>`:""}</div>
+      <div class="tmc-head">${assignmentState?`<b>${esc(assignmentState)}</b>`:esc(tmHeadlineTail(e))}</div>
+      <div class="tmc-meta">${rc.years?`<span>${Number(rc.years)}年经验</span>`:""}${tags.map(t=>`<span>${esc(t)}</span>`).join("")}</div>
+      <div class="tmc-act">
+        <button class="btn sm" onclick="event.stopPropagation();openSpec(${e.idx},'resume')">📄 看履历</button>
+        ${ME&&ME.role!=="tour"&&canAssign?`<button class="btn sm pri" onclick="event.stopPropagation();openSpec(${e.idx},'task')">📋 派活</button>`:""}
+      </div>
+    </div></div>`;
+}
+function tmApply(key){
+  const root=document.querySelector(`[data-tm="${CSS.escape(key)}"]`);
+  if(!root) return;
+  const q=String(root.querySelector(".tm-q")?.value||"").trim().toLowerCase();
+  const words=q.split(/\s+/).filter(Boolean);
+  const group=TM_GROUP[key]||"";
+  root.classList.toggle("tm-filtering",!!(words.length||group));
+  let shown=0;
+  root.querySelectorAll(".tm-sec").forEach(sec=>{
+    let n=0;
+    sec.querySelectorAll(".tmcard").forEach(card=>{
+      const text=card.dataset.tmText||"";
+      const ok=(!group||card.dataset.tmGroup===group)&&words.every(w=>text.includes(w));
+      card.hidden=!ok; if(ok) n++;
+    });
+    sec.hidden=n===0; shown+=n;
+  });
+  root.querySelectorAll(".tm-chip").forEach(c=>c.classList.toggle("on",(c.dataset.group||"")===group));
+  const cnt=root.querySelector(".tm-count"); if(cnt) cnt.textContent=`显示 ${shown} 人`;
+  const empty=root.querySelector(".tm-empty"); if(empty) empty.hidden=shown>0;
+}
+function tmPick(key,group){ TM_GROUP[key]=group; tmApply(key); }
 function deptFloorHtml(d){
-  return `<div class="notice" style="margin-top:0">${d.emoji} <b>${esc(d.name)}</b> — ${esc(deptTagline(d))}。${ME&&ME.role==="tour"?"点任何员工查看公开文字介绍。":"点任何专家即可查看介绍或直接派活；产出自动进资产库。"}</div>`
-    + (ME&&ME.role==="tour"?"":expFinderCard(d.key))
-    + d.groups.map(g=>{
-      const members = d.employees.filter(e=>e.group===g.name && (e.enabled!==false || isBoss()));
-      return `<div class="grouphead"><span style="font-size:18px">${g.emoji}</span>${esc(g.name)}<span class="sub">(${members.length}人)</span><span class="gline"></span></div>
-        <div class="floor">${members.map(specRoomCard).join("")}</div>`;
-    }).join("");
+  const key=d.key;
+  const visible=d.employees.filter(e=>e.enabled!==false||isBoss());
+  const groups=d.groups.map(g=>({...g,members:visible.filter(e=>e.group===g.name)})).filter(g=>g.members.length);
+  const group=TM_GROUP[key]||"";
+  const chip=(name,label,n,extra="")=>`<button type="button" class="chip tm-chip ${group===name?"on":""} ${extra}" data-group="${esc(name)}" onclick="tmPick(${cp(key)},${cp(name)})">${label}<span class="tm-n">${n}</span></button>`;
+  return `<div class="tm ${group?"tm-filtering":""}" data-tm="${esc(key)}">
+    <div class="notice" style="margin-top:0">${d.emoji} <b>${esc(d.name)}</b> — ${esc(deptTagline(d))}。${ME&&ME.role==="tour"?"点任何员工看TA的履历。":"点卡片看履历，满意就直接派活；产出自动进资产库。"}</div>
+    ${ME&&ME.role==="tour"?"":expFinderCard(key)}
+    <div class="tm-bar">
+      <input class="tm-q" type="search" placeholder="🔍 搜名字、岗位、技能，例如：选址、差评、医保" oninput="tmApply(${cp(key)})" aria-label="搜索员工">
+      <span class="sub tm-count">显示 ${visible.length} 人</span>
+    </div>
+    <div class="tm-chips" role="tablist" aria-label="按分组筛选">
+      ${chip("","全部",visible.length)}
+      ${groups.map(g=>chip(g.name,`${g.emoji||"📂"} ${esc(g.name)}`,g.members.length,g.members.some(e=>e.scene_role)?"tm-chip-new":"")).join("")}
+    </div>
+    ${groups.map(g=>`<section class="tm-sec" ${group&&group!==g.name?"hidden":""}>
+      <div class="grouphead"><span style="font-size:18px">${g.emoji||"📂"}</span>${esc(g.name)}<span class="sub">(${g.members.length}人)</span><span class="gline"></span></div>
+      <div class="tm-grid">${g.members.map(tmCard).join("")}</div>
+      ${g.members.length>3?`<button type="button" class="btn sm tm-more" onclick="this.closest('.tm-sec').classList.add('open')">展开全部 ${g.members.length} 人 ▾</button>`:""}</section>`).join("")}
+    <div class="empty tm-empty" hidden>没找到对口的员工。试试换个词，或在上面「不知道找谁?」里说说你要办的事。</div>
+  </div>`;
 }
 function deptSection(key, emoji, name, count, tagline, innerFn){
   const open = deptIsOpen(key);
@@ -2975,8 +3042,9 @@ async function openSpec(idx,initialTab){
   SPEC={...(directoryEmployee||{}),...detail};
   if(detail.enabled===undefined&&directoryEmployee) SPEC.enabled=directoryEmployee.enabled;
   const canAssign=employeeCanAssignNew(SPEC);
-  SPEC_TAB = isBoss() ? (initialTab==="skills"?"skills":(initialTab==="intro"||!canAssign?"info":"task")) :
-    (ME&&ME.role==="tour"||!canAssign ? "intro" : (initialTab==="task"?"task":"intro"));
+  const known=["task","caps","method","skills","prompt","info","resume"];
+  SPEC_TAB = initialTab==="task"&&canAssign&&ME&&ME.role!=="tour" ? "task"
+    : (isBoss()&&known.includes(initialTab)&&initialTab!=="task" ? initialTab : "resume");
   SPEC_TASK = null;
   drawSpec();
 }
@@ -2986,9 +3054,9 @@ function drawSpec(){
   const e = SPEC;
   const canAssign=employeeCanAssignNew(e), assignmentState=employeeAssignmentState(e);
   const tabs = isBoss()
-    ? [...(canAssign?[["task","📋 派活"]]:[]),["caps","🧰 能力"],["method","🔬 工作方式"],
+    ? [["resume","📄 履历"],...(canAssign?[["task","📋 派活"]]:[]),["caps","🧰 能力"],["method","🔬 工作方式"],
        ["skills","⚡ 技能库"],...(canAssign?[["prompt","📝 自定义配置"]]:[]),["info","🪪 岗位档案"]]
-    : [...(ME&&ME.role!=="tour"&&canAssign?[["task","📋 派活"]]:[]),["intro","🪪 员工介绍"],
+    : [["resume","📄 履历"],...(ME&&ME.role!=="tour"&&canAssign?[["task","📋 派活"]]:[]),
        ...(ME&&ME.role!=="tour"?[["info","🪪 岗位档案"]]:[])];
   const st = e.learning?"learn":(e.tasks||[]).some(t=>["queued","running"].includes(t.status))?"work":"idle";
   const displayIdentity=employeeDisplayIdentity(e);
@@ -2999,9 +3067,10 @@ function drawSpec(){
   else if(SPEC_TAB==="skills") body = specSkillsTab(e);
   else if(SPEC_TAB==="prompt"&&canAssign) body = specPromptTab(e);
   else if(SPEC_TAB==="info"&&ME&&ME.role!=="tour") body = specInfoTab(e);
-  else body = specIntroTab(e);
+  else if(SPEC_TAB==="intro") body = specIntroTab(e);
+  else body = e.resume&&Object.keys(e.resume).length ? specResumeTab(e) : specIntroTab(e);
   $("#modal").innerHTML = `<div class="overlay" onclick="if(event.target===this)closeSpec()">
-    <div class="panel">
+    <div class="panel ${SPEC_TAB==="resume"?"wide":""}">
       <div class="phead" style="background:linear-gradient(120deg,${e.color}44,transparent)">
         ${charSVG(e.color, e.emoji, st, 88)}
         <div style="flex:1">
@@ -3054,6 +3123,89 @@ async function specInsightDecide(idx, index, action, btn){
     toast(action==="adopt"?"已采纳,下次任务自动带上":action==="remove"?"已移除":"已忽略");
     specInsightsLoad(idx);
   }catch(e){ toast(e.message); btn.disabled = false; }
+}
+/* ---------- 员工履历页:招聘网站式简历(个人优势/成果/经历/项目/推荐理由/场景/技能) + 老板配置入口 ---------- */
+function rzList(items,cls=""){
+  const rows=(items||[]).filter(x=>x!==null&&x!==undefined&&String(typeof x==="object"?(x.text||x.title||x.when||""):x).trim());
+  return rows.length?`<ul class="rz-pts ${cls}">${rows.map(x=>`<li>${typeof x==="object"
+    ?(x.title?`<b>${esc(x.title)}</b>：`:"")+esc(x.text||"")
+    :esc(x)}</li>`).join("")}</ul>`:"";
+}
+function rzSec(id,title,inner,extra=""){
+  return inner?`<section class="rz-panel" ${extra}><h3 class="rz-sec">${title}</h3>${inner}</section>`:"";
+}
+function specResumeTab(e){
+  const r=e.resume||{};
+  const boss=isBoss(), canAssign=employeeCanAssignNew(e);
+  const tour=!ME||ME.role==="tour";
+  const head=String(r.headline||"");
+  const meta=[r.years?`${Number(r.years)} 年经验`:"",r.degree||"",r.industry||e.dept_name||"",
+    boss&&e.group?e.group:""].filter(Boolean);
+  const adv=Array.isArray(r.advantages)&&r.advantages.length?rzList(r.advantages):(r.summary?`<p class="rz-p">${esc(r.summary)}</p>`:"");
+  const feats=(r.highlights||[]).filter(f=>f&&f.title);
+  const featHtml=feats.length?`<div class="rz-feat">${feats.map(f=>`<div class="rz-featcard">
+      ${f.num?`<div class="rz-big">${esc(f.num)}</div>`:""}<div class="rz-ft">${esc(f.title)}</div>
+      ${f.detail?`<div class="sub">${esc(f.detail)}</div>`:""}</div>`).join("")}</div>`:"";
+  const jobs=(r.experiences||[]).map(j=>`<div class="rz-job">
+      <div class="rz-jh"><b>${esc(j.company||"")}</b><span class="rz-role">${esc(j.title||"")}</span><span class="sub rz-when">${esc(j.period||"")}</span></div>
+      ${j.scale?`<div class="sub">${esc(j.scale)}</div>`:""}
+      ${(j.duties||[]).length?`<div class="rz-lab">工作内容</div>${rzList(j.duties)}`:""}
+      ${(j.wins||[]).length?`<div class="rz-lab">工作业绩</div>${rzList(j.wins,"win")}`:""}
+    </div>`).join("");
+  const projects=(r.projects||[]).map(p=>`<div class="rz-proj">
+      <div class="rz-jh"><b>${esc(p.name||"")}</b>${p.org||p.period?`<span class="sub rz-when">${esc([p.org,p.period].filter(Boolean).join(" · "))}</span>`:""}</div>
+      <dl class="rz-dl">${[["目标",p.goal],["角色",p.role],["做法",p.how],["结果",p.result]].filter(x=>x[1]).map(([k,v])=>`<dt>${k}</dt><dd>${esc(v)}</dd>`).join("")}</dl>
+    </div>`).join("");
+  const edu=r.education||{};
+  const eduHtml=(edu.school||edu.major)?`<div class="rz-jh"><b>${esc(edu.school||"")}</b><span class="rz-role">${esc([edu.major,edu.degree].filter(Boolean).join(" · "))}</span><span class="sub rz-when">${esc(edu.period||"")}</span></div>`:"";
+  const certs=(r.certificates||[]).length?`<div class="rz-lab">专业方向 / 资质</div><div class="rz-chips">${r.certificates.map(c=>`<span class="tag">${esc(c)}</span>`).join("")}</div>`:"";
+  const learn=(r.learning||[]).length?`<div class="rz-lab">持续进修</div><div class="rz-chips">${r.learning.map(c=>`<span class="tag">${esc(c)}</span>`).join("")}</div>`:"";
+  const why=(r.why||[]).map((t,i)=>`<div class="rz-reason"><span class="rz-no">${i+1}</span><span>${esc(t)}</span></div>`).join("");
+  const cautions=(r.cautions||[]).length?`<div class="rz-lab" style="color:#8a5a00">需要留意</div>${rzList(r.cautions)}`:"";
+  const scenes=(r.scenes||[]).map(sc=>typeof sc==="object"
+    ?`<div class="rz-scene"><b>${esc(sc.when||"")}</b>${sc.get?`<div class="sub">交回：${esc(sc.get)}</div>`:""}</div>`
+    :`<div class="rz-scene"><b>${esc(sc)}</b></div>`).join("");
+  const bars=(r.skill_bars||[]).map(b=>{const lv=Math.max(0,Math.min(100,Number(b.level)||0));
+    const label=b.label||(lv>=90?"精通":lv>=82?"熟练":"掌握");
+    return `<div class="rz-bar"><div class="rz-barh"><span>${esc(b.name||"")}</span><span class="sub">${esc(label)}</span></div><div class="rz-track"><div style="width:${lv}%"></div></div></div>`;}).join("");
+  const stats=e.stats||{};
+  const bossBox=(cls)=>boss?`<section class="rz-panel rz-boss ${cls}"><h3 class="rz-sec">⚙️ 岗位配置 <span class="rz-badge">仅老板可见</span></h3>
+      <div class="sub" style="margin-bottom:8px">交付 ${Number(stats.runs)||0} 单 · 历史成本 ${rmb(stats.cost_usd)} · 进修技能 ${(e.skills||[]).length} 条</div>
+      <div class="rz-cfg">
+        <button class="btn sm" onclick="SPEC_TAB='caps';drawSpec()">🧰 能力开关</button>
+        <button class="btn sm" onclick="SPEC_TAB='method';drawSpec()">🔬 工作方式</button>
+        <button class="btn sm" onclick="SPEC_TAB='skills';drawSpec()">⚡ 技能库</button>
+        ${canAssign?`<button class="btn sm" onclick="SPEC_TAB='prompt';drawSpec()">📝 自定义配置</button>`:""}
+        <button class="btn sm" onclick="SPEC_TAB='info';drawSpec()">🪪 岗位档案</button>
+      </div></section>`:"";
+  return `<div class="rz">
+    <div class="rz-top">
+      ${head?`<div class="rz-headline">${esc(head)}</div>`:""}
+      ${meta.length?`<div class="rz-meta">${meta.map(m=>`<span>${esc(m)}</span>`).join("")}</div>`:""}
+      ${(r.tags||[]).length?`<div class="rz-chips">${r.tags.map(t=>`<span class="chip rz-tagchip">${esc(t)}</span>`).join("")}</div>`:""}
+      ${!tour&&canAssign?`<div class="rz-cta"><button class="btn pri" onclick="SPEC_TAB='task';drawSpec()">📋 聘用并派活</button>
+        <span class="sub">一句话说清要什么，TA 交回结论、依据和行动清单，拍板永远在你。</span></div>`:""}
+    </div>
+    ${bossBox("rz-boss-m")}
+    <div class="rz-body">
+      <div class="rz-main">
+        ${rzSec("adv","个人优势",adv)}
+        ${rzSec("feat",feats.some(f=>f.num)?"精选成果":"代表能力",featHtml)}
+        ${rzSec("job","工作经历",jobs)}
+        ${rzSec("proj",`项目经历 <small class="sub">代表项目 ${(r.projects||[]).length} 个</small>`,projects)}
+        ${rzSec("edu","教育经历与资质",eduHtml+certs+learn)}
+      </div>
+      <div class="rz-side">
+        ${bossBox("rz-boss-d")}
+        ${rzSec("why","为什么推荐TA",why+cautions,'style="background:#fff6dc"')}
+        ${rzSec("scene","这些时候找TA",scenes)}
+        ${rzSec("skill","专业技能",bars)}
+        ${rzSec("need","派活时请准备",rzList(r.prepare))}
+        ${rzSec("out","TA 会交回",(r.deliverables||[]).length?`<div class="rz-chips">${r.deliverables.map(c=>`<span class="tag">${esc(c)}</span>`).join("")}</div>`:"")}
+      </div>
+    </div>
+    <div class="rz-foot sub">${esc(r.footnote||"")}</div>
+  </div>`;
 }
 function specIntroTab(e){
   return `<div class="card" style="background:linear-gradient(120deg,#fff6dc,#fffaf0);margin-top:0">

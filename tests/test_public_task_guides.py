@@ -42,8 +42,8 @@ class PublicExpertTaskGuideTests(unittest.TestCase):
             employee["name"]
             for employee in specialists.values()
         }
-        self.assertEqual(420, len(specialists))
-        self.assertEqual(420, len(published_names))
+        self.assertEqual(447, len(specialists))
+        self.assertEqual(447, len(published_names))
 
         for idx, employee in specialists.items():
             name = employee["name"]
@@ -56,7 +56,7 @@ class PublicExpertTaskGuideTests(unittest.TestCase):
             )
             role = (
                 employee.get("public_guide")
-                if is_decision
+                if is_decision or employee.get("scene_role")
                 else departments._PUBLIC_ROLE_GUIDES.get(name)
             )
             self.assertIsInstance(role, dict, name)
@@ -100,6 +100,8 @@ class PublicExpertTaskGuideTests(unittest.TestCase):
         active_by_dept = {}
         historical_by_dept = {}
         for employee in active.values():
+            if employee.get("scene_role"):
+                continue  # AI 场景专岗是独立号段的附加岗位，不属于冻结目录
             active_by_dept.setdefault(employee["dept_key"], []).append(employee)
         for employee in historical:
             historical_by_dept.setdefault(employee["dept_key"], []).append(employee)
@@ -169,7 +171,7 @@ class PublicExpertTaskGuideTests(unittest.TestCase):
 
     def test_all_specialists_have_unique_industry_and_role_guides(self):
         specialists = departments.specialists()
-        self.assertEqual(420, len(specialists))
+        self.assertEqual(447, len(specialists))
         rendered = {}
         for idx, employee in specialists.items():
             guide = departments.public_task_guide(employee)
@@ -198,7 +200,7 @@ class PublicExpertTaskGuideTests(unittest.TestCase):
         one_industry = {
             employee["name"]: employee
             for employee in specialists
-            if employee["dept_key"] == "auto"
+            if employee["dept_key"] == "auto" and not employee.get("scene_role")
         }
         self.assertEqual(36, len(one_industry))
         self.assertTrue(

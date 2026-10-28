@@ -141,7 +141,8 @@ class Schema55FrontendContractTests(unittest.TestCase):
         self.assertIn("/employee-learning/batches/${Number(batch.id)}", load)
         self.assertIn("closeEmployeeLearningBatchManager", open_review)
         self.assertIn('openSpec(Number(idx),"skills")', open_review)
-        self.assertIn('initialTab==="skills"?"skills"', open_spec)
+        self.assertIn('known.includes(initialTab)', open_spec)
+        self.assertIn('"skills"', open_spec)
 
     def test_batch_execute_has_an_independent_complete_ui_snapshot_contract(self):
         execute = function(self.source, "executeEmployeeLearningBatch")

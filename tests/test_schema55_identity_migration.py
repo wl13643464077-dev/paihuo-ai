@@ -50,7 +50,7 @@ class Schema55IdentityMigrationCase(unittest.TestCase):
             employee for employee in active.values()
             if employee.get("catalog_version") == "2026.08.v4"
         ]
-        self.assertEqual(420, len(active))
+        self.assertEqual(447, len(active))
         self.assertEqual(360, len(current_v4))
         people = [str(employee.get("person") or "") for employee in current_v4]
         self.assertEqual(360, len(set(people)))
@@ -69,7 +69,7 @@ class Schema55IdentityMigrationCase(unittest.TestCase):
         self.assertEqual("legacy-six", versions[1].get("identity_scheme", "legacy-six"))
         refs = [employeeidentity.identity_ref(row) for row in versions]
         self.assertEqual(len(refs), len(set(refs)))
-        self.assertEqual(1200, len(departments.all_identity_versions()))
+        self.assertEqual(1227, len(departments.all_identity_versions()))  # 含 27 名 AI 场景专岗
 
     def test_v1_to_v3_identity_ref_algorithm_is_byte_stable(self):
         versions = departments.identity_versions(1001)
