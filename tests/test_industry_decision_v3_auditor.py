@@ -47,13 +47,15 @@ class IndustryDecisionV3AuditorTests(unittest.TestCase):
 
         departments.reset_cache()
         specialists = departments.specialists()
-        self.assertEqual(420, len(specialists))
+        # 420 frozen roles + 27 AI 场景专岗 add-on roles (independent 3xxx ids).
+        self.assertEqual(447, len(specialists))
+        self.assertEqual(420, sum(not e.get("scene_role") for e in specialists.values()))
         self.assertEqual(360, sum(
             employee.get("catalog_version") == "2026.08.v4"
             for employee in specialists.values()
         ))
         identities = departments.all_identity_versions()
-        self.assertEqual(1200, len(identities))
+        self.assertEqual(1227, len(identities))
         self.assertEqual(360, sum(
             employee.get("catalog_version") == "2026.08.v3"
             for employee in identities

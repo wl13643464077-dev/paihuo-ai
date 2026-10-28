@@ -3061,11 +3061,82 @@ def _load():
                     f"V3 active 员工的 1080 个 {label} 必须全局唯一"
                 )
 
+    active_depts = _merge_scene_roles(active_depts)
     _cache = active_depts
     _legacy_cache = legacy_depts
     _all_cache = None
     _identity_versions_cache = None
     return _cache
+
+
+SCENE_ROLES_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "scene_roles_v1.json"
+)
+SCENE_CATALOG_VERSION = "v1"
+SCENE_IDX_RANGE = range(3001, 4000)
+
+
+def _merge_scene_roles(active_depts: list[dict]) -> list[dict]:
+    """Append the release-shipped AI 场景专岗 add-on roster (2026-10).
+
+    These roles live in their own idx range (3001–3999) and use the plain V1
+    role shape, so the frozen V1/V3/V4 catalogs and their schema checks stay
+    untouched.  A missing sidecar simply means no add-on roles.
+    """
+    try:
+        with open(SCENE_ROLES_PATH, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except FileNotFoundError:
+        return active_depts
+    except ValueError as exc:
+        raise DepartmentConfigError("AI 场景专岗配置无法解析") from exc
+    scene = raw.get("departments") if isinstance(raw, dict) else None
+    if not isinstance(scene, dict):
+        raise DepartmentConfigError("AI 场景专岗配置缺少 departments")
+    seen = {
+        field: {
+            employee.get(field)
+            for dept in active_depts for employee in dept.get("employees") or []
+        }
+        for field in ("idx", "key", "name")
+    }
+    out = []
+    for dept in active_depts:
+        extra = scene.get(dept.get("key"))
+        if not extra:
+            out.append(dept)
+            continue
+        group = dict(extra.get("group") or {})
+        rows = []
+        for original in extra.get("employees") or []:
+            employee = dict(original)
+            idx = employee.get("idx")
+            if not isinstance(idx, int) or idx not in SCENE_IDX_RANGE:
+                raise DepartmentConfigError(f"AI 场景专岗 idx 越界: {idx}")
+            for field in ("idx", "key", "name"):
+                value = employee.get(field)
+                if not value or value in seen[field]:
+                    raise DepartmentConfigError(
+                        f"AI 场景专岗 {field} 为空或与现有员工重复: {value}"
+                    )
+                seen[field].add(value)
+            employee["group"] = group.get("name") or employee.get("group")
+            rows.append(employee)
+        annotated = _annotate_v1_department(
+            {"employees": rows}, status="active"
+        )["employees"]
+        for employee in annotated:
+            employee["scene_role"] = True
+        group["members"] = [employee["idx"] for employee in annotated]
+        tagline = str(dept.get("tagline") or "")
+        out.append({
+            **dept,
+            "tagline": (tagline.rstrip("。") + f"；另有 {len(annotated)} 名 AI 场景专岗新上岗。") if tagline else tagline,
+            # 新上岗的场景专岗分组排在最前，老板一进楼层就能看到。
+            "groups": [group, *(dept.get("groups") or [])],
+            "employees": [*(dept.get("employees") or []), *annotated],
+        })
+    return out
 
 
 def reset_cache() -> None:

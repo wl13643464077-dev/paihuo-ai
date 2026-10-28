@@ -29,7 +29,7 @@ from . import (analyzer, assetfiles, auth, billing, bossdashboard, brand_media, 
                inspection, inspectionimport, inspectionoverrides, inspectionstandards,
                learningevidence, purchases, secureconfig,
                taskcenter, taskrunner, taskthreads, teamrun)
-from . import instancelock, retention, timeutil  # 单进程锁 / 数据保留期 / 北京时间
+from . import instancelock, resume, retention, timeutil  # 单进程锁 / 数据保留期 / 北京时间
 from . import wxpay  # 微信支付 APIv3(默认关闭)
 from . import photoproof  # 店员现场照片(压缩+水印+落盘)
 from . import api_staff, stafftask  # 第 2 期:派给店员的任务(路由模块 + 服务层)
@@ -2956,6 +2956,8 @@ def depts_list():
             ) | {
                 "group": e["group"], "enabled": enabled,
                 "tasks_n": st.get("n", 0), "running_n": st.get("run", 0) or 0,
+                "resume_card": resume.card(resume.for_employee(scoped_employee)),
+                "scene_role": bool(e.get("scene_role")),
             }
             if internal:
                 public |= {
@@ -3015,6 +3017,8 @@ def dept_emp(idx: int):
     ) | {
         "tasks": tasks,
         "enabled": enabled,
+        "resume": resume.for_employee(e),
+        "scene_role": bool(e.get("scene_role")),
     }
     if not _is_boss():
         return public

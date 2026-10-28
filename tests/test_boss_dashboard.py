@@ -365,7 +365,7 @@ class BossDashboardServiceCase(unittest.TestCase):
         ]
         active = [item for item in specialists if item["roster_status"] == "active"]
         legacy = [item for item in specialists if item["roster_status"] == "legacy"]
-        self.assertEqual(36, len(active))
+        self.assertEqual(39, len(active))  # 36 名冻结岗位 + 3 名 AI 场景专岗
         self.assertTrue(all(item["can_assign"] for item in active))
         self.assertEqual(1, len(legacy))
         legacy_card = legacy[0]

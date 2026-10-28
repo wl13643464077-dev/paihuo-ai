@@ -89,16 +89,18 @@ class CapabilityRenderingTests(unittest.TestCase):
     def test_every_specialist_exposes_capabilities(self):
         specialists = departments.specialists()
         # Schema 55 keeps 360 V4 industry people active, plus restaurant's 60
-        # unchanged specialists.
-        self.assertEqual(420, len(specialists))
+        # unchanged specialists, plus the 27 AI 场景专岗 add-on roles.
+        self.assertEqual(447, len(specialists))
+        self.assertEqual(27, sum(1 for e in specialists.values() if e.get("scene_role")))
         # The legacy idx-keyed compatibility map still collapses same-slot
         # versions, while the lossless registry retains V1 + V2 + V3.
         self.assertEqual(420, len(departments.legacy_specialists()))
         self.assertEqual(780, len(departments.historical_specialists()))
         # The active-first idx compatibility view keeps the 360 shared slots
         # once and also retains the 60 independent 20xxx historical ids.
-        self.assertEqual(480, len(departments.all_specialists()))
-        self.assertEqual(1200, len(departments.all_identity_versions()))
+        # +27 AI 场景专岗 (independent 3xxx ids).
+        self.assertEqual(507, len(departments.all_specialists()))
+        self.assertEqual(1227, len(departments.all_identity_versions()))
         empty = [
             idx for idx in specialists
             if not departments.capabilities_for(idx, [])

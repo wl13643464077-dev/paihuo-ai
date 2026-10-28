@@ -323,7 +323,7 @@ class FrontendNavigationContractTests(unittest.TestCase):
     def test_employee_dispatch_buttons_open_the_guided_task_form(self):
         self.assertIn("async function openSpec(idx,initialTab)", self.app_js)
         self.assertIn(
-            '(initialTab==="task"?"task":"intro")',
+            'initialTab==="task"&&canAssign',
             self.app_js,
         )
         self.assertIn(
@@ -335,7 +335,7 @@ class FrontendNavigationContractTests(unittest.TestCase):
             self.app_js,
         )
         self.assertIn(
-            'ME&&ME.role==="tour"||!canAssign ? "intro"',
+            ': "resume");',
             self.app_js,
         )
 
