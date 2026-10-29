@@ -6995,7 +6995,7 @@ async function avSubmit(btn){
       own_audio_name: AV_VOICE_MODE==="own"&&AV_OWN_AUDIO ? AV_OWN_AUDIO.name : "",
       consent:AV_CONSENT, overseas_ok:AV_OVERSEAS,
       studio: stPackOn()?{enabled:true, topic:ST.topic||{}, title:($("#st-title")?.value||ST.title||"").trim(),
-        cover_title:($("#st-cover")?.value||ST.cover||"").trim()}:null}});
+        cover_title:($("#st-cover")?.value||ST.cover||"").trim(), store_name:ST.store?ST.store.name:""}:null}});
     if(stPackOn()){ ST.topic=null; ST.topics=null; ST.title=""; ST.cover=""; }
     AV_DRAFT="";
     toast(`已开拍${AV_VOICE_MODE==="own"?"(用您的原声)":""},可继续开新的任务`); render();

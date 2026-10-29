@@ -704,8 +704,10 @@ def _studio_params(raw) -> dict | None:
         raise HTTPException(400, "自动剪辑需要视频标题：先选题写稿，或填一个标题")
     if not clean["keywords"]:
         clean["keywords"] = [(title or clean["title"])[:12]]
+    store = _avatar_asset_name(raw.get("store_name"), "store_name", {"store"}, required=False)
     return {"topic": clean, "title": title or clean["title"][:22],
-            "cover_title": storestudio._clean_public(raw.get("cover_title"), 20)}
+            "cover_title": storestudio._clean_public(raw.get("cover_title"), 20),
+            "store_name": store}
 
 
 async def _billed_studio_call(action: str, note: str, work, n: int = 1):

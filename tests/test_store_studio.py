@@ -60,6 +60,32 @@ class StudioPureTests(unittest.TestCase):
             self.assertLessEqual(end - start, 2.8 + 1e-6)
             self.assertLessEqual(end, 20.0 - 1.5)
 
+    def test_render_uses_four_inputs_regardless_of_sentence_count(self):
+        import tempfile as _tf
+        script = "。".join(f"第{n}句话讲一件事情" for n in range(20)) + "。"
+        timeline = storestudio.subtitle_timeline(script, 40.0)
+        with _tf.TemporaryDirectory() as d:
+            from PIL import Image
+            card = os.path.join(d, "quote.png")
+            Image.new("RGB", (400, 300), "white").save(card)
+            args = storestudio.render_cmd("v.mp4", [(card, 3.0, 5.8), (card, 9.0, 11.8)], d,
+                                          timeline, "标题", os.path.join(d, "o.mp4"), 40.0)
+            self.assertEqual(4, args.count("-i"))
+            listing = open(os.path.join(d, "subs.txt"), encoding="utf-8").read()
+            self.assertEqual(len(timeline) + 1, listing.count("file '"))
+
+    def test_quote_card_follows_the_cited_sentence_and_store_card_the_shop_sentence(self):
+        script = ("美团要建一千家超级厨房，小店要完？亿邦动力10月26号报的这事。"
+                  "平台越做越标准。所以我们店明档就摆门口，客人进门先看刀。你怎么看？")
+        timeline = storestudio.subtitle_timeline(script, 30.0)
+        cards = [{"path": "/x/quote.png"}, {"path": "/x/store.png"}]
+        placed = storestudio._place_cards(
+            cards, timeline, storestudio.broll_windows(timeline, 2, 30.0),
+            {"topic": {"source": "亿邦动力 2026-10-26"}}, 30.0)
+        by_start = {a: t for a, _, t in timeline}
+        self.assertIn("亿邦", by_start[placed[0][0]])
+        self.assertRegex(by_start[placed[1][0]], "门口|我们店|明档")
+
     def test_studio_files_resolve_to_the_job_owner(self):
         for name in ("avatar_5_studio.mp4", "avatar_5_studio-pack.zip",
                      "avatar_5_studio-cover34.jpg", "avatar_5_studio-cover916.jpg"):
