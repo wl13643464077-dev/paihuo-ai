@@ -3177,6 +3177,19 @@ function specResumeTab(e){
         ${(pl.value||[]).length?`<div class="rz-pb"><div class="rz-pt">💡 能帮你什么</div>${rzList(pl.value,"win")}</div>`:""}
         ${pl.how?`<div class="rz-pb"><div class="rz-pt">👉 怎么用</div><p class="rz-p">${esc(pl.how)}</p></div>`:""}
       </div></section>`:"";
+  const q=r.quality||{};
+  const qStats=(q.stats||[]).filter(x=>x&&Number(x.num));
+  const statsHtml=qStats.length?`<div class="rz-stats">${qStats.map(x=>`<div class="rz-stat"><b>${Number(x.num)}</b><span>${esc(x.label||"")}</span></div>`).join("")}</div>`:"";
+  const methods=(q.methods||[]).filter(m=>m&&m.name);
+  const methodHtml=methods.length?`<div class="rz-methods">${methods.map(m=>`<div class="rz-method"><b>${esc(m.name)}</b>${m.detail?`<p>${esc(m.detail)}</p>`:""}</div>`).join("")}</div>`:"";
+  const flow=(q.workflow||[]).filter(w=>w&&w.head);
+  const flowHtml=flow.length?`<ol class="rz-flow">${flow.map(w=>`<li><b>${esc(w.head)}</b>${w.detail?`<span class="sub">${esc(w.detail)}</span>`:""}</li>`).join("")}</ol>`:"";
+  const checkHtml=[(q.checks||[]).length?`<div class="rz-lab" style="margin-top:0">交付前逐条核对</div><ul class="rz-checks">${q.checks.map(c=>`<li>${esc(c)}</li>`).join("")}</ul>`:"",
+    q.fallback?`<div class="rz-fallback"><b>资料不够时：</b>${esc(q.fallback)}</div>`:"",
+    (q.metrics||[]).length?`<div class="rz-lab">衡量 TA 干得好不好</div><div class="rz-chips">${q.metrics.map(m=>`<span class="tag">📈 ${esc(m)}</span>`).join("")}</div>`:""].join("");
+  const redHtml=(q.redlines||[]).length?`<ul class="rz-checks no">${q.redlines.map(c=>`<li>${esc(c)}</li>`).join("")}</ul>`:"";
+  const outs=(q.outputs||[]).length?q.outputs:(r.deliverables||[]);
+  const outHtml=outs.length?`<div class="rz-docs">${outs.map(o=>`<div class="rz-doc">${esc(o)}</div>`).join("")}</div>`:"";
   const stats=e.stats||{};
   const bossBox=(cls)=>boss?`<section class="rz-panel rz-boss ${cls}"><h3 class="rz-sec">⚙️ 岗位配置 <span class="rz-badge">仅老板可见</span></h3>
       <div class="sub" style="margin-bottom:8px">交付 ${Number(stats.runs)||0} 单 · 历史成本 ${rmb(stats.cost_usd)} · 进修技能 ${(e.skills||[]).length} 条</div>
@@ -3192,6 +3205,7 @@ function specResumeTab(e){
       ${head?`<div class="rz-headline">${esc(head)}</div>`:""}
       ${meta.length?`<div class="rz-meta">${meta.map(m=>`<span>${esc(m)}</span>`).join("")}</div>`:""}
       ${(r.tags||[]).length?`<div class="rz-chips">${r.tags.map(t=>`<span class="chip rz-tagchip">${esc(t)}</span>`).join("")}</div>`:""}
+      ${statsHtml}
       ${!tour&&canAssign?`<div class="rz-cta"><button class="btn pri" onclick="SPEC_TAB='task';drawSpec()">📋 聘用并派活</button>
         <span class="sub">一句话说清要什么，TA 交回结论、依据和行动清单，拍板永远在你。</span></div>`:""}
     </div>
@@ -3200,6 +3214,9 @@ function specResumeTab(e){
       <div class="rz-main">
         ${plainBox}
         ${pl?"":rzSec("adv","个人优势",adv)}
+        ${rzSec("method",`拿手方法 <small class="sub">TA 干活靠的不是感觉</small>`,methodHtml)}
+        ${rzSec("flow",`TA 怎么干活 <small class="sub">每单都按这 ${flow.length} 步走</small>`,flowHtml)}
+        ${rzSec("qa","质量把关",checkHtml)}
         ${rzSec("feat",feats.some(f=>f.num)?"精选成果":"代表能力",featHtml)}
         ${rzSec("job","工作经历",jobs)}
         ${rzSec("proj",`项目经历 <small class="sub">代表项目 ${(r.projects||[]).length} 个</small>`,projects)}
@@ -3209,9 +3226,10 @@ function specResumeTab(e){
         ${bossBox("rz-boss-d")}
         ${pl?rzSec("why","需要留意",rzList(r.cautions),'style="background:#fff6dc"'):rzSec("why","为什么推荐TA",why+cautions,'style="background:#fff6dc"')}
         ${pl?"":rzSec("scene","这些时候找TA",scenes)}
-        ${rzSec("skill","专业技能",bars)}
+        ${rzSec("out",`TA 会交回 <small class="sub">${outs.length} 份文件</small>`,outHtml)}
+        ${rzSec("red","TA 绝不做的事",redHtml)}
+        ${methods.length?"":rzSec("skill","专业技能",bars)}
         ${rzSec("need","派活时请准备",rzList(r.prepare))}
-        ${rzSec("out","TA 会交回",(r.deliverables||[]).length?`<div class="rz-chips">${r.deliverables.map(c=>`<span class="tag">${esc(c)}</span>`).join("")}</div>`:"")}
       </div>
     </div>
     <div class="rz-foot sub">${esc(r.footnote||"")}</div>
