@@ -7067,7 +7067,7 @@ async function stScene(btn){
   if(!avConsentOk()) return;
   const label=btn.textContent; btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 合成中(约1-2分钟)…`;
   try{
-    const r=await api("/avatar/studio/scene",{method:"POST",body:{portrait_name:AV_PHOTO.name,store_name:ST.store.name,
+    const r=await api("/avatar/studio/scene",{method:"POST",timeout:420000,longRunning:true,body:{portrait_name:AV_PHOTO.name,store_name:ST.store.name,
       scene:ST.scene,note:(ST.sceneNote||"").trim(),industry:ST.industry,consent:AV_CONSENT}});
     if(r.photos&&r.photos.length){ AV_PHOTO=r.photos[0]; toast(`已生成 ${r.photos.length} 张,已选中第 1 张;在「开拍 ①」可换另一张`); }
     render();
@@ -7078,7 +7078,7 @@ async function stTopics(btn){
   ST.industry=industry; ST.note=($("#st-note")?.value||"").trim();
   const label=btn.textContent; btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 全网扫描中(约1-3分钟)…`;
   try{
-    const r=await api("/avatar/studio/topics",{method:"POST",body:{industry,store_note:ST.note}});
+    const r=await api("/avatar/studio/topics",{method:"POST",timeout:660000,longRunning:true,body:{industry,store_note:ST.note}});
     ST.topics=r.topics||[]; ST.scanNote=r.scan_note||""; ST.topic=null; render();
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent=label; }
 }
@@ -7088,7 +7088,7 @@ async function stScript(btn){
   const label=btn.textContent; btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 写稿中…`;
   try{
     const dur=+($("#st-dur")?.value||30);
-    const r=await api("/avatar/studio/script",{method:"POST",body:{topic:ST.topic,industry:ST.industry,store_note:ST.note,duration:dur}});
+    const r=await api("/avatar/studio/script",{method:"POST",timeout:330000,longRunning:true,body:{topic:ST.topic,industry:ST.industry,store_note:ST.note,duration:dur}});
     ST.title=r.title||ST.title; ST.cover=r.cover_title||ST.cover;
     render();
     setTimeout(()=>{ const box=$("#av-script"); if(box){ box.value=r.script; box.scrollIntoView({behavior:"smooth",block:"center"}); }
