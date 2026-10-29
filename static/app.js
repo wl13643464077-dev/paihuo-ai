@@ -6807,7 +6807,7 @@ async function avatarView(){
           <input type="file" accept=".mp3,.m4a,.wav" onchange="avUploadVoice(this)">
           <div class="sub" id="av-own-status" style="margin-top:4px">上传一段您念这份口播稿的录音(手机录就行,成片就是您的原声)</div></div>
         <label>③ 口播稿 *(建议 60-200 字,约 30-60 秒)</label>
-        <textarea id="av-script" style="min-height:120px" placeholder="自己写、从内容部交付里复制,或用上面的爆款链接自动生成。"></textarea>
+        <textarea id="av-script" style="min-height:120px" placeholder="自己写、从内容部交付里复制,或用上面的爆款链接自动生成。" oninput="AV_DRAFT=this.value">${esc(AV_DRAFT||"")}</textarea>
         <label>④ 生成引擎 & 时长档位</label>
         <div class="row">
           <div><select id="av-engine" onchange="avPriceSync()">${meta.engines.map(e=>`<option value="${e.key}">${esc(e.label)}</option>`).join("")}</select></div>
@@ -6938,7 +6938,7 @@ async function avFromLink(btn){
   try{
     const r = await api("/avatar/script-from-link",{method:"POST",body:{url, style:$("#av-style").value.trim(),
       duration:+($("#av-link-dur")?.value||30), profile_id:$("#av-link-profile")?.value?+$("#av-link-profile").value:null}});
-    $("#av-script").value = r.script;
+    $("#av-script").value = r.script; AV_DRAFT = r.script;
     if(r.source_text){
       let box = $("#av-source");
       if(!box){ $("#av-link").closest(".card").insertAdjacentHTML("beforeend",
@@ -6997,11 +6997,12 @@ async function avSubmit(btn){
       studio: stPackOn()?{enabled:true, topic:ST.topic||{}, title:($("#st-title")?.value||ST.title||"").trim(),
         cover_title:($("#st-cover")?.value||ST.cover||"").trim()}:null}});
     if(stPackOn()){ ST.topic=null; ST.topics=null; ST.title=""; ST.cover=""; }
+    AV_DRAFT="";
     toast(`已开拍${AV_VOICE_MODE==="own"?"(用您的原声)":""},可继续开新的任务`); render();
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🎬 开拍"; }
 }
 /* ---------- 门店数字人一条龙(内容流水线 v3.1 融合) ---------- */
-let AV_META = null;
+let AV_META = null, AV_DRAFT = "";
 let ST = {store:null, scene:"door", topics:null, topic:null, title:"", cover:"", pack:true, industry:"", note:"", scanNote:""};
 function stPackOn(){ return !!(ST.pack && (ST.topic || ST.title) && $("#st-pack")?.checked!==false); }
 function studioCard(meta, stores){
@@ -7089,10 +7090,10 @@ async function stScript(btn){
   try{
     const dur=+($("#st-dur")?.value||30);
     const r=await api("/avatar/studio/script",{method:"POST",timeout:330000,longRunning:true,body:{topic:ST.topic,industry:ST.industry,store_note:ST.note,duration:dur}});
-    ST.title=r.title||ST.title; ST.cover=r.cover_title||ST.cover;
-    render();
-    setTimeout(()=>{ const box=$("#av-script"); if(box){ box.value=r.script; box.scrollIntoView({behavior:"smooth",block:"center"}); }
-      const sel=$("#av-dur"); if(sel){ sel.value=String(dur); avPriceSync(); } },0);
+    ST.title=r.title||ST.title; ST.cover=r.cover_title||ST.cover; AV_DRAFT=r.script;
+    await render();
+    const box=$("#av-script"); if(box){ box.value=r.script; box.scrollIntoView({behavior:"smooth",block:"center"}); }
+    const sel=$("#av-dur"); if(sel){ sel.value=String(dur); avPriceSync(); }
     toast((r.issues||[]).length?`⚠️ 稿子有红线风险:${r.issues.join("、")},请改一下再开拍`:"口播稿已填进「开拍 ③」,可以再改");
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent=label; }
 }
