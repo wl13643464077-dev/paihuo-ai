@@ -177,11 +177,171 @@ def _step_head(step: str) -> str:
     return re.split(r"[：:，,；;。]", str(step or "").strip(), maxsplit=1)[0].strip()
 
 
+def _md_sections(employee: dict) -> dict:
+    text = employee.get("md") or ""
+    if isinstance(text, str) and text.startswith('"'):
+        try:
+            text = json.loads(text)
+        except ValueError:
+            pass
+    if not isinstance(text, str):
+        return {}
+    return {
+        head.strip(): body.strip()
+        for head, body in re.findall(r"^## (.+?)\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+    }
+
+
+def _bullets(body: str) -> list[str]:
+    out = []
+    for line in str(body or "").splitlines():
+        line = re.sub(r"^\s*(?:[-*]|\d+[.)、])\s*", "", line).strip().rstrip("；;。")
+        if line:
+            out.append(line)
+    return out
+
+
+# 把内部状态码翻成老板听得懂的话
+_STATE_WORDS = (
+    (r"(时)?返回\s*HOLD", r"\1先暂停、不下结论"),
+    (r"(时)?返回\s*ESCALATE", r"\1马上上报负责人"),
+    (r"(时)?返回\s*GO", r"\1给出可执行结论"),
+    (r"(?<![A-Za-z])HOLD(?![A-Za-z])", "暂停"), (r"(?<![A-Za-z])ESCALATE(?![A-Za-z])", "上报"),
+    (r"(?<![A-Za-z])GO(?![A-Za-z])", "放行"),
+)
+
+
+def _plain_words(text: str) -> str:
+    text = str(text or "")
+    for pattern, repl in _STATE_WORDS:
+        text = re.sub(pattern, repl, text)
+    return text
+
+
+def _split_step(step: str) -> dict:
+    step = str(step or "").strip().rstrip("。；;")
+    parts = re.split(r"[：:]", step, maxsplit=1)
+    head = parts[0].strip()
+    rest = parts[1].strip() if len(parts) > 1 else ""
+    if not rest and len(head) > 30:
+        parts = re.split(r"[，,；;]", head, maxsplit=1)
+        if len(parts) == 2 and len(parts[0]) >= 4:
+            head, rest = parts[0].strip(), parts[1].strip()
+    return {"head": _short(head, 40), "detail": _short(rest, 70)}
+
+
+def _first_sentence(text: str, limit: int) -> str:
+    text = str(text or "").strip()
+    first = re.split(r"(?<=[。！？])", text, maxsplit=1)[0]
+    if len(first) > limit:
+        # 长句优先停在「输出…」之前，保留“做什么”
+        first = re.split(r"，(?:输出|执行时|确保)", first, maxsplit=1)[0].rstrip("，") + "。"
+    return _short(first, limit)
+
+
+def _redline(text: str) -> str:
+    text = _plain_words(text)
+    if text.startswith("不得绕过人工审批"):
+        return "不会绕过你的审批直接执行结论"
+    return re.sub(r"^不得", "绝不", text)
+
+
+def _bracket_rules(employee: dict, label: str) -> list[str]:
+    """Older specs write rules inline, e.g. 「【禁止】A；B；C」."""
+    text = employee.get("md") or ""
+    if isinstance(text, str) and text.startswith('"'):
+        try:
+            text = json.loads(text)
+        except ValueError:
+            return []
+    found = re.search(rf"【{label}】([^\n]+)", str(text))
+    if not found:
+        return []
+    return [p.strip().rstrip("。") for p in re.split(r"[；;]", found.group(1)) if p.strip()]
+
+
+def _quality(employee: dict, profile: dict, details: dict) -> dict:
+    """Professional depth shown on the résumé, taken only from the role's own spec."""
+    md = _md_sections(employee)
+    contract = employee.get("decision_contract") or {}
+    profile = profile if isinstance(profile, dict) else {}
+    details = details if isinstance(details, dict) else {}
+
+    method_names = _strings(profile.get("skill_tree")) or _bullets(md.get("岗位技能树"))
+    method_detail = details.get("skill_tree") or {}
+    cap_detail = details.get("capabilities") or {}
+    methods = [
+        {"name": _short(name, 18), "detail": _first_sentence(method_detail.get(name) or "", 72)}
+        for name in method_names[:6]
+    ]
+    if not any(m["detail"] for m in methods):
+        caps = _strings(profile.get("capabilities"))
+        if caps and cap_detail:
+            methods = [{"name": c, "detail": _first_sentence(cap_detail.get(c) or "", 72)} for c in caps[:6]]
+
+    steps = _strings(employee.get("steps")) or _strings(contract.get("workflow")) or _bullets(md.get("工作流"))
+    workflow = [_split_step(s) for s in steps[:8]]
+
+    checks = (_bullets(md.get("质量门")) or _strings(contract.get("evidence_required"))
+              or _bullets(md.get("证据要求")))
+    checks = [_short(_plain_words(c), 60) for c in checks[:5]]
+
+    metrics = []
+    for m in contract.get("success_metrics") or []:
+        name = m.get("name") if isinstance(m, dict) else m
+        name = str(name or "").split("·")[-1].strip()
+        if name:
+            metrics.append(name)
+    if not metrics:
+        metrics = [re.split(r"[：:]", b, maxsplit=1)[0].split("·")[-1].strip()
+                   for b in _bullets(md.get("成功指标"))]
+    metrics = [_short(m, 20) for m in metrics if m][:5]
+
+    fallback = str(contract.get("fallback") or md.get("缺数回退") or "").strip()
+    fallback = _short(_plain_words(fallback), 130) if fallback else ""
+
+    redlines = (_strings(contract.get("forbidden_actions")) or _bullets(md.get("禁止动作"))
+                or _strings(employee.get("scene_boundary")) or _bracket_rules(employee, "禁止"))
+    redlines = [_short(_redline(r), 46) for r in redlines[:4]]
+
+    outputs = (_strings(contract.get("outputs")) or _strings(employee.get("deliverables"))
+               or _bullets(md.get("交付物")))
+    outputs = [_short(_plain_words(o), 40) for o in outputs[:6]]
+    knowledge = _strings(profile.get("knowledge_domains"))[:6]
+
+    stats = [s for s in (
+        {"num": len(method_names), "label": "套拿手方法"} if method_names else None,
+        {"num": len(steps), "label": "步标准流程"} if steps else None,
+        {"num": len(outputs), "label": "份交付文件"} if outputs else None,
+        {"num": len(checks) + len(redlines), "label": "道质量把关"} if checks or redlines else None,
+        {"num": len(knowledge), "label": "个知识领域"} if knowledge else None,
+    ) if s and s["num"]]
+    return {
+        "stats": stats[:5],
+        "methods": methods,
+        "workflow": workflow,
+        "checks": checks,
+        "metrics": metrics,
+        "fallback": fallback,
+        "redlines": redlines,
+        "outputs": outputs,
+        "knowledge": knowledge,
+    }
+
+
 def build(employee: dict, profile: dict | None = None,
           capability_details: dict | None = None) -> dict:
     """Return a résumé dict for one active or historical employee."""
     if not isinstance(employee, dict):
         return {}
+    result = _build(employee, profile, capability_details)
+    if result:
+        result["quality"] = _quality(employee, profile or {}, capability_details or {})
+    return result
+
+
+def _build(employee: dict, profile: dict | None = None,
+           capability_details: dict | None = None) -> dict:
     key = str(employee.get("key") or employee.get("idx") or "")
     override = _overrides().get(key)
     if isinstance(override, dict) and override:

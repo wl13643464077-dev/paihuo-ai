@@ -76,6 +76,24 @@ class ResumeTests(unittest.TestCase):
             self.assertLessEqual(len(card["tags"]), 3)
         self.assertEqual(447, count)
 
+    def test_every_resume_shows_professional_depth_from_its_own_spec(self):
+        for employee in self._all():
+            q = resume.for_employee(employee)["quality"]
+            name = employee["name"]
+            self.assertGreaterEqual(len(q["workflow"]), 3, name)
+            self.assertTrue(q["outputs"], name)
+            self.assertTrue(q["checks"] or q["redlines"], name)
+            self.assertTrue(q["methods"], name)
+            for stat in q["stats"]:
+                self.assertGreater(stat["num"], 0, name)
+            shown = json.dumps(q, ensure_ascii=False)
+            self.assertNotRegex(shown, r"(?<![A-Za-z])(HOLD|ESCALATE)(?![A-Za-z])", name)
+            # 每个拿手方法都必须来自岗位自己的技能树或能力
+            spec = json.dumps(employee, ensure_ascii=False) + json.dumps(
+                departments.factory_profile_for(employee["key"]) or {}, ensure_ascii=False)
+            for method in q["methods"]:
+                self.assertIn(method["name"].rstrip("…"), spec, name)
+
     def test_generated_resumes_never_invent_numbers_in_wins(self):
         for employee in self._all():
             r = resume.for_employee(employee)
