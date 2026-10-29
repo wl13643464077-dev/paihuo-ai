@@ -42,6 +42,10 @@ DEFAULT_PRICES = {
     "bench_watch": {"points": 3, "label": "竞品盯梢周报", "cost": "成本≈¥1.1(联网)"},
     "menu_copy": {"points": 1, "label": "看图写卖点/菜单文案", "cost": "成本≈¥0.3"},
     "product_shot": {"points": 2, "label": "产品图美化(图生图)", "cost": "成本≈¥0.6"},
+    "studio_scene": {"points": 2, "label": "门店数字人·老板进店场景照(每张)", "cost": "成本≈¥0.6/张(双参考图生图)"},
+    "studio_topics": {"points": 1, "label": "门店数字人·72小时行业热点选题", "cost": "成本≈¥0.4(联网)"},
+    "studio_script": {"points": 1, "label": "门店数字人·选题写口播稿", "cost": "成本≈¥0.3"},
+    "studio_pack": {"points": 3, "label": "门店数字人·自动剪辑+封面+三平台发布包", "cost": "成本≈¥1(抓图+文案+算力)"},
     # 第 2 期真人派活:只有调大模型的两步扣点,派活/拍照/审核本身不扣
     "staff_parse": {"points": 0.2, "label": "一句话派活·AI 拆任务", "cost": "成本≈¥0.03"},
     "staff_ai_check": {"points": 0.2, "label": "店员交差·AI 验照片", "cost": "成本≈¥0.05"},

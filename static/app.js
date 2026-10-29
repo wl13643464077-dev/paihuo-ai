@@ -6723,9 +6723,14 @@ async function settingsView(){
 /* ---------- V6:数字人摄影棚 ---------- */
 let AV_PHOTO = null, AV_JOB = null;
 async function avatarView(){
-  const [meta,jobsPayload,photosPayload] = await Promise.all([
-    api("/avatar/meta"),api(listPath("/avatar/jobs","avatar")),api("/avatar/photos")
+  const [meta,jobsPayload,photosPayload,storePayload] = await Promise.all([
+    api("/avatar/meta"),api(listPath("/avatar/jobs","avatar")),api("/avatar/photos"),
+    api("/avatar/store-photos").catch(()=>[])
   ]);
+  AV_META = meta;
+  const stores = Array.isArray(storePayload)?storePayload:[];
+  if(ST.store && !stores.some(p=>p.name===ST.store.name)) ST.store=null;
+  if(!ST.store && stores.length) ST.store=stores[stores.length-1];
   const jobsContract=normalizeListContract(jobsPayload,50);
   const photosContract=normalizeListContract(photosPayload,0);
   const jobs=jobsContract.items, photos=photosContract.items;
@@ -6760,6 +6765,7 @@ async function avatarView(){
     </div>
     <div class="sub" style="margin-top:6px">情报员会打开链接提取内容,自动改写成 30-60 秒口播稿并填到下面(约 1 分钟)。</div>
     ${meta.link_video_enabled===false?`<div class="notice" style="font-size:12.5px;margin-top:6px">ℹ️ ${esc(meta.link_video_hint||"")}</div>`:""}</div>
+  ${studioCard(meta, stores)}
   <div class="card"><h2>🎬 开拍</h2>
     ${meta.consent?`<label class="notice" style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;margin-top:0">
       <input type="checkbox" id="av-consent" style="width:auto;margin-top:3px" ${AV_CONSENT?"checked":""} onchange="AV_CONSENT=this.checked">
@@ -6849,6 +6855,7 @@ async function avatarView(){
         ${safeAssetUrl(j.audio_file)?`<a class="btn sm" href="${esc(safeAssetUrl(j.audio_file))}" target="_blank" rel="noopener noreferrer">🔊 只要配音</a>`:""}</div>
         ${meta.ai_label?`<div class="sub" style="font-size:11px">🏷 ${esc(meta.ai_label)}(发布时请保留此标识)</div>`:""}`:""}
       ${j.status==="failed"?`<div class="notice red" style="margin-top:6px">${esc(j.error||"生成失败")}</div>`:""}
+      ${j.studio?studioJobBlock(j):""}
       <div class="sub" style="margin-top:4px;font-size:11px">${new Date(j.created_at*1000).toLocaleString("zh-CN")}</div>
     </div>`).join(""):`<div class="empty">这一页没有数字人任务。</div>`}
     ${listPager(jobsContract,"avatar")}</div>`:""}`;
@@ -6970,7 +6977,7 @@ async function avDelPhoto(name, ev){
 function avPriceSync(){
   const el=$("#av-price"); if(!el) return;
   const eng=$("#av-engine")?.value||"", dur=+($("#av-dur")?.value||30);
-  const pts = eng==="basic" ? 6 : (dur<=30 ? 12 : 20);
+  const pts = (eng==="basic" ? 6 : (dur<=30 ? 12 : 20)) + (stPackOn()?+(AV_META?.studio?.prices?.studio_pack||3):0);
   el.innerHTML = `💎 本单 <b>${pts} 点</b> · 余额 ${Math.round(STATE?.balance||0)} 点`;
 }
 async function avSubmit(btn){
@@ -6986,9 +6993,132 @@ async function avSubmit(btn){
       voice_id:$("#av-voice")?.value, script, prompt:$("#av-prompt").value.trim(),
       engine:$("#av-engine")?.value||"", duration:+($("#av-dur")?.value||30),
       own_audio_name: AV_VOICE_MODE==="own"&&AV_OWN_AUDIO ? AV_OWN_AUDIO.name : "",
-      consent:AV_CONSENT, overseas_ok:AV_OVERSEAS}});
+      consent:AV_CONSENT, overseas_ok:AV_OVERSEAS,
+      studio: stPackOn()?{enabled:true, topic:ST.topic||{}, title:($("#st-title")?.value||ST.title||"").trim(),
+        cover_title:($("#st-cover")?.value||ST.cover||"").trim()}:null}});
+    if(stPackOn()){ ST.topic=null; ST.topics=null; ST.title=""; ST.cover=""; }
     toast(`已开拍${AV_VOICE_MODE==="own"?"(用您的原声)":""},可继续开新的任务`); render();
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🎬 开拍"; }
+}
+/* ---------- 门店数字人一条龙(内容流水线 v3.1 融合) ---------- */
+let AV_META = null;
+let ST = {store:null, scene:"door", topics:null, topic:null, title:"", cover:"", pack:true, industry:"", note:"", scanNote:""};
+function stPackOn(){ return !!(ST.pack && (ST.topic || ST.title) && $("#st-pack")?.checked!==false); }
+function studioCard(meta, stores){
+  const s=meta.studio||{}, pr=s.prices||{};
+  if(!ST.industry) ST.industry=s.industry||"";
+  const stepHead=(n,t)=>`<div style="display:flex;gap:8px;align-items:center;margin:14px 0 6px"><span class="rz-no" style="width:24px;height:24px">${n}</span><b>${t}</b></div>`;
+  const topics=ST.topics||[];
+  return `<div class="card" style="background:linear-gradient(120deg,#fff4dc,#fffdf7 70%)">
+    <h2 style="margin-bottom:4px">🏪 门店数字人一条龙</h2>
+    <div class="sub">老板进店场景照 → 最近 72 小时行业热点 → 写口播稿 → 数字人出片 → <b>自动剪辑 + 封面 + 抖音/视频号/小红书发布包</b>。每步单独计点，失败自动退回；AI 只出草稿，发布由您本人点。</div>
+    ${stepHead("A","老板进店：上传门头/店内照片，AI 把您合成到店门口或店里")}
+    <div class="row" style="align-items:flex-start">
+      <div style="flex:1;min-width:240px">
+        <label>门店照片(门头/店内/收银台,清晰、少行人)</label>
+        <input type="file" accept=".jpg,.jpeg,.png,.webp" onchange="stUploadStore(this)">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">${stores.map(p=>`<img src="${esc(safeAssetUrl(p.preview))}" onclick="ST.store={name:${cp(p.name)},preview:${cp(p.preview)}};render()"
+          style="width:84px;height:84px;object-fit:cover;cursor:pointer;border-radius:10px;border:3px solid ${ST.store&&ST.store.name===p.name?"var(--gold,#c9a227)":"var(--ink)"}">`).join("")||`<span class="sub">还没上传门店照片</span>`}</div>
+      </div>
+      <div style="flex:1.2;min-width:260px">
+        <label>站在哪</label>
+        <div class="chips" style="gap:6px">${(s.scenes||[]).map(x=>`<span class="chip ${ST.scene===x.key?"on":""}" onclick="ST.scene=${cp(x.key)};render()">${esc(x.label)}</span>`).join("")}</div>
+        <label>补充要求(选填)</label><input id="st-scene-note" maxlength="80" placeholder="如:穿厨师服、手里端着招牌菜" value="${esc(ST.sceneNote||"")}" oninput="ST.sceneNote=this.value">
+        <div class="actions"><button class="btn pri" onclick="stScene(this)">🪄 生成老板进店照(2张·${(pr.studio_scene||2)*2}点)</button></div>
+        <div class="sub">老板照片用下方「开拍 ①」里选中的那张（现在：<b>${AV_PHOTO?"已选":"未选"}</b>）。生成的照片自动进照片库并选中，直接用它开拍。</div>
+      </div>
+    </div>
+    ${stepHead("B","选题：扫本行业最近 72 小时热点")}
+    <div class="row" style="align-items:flex-end">
+      <div style="flex:1;min-width:150px"><label>行业</label><input id="st-industry" list="st-industries" value="${esc(ST.industry)}" oninput="ST.industry=this.value">
+        <datalist id="st-industries">${(s.industries||[]).map(x=>`<option value="${esc(x)}">`).join("")}</datalist></div>
+      <div style="flex:2;min-width:240px"><label>门店情况(选填,写得越具体选题越贴)</label><input id="st-note" maxlength="120" placeholder="如:社区火锅店,人均80,主打鲜切牛肉,周边写字楼多" value="${esc(ST.note)}" oninput="ST.note=this.value"></div>
+      <div><button class="btn pri" onclick="stTopics(this)">📡 扫 72 小时热点(${pr.studio_topics||1}点)</button></div>
+    </div>
+    ${ST.scanNote?`<div class="sub" style="margin-top:6px">🔎 ${esc(ST.scanNote)}</div>`:""}
+    ${topics.length?`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:10px;margin-top:10px">${topics.map((t,i)=>`
+      <div onclick="stPickTopic(${i})" style="cursor:pointer;border:2.5px solid ${ST.topic&&ST.topic.title===t.title?"var(--gold,#c9a227)":"var(--ink)"};border-radius:12px;padding:10px 12px;background:${ST.topic&&ST.topic.title===t.title?"#fff6dc":"#fff"}">
+        <div style="display:flex;gap:6px;align-items:center"><b style="flex:1">${esc(t.title)}</b><span class="pill done">${Number(t.score)||0}分</span></div>
+        <div class="sub" style="margin-top:4px">🔥 ${esc(t.heat)}</div>
+        <div class="sub">📰 ${esc(t.source)} · 约 ${Number(t.hours_ago)||0} 小时前</div>
+        ${t.angle?`<div style="font-size:13px;margin-top:4px">👉 ${esc(t.angle)}</div>`:""}
+      </div>`).join("")}</div>`:""}
+    ${stepHead("C","写稿：按选好的热点写口播稿（自动填进下方「开拍 ③」）")}
+    <div class="row" style="align-items:flex-end">
+      <div style="flex:1;min-width:120px"><label>时长</label><select id="st-dur">${(meta.durations||[]).map(d=>`<option value="${d.s}" ${d.s===30?"selected":""}>${esc(d.label)}</option>`).join("")}</select></div>
+      <div><button class="btn pri" onclick="stScript(this)" ${ST.topic?"":"disabled"}>✍️ 写口播稿(${pr.studio_script||1}点)</button></div>
+      <div style="flex:2;min-width:200px"><label>视频标题</label><input id="st-title" maxlength="30" value="${esc(ST.title)}" oninput="ST.title=this.value;avPriceSync()"></div>
+      <div style="flex:1;min-width:160px"><label>封面大字(｜分两行)</label><input id="st-cover" maxlength="20" value="${esc(ST.cover)}" oninput="ST.cover=this.value"></div>
+    </div>
+    <label style="display:flex;gap:6px;align-items:flex-start;font-weight:400;cursor:pointer;margin-top:8px">
+      <input type="checkbox" id="st-pack" style="width:auto;margin-top:3px" ${ST.pack?"checked":""} onchange="ST.pack=this.checked;avPriceSync()">
+      <span>开拍后<b>自动剪辑</b>（真人 + 新闻证据卡交替、字幕、标题）+ 封面(3:4/9:16) + 三平台发布文案 + 红线体检，打包下载(+${pr.studio_pack||3}点，失败自动退)。<span class="sub">需先选题或填标题。</span></span></label>
+  </div>`;
+}
+async function stUploadStore(input){
+  const f=input.files[0]; if(!f) return;
+  const fd=new FormData(); fd.append("file",f); fd.append("kind","store");
+  try{ ST.store=await xhrUpload("/api/avatar/upload",fd,input); toast("门店照片已上传"); render(); }
+  catch(e){ toast(e.message); }
+}
+async function stScene(btn){
+  if(!AV_PHOTO) return toast("先在下方「开拍 ①」上传并选中老板本人照片");
+  if(!ST.store) return toast("先上传一张门店照片");
+  if(!avConsentOk()) return;
+  const label=btn.textContent; btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 合成中(约1-2分钟)…`;
+  try{
+    const r=await api("/avatar/studio/scene",{method:"POST",body:{portrait_name:AV_PHOTO.name,store_name:ST.store.name,
+      scene:ST.scene,note:(ST.sceneNote||"").trim(),industry:ST.industry,consent:AV_CONSENT}});
+    if(r.photos&&r.photos.length){ AV_PHOTO=r.photos[0]; toast(`已生成 ${r.photos.length} 张,已选中第 1 张;在「开拍 ①」可换另一张`); }
+    render();
+  }catch(e){ toast(e.message); btn.disabled=false; btn.textContent=label; }
+}
+async function stTopics(btn){
+  const industry=($("#st-industry")?.value||"").trim(); if(!industry) return toast("先填行业");
+  ST.industry=industry; ST.note=($("#st-note")?.value||"").trim();
+  const label=btn.textContent; btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 全网扫描中(约1-3分钟)…`;
+  try{
+    const r=await api("/avatar/studio/topics",{method:"POST",body:{industry,store_note:ST.note}});
+    ST.topics=r.topics||[]; ST.scanNote=r.scan_note||""; ST.topic=null; render();
+  }catch(e){ toast(e.message); btn.disabled=false; btn.textContent=label; }
+}
+function stPickTopic(i){ ST.topic=(ST.topics||[])[i]||null; if(ST.topic&&!ST.title) ST.title=ST.topic.title.slice(0,22); render(); }
+async function stScript(btn){
+  if(!ST.topic) return toast("先点选一个选题");
+  const label=btn.textContent; btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 写稿中…`;
+  try{
+    const dur=+($("#st-dur")?.value||30);
+    const r=await api("/avatar/studio/script",{method:"POST",body:{topic:ST.topic,industry:ST.industry,store_note:ST.note,duration:dur}});
+    ST.title=r.title||ST.title; ST.cover=r.cover_title||ST.cover;
+    render();
+    setTimeout(()=>{ const box=$("#av-script"); if(box){ box.value=r.script; box.scrollIntoView({behavior:"smooth",block:"center"}); }
+      const sel=$("#av-dur"); if(sel){ sel.value=String(dur); avPriceSync(); } },0);
+    toast((r.issues||[]).length?`⚠️ 稿子有红线风险:${r.issues.join("、")},请改一下再开拍`:"口播稿已填进「开拍 ③」,可以再改");
+  }catch(e){ toast(e.message); btn.disabled=false; btn.textContent=label; }
+}
+function studioJobBlock(j){
+  const s=j.studio||{};
+  if(s.status==="done"){
+    const c=s.copy||{}, names={douyin:"抖音",shipinhao:"视频号",xiaohongshu:"小红书"};
+    return `<div style="border:2px dashed #e0a100;border-radius:12px;padding:10px;margin-top:8px;background:#fffaf0">
+      <b>📦 剪辑版 + 发布包</b> <span class="sub">${Number(s.broll)||0} 张证据卡</span>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px;align-items:flex-start">
+        ${safeAssetUrl(s.video)?`<video controls style="width:200px;border:3px solid var(--ink);border-radius:12px" src="${esc(safeAssetUrl(s.video))}"></video>`:""}
+        ${[s.cover34,s.cover916].filter(u=>safeAssetUrl(u)).map(u=>`<a href="${esc(safeAssetUrl(u))}" target="_blank" rel="noopener"><img src="${esc(safeAssetUrl(u))}" style="height:200px;border-radius:10px;border:2px solid var(--ink)"></a>`).join("")}
+      </div>
+      <div class="actions" style="margin-top:6px">${safeAssetUrl(s.pack)?`<a class="btn sm pri" href="${esc(safeAssetUrl(s.pack))}" download>⬇️ 下载发布包(zip)</a>`:""}
+        ${safeAssetUrl(s.video)?`<a class="btn sm" href="${esc(safeAssetUrl(s.video))}" download>⬇️ 只要剪辑版</a>`:""}</div>
+      <details style="margin-top:6px"><summary style="cursor:pointer;font-weight:800">📝 三平台文案 & 体检</summary>
+        ${Object.entries(names).map(([k,l])=>{const x=c[k]||{}; const txt=[x.title,x.body,(x.tags||[]).map(t=>"#"+t).join(" ")].filter(Boolean).join("\n\n");
+          if(!txt) return "";
+          return `<div style="margin-top:8px"><b>${l}</b> <button class="btn sm" onclick="navigator.clipboard.writeText(${cp(txt)}).then(()=>toast('已复制${l}文案'))">复制</button>
+          <div class="notice" style="white-space:pre-wrap;font-size:12.5px;margin-top:4px">${esc(txt)}</div></div>`;}).join("")}
+        <div style="margin-top:8px">${(s.checks||[]).map(x=>`<div style="font-size:13px">${x.ok?"✅":"🔴"} ${esc(x.text)}</div>`).join("")}</div>
+      </details></div>`;
+  }
+  if(s.status==="failed") return `<div class="notice red" style="margin-top:6px">${esc(s.error||"自动剪辑失败,剪辑包点数已退回")}</div>`;
+  if(j.status==="done"||s.status==="running") return `<div class="sub" style="margin-top:6px">✂️ 自动剪辑 + 发布包制作中…(约 1-3 分钟,完成后刷新)</div>`;
+  return `<div class="sub" style="margin-top:6px">📦 出片后自动剪辑 + 发布包</div>`;
 }
 async function svSubmit(btn){
   if(!AV_PHOTO) return toast("先在 ① 上传并点选一张产品照片");

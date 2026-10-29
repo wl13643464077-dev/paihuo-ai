@@ -740,7 +740,7 @@ _ASSET_NAME_RE = re.compile(
     r"^[0-9a-f]{32}\.(?:jpg|jpeg|png|webp|mp3|m4a|wav|mp4|mov)$",
     re.I,
 )
-_ASSET_KINDS = {"photo", "voice", "video", "generated"}
+_ASSET_KINDS = {"photo", "voice", "video", "generated", "store"}
 
 
 def _asset_key(tid: int) -> str:
@@ -1810,7 +1810,7 @@ def store_uploaded_asset(
 ) -> dict:
     """Quota-check, atomically write and register one already-validated upload."""
     tid = int(tid)
-    if kind not in {"photo", "voice", "video"}:
+    if kind not in {"photo", "voice", "video", "store"}:
         raise ValueError("invalid avatar asset kind")
     with _ASSET_STORE_LOCK:
         recover_asset_transactions(tid, raise_on_blocked=True)
@@ -2357,12 +2357,17 @@ def settle_failure(job_id: int, message: str,
         return changed.rowcount == 1
 
     label = (billing.prices().get(action) or {}).get("label", action)
-    return billing.refund_amount_if_claimed(
+    refunded = billing.refund_amount_if_claimed(
         row.get("tenant_id") or 1,
         points,
         claim,
         f"退回:{label} · {text[:160]}",
     )
+    if refunded and params.get("studio"):
+        # 数字人原片没交付，预付的「剪辑+发布包」一并退回
+        from . import storestudio
+        storestudio.refund_pack(job_id, params, "数字人未交付，剪辑包自动退回")
+    return refunded
 
 
 def prepare_retry(job_id: int, tenant_id: int) -> bool:
@@ -2637,6 +2642,10 @@ async def run_job(job_id: int, broadcast):
             },
         )
         progress("done", "🎬 数字人视频交付!")
+        if p.get("studio"):
+            from . import storestudio
+            await storestudio.run_after_delivery(
+                job_id, j.get("tenant_id") or 1, p, out, photo_path, progress)
     except Cancelled:
         log.info("avatar job %s cancelled by user", job_id)
         try:
@@ -2733,6 +2742,11 @@ def resume_pending(broadcast):
                     type(exc).__name__,
                 )
             broadcast({"type": "avatar_update", "job_id": r["id"]})
+    try:
+        from . import storestudio
+        storestudio.recover_interrupted()
+    except Exception as exc:
+        log.error("studio restart recovery failed error_type=%s", type(exc).__name__)
 
 
 # ---------------- AI 生成内容标识(第 3 期) ----------------

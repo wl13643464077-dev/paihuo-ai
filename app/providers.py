@@ -995,8 +995,12 @@ async def call_image(idx: int | None, prompt: str, size: str = "1024x1536",
 
 
 async def _image_edit(*, model: str, prompt: str, image_bytes: bytes,
-                      size: str, timeout: int) -> bytes:
-    """OpenAI 兼容图生图请求；模型只能由 ``edit_image`` 路由后传入。"""
+                      size: str, timeout: int,
+                      extra_images: list[bytes] | None = None) -> bytes:
+    """OpenAI 兼容图生图请求；模型只能由 ``edit_image`` 路由后传入。
+
+    ``extra_images`` 用于多参考图合成（如老板人像 + 门店照片），按 OpenAI
+    ``image[]`` 多文件字段一并上传；为空时与单图请求完全一致。"""
     if not image_model_available(model):
         raise ProviderError(f"生图模型不可用:{str(model)[:80] or '(空)'}")
     base, key = await db.arun(yunwu_conf)
@@ -1008,7 +1012,12 @@ async def _image_edit(*, model: str, prompt: str, image_bytes: bytes,
             response = await cli.post(
                 f"{base}/v1/images/edits",
                 headers={"Authorization": f"Bearer {key}"},
-                files={"image": ("source.png", image_bytes, "image/png")},
+                files=(
+                    [("image[]", (f"ref-{n}.png", data, "image/png"))
+                     for n, data in enumerate([image_bytes, *extra_images])]
+                    if extra_images else
+                    {"image": ("source.png", image_bytes, "image/png")}
+                ),
                 data={
                     "model": model,
                     "prompt": prompt,
@@ -1050,7 +1059,8 @@ async def edit_image(idx: int | None, prompt: str, image_bytes: bytes,
                      size: str = "1024x1024", timeout: int = 300, *,
                      identity_ref: str = None, config_revision: int = None,
                      config_sha256: str = None,
-                     bundle_sha256: str = None) -> bytes:
+                     bundle_sha256: str = None,
+                     extra_images: list[bytes] | None = None) -> bytes:
     """统一图生图入口：员工选择优先；``idx=None`` 时服从全局生图模型。"""
     model = await db.arun(
         image_model_for, idx, identity_ref=identity_ref,
@@ -1063,6 +1073,7 @@ async def edit_image(idx: int | None, prompt: str, image_bytes: bytes,
         image_bytes=image_bytes,
         size=size,
         timeout=timeout,
+        extra_images=extra_images,
     )
 
 

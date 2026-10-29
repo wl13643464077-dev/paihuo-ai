@@ -20,7 +20,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ASSET_ROOT = os.path.join(ROOT, "data", "assets")
 
 _JOB_RE = re.compile(r"^/files/job(\d+)(?:/|$)")
-_AVATAR_RE = re.compile(r"^/files/avatar/avatar_(\d+)\.mp4$")
+_AVATAR_RE = re.compile(
+    r"^/files/avatar/avatar_(\d+)(?:_studio(?:-cover34\.jpg|-cover916\.jpg|-pack\.zip|\.mp4)|\.mp4)$"
+)
 _TVCLIP_RE = re.compile(r"^/files/tvclips/(\d+)(?:/|$)")
 _TV_RE = re.compile(r"^/files/tv/tv_(\d+)\.mp4$")
 _PUB_RE = re.compile(r"^/files/pub/fail_(\d+)\.png$")
