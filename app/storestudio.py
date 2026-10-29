@@ -677,12 +677,13 @@ def quote_card(dst: str, source: str, text: str, kicker: str = "原文出处") -
     head = ImageFont.truetype(font_path(), 40)
     body = ImageFont.truetype(font_path(), 44)
     small = ImageFont.truetype(font_path(), 26)
-    lines = _wrap_line(_clean_public(text, 80), 18).split("\n")[:4]
+    lines = _wrap_line(_clean_public(text, 96), 19).split("\n")[:5]
     h = 60 + 56 + len(lines) * 64 + 80
     card = Image.new("RGB", (960, h), (255, 252, 240))
     draw = ImageDraw.Draw(card)
     draw.rectangle([(0, 0), (14, h)], fill=(242, 183, 5))
-    draw.text((44, 36), _clean_public(source, 30), font=head, fill=(40, 40, 40))
+    draw.text((44, 36), _clean_public(re.sub(r"\s*\+\s*", " ", str(source or "")), 30),
+              font=head, fill=(40, 40, 40))
     y = 36 + 72
     for line in lines:
         draw.rectangle([(40, y + 30), (40 + draw.textlength(line, font=body), y + 52)],

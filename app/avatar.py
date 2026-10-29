@@ -2302,7 +2302,7 @@ def _charged_action(p: dict) -> str:
     """还原 avatar_job_create 当初扣的动作(按原始请求引擎+时长,不受运行中引擎回退影响)."""
     if (p.get("engine") or "") == "sales":
         return "avatar_sales"
-    if (p.get("engine") or "") == "basic":
+    if (p.get("engine") or "") in ("basic", "rh_text"):
         return "avatar_basic"
     return "avatar_video" if int(p.get("duration") or 30) <= 30 else "avatar_video_60"
 
@@ -2441,7 +2441,7 @@ async def run_job(job_id: int, broadcast):
     try:
         if await db.arun(cancelled, job_id):
             raise Cancelled()
-        picked = p.get("engine") if p.get("engine") in ("heygen", "kling", "basic", "sales") else ""
+        picked = p.get("engine") if p.get("engine") in ("heygen", "kling", "basic", "sales", "rh_text") else ""
         eng = picked or await db.arun(engine_name)
         if eng == "heygen":
             heygen_ready = await db.arun(secureconfig.get_secret, "heygen_key")
@@ -2464,6 +2464,16 @@ async def run_job(job_id: int, broadcast):
         own_audio = p.get("own_audio_name")
         if eng == "sales":
             url = await _sales_video_url(p, j, job_id, photo_path, progress)
+        if eng == "rh_text":
+            # RunningHub「数字人-文本驱动」：口播文本 + 老板本人声音样本(截到 25 秒) → 本人声音口播
+            from . import runninghub
+            if not own_audio:
+                raise providers.ProviderError("文本驱动需要先上传 10-30 秒的声音样本")
+            sample = await db.arun(asset_path, own_audio, {"voice"}, j.get("tenant_id") or 1)
+            capped = await asyncio.to_thread(_cap_audio, sample, 25)
+            if os.path.realpath(capped) != os.path.realpath(sample):
+                temporary_audio_paths.append(capped)
+            url = await runninghub.synth_text(photo_path, p["script"], capped, progress)
         if eng == "basic":
             from . import runninghub
             if own_audio:

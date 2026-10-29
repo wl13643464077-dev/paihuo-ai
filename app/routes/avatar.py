@@ -140,7 +140,8 @@ def avatar_meta():
     _need_module("avatar")
     eng = avatar.engine_name()
     return {"voices": avatar.cloned_voices() + avatar.VOICES,
-            "engines": ([{"key": "basic", "label": "基础版·省钱(6点/条,不限时长)"}]
+            "engines": ([{"key": "rh_text", "label": "RunningHub·文本驱动(本人声音样本·6点/条)", "needs_sample": True},
+                         {"key": "basic", "label": "基础版·省钱(6点/条,不限时长)"}]
                         if avatar.rh_ready() else [])
                        + [{"key": "", "label": f"自动(当前:{'HeyGen·境外' if eng=='heygen' else '可灵'})"},
                           {"key": "heygen", "label": "HeyGen(会动·快 · 境外服务商)", "overseas": True},
@@ -607,6 +608,8 @@ async def avatar_job_create(body: dict):
             f"{dur} 秒口播稿最多 {max_script_chars} 个字符，请精简或选择更长时长",
         )
     tid = TEN()
+    if (body.get("engine") or "") == "rh_text" and not (body.get("own_audio_name") or "").strip():
+        raise HTTPException(400, "RunningHub 文本驱动要先上传一段 10-30 秒的本人声音样本（平时说话就行，不用念稿）")
     # 第3期:选 HeyGen(境外)必须明确同意；没同意的任务只用国内引擎
     try:
         overseas_ok = avatar.overseas_allowed(

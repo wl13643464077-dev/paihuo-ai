@@ -106,7 +106,7 @@ class StudioPureTests(unittest.TestCase):
             self.assertNotIn("100|0", joined)
             self.assertNotIn("—|—", joined)
 
-    def test_mode_c_render_stays_within_seven_inputs(self):
+    def test_mode_c_render_stays_within_eight_inputs(self):
         import tempfile as _tf
         from app import studiocut
         with _tf.TemporaryDirectory() as d:
@@ -119,7 +119,7 @@ class StudioPureTests(unittest.TestCase):
                 cover_title="上半句｜下半句", cards=[(card, 3.0, 5.8)], keywords=["一件事"],
                 nameplate="王磊 · 店主", ai_label="AI生成", font_path=storestudio.font_path(),
                 source="某报 2026-10-28", out=os.path.join(d, "o.mp4"))
-            self.assertEqual(7, args.count("-i"))
+            self.assertEqual(8, args.count("-i"))
             self.assertEqual(25, stats["sentences"])
             self.assertGreaterEqual(stats["sfx"], 3)
 
@@ -203,3 +203,54 @@ class StudioBillingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunningHubTextEngineTests(unittest.TestCase):
+    def test_nodes_match_the_text_driven_app(self):
+        from app import runninghub
+        nodes = {n["nodeId"]: n["fieldValue"] for n in runninghub.text_nodes("稿", "a.png", "v.mp3", "3:4", "开心")}
+        self.assertEqual({"126": "a.png", "127": "3:4", "184": "稿", "217": "11", "185": "v.mp3", "249": "开心"}, nodes)
+        self.assertEqual("1961397507056144386", runninghub.TEXT_APP)
+
+    def test_emotion_follows_script_risk(self):
+        from app import runninghub
+        self.assertEqual("serious", runninghub.choose_emotion("外卖出事故谁来赔")["label"])
+        self.assertEqual("analytical", runninghub.choose_emotion("我们算账，成本降了")["label"])
+        self.assertEqual("engaging", runninghub.choose_emotion("今天聊聊火锅")["label"])
+
+    def test_text_engine_is_charged_as_the_cheap_engine(self):
+        self.assertEqual("avatar_basic", avatar._charged_action({"engine": "rh_text", "duration": 60}))
+
+    def test_synth_text_uploads_submits_and_returns_video(self):
+        from app import runninghub, secureconfig
+        calls = []
+
+        async def fake_v2(cli, key, path, json_body=None, file_path=None):
+            calls.append(path)
+            if path == "/media/upload/binary":
+                return {"fileName": "f-" + os.path.basename(file_path)}
+            if path.startswith("/run/ai-app/"):
+                self.assertEqual("3:4", json_body["nodeInfoList"][1]["fieldValue"])
+                return {"taskId": "t1"}
+            return {"status": "SUCCESS", "results": [{"url": "https://cdn.example.com/x.mp4"}]}
+
+        async def ok_url(_):
+            return None
+
+        async def no_sleep(_):
+            return None
+
+        with tempfile.TemporaryDirectory() as d:
+            img, aud = os.path.join(d, "p.png"), os.path.join(d, "v.mp3")
+            for path in (img, aud):
+                open(path, "wb").write(b"x")
+            with mock.patch.object(secureconfig, "get_secret", return_value="k"), \
+                 mock.patch.object(runninghub, "_v2", side_effect=fake_v2), \
+                 mock.patch.object(runninghub.netfetch, "guard_public_url", side_effect=ok_url), \
+                 mock.patch.object(runninghub.asyncio, "sleep", side_effect=no_sleep), \
+                 mock.patch.object(runninghub.db, "get_setting", return_value=None), \
+                 mock.patch.object(runninghub.db, "aget_setting", side_effect=lambda *_: no_sleep(None)):
+                url = asyncio.run(runninghub.synth_text(img, "老板好今天聊聊", aud, lambda *_: None))
+        self.assertEqual("https://cdn.example.com/x.mp4", url)
+        self.assertEqual(["/media/upload/binary", "/media/upload/binary",
+                          "/run/ai-app/1961397507056144386", "/query"], calls)

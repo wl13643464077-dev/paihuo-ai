@@ -23,7 +23,9 @@ TITLE_Y, TITLE_H = 246, 216            # 固定标题条
 BAR_Y = TITLE_Y + TITLE_H + 8          # 进度条
 SUB_BOTTOM, SUB_H = 1560, 280          # 字幕带：底边 1560
 MAIN_Y, MAIN_H = 470, 1090            # 主画面 470–1560（人物放这里，标题条不压脸）
-CARD_Y, CARD_H = 960, 400              # 证据卡区（主画面下半、字幕之上）
+CARD_Y, CARD_H = MAIN_Y, 800          # 证据卡轨画布（主画面上部到字幕之上）
+CARD_BOX_TOP = 360                     # 卡片放在画布 360–800（屏幕 830–1270）
+PIP_SIZE, PIP_X, PIP_Y = 280, W - 330, MAIN_Y + 50   # 证据卡出现时人物缩成右上圆窗（黄圈），脸始终可见
 FX_Y = 990                             # 钩子/人名条/CTA 所在带（全帧透明画布）
 YELLOW = (255, 212, 0)
 PUNCT = "，。！？、；：,.!?;:"
@@ -230,7 +232,7 @@ def fx_frame(path: str, kind: str, text: str, font_path: str) -> None:
     if kind == "hook":
         lines = _balanced_lines(text, 8)[:2]
         f = _font(font_path, 112)
-        y = FX_Y
+        y = MAIN_Y + 40  # 主画面顶部（背景/招牌区），不压脸
         for n, line in enumerate(lines):
             lw = d.textlength(line, font=f)
             d.text(((W - lw) / 2, y), line, font=f, fill=YELLOW if n == 0 else (255, 255, 255),
@@ -252,6 +254,29 @@ def fx_frame(path: str, kind: str, text: str, font_path: str) -> None:
                             outline=(0, 0, 0), width=5)
         d.text((x0 + 40, y0 + 18), label, font=f, fill=(0, 0, 0))
     im.save(path, "PNG")
+
+
+def card_frame_png(path: str, inner: str | None) -> None:
+    """证据卡帧：卡片放在主画面下部；右上画黄圈，圆窗里是人物（模式 C：任何时候都能看到脸）。"""
+    from PIL import Image, ImageDraw
+    canvas = Image.new("RGBA", (W, CARD_H), (0, 0, 0, 0))
+    if inner:
+        with Image.open(inner) as im:
+            im = im.convert("RGBA")
+            im.thumbnail((W - 100, CARD_H - CARD_BOX_TOP - 10))
+            box_h = CARD_H - CARD_BOX_TOP
+            canvas.alpha_composite(im, ((W - im.width) // 2, CARD_BOX_TOP + (box_h - im.height) // 2))
+        d = ImageDraw.Draw(canvas)
+        x, y = PIP_X, PIP_Y - CARD_Y
+        d.ellipse([(x - 8, y - 8), (x + PIP_SIZE + 8, y + PIP_SIZE + 8)], outline=YELLOW, width=8)
+    canvas.save(path, "PNG")
+
+
+def circle_mask_png(path: str) -> None:
+    from PIL import Image, ImageDraw
+    m = Image.new("L", (PIP_SIZE, PIP_SIZE), 0)
+    ImageDraw.Draw(m).ellipse([(0, 0), (PIP_SIZE - 1, PIP_SIZE - 1)], fill=255)
+    m.save(path, "PNG")
 
 
 def canvas_png(path: str, h: int, inner: str | None = None) -> None:
@@ -385,12 +410,12 @@ def build(video: str, work: str, *, script: str, duration: float, silences: list
           source: str, out: str) -> tuple[list[str], dict]:
     """生成全部图层与音效，返回 (ffmpeg 参数, 统计)。"""
     timeline = align(script, duration, silences)
-    # 标题条：优先封面大字的「A｜B」两段，否则把标题对半
-    parts = [p for p in re.split(r"[｜|]", cover_title or "") if p.strip()]
-    if len(parts) >= 2:
-        line1, line2 = parts[0], parts[1]
+    # 标题条放视频标题（两行：白字 + 黄底黑字）；封面大字留给第 0 帧钩子，避免两处重复
+    t = re.sub(r"[｜|]", "", title or cover_title or "")
+    halves = re.split(r"[，,？?！!：:]", t, maxsplit=1)
+    if len(halves) == 2 and halves[0] and halves[1] and len(halves[0]) <= 14:
+        line1, line2 = halves[0], halves[1]
     else:
-        t = title or cover_title or ""
         cut = (len(t) + 1) // 2
         line1, line2 = t[:cut], t[cut:]
     chapters = chapters_for(timeline, source)
@@ -407,12 +432,14 @@ def build(video: str, work: str, *, script: str, duration: float, silences: list
         subtitle_png(p, text, font_path, keywords)
         sub_entries.append((a, b, p))
     blank_card = os.path.join(work, "blank-card.png")
-    canvas_png(blank_card, CARD_H)
+    card_frame_png(blank_card, None)
     card_entries = []
     for n, (path, a, b) in enumerate(cards):
         p = os.path.join(work, f"cardf{n}.png")
-        canvas_png(p, CARD_H, path)
+        card_frame_png(p, path)
         card_entries.append((a, b, p))
+    mask = os.path.join(work, "pipmask.png")
+    circle_mask_png(mask)
     blank_fx = os.path.join(work, "blank-fx.png")
     from PIL import Image
     Image.new("RGBA", (W, H), (0, 0, 0, 0)).save(blank_fx, "PNG")
@@ -455,8 +482,10 @@ def build(video: str, work: str, *, script: str, duration: float, silences: list
             *concat_in, "-i", lists["subs"],
             *concat_in, "-i", lists["cards"],
             *concat_in, "-i", lists["fx"],
-            "-i", sfx]
+            "-i", sfx,
+            "-loop", "1", "-t", f"{duration:.2f}", "-i", mask]
     z = zoom_expr(timeline)
+    pip_enable = "+".join(f"between(t,{a},{b})" for _, a, b in cards) or "0"
     graph = ";".join([
         # 背景：同一画面放大虚化压暗铺满（顶/底不留死黑）；主画面 470–1560 放人物，脸在标题条之下
         f"[0:v]fps={FPS},split=2[src0][src1]",
@@ -464,9 +493,14 @@ def build(video: str, work: str, *, script: str, duration: float, silences: list
         "boxblur=24:2,eq=brightness=-0.18:saturation=0.8,setsar=1[bg]",
         f"[src1]scale={W}:-2,crop={W}:'min(ih,{MAIN_H})':0:'max(0,(ih-{MAIN_H})*0.22)',"
         f"scale=w='trunc({W}*({z})/2)*2':h='trunc({MAIN_H}*({z})/2)*2':eval=frame,"
-        f"crop={W}:{MAIN_H}:(iw-{W})/2:(ih-{MAIN_H})*0.25,setsar=1[main]",
+        f"crop={W}:{MAIN_H}:(iw-{W})/2:(ih-{MAIN_H})*0.25,setsar=1,split=2[main][pipsrc]",
         f"[bg][main]overlay=x=0:y={MAIN_Y}:shortest=1[base]",
-        f"[base][4:v]overlay=x=0:y={CARD_Y}:eof_action=pass[v1]",
+        f"[base][4:v]overlay=x=0:y={CARD_Y}:eof_action=pass[v0c]",
+        # 圆窗放整幅主画面（不猜脸在哪），保证脸一定在圈里
+        f"[pipsrc]crop='min(iw,ih)':'min(iw,ih)',scale={PIP_SIZE}:{PIP_SIZE},format=rgba[pipr]",
+        "[7:v]format=gray[pipm]",
+        "[pipr][pipm]alphamerge[pip]",
+        f"[v0c][pip]overlay=x={PIP_X}:y={PIP_Y}:shortest=1:enable='{pip_enable}'[v1]",
         "[v1][1:v]overlay=x=0:y=0:shortest=1[v2]",
         f"[v2][2:v]overlay=x='-w+w*t/{duration:.3f}':y={BAR_Y}:shortest=1[v3]",
         f"[v3][5:v]overlay=x=0:y=0:eof_action=pass[v4]",

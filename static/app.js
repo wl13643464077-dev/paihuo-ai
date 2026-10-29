@@ -6810,7 +6810,7 @@ async function avatarView(){
         <textarea id="av-script" style="min-height:120px" placeholder="自己写、从内容部交付里复制,或用上面的爆款链接自动生成。" oninput="AV_DRAFT=this.value">${esc(AV_DRAFT||"")}</textarea>
         <label>④ 生成引擎 & 时长档位</label>
         <div class="row">
-          <div><select id="av-engine" onchange="avPriceSync()">${meta.engines.map(e=>`<option value="${e.key}">${esc(e.label)}</option>`).join("")}</select></div>
+          <div><select id="av-engine" onchange="avEngineSync();avPriceSync()">${meta.engines.map(e=>`<option value="${e.key}">${esc(e.label)}</option>`).join("")}</select></div>
           <div><select id="av-dur" onchange="avPriceSync()">${meta.durations.map(d=>`<option value="${d.s}" ${d.s===30?"selected":""}>${d.label}</option>`).join("")}</select></div>
         </div>
         <label style="display:flex;gap:6px;align-items:flex-start;font-weight:400;cursor:pointer">
@@ -6860,6 +6860,7 @@ async function avatarView(){
     </div>`).join(""):`<div class="empty">这一页没有数字人任务。</div>`}
     ${listPager(jobsContract,"avatar")}</div>`:""}`;
   active.forEach(j=>{ const box=document.querySelector(`[data-avsteps="${j.id}"]`); if(box) box.scrollTop=box.scrollHeight; });
+  avEngineSync();
   avPriceSync();
 }
 let AV_VOICE_MODE = "preset", AV_OWN_AUDIO = null, AV_CONSENT = false, AV_OVERSEAS = false;
@@ -6974,10 +6975,18 @@ async function avDelPhoto(name, ev){
     toast("已删除"); render();
   }catch(e){ toast(e.message); }
 }
+function avEngineSync(){
+  const rh=($("#av-engine")?.value||"")==="rh_text";
+  if(rh && AV_VOICE_MODE!=="own") avVoiceMode("own");
+  const hint=$("#av-own-status");
+  if(hint && !AV_OWN_AUDIO) hint.textContent = rh
+    ? "文本驱动:上传一段 10-30 秒您平时说话的录音(声音样本,不用念稿),成片就是您本人的声音念这份口播稿"
+    : "上传一段您念这份口播稿的录音(手机录就行,成片就是您的原声)";
+}
 function avPriceSync(){
   const el=$("#av-price"); if(!el) return;
   const eng=$("#av-engine")?.value||"", dur=+($("#av-dur")?.value||30);
-  const pts = (eng==="basic" ? 6 : (dur<=30 ? 12 : 20)) + (stPackOn()?+(AV_META?.studio?.prices?.studio_pack||3):0);
+  const pts = ((eng==="basic"||eng==="rh_text") ? 6 : (dur<=30 ? 12 : 20)) + (stPackOn()?+(AV_META?.studio?.prices?.studio_pack||3):0);
   el.innerHTML = `💎 本单 <b>${pts} 点</b> · 余额 ${Math.round(STATE?.balance||0)} 点`;
 }
 async function avSubmit(btn){
@@ -6987,7 +6996,7 @@ async function avSubmit(btn){
   const script = $("#av-script").value.trim();
   if(!script) return toast("口播稿必填");
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 开拍中…`;
-  if(AV_VOICE_MODE==="own" && !AV_OWN_AUDIO) { btn.disabled=false; btn.textContent="🎬 开拍"; return toast("先上传您的录音"); }
+  if(AV_VOICE_MODE==="own" && !AV_OWN_AUDIO) { btn.disabled=false; btn.textContent="🎬 开拍"; return toast(($("#av-engine")?.value||"")==="rh_text"?"文本驱动要先上传 10-30 秒的声音样本":"先上传您的录音"); }
   try{
     await api("/avatar/jobs",{method:"POST",body:{photo_name:AV_PHOTO.name,
       voice_id:$("#av-voice")?.value, script, prompt:$("#av-prompt").value.trim(),
@@ -7099,8 +7108,11 @@ async function stScript(btn){
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent=label; }
 }
 function studioJobBlock(j){
-  const s=j.studio||{};
+  let s=j.studio||{};
   if(s.status==="done"){
+    // 重剪后文件名不变：带上完成时间做版本号，浏览器不会继续放旧片
+    const ver=`?v=${Math.round(Number(s.finished_at)||0)}`;
+    s={...s, video:s.video&&s.video+ver, cover34:s.cover34&&s.cover34+ver, cover916:s.cover916&&s.cover916+ver, pack:s.pack&&s.pack+ver};
     const c=s.copy||{}, names={douyin:"抖音",shipinhao:"视频号",xiaohongshu:"小红书"};
     return `<div style="border:2px dashed #e0a100;border-radius:12px;padding:10px;margin-top:8px;background:#fffaf0">
       <b>📦 剪辑版 + 发布包</b> <span class="sub">${Number(s.broll)||0} 张证据卡</span>
