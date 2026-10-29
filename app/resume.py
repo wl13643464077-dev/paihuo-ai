@@ -74,6 +74,74 @@ def _overrides() -> dict:
     return _overrides_cache
 
 
+PLAIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "resume_plain")
+_plain_cache = None
+
+
+def _plain() -> dict:
+    """人工逐个写的大白话介绍（按员工 key），存在时覆盖模板生成的同名字段。"""
+    global _plain_cache
+    if _plain_cache is None:
+        data = {}
+        try:
+            names = sorted(n for n in os.listdir(PLAIN_DIR) if n.endswith(".json"))
+        except OSError:
+            names = []
+        for name in names:
+            try:
+                with open(os.path.join(PLAIN_DIR, name), encoding="utf-8") as handle:
+                    raw = json.load(handle)
+            except (OSError, ValueError):
+                log.warning("plain resume file unreadable: %s", name)
+                continue
+            if isinstance(raw, dict):
+                data.update({k: v for k, v in raw.items() if isinstance(v, dict)})
+        _plain_cache = data
+    return _plain_cache
+
+
+def _apply_plain(result: dict, plain: dict, job: str) -> dict:
+    one = str(plain.get("one") or "").strip()
+    what = str(plain.get("what") or "").strip()
+    how = str(plain.get("how") or "").strip()
+    when = [w for w in plain.get("when") or [] if isinstance(w, dict) and w.get("when")]
+    value = [str(v).strip() for v in plain.get("value") or [] if str(v).strip()]
+    past = [p for p in plain.get("past") or [] if isinstance(p, dict) and p.get("story")]
+    periods = [job_row.get("period") for job_row in result.get("experiences") or []]
+    out = dict(result)
+    out["plain"] = {"one": one, "what": what, "how": how, "when": when, "value": value}
+    if one:
+        out["one"] = one
+        out["headline"] = f"{job}｜{one}"
+    if what:
+        out["summary"] = what
+    if when:
+        out["scenes"] = when
+    if value:
+        out["why"] = value
+    first = (result.get("cautions") or [""])[0]
+    out["cautions"] = [c for c in (
+        str(plain.get("note") or "").strip() or first,
+        "TA 只出建议和清单，不会动你的系统和钱，最后怎么做由你拍板。",
+    ) if c]
+    if plain.get("tags"):
+        out["tags"] = [str(t) for t in plain["tags"]][:4]
+    if past:
+        out["experiences"] = [
+            {
+                "company": str(p.get("company") or "某企业"),
+                "title": str(p.get("title") or ""),
+                "period": periods[i] if i < len(periods) else "",
+                "duties": [],
+                "wins": [str(p["story"])],
+            }
+            for i, p in enumerate(past[:3])
+        ]
+        out["projects"] = []
+        out["highlights"] = []
+    return out
+
+
 def _seed(key: str) -> int:
     return int(hashlib.sha256(key.encode("utf-8")).hexdigest()[:8], 16)
 
@@ -118,7 +186,8 @@ def build(employee: dict, profile: dict | None = None,
     override = _overrides().get(key)
     if isinstance(override, dict) and override:
         return {**override, "footnote": override.get("footnote") or FOOTNOTE,
-                "source": "override"}
+                "source": "override",
+                "one": override.get("one") or str(override.get("headline") or "").split("｜")[-1]}
 
     profile = profile if isinstance(profile, dict) else {}
     details = capability_details if isinstance(capability_details, dict) else {}
@@ -257,7 +326,7 @@ def build(employee: dict, profile: dict | None = None,
         headline_tail = _short(duty, 36)
     else:
         headline_tail = _short(scope, 36)
-    return {
+    result = {
         "source": "generated",
         "headline": f"{job}｜{headline_tail}",
         "years": years,
@@ -289,6 +358,11 @@ def build(employee: dict, profile: dict | None = None,
         "deliverables": outputs[:6],
         "footnote": FOOTNOTE,
     }
+    plain = _plain().get(key)
+    if isinstance(plain, dict):
+        result = _apply_plain(result, plain, job)
+        result["source"] = "plain"
+    return result
 
 
 def card(resume: dict) -> dict:
@@ -296,6 +370,7 @@ def card(resume: dict) -> dict:
     if not isinstance(resume, dict):
         return {}
     return {
+        "one": resume.get("one") or "",
         "headline": resume.get("headline") or "",
         "years": resume.get("years"),
         "tags": (resume.get("tags") or [])[:3],
