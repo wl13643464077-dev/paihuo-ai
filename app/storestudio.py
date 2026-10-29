@@ -116,8 +116,18 @@ def scene_prompt(scene: str, industry: str = "", note: str = "") -> str:
     return IDENTITY + spec["prompt"] + (" " + " ".join(extra) if extra else "") + TAIL
 
 
+def _to_jpeg(data: bytes) -> bytes:
+    """生图返回的 PNG 约 2.5MB，转成 JPEG（约十分之一），老板手机上秒开。"""
+    from PIL import Image
+    with Image.open(io.BytesIO(data)) as im:
+        out = io.BytesIO()
+        im.convert("RGB").save(out, "JPEG", quality=90, optimize=True)
+        return out.getvalue()
+
+
 async def scene_photos(tid: int, portrait_name: str, store_name: str, scene: str,
-                       industry: str = "", note: str = "", n: int = 2) -> list[dict]:
+                       industry: str = "", note: str = "", n: int = 2,
+                       user: dict | None = None) -> list[dict]:
     """老板人像 + 门店照 → n 张「老板在自家店」场景照，存进数字人照片库。"""
     if scene not in SCENES:
         raise StudioError("场景只能选：门头前 / 店里 / 收银台")
@@ -140,10 +150,11 @@ async def scene_photos(tid: int, portrait_name: str, store_name: str, scene: str
         raise providers.ProviderError("场景照生成失败，点数已退回，请换张更清晰的门店照再试") from first
     saved = []
     for data in images:
-        await asyncio.to_thread(avatar.validate_upload_media, bytes(data), ".png", "photo")
-        pub = await asyncio.to_thread(avatar.store_uploaded_asset, bytes(data), ".png", "photo", tid)
-        # 场景照由已授权的本人肖像合成，沿用并补记授权留痕
-        await db.arun(avatar.record_consent, tid, pub["name"], "photo", "scene_compose")
+        jpeg = await asyncio.to_thread(_to_jpeg, bytes(data))
+        await asyncio.to_thread(avatar.validate_upload_media, jpeg, ".jpg", "photo")
+        pub = await asyncio.to_thread(avatar.store_uploaded_asset, jpeg, ".jpg", "photo", tid)
+        # 场景照由已授权的本人肖像合成，沿用并补记授权留痕（记录操作人）
+        await db.arun(avatar.record_consent, tid, pub["name"], "photo", "scene_compose", user)
         saved.append({"name": pub["name"], "preview": f"/files/avatar-public/{pub['name']}",
                       "scene": scene})
     return saved

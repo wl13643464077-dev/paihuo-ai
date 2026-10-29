@@ -763,7 +763,7 @@ async def avatar_studio_scene(body: dict):
         lambda: storestudio.scene_photos(
             tid, portrait, store, scene,
             industry=str(body.get("industry") or "")[:20],
-            note=str(body.get("note") or "")[:80], n=n),
+            note=str(body.get("note") or "")[:80], n=n, user=auth.current()),
         n=n,
     )
     missing = n - len(photos)
