@@ -96,6 +96,8 @@ def _bounded_media_worker(argv: list[str]) -> int:
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "HOME": "/nonexistent",
+        # glibc 默认每线程预留 64MB 内存池，多输入渲染在 2GB 地址空间上限下会分配失败
+        "MALLOC_ARENA_MAX": "2",
     }
     os.execve(executable, [executable, *argv[2:]], environment)
     return 2

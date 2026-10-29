@@ -7117,9 +7117,15 @@ function studioJobBlock(j){
         <div style="margin-top:8px">${(s.checks||[]).map(x=>`<div style="font-size:13px">${x.ok?"✅":"🔴"} ${esc(x.text)}</div>`).join("")}</div>
       </details></div>`;
   }
-  if(s.status==="failed") return `<div class="notice red" style="margin-top:6px">${esc(s.error||"自动剪辑失败,剪辑包点数已退回")}</div>`;
+  if(s.status==="failed") return `<div class="notice red" style="margin-top:6px">${esc(s.error||"自动剪辑失败,剪辑包点数已退回")}
+    ${j.status==="done"?`<button class="btn sm pri" style="margin-left:8px" onclick="stRetry(${j.id},this)">🔁 重新剪辑(${AV_META?.studio?.prices?.studio_pack||3}点)</button>`:""}</div>`;
   if(j.status==="done"||s.status==="running") return `<div class="sub" style="margin-top:6px">✂️ 自动剪辑 + 发布包制作中…(约 1-3 分钟,完成后刷新)</div>`;
   return `<div class="sub" style="margin-top:6px">📦 出片后自动剪辑 + 发布包</div>`;
+}
+async function stRetry(id,btn){
+  btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 提交中…`;
+  try{ await api(`/avatar/jobs/${id}/studio-retry`,{method:"POST"}); toast("已重新开剪,约 1-3 分钟"); render(); }
+  catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🔁 重新剪辑"; }
 }
 async function svSubmit(btn){
   if(!AV_PHOTO) return toast("先在 ① 上传并点选一张产品照片");

@@ -733,6 +733,45 @@ async def _billed_studio_call(action: str, note: str, work, n: int = 1):
     return result, op
 
 
+@router.post("/api/avatar/jobs/{jid}/studio-retry")
+async def avatar_studio_retry(jid: int):
+    """原片已交付、自动剪辑失败的工单：只重做剪辑 + 发布包（重新计剪辑包点数，失败自动退）。"""
+    _need_module("avatar")
+    from .. import storestudio
+    tid = TEN()
+    row = db.one("SELECT * FROM avatar_job WHERE id=? AND tenant_id=? AND deleted_at IS NULL",
+                 (jid, tid))
+    if not row:
+        raise HTTPException(404, "没有这个数字人任务")
+    params = db.jloads(row.get("params_json"), {}) or {}
+    if row.get("status") != "done" or not params.get("studio"):
+        raise HTTPException(400, "只有已交付、开了自动剪辑的任务能重新剪辑")
+    if (storestudio.studio_state(jid) or {}).get("status") not in ("failed", None):
+        raise HTTPException(409, "这条正在剪辑或已经剪好了")
+    video = os.path.join(avatar.OUT_DIR, f"avatar_{jid}.mp4")
+    if not os.path.isfile(video):
+        raise HTTPException(400, "原片文件不在了，没法重新剪辑")
+    try:
+        photo = avatar.asset_path(params.get("photo_name") or "", {"photo"}, tid)
+    except Exception:
+        raise HTTPException(400, "这条任务用的照片已删除，没法重新做封面") from None
+    try:
+        op = await _start_billing_operation_safely(
+            billing.start_operation, "studio_pack", tid=tid, note=f"重新剪辑 #{jid}",
+            cancel_reason="重新剪辑请求中断自动退回")
+    except billing.InsufficientPoints as e:
+        raise HTTPException(402, str(e))
+    params["studio"]["billing_op"] = op
+    db.update("avatar_job", jid, {"params_json": json.dumps(params, ensure_ascii=False)})
+    storestudio._save_state(jid, {"status": "running", "started_at": time.time()})
+
+    def progress(kind, label=""):
+        engine.broadcast({"type": "avatar_update", "tenant_id": tid, "job_id": jid})
+
+    asyncio.create_task(storestudio.run_after_delivery(jid, tid, params, video, photo, progress))
+    return {"ok": True}
+
+
 @router.get("/api/avatar/store-photos")
 def avatar_store_photos():
     """门店门头/店内照片（不是肖像，不进数字人照片卡槽）。"""
