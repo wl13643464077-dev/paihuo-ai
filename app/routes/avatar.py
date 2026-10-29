@@ -121,6 +121,20 @@ async def _prepare_avatar_clone_sample_safely(
         raise
 
 
+def _studio_meta() -> dict:
+    """门店数字人一条龙：本租户主行业（选题默认值）、场景与各步价格。"""
+    from .. import signup, storestudio
+    keys = auth.tenant_industries()
+    industry = signup.industry_label(keys[0]) if keys else ""
+    return {
+        "industry": industry,
+        "industries": [v[0] for v in signup.INDUSTRY_CATALOG.values()],
+        "scenes": [{"key": k, "label": v["label"]} for k, v in storestudio.SCENES.items()],
+        "prices": {a: storestudio.price_points(a) for a in
+                   ("studio_scene", "studio_topics", "studio_script", "studio_pack")},
+    }
+
+
 @router.get("/api/avatar/meta")
 def avatar_meta():
     _need_module("avatar")
@@ -138,6 +152,7 @@ def avatar_meta():
                 secureconfig.get_secret("heygen_key")
             ),
             "heygen_exhausted": bool(db.get_setting("heygen_exhausted")),
+            "studio": _studio_meta(),
             "own_voice_ready": True,
             # 第3期:肖像/声音授权声明 + 境外传输告知 + 成片 AI 标识
             "consent": {"version": avatar.CONSENT_VERSION, "text": avatar.CONSENT_TEXT,
@@ -298,6 +313,7 @@ async def avatar_upload(file: UploadFile = File(...), kind: str = Form("photo"),
         or (".jpg" if kind == "photo" else ".mp3")
     )
     allowed = {"photo": (".jpg", ".jpeg", ".png", ".webp"),
+               "store": (".jpg", ".jpeg", ".png", ".webp"),
                "voice": (".mp3", ".m4a", ".wav"),
                "video": (".mp4", ".mov")}
     if ext not in allowed.get(kind, ()):
@@ -327,7 +343,7 @@ async def avatar_upload(file: UploadFile = File(...), kind: str = Form("photo"),
                 avatar.validate_upload_media,
                 data,
                 ext,
-                kind,
+                "photo" if kind == "store" else kind,
             )
             pub = await asyncio.to_thread(
                 avatar.store_uploaded_asset,
@@ -645,14 +661,153 @@ async def avatar_job_create(body: dict):
                 "prompt": (body.get("prompt") or "").strip(),
                 "domestic_only": not overseas_ok,
             }
+            if studio:
+                params["studio"] = studio
             return _create_charged_avatar_job(params, tid)
 
-    jid = await _run_db_then_start_worker_safely(
-        create_job,
-        start_worker=_start_avatar_job_worker,
-        settle_unstarted=_settle_unstarted_avatar_job,
-    )
+    # 门店数字人一条龙：成片后自动剪辑 + 封面 + 三平台发布包，开拍时预付、失败自动退
+    studio = _studio_params(body.get("studio"))
+    if studio:
+        try:
+            studio["billing_op"] = await _start_billing_operation_safely(
+                billing.start_operation, "studio_pack", tid=tid,
+                note="门店数字人剪辑+发布包",
+                cancel_reason="门店数字人剪辑包请求中断自动退回",
+            )
+        except billing.InsufficientPoints as e:
+            raise HTTPException(402, str(e))
+    try:
+        jid = await _run_db_then_start_worker_safely(
+            create_job,
+            start_worker=_start_avatar_job_worker,
+            settle_unstarted=_settle_unstarted_avatar_job,
+        )
+    except BaseException:
+        if studio:
+            await _run_db_safely(billing.fail_operation, studio["billing_op"],
+                                 "数字人开拍失败，剪辑包自动退回")
+        raise
     return {"job_id": jid}
+
+
+def _studio_params(raw) -> dict | None:
+    if not isinstance(raw, dict) or not raw.get("enabled"):
+        return None
+    from .. import storestudio
+    topic = raw.get("topic") if isinstance(raw.get("topic"), dict) else {}
+    clean = {k: storestudio._clean_public(topic.get(k), 160)
+             for k in ("title", "heat", "source", "published", "angle")}
+    clean["keywords"] = [storestudio._clean_public(k, 16) for k in (topic.get("keywords") or [])
+                         if isinstance(k, str) and k.strip()][:3]
+    title = storestudio._clean_public(raw.get("title"), 30)
+    if not (title or clean["title"]):
+        raise HTTPException(400, "自动剪辑需要视频标题：先选题写稿，或填一个标题")
+    if not clean["keywords"]:
+        clean["keywords"] = [(title or clean["title"])[:12]]
+    return {"topic": clean, "title": title or clean["title"][:22],
+            "cover_title": storestudio._clean_public(raw.get("cover_title"), 20)}
+
+
+async def _billed_studio_call(action: str, note: str, work, n: int = 1):
+    """门店数字人的单步收费调用：先扣、失败全退。"""
+    try:
+        op = await _start_billing_operation_safely(
+            billing.start_operation, action, tid=TEN(), note=note, n=n,
+            cancel_reason=f"{note}请求中断自动退回",
+        )
+    except billing.InsufficientPoints as e:
+        raise HTTPException(402, str(e))
+    try:
+        result = await work()
+    except BaseException as exc:
+        await _run_db_safely(billing.fail_operation, op, f"{note}失败自动退回")
+        from .. import providers as _providers, storestudio
+        if isinstance(exc, storestudio.StudioError):
+            raise HTTPException(400, str(exc)) from None
+        if isinstance(exc, _providers.ProviderError):
+            raise HTTPException(502, str(exc)) from None
+        raise
+    await _run_db_safely(billing.complete_operation, op)
+    return result, op
+
+
+@router.get("/api/avatar/store-photos")
+def avatar_store_photos():
+    """门店门头/店内照片（不是肖像，不进数字人照片卡槽）。"""
+    _need_module("avatar")
+    return [{"name": a["name"], "preview": f"/files/avatar-public/{a['name']}", "ts": a.get("ts")}
+            for a in avatar.saved_assets(TEN())
+            if a.get("kind") == "store"
+            and os.path.isfile(os.path.join(avatar.PUBLIC_DIR, os.path.basename(a["name"])))]
+
+
+@router.post("/api/avatar/studio/scene")
+async def avatar_studio_scene(body: dict):
+    """老板人像 + 门店照 → 2 张「老板在自家店」场景照，直接进数字人照片库。"""
+    _need_module("avatar")
+    from .. import storestudio
+    tid = TEN()
+    scene = str(body.get("scene") or "door")
+    if scene not in storestudio.SCENES:
+        raise HTTPException(400, "场景只能选：门头前 / 店里 / 收银台")
+    portrait = _avatar_asset_name(body.get("portrait_name"), "portrait_name", {"photo"})
+    store = _avatar_asset_name(body.get("store_name"), "store_name", {"store"})
+    try:
+        avatar.require_consent(tid, [portrait], body.get("consent"), "scene_compose",
+                               user=auth.current(), kinds={portrait: "photo"})
+    except avatar.ConsentRequired as exc:
+        raise HTTPException(400, str(exc)) from None
+    n = 2
+    photos, _ = await _billed_studio_call(
+        "studio_scene", "老板进店场景照",
+        lambda: storestudio.scene_photos(
+            tid, portrait, store, scene,
+            industry=str(body.get("industry") or "")[:20],
+            note=str(body.get("note") or "")[:80], n=n),
+        n=n,
+    )
+    missing = n - len(photos)
+    if missing > 0:
+        await db.arun(billing.refund, "studio_scene", tid, "部分场景照未生成", missing)
+    return {"photos": photos}
+
+
+@router.post("/api/avatar/studio/topics")
+async def avatar_studio_topics(body: dict):
+    """按行业扫最近 72 小时热点，给 6 个能落到门店的选题。"""
+    _need_module("avatar")
+    from .. import storestudio
+    industry = str(body.get("industry") or "").strip()[:20]
+    if not industry:
+        raise HTTPException(400, "先选行业")
+    result, _ = await _billed_studio_call(
+        "studio_topics", "72小时行业热点选题",
+        lambda: storestudio.hot_topics(TEN(), industry, str(body.get("store_note") or "")[:120]),
+    )
+    return result
+
+
+@router.post("/api/avatar/studio/script")
+async def avatar_studio_script(body: dict):
+    """选好的热点 → 门店老板口播稿 + 视频标题 + 封面大字。"""
+    _need_module("avatar")
+    from .. import storestudio
+    topic = body.get("topic") if isinstance(body.get("topic"), dict) else None
+    if not topic or not str(topic.get("title") or "").strip():
+        raise HTTPException(400, "先选一个选题")
+    try:
+        dur = int(body.get("duration") or 30)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "口播时长无效")
+    if dur not in storestudio.MAX_SCRIPT_CHARS:
+        raise HTTPException(400, "时长只能选 15、30 或 60 秒")
+    result, _ = await _billed_studio_call(
+        "studio_script", "选题写口播稿",
+        lambda: storestudio.write_script(
+            TEN(), topic, str(body.get("industry") or "")[:20],
+            str(body.get("store_note") or "")[:120], dur),
+    )
+    return result
 
 
 @router.post("/api/avatar/sales-jobs")
@@ -733,6 +888,12 @@ def avatar_jobs(limit: int | None = None, offset: int = 0):
             r.get("error"),
             _is_boss(),
         )
+        if (r.get("params") or {}).get("studio"):
+            from .. import storestudio
+            r["params"]["studio"] = {
+                k: v for k, v in r["params"]["studio"].items() if k != "billing_op"
+            }
+            r["studio"] = storestudio.studio_state(r["id"]) or {"status": "waiting"}
     return _page_result(rows, total, page_limit, page_offset) if paged else rows
 
 
