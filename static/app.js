@@ -6995,7 +6995,7 @@ async function avSubmit(btn){
       own_audio_name: AV_VOICE_MODE==="own"&&AV_OWN_AUDIO ? AV_OWN_AUDIO.name : "",
       consent:AV_CONSENT, overseas_ok:AV_OVERSEAS,
       studio: stPackOn()?{enabled:true, topic:ST.topic||{}, title:($("#st-title")?.value||ST.title||"").trim(),
-        cover_title:($("#st-cover")?.value||ST.cover||"").trim(), store_name:ST.store?ST.store.name:""}:null}});
+        cover_title:($("#st-cover")?.value||ST.cover||"").trim(), store_name:ST.store?ST.store.name:"", nameplate:(ST.name||"").trim()}:null}});
     if(stPackOn()){ ST.topic=null; ST.topics=null; ST.title=""; ST.cover=""; }
     AV_DRAFT="";
     toast(`已开拍${AV_VOICE_MODE==="own"?"(用您的原声)":""},可继续开新的任务`); render();
@@ -7050,10 +7050,11 @@ function studioCard(meta, stores){
       <div><button class="btn pri" onclick="stScript(this)" ${ST.topic?"":"disabled"}>✍️ 写口播稿(${pr.studio_script||1}点)</button></div>
       <div style="flex:2;min-width:200px"><label>视频标题</label><input id="st-title" maxlength="30" value="${esc(ST.title)}" oninput="ST.title=this.value;avPriceSync()"></div>
       <div style="flex:1;min-width:160px"><label>封面大字(｜分两行)</label><input id="st-cover" maxlength="20" value="${esc(ST.cover)}" oninput="ST.cover=this.value"></div>
+      <div style="flex:1;min-width:180px"><label>人名条(选填)</label><input id="st-name" maxlength="20" placeholder="如:王磊 · 老王火锅店主" value="${esc(ST.name||"")}" oninput="ST.name=this.value"></div>
     </div>
     <label style="display:flex;gap:6px;align-items:flex-start;font-weight:400;cursor:pointer;margin-top:8px">
       <input type="checkbox" id="st-pack" style="width:auto;margin-top:3px" ${ST.pack?"checked":""} onchange="ST.pack=this.checked;avPriceSync()">
-      <span>开拍后<b>自动剪辑</b>（真人 + 新闻证据卡交替、字幕、标题）+ 封面(3:4/9:16) + 三平台发布文案 + 红线体检，打包下载(+${pr.studio_pack||3}点，失败自动退)。<span class="sub">需先选题或填标题。</span></span></label>
+      <span>开拍后<b>自动剪辑</b>（模式C：标题条 + 进度条章节 + 停顿对齐大字幕 + 原文引用卡/门店实拍 + 推镜 + 音效）+ 封面(3:4/9:16) + 三平台发布文案 + 红线体检，打包下载(+${pr.studio_pack||3}点，失败自动退)。<span class="sub">需先选题或填标题。</span></span></label>
   </div>`;
 }
 async function stUploadStore(input){
@@ -7108,6 +7109,7 @@ function studioJobBlock(j){
         ${[s.cover34,s.cover916].filter(u=>safeAssetUrl(u)).map(u=>`<a href="${esc(safeAssetUrl(u))}" target="_blank" rel="noopener"><img src="${esc(safeAssetUrl(u))}" style="height:200px;border-radius:10px;border:2px solid var(--ink)"></a>`).join("")}
       </div>
       <div class="actions" style="margin-top:6px">${safeAssetUrl(s.pack)?`<a class="btn sm pri" href="${esc(safeAssetUrl(s.pack))}" download>⬇️ 下载发布包(zip)</a>`:""}
+        <button class="btn sm" onclick="stRetry(${j.id},this)">🔁 用最新剪辑重剪(${AV_META?.studio?.prices?.studio_pack||3}点)</button>
         ${safeAssetUrl(s.video)?`<a class="btn sm" href="${esc(safeAssetUrl(s.video))}" download>⬇️ 只要剪辑版</a>`:""}</div>
       <details style="margin-top:6px"><summary style="cursor:pointer;font-weight:800">📝 三平台文案 & 体检</summary>
         ${Object.entries(names).map(([k,l])=>{const x=c[k]||{}; const txt=[x.title,x.body,(x.tags||[]).map(t=>"#"+t).join(" ")].filter(Boolean).join("\n\n");

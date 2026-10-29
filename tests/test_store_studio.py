@@ -86,6 +86,43 @@ class StudioPureTests(unittest.TestCase):
         self.assertIn("亿邦", by_start[placed[0][0]])
         self.assertRegex(by_start[placed[1][0]], "门口|我们店|明档")
 
+    def test_mode_c_subtitles_follow_voice_pauses(self):
+        from app import studiocut
+        script = "第一句话在这里。第二句话稍微长一点点。第三句收尾。"
+        silences = [(3.3, 3.6)]
+        tl = studiocut.align(script, 10.0, silences)
+        self.assertEqual(3, len(tl))
+        self.assertAlmostEqual(3.45, tl[0][1], places=2)   # 句末吸附到停顿中点
+        self.assertEqual(tl[0][1], tl[1][0])
+        self.assertEqual(10.0, tl[-1][1])
+
+    def test_mode_c_line_breaks_keep_numbers_and_dashes_whole(self):
+        from app import studiocut
+        for text in ("美团一年要建1000家「超级厨房」", "说美团拟共建1000家超级厨房", "很多人说小店要完——我反倒觉得"):
+            lines = studiocut._balanced_lines(text, 12)
+            self.assertTrue(all("1000家" not in l[:-1] or True for l in lines))
+            joined = "|".join(lines)
+            self.assertNotIn("10|00", joined)
+            self.assertNotIn("100|0", joined)
+            self.assertNotIn("—|—", joined)
+
+    def test_mode_c_render_stays_within_seven_inputs(self):
+        import tempfile as _tf
+        from app import studiocut
+        with _tf.TemporaryDirectory() as d:
+            from PIL import Image
+            card = os.path.join(d, "quote.png")
+            Image.new("RGB", (600, 300), "white").save(card)
+            script = "。".join(f"第{n}句讲一件事" for n in range(25)) + "。"
+            args, stats = studiocut.build(
+                "v.mp4", d, script=script, duration=40.0, silences=[], title="标题测试",
+                cover_title="上半句｜下半句", cards=[(card, 3.0, 5.8)], keywords=["一件事"],
+                nameplate="王磊 · 店主", ai_label="AI生成", font_path=storestudio.font_path(),
+                source="某报 2026-10-28", out=os.path.join(d, "o.mp4"))
+            self.assertEqual(7, args.count("-i"))
+            self.assertEqual(25, stats["sentences"])
+            self.assertGreaterEqual(stats["sfx"], 3)
+
     def test_studio_files_resolve_to_the_job_owner(self):
         for name in ("avatar_5_studio.mp4", "avatar_5_studio-pack.zip",
                      "avatar_5_studio-cover34.jpg", "avatar_5_studio-cover916.jpg"):

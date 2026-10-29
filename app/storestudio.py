@@ -767,17 +767,25 @@ async def compose(job_id: int, tid: int, params: dict, video_path: str, photo_pa
             except Exception:
                 store_path = None
         broll = (await _evidence_cards(tid, studio, store_path, work))[:4]
+        from . import studiocut
         duration = await asyncio.to_thread(_probe_duration, video_path)
-        timeline = subtitle_timeline(script, duration)
+        silences = await asyncio.to_thread(studiocut.detect_silences, video_path)
+        timeline = studiocut.align(script, duration, silences) or subtitle_timeline(script, duration)
         windows = broll_windows(timeline, len(broll), duration)
         windows = _place_cards(broll, timeline, windows, studio, duration)
         cards = [(b["path"], a, e) for b, (a, e) in zip(broll, windows)]
-        progress("start", f"✂️ 剪辑中：真人 + {len(cards)} 张证据卡 + 字幕 + 标题…")
+        progress("start", f"✂️ 模式C剪辑：真人 + {len(cards)} 张证据卡 + 标题条/进度条 + 停顿对齐字幕 + 音效…")
         final = base + ".mp4"
-        await asyncio.to_thread(
-            _run_render, render_cmd(video_path, cards, work, timeline,
-                                    studio.get("title", ""), final, duration))
         ai_label = await db.arun(features.ai_label_for, tid, None)
+        topic = studio.get("topic") or {}
+        args, stats = await asyncio.to_thread(
+            studiocut.build, video_path, work, script=script, duration=duration,
+            silences=silences, title=studio.get("title", ""),
+            cover_title=studio.get("cover_title", ""), cards=cards,
+            keywords=list(topic.get("keywords") or []), nameplate=studio.get("nameplate", ""),
+            ai_label=ai_label or "AI生成", font_path=font_path(), source=topic.get("source", ""),
+            out=final)
+        await asyncio.to_thread(_run_render, args)
         if ai_label:
             await asyncio.to_thread(avatar.stamp_video_label, final, ai_label)
         progress("start", "🖼 做封面（3:4 + 9:16）…")
@@ -802,6 +810,7 @@ async def compose(job_id: int, tid: int, params: dict, video_path: str, photo_pa
         "video": rel + ".mp4", "cover34": rel + "-cover34.jpg", "cover916": rel + "-cover916.jpg",
         "pack": rel + "-pack.zip", "copy": copy, "checks": checks,
         "broll": len(cards), "title": studio.get("title", ""),
+        "edit": stats,
     }
     await db.arun(_save_state, job_id, state)
     return state

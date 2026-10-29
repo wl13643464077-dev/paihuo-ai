@@ -707,6 +707,7 @@ def _studio_params(raw) -> dict | None:
     store = _avatar_asset_name(raw.get("store_name"), "store_name", {"store"}, required=False)
     return {"topic": clean, "title": title or clean["title"][:22],
             "cover_title": storestudio._clean_public(raw.get("cover_title"), 20),
+            "nameplate": storestudio._clean_public(raw.get("nameplate"), 20),
             "store_name": store}
 
 
@@ -746,8 +747,8 @@ async def avatar_studio_retry(jid: int):
     params = db.jloads(row.get("params_json"), {}) or {}
     if row.get("status") != "done" or not params.get("studio"):
         raise HTTPException(400, "只有已交付、开了自动剪辑的任务能重新剪辑")
-    if (storestudio.studio_state(jid) or {}).get("status") not in ("failed", None):
-        raise HTTPException(409, "这条正在剪辑或已经剪好了")
+    if (storestudio.studio_state(jid) or {}).get("status") == "running":
+        raise HTTPException(409, "这条正在剪辑，请稍等")
     video = os.path.join(avatar.OUT_DIR, f"avatar_{jid}.mp4")
     if not os.path.isfile(video):
         raise HTTPException(400, "原片文件不在了，没法重新剪辑")
