@@ -151,31 +151,85 @@ async def scene_photos(tid: int, portrait_name: str, store_name: str, scene: str
 
 # ---------- ② 72 小时行业热点选题 ----------
 def _hours_ago(published: str, now: datetime) -> float | None:
+    """解析模型给的各种日期写法，返回距今小时数；只有日期时按当天 23:59 算（对时效宽一档）。
+
+    支持：2026-10-28[ 18:01] / 2026/10/28 / 2026年10月28日 / 10月28日 / 10-28 /
+    今天 / 昨天 / 前天 / N小时前 / N天前。"""
     text = str(published or "").strip()
-    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
-        try:
-            when = datetime.strptime(text[:len(datetime.now().strftime(fmt))], fmt).replace(tzinfo=TZ)
-            return max(0.0, (now - when).total_seconds() / 3600)
-        except ValueError:
-            continue
-    return None
+    if not text:
+        return None
+    m = re.search(r"(\d+)\s*(?:个)?小时前", text)
+    if m:
+        return float(m.group(1))
+    m = re.search(r"(\d+)\s*天前", text)
+    if m:
+        return float(m.group(1)) * 24
+    for word, days in (("今天", 0), ("今日", 0), ("昨天", 1), ("昨日", 1), ("前天", 2)):
+        if word in text:
+            return float(days * 24)
+    year = month = day = None
+    hour = minute = None
+    m = re.search(r"(20\d{2})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})", text)
+    if m:
+        year, month, day = (int(x) for x in m.groups())
+    else:
+        m = re.search(r"(?<!\d)(\d{1,2})\s*[-/.月]\s*(\d{1,2})(?!\d)", text)
+        if m:
+            year, month, day = now.year, int(m.group(1)), int(m.group(2))
+    if year is None:
+        return None
+    t = re.search(r"(\d{1,2}):(\d{2})", text[m.end():] if m else "")
+    if t:
+        hour, minute = int(t.group(1)), int(t.group(2))
+    try:
+        when = datetime(year, month, day, hour if hour is not None else 23,
+                        minute if minute is not None else 59, tzinfo=TZ)
+    except ValueError:
+        return None
+    if when - now > timedelta(days=2) and year == now.year and not re.search(r"20\d{2}", text):
+        when = when.replace(year=year - 1)  # 「12月31日」在 1 月看是去年
+    return max(0.0, (now - when).total_seconds() / 3600)
+
+
+def _topic_items(data):
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("topics", "picks", "items", "data"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+            if isinstance(value, dict):
+                nested = _topic_items(value)
+                if nested:
+                    return nested
+    return []
 
 
 def normalize_topics(data, now: datetime | None = None) -> list[dict]:
     now = now or datetime.now(TZ)
-    items = data.get("topics") if isinstance(data, dict) else None
-    out = []
-    for raw in items if isinstance(items, list) else []:
+    out, rejected = [], {"no_source": 0, "no_date": 0, "too_old": 0}
+    for raw in _topic_items(data):
         if not isinstance(raw, dict):
             continue
         title = _clean_public(raw.get("title"), 60)
-        heat = _clean_public(raw.get("heat"), 120)
-        source = _clean_public(raw.get("source"), 60)
-        published = _clean_public(raw.get("published"), 20)
-        if not (title and heat and source and published):
+        heat = _clean_public(raw.get("heat") or raw.get("why") or raw.get("evidence"), 120)
+        source = _clean_public(raw.get("source") or raw.get("channel"), 60)
+        published = _clean_public(raw.get("published") or raw.get("date") or raw.get("time")
+                                  or raw.get("publish_time"), 30)
+        if not (title and heat and source):
+            rejected["no_source"] += 1
             continue  # 没有可核验热度证据和出处的不收
-        hours = _hours_ago(published, now)
-        if hours is None or hours > 72 + 12:  # 只收 72 小时内（日期粒度留半天余量）
+        hours = None
+        for text in (published, source, heat):
+            hours = _hours_ago(text, now)
+            if hours is not None:
+                break
+        if hours is None:
+            rejected["no_date"] += 1
+            continue
+        if hours > 72:
+            rejected["too_old"] += 1
             continue
         try:
             score = max(0, min(100, int(raw.get("score") or 0)))
@@ -188,6 +242,8 @@ def normalize_topics(data, now: datetime | None = None) -> list[dict]:
             "hook": _clean_public(raw.get("hook"), 60), "score": score,
             "keywords": [k for k in keywords if k][:3] or [title[:12]],
         })
+    if any(rejected.values()):
+        log.info("studio topics kept=%s rejected=%s", len(out), rejected)
     out.sort(key=lambda t: (-t["score"], t["hours_ago"]))
     return out[:6]
 
@@ -220,6 +276,9 @@ async def hot_topics(tid: int, industry: str, store_note: str = "") -> dict:
     data = result.get("data") if isinstance(result, dict) else None
     topics = normalize_topics(data, now)
     if not topics:
+        if not _topic_items(data):
+            log.warning("studio topics empty payload type=%s", type(data).__name__)
+            raise providers.ProviderError("热点扫描这次没返回结果，点数已退回，请再点一次")
         raise providers.ProviderError("72 小时内没找到能核实出处的行业热点，点数已退回；可稍后再扫或自己写选题")
     return {"industry": industry, "date": today, "topics": topics,
             "scan_note": _clean_public((data or {}).get("scan_note"), 120)}

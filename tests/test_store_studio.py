@@ -27,6 +27,19 @@ class StudioPureTests(unittest.TestCase):
         self.assertEqual(["国庆客流"[:12]], topics[1]["keywords"])
         self.assertLessEqual(topics[0]["hours_ago"], 72)
 
+    def test_topic_dates_accept_common_chinese_formats(self):
+        now = datetime(2026, 10, 29, 17, 0, tzinfo=storestudio.TZ)
+        for text in ("2026-10-28", "2026年10月28日", "10月28日", "10-27", "昨天", "5小时前",
+                     "2天前", "央视财经 10-28", "2026/10/27 09:30"):
+            hours = storestudio._hours_ago(text, now)
+            self.assertIsNotNone(hours, text)
+            self.assertLessEqual(hours, 72, text)
+        self.assertGreater(storestudio._hours_ago("2026-10-25", now), 72)
+        self.assertIsNone(storestudio._hours_ago("最近", now))
+        kept = storestudio.normalize_topics(
+            [{"title": "新规", "why": "热搜", "channel": "央视财经 10月28日"}], now)
+        self.assertEqual(1, len(kept))
+
     def test_redlines_flag_contacts_urls_and_absolute_claims_but_not_list_ordinals(self):
         self.assertEqual([], storestudio.redline_issues("第一，晚六点前到店送酸梅汤；第二，套餐降价"))
         issues = storestudio.redline_issues("全网最低，加V领券，详见 www.a.com，电话13800138000")
