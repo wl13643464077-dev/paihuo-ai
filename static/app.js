@@ -1247,6 +1247,7 @@ function specRoomCard(e){
 /* ---------- 人才市场:行业员工楼层改成「搜索 + 分组筛选 + 简历卡片」,几十人也一屏看得清 ---------- */
 const TM_GROUP = {};   // 每个行业当前选中的分组(""=全部),只在本页会话内记忆
 function tmHeadlineTail(e){
+  if(e.resume_card?.one) return String(e.resume_card.one);
   const h=String(e.resume_card?.headline||"");
   const i=h.indexOf("｜");
   return i>=0?h.slice(i+1):(isBoss()?(e.duty||e.intro||""):(e.intro||""));
@@ -3078,7 +3079,7 @@ function drawSpec(){
             <b style="font-size:19px">${esc(displayIdentity.person)} · ${esc(displayIdentity.job)}</b>
             <span class="tag">${esc(e.dept_name)}${isBoss()&&e.group?" · "+esc(e.group):""}</span>
             <span class="stpill ${PILL_CLS[st]}">${{work:"干活中",learn:"进修中",idle:"待命"}[st]}</span></div>
-          <div class="sub" style="margin-top:5px">${esc(isBoss()?e.duty:e.intro)}</div>
+          <div class="sub" style="margin-top:5px">${esc(e.resume?.one||(isBoss()?e.duty:e.intro))}</div>
           ${assignmentState?`<div class="sub" style="margin-top:5px;color:#8a5a1f"><b>${esc(assignmentState)}</b></div>`:""}
           <div class="sub" style="margin-top:5px">${esc(employeeIdentityLabel(e))}${Number(e.config_revision)>0?` · 配置 r${Number(e.config_revision)}`:""}</div>
           ${isBoss()?`<div class="kv" style="margin-top:6px"><span>交付 ${e.stats.runs} 单</span>
@@ -3150,7 +3151,7 @@ function specResumeTab(e){
       <div class="rz-jh"><b>${esc(j.company||"")}</b><span class="rz-role">${esc(j.title||"")}</span><span class="sub rz-when">${esc(j.period||"")}</span></div>
       ${j.scale?`<div class="sub">${esc(j.scale)}</div>`:""}
       ${(j.duties||[]).length?`<div class="rz-lab">工作内容</div>${rzList(j.duties)}`:""}
-      ${(j.wins||[]).length?`<div class="rz-lab">工作业绩</div>${rzList(j.wins,"win")}`:""}
+      ${(j.wins||[]).length?`<div class="rz-lab">${(j.duties||[]).length?"工作业绩":"做过的事"}</div>${rzList(j.wins,"win")}`:""}
     </div>`).join("");
   const projects=(r.projects||[]).map(p=>`<div class="rz-proj">
       <div class="rz-jh"><b>${esc(p.name||"")}</b>${p.org||p.period?`<span class="sub rz-when">${esc([p.org,p.period].filter(Boolean).join(" · "))}</span>`:""}</div>
@@ -3168,6 +3169,14 @@ function specResumeTab(e){
   const bars=(r.skill_bars||[]).map(b=>{const lv=Math.max(0,Math.min(100,Number(b.level)||0));
     const label=b.label||(lv>=90?"精通":lv>=82?"熟练":"掌握");
     return `<div class="rz-bar"><div class="rz-barh"><span>${esc(b.name||"")}</span><span class="sub">${esc(label)}</span></div><div class="rz-track"><div style="width:${lv}%"></div></div></div>`;}).join("");
+  const pl=r.plain&&r.plain.what?r.plain:null;
+  const plainBox=pl?`<section class="rz-panel rz-plain"><h3 class="rz-sec">一眼看懂 TA</h3>
+      <div class="rz-pg">
+        <div class="rz-pb"><div class="rz-pt">📌 TA 是干啥的</div><p class="rz-p">${esc(pl.what)}</p></div>
+        ${(pl.when||[]).length?`<div class="rz-pb"><div class="rz-pt">🕐 什么时候找 TA</div>${pl.when.map(w=>`<div class="rz-scene"><b>${esc(w.when)}</b>${w.get?`<div class="sub">TA 交给你：${esc(w.get)}</div>`:""}</div>`).join("")}</div>`:""}
+        ${(pl.value||[]).length?`<div class="rz-pb"><div class="rz-pt">💡 能帮你什么</div>${rzList(pl.value,"win")}</div>`:""}
+        ${pl.how?`<div class="rz-pb"><div class="rz-pt">👉 怎么用</div><p class="rz-p">${esc(pl.how)}</p></div>`:""}
+      </div></section>`:"";
   const stats=e.stats||{};
   const bossBox=(cls)=>boss?`<section class="rz-panel rz-boss ${cls}"><h3 class="rz-sec">⚙️ 岗位配置 <span class="rz-badge">仅老板可见</span></h3>
       <div class="sub" style="margin-bottom:8px">交付 ${Number(stats.runs)||0} 单 · 历史成本 ${rmb(stats.cost_usd)} · 进修技能 ${(e.skills||[]).length} 条</div>
@@ -3189,7 +3198,8 @@ function specResumeTab(e){
     ${bossBox("rz-boss-m")}
     <div class="rz-body">
       <div class="rz-main">
-        ${rzSec("adv","个人优势",adv)}
+        ${plainBox}
+        ${pl?"":rzSec("adv","个人优势",adv)}
         ${rzSec("feat",feats.some(f=>f.num)?"精选成果":"代表能力",featHtml)}
         ${rzSec("job","工作经历",jobs)}
         ${rzSec("proj",`项目经历 <small class="sub">代表项目 ${(r.projects||[]).length} 个</small>`,projects)}
@@ -3197,8 +3207,8 @@ function specResumeTab(e){
       </div>
       <div class="rz-side">
         ${bossBox("rz-boss-d")}
-        ${rzSec("why","为什么推荐TA",why+cautions,'style="background:#fff6dc"')}
-        ${rzSec("scene","这些时候找TA",scenes)}
+        ${pl?rzSec("why","需要留意",rzList(r.cautions),'style="background:#fff6dc"'):rzSec("why","为什么推荐TA",why+cautions,'style="background:#fff6dc"')}
+        ${pl?"":rzSec("scene","这些时候找TA",scenes)}
         ${rzSec("skill","专业技能",bars)}
         ${rzSec("need","派活时请准备",rzList(r.prepare))}
         ${rzSec("out","TA 会交回",(r.deliverables||[]).length?`<div class="rz-chips">${r.deliverables.map(c=>`<span class="tag">${esc(c)}</span>`).join("")}</div>`:"")}

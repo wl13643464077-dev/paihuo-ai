@@ -64,8 +64,9 @@ class ResumeTests(unittest.TestCase):
             r = resume.for_employee(employee)
             count += 1
             self.assertTrue(r["headline"].startswith(employee["name"]) or r["source"] == "override", employee["name"])
-            self.assertEqual(3, len(r["experiences"]), employee["name"])
-            self.assertTrue(r["projects"], employee["name"])
+            self.assertGreaterEqual(len(r["experiences"]), 2, employee["name"])
+            if r["source"] == "generated":
+                self.assertTrue(r["projects"], employee["name"])
             self.assertTrue(r["skill_bars"], employee["name"])
             self.assertTrue(r["prepare"], employee["name"])
             self.assertIn("人设履历", r["footnote"])
@@ -89,6 +90,24 @@ class ResumeTests(unittest.TestCase):
         r = resume.for_employee({**employee, "dept_key": "restaurant", "dept_name": "餐饮产业部"})
         self.assertEqual("override", r["source"])
         self.assertEqual("某连锁川菜品牌", r["experiences"][0]["company"])
+
+
+
+class PlainIntroTests(unittest.TestCase):
+    def test_every_active_employee_has_a_hand_written_plain_intro(self):
+        plain = resume._plain()
+        for dept in departments.list_depts():
+            for employee in dept["employees"]:
+                if employee["key"] == "11-dish-costing-pricing":
+                    continue  # 手写样稿 override
+                entry = plain.get(employee["key"])
+                self.assertIsInstance(entry, dict, employee["name"])
+                for field in ("one", "what", "how", "when", "value", "past", "tags"):
+                    self.assertTrue(entry.get(field), (employee["name"], field))
+                r = resume.for_employee({**employee, "dept_key": dept["key"], "dept_name": dept["name"]})
+                self.assertEqual("plain", r["source"])
+                self.assertTrue(r["plain"]["what"])
+                self.assertTrue(r["one"])
 
 
 if __name__ == "__main__":
