@@ -170,9 +170,13 @@ def text_nodes(text: str, image_name: str, audio_name: str, ratio: str, emotion:
 async def _v2(cli, key: str, path: str, *, json_body=None, file_path=None) -> dict:
     headers = {"Authorization": f"Bearer {key}", "Accept": "application/json"}
     if file_path:
+        # 照搬 generate_digital_human.py：上传必须带明确的文件类型，否则工作流的加载节点读不出来
+        ext = os.path.splitext(file_path)[1].lower()
+        mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
+                ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4"}.get(ext, "application/octet-stream")
         with open(file_path, "rb") as fh:
             r = await cli.post(f"{API_V2}{path}", headers=headers,
-                               files={"file": (os.path.basename(file_path), fh.read())})
+                               files={"file": (os.path.basename(file_path), fh.read(), mime)})
     else:
         r = await cli.post(f"{API_V2}{path}", headers=headers, json=json_body or {})
     try:
@@ -218,6 +222,7 @@ async def synth_text(photo_path: str, text: str, voice_sample_path: str, progres
         if not info or not info.get("taskId"):
             raise RHError("RunningHub 任务提交失败，请稍后重试")
         tid = info["taskId"]
+        log.info("runninghub text task submitted %s", tid)
         progress("tool", f"任务已受理 {str(tid)[:14]}…,开始合成（约 10-20 分钟）")
         failures = 0
         for i in range(120):  # 最多 30 分钟
@@ -244,6 +249,9 @@ async def synth_text(photo_path: str, text: str, voice_sample_path: str, progres
                     raise RHError("成片地址未通过公网安全校验") from exc
                 return vid
             if st in {"FAILED", "CANCELLED", "CANCELED"}:
+                reason = " | ".join(str(q.get(k))[:200] for k in ("errorCode", "errorMessage", "failedReason", "promptTips")
+                                    if q.get(k))
+                log.warning("runninghub text task %s %s reason=%s", tid, st, reason or "(none)")
                 raise RHError("数字人合成失败（RunningHub），点数已退回")
             safe = st if st in {"RUNNING", "QUEUED", "WAITING", "PENDING"} else "排队"
             progress("tool", f"合成中({safe})…已等 {(i + 1) * 15}s")
