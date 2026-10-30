@@ -6792,7 +6792,7 @@ async function avatarView(){
           <span class="chip ${AV_VOICE_MODE!=="own"?"on":""}" style="padding:9px 16px" id="av-vm-preset" onclick="avVoiceMode('preset')">🎙 系统音色配音</span>
           <span class="chip ${AV_VOICE_MODE==="own"?"on":""}" style="padding:9px 16px" id="av-vm-own" onclick="avVoiceMode('own')">🗣 用我自己的录音</span>
         </div>
-        <div id="av-voice-preset" style="margin-top:6px">
+        <div id="av-voice-preset" style="margin-top:6px;${AV_VOICE_MODE==="own"?"display:none":""}">
           <select id="av-voice">${meta.voices.map(v=>`<option value="${v.id}">${esc(v.label)}</option>`).join("")}</select>
           <details style="margin-top:6px"><summary class="sub" style="cursor:pointer">🧬 克隆我的声音(录 30 秒,以后任何稿子都是您的原声)</summary>
             <div class="notice" style="margin-top:6px">用手机随便录一段您说话的音频(<b>至少 10 秒</b>,建议 30-60 秒,内容随意),上传后点克隆。克隆好的声音会出现在上面的音色列表最顶部,永久可用。</div>
@@ -6803,7 +6803,7 @@ async function avatarView(){
             </div>
             <div class="sub" id="av-clone-status"></div>
           </details></div>
-        <div id="av-voice-own" style="display:none;margin-top:6px">
+        <div id="av-voice-own" style="${AV_VOICE_MODE==="own"?"":"display:none;"}margin-top:6px">
           <input type="file" accept=".mp3,.m4a,.wav" onchange="avUploadVoice(this)">
           <div class="sub" id="av-own-status" style="margin-top:4px">上传一段您念这份口播稿的录音(手机录就行,成片就是您的原声)</div></div>
         <label>③ 口播稿 *(建议 60-200 字,约 30-60 秒)</label>
