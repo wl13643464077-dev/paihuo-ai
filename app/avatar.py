@@ -2656,6 +2656,10 @@ async def run_job(job_id: int, broadcast):
             from . import storestudio
             await storestudio.run_after_delivery(
                 job_id, j.get("tenant_id") or 1, p, out, photo_path, progress)
+        else:
+            await asyncio.to_thread(
+                notify_done, j.get("tenant_id") or 1, job_id, (p.get("script") or "")[:30], True,
+                "成片已交付，可在数字人摄影棚下载")
     except Cancelled:
         log.info("avatar job %s cancelled by user", job_id)
         try:
@@ -2694,6 +2698,9 @@ async def run_job(job_id: int, broadcast):
                 job_id,
                 type(exc).__name__,
             )
+        await asyncio.to_thread(
+            notify_done, j.get("tenant_id") or 1, job_id, (p.get("script") or "")[:30], False,
+            public_error)
         try:
             progress("error", public_error)
         except Exception as exc:
@@ -2720,6 +2727,18 @@ async def run_job(job_id: int, broadcast):
             "tenant_id": j.get("tenant_id") or 1,
             "job_id": job_id,
         })
+
+
+def notify_done(tid: int, job_id: int, title: str, ok: bool, summary: str) -> None:
+    """出片/失败提醒：站内通知 + 企业微信群机器人（配了才发）；提醒失败不影响任务。"""
+    from . import notify
+    payload = {"job_id": job_id, "title": (title or "")[:30], "ok": bool(ok),
+               "summary": (summary or "")[:200]}
+    try:
+        notify.record(int(tid or 1), "avatar_done", payload)
+        notify.send_sync(int(tid or 1), "avatar_done", payload)
+    except Exception as exc:
+        log.warning("avatar notify failed job=%s error_type=%s", job_id, type(exc).__name__)
 
 
 def resume_pending(broadcast):

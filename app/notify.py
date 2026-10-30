@@ -138,6 +138,10 @@ def build_msg(kind: str, payload: dict) -> str:
     if kind == "video":
         return (f"**🎬 派活 · 视频成片**\n《{title}》已出片,可下载发布\n"
                 f"[查看]({base}{p.get('file', '')})")
+    if kind == "avatar_done":
+        head = "🎬 派活 · 数字人出片了" if p.get("ok", True) else "⚠️ 派活 · 数字人没做成"
+        return (f"**{head}**\n#{p.get('job_id')} 《{title}》\n{(p.get('summary') or '')[:120]}\n"
+                f"[去看看]({base}/#/avatar)")
     if kind in STAFF_TASK_KINDS:
         # 派给店员的活:群里只报事,不带照片;链接进老板端/店员手机版都能看
         heads = {
@@ -170,6 +174,7 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
         "task_outcome": p.get("report_name") or "派出去的任务有结果了",
         "meeting_outcome": p.get("report_name") or "会议有结果了",
         "video": "视频成片已交付",
+        "avatar_done": "数字人视频出片了" if p.get("ok", True) else "数字人视频没做成(已退点)",
         "pub": "矩阵发布成功" if p.get("ok") else "矩阵发布失败",
         "learn_done": "员工进修完成",
         "learn_failed": "员工进修失败(已退点)",
@@ -214,6 +219,8 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
         link = "#/censor"
     elif kind == "video":
         link = "#/tasks"
+    elif kind == "avatar_done":
+        link = "#/avatar"
     elif kind == "pub":
         link = "#/channels"
     elif kind in {"task_outcome", "meeting_outcome"}:
@@ -281,6 +288,8 @@ KIND_MODULES = {
     # ``video`` 来自 textvideo.tv_job（图文成片），任务中心和详情都归内容部。
     # 数字人摄影棚使用 avatar_job/SSE，不得把图文成片通知误投给 avatar-only 成员。
     "video": frozenset({"content"}),
+    # 数字人摄影棚出片/失败：只给有数字人板块权限的人看
+    "avatar_done": frozenset({"avatar"}),
 }
 
 # v60:逐人发送的通知。payload 必须带 user_id，只写 user_id 定向行，绝不做

@@ -286,6 +286,12 @@ async def hot_topics(tid: int, industry: str, store_note: str = "") -> dict:
         0, prompt, web=True, timeout=600, research_brief=brief)
     data = result.get("data") if isinstance(result, dict) else None
     topics = normalize_topics(data, now)
+    if len(topics) < 3:
+        # 72 小时热点不够时，用「常青题」补位（内容流水线：热点不足从常青库补，单列展示，不冒充热点）
+        try:
+            topics += await evergreen_topics(industry, store_note, 3 if topics else 4)
+        except Exception as exc:
+            log.info("studio evergreen fill skipped error_type=%s", type(exc).__name__)
     if not topics:
         if not _topic_items(data):
             log.warning("studio topics empty payload type=%s", type(data).__name__)
@@ -295,6 +301,31 @@ async def hot_topics(tid: int, industry: str, store_note: str = "") -> dict:
             "scan_note": _clean_public((data or {}).get("scan_note"), 120)}
 
 
+async def evergreen_topics(industry: str, store_note: str, n: int) -> list[dict]:
+    """常青题：老板长期关心、任何时候讲都成立的门店经营话题；不编新闻、不写出处。"""
+    from . import growth
+    prompt = f"""给「{industry}」门店老板想 {n} 个「常青」短视频选题（不依赖新闻，任何时候发都成立）。
+【门店】{store_note or '(未填写)'}
+方向参考：算账（成本/毛利/客单）、顾客为什么不回头、员工和排班、差评怎么回、外卖平台费用、节假日备货、同行在做的小招。
+要求：落到这家店能讲的具体做法；不编数据、不编新闻、不写媒体出处；hook 是冲突或结论开头的第一句。
+只输出 JSON：{{"topics":[{{"title":"选题标题","angle":"门店切入角度","hook":"第一句","keywords":["词1","词2"]}}]}}"""
+    result = await growth._call_toolbox_employee_json(0, prompt, timeout=240)
+    items = _topic_items(result.get("data") if isinstance(result, dict) else None)
+    out = []
+    for raw in items[:n]:
+        if not isinstance(raw, dict) or not _clean_public(raw.get("title"), 60):
+            continue
+        keywords = [_clean_public(k, 16) for k in (raw.get("keywords") or []) if isinstance(k, str)]
+        title = _clean_public(raw.get("title"), 60)
+        out.append({
+            "title": title, "heat": "常青题：老板长期关心的经营问题（非新闻热点）", "source": "",
+            "published": "", "hours_ago": None, "angle": _clean_public(raw.get("angle"), 120),
+            "hook": _clean_public(raw.get("hook"), 60), "score": 0, "evergreen": True,
+            "keywords": [k for k in keywords if k][:3] or [title[:12]],
+        })
+    return out
+
+
 # ---------- ③ 口播稿 ----------
 async def write_script(tid: int, topic: dict, industry: str, store_note: str,
                        duration: int) -> dict:
@@ -302,13 +333,14 @@ async def write_script(tid: int, topic: dict, industry: str, store_note: str,
     duration = duration if duration in MAX_SCRIPT_CHARS else 30
     limit = MAX_SCRIPT_CHARS[duration]
     target = {15: "70-100", 30: "150-210", 60: "300-420"}[duration]
+    evergreen = bool((topic or {}).get("evergreen"))
     topic = {k: _clean_public(v, 160) for k, v in (topic or {}).items() if isinstance(v, str)}
     if not topic.get("title"):
         raise StudioError("先选一个选题")
     prompt = f"""你给「{_clean_public(industry, 20) or '实体门店'}」老板写一条 {duration} 秒抖音口播稿，老板本人出镜，站在自家店里讲。
 【门店】{_clean_public(store_note, 120) or '(未填写)'}
 【选题】{topic.get('title')}
-【热度证据】{topic.get('heat', '')}（出处：{topic.get('source', '')}）
+{"【常青题】这不是新闻热点：不要提任何媒体、日期和数据出处，直接讲门店经验和做法。" if evergreen else f"【热度证据】{topic.get('heat', '')}（出处：{topic.get('source', '')}）"}
 【切入角度】{topic.get('angle', '')}
 【建议第一句】{topic.get('hook', '')}
 【结构】冲突/结论开头 → 这件事是什么（一句，带出处「媒体名+日期」）→ 对顾客/同行意味着什么 → 我们店怎么做（2-3 条具体做法）→ 一个互动问题收尾。
@@ -569,6 +601,15 @@ def render_cmd(video: str, cards: list[tuple[str, float, float]], text_dir: str,
     ]
 
 
+def preview_args(final: str, preview: str, poster: str) -> list[str]:
+    """一条命令出两样：540×960 低码率预览 mp4 + 第 1 秒的海报帧。"""
+    return ["-threads", "2", "-i", final,
+            "-map", "0:v", "-map", "0:a?", "-vf", "scale=540:960", "-c:v", "libx264", "-preset", "veryfast",
+            "-crf", "30", "-pix_fmt", "yuv420p", "-threads", "2", "-c:a", "aac", "-b:a", "80k",
+            "-movflags", "+faststart", preview,
+            "-map", "0:v", "-ss", "1", "-frames:v", "1", "-vf", "scale=540:960", "-q:v", "4", poster]
+
+
 def _run_render(arguments: list[str]) -> None:
     from . import textvideo
     command = textvideo._render_command(arguments)
@@ -707,7 +748,7 @@ async def _evidence_cards(tid: int, studio: dict, store_path: str | None, work: 
     """证据卡：①原文引用卡（出处+热度事实）②老板自家门店照 ③（平台开了全网抓图时）新闻配图。"""
     topic = studio.get("topic") or {}
     cards = []
-    if topic.get("source") and topic.get("heat"):
+    if topic.get("source") and topic.get("heat") and not topic.get("evergreen"):
         path = os.path.join(work, "quote.png")
         await asyncio.to_thread(quote_card, path, topic["source"], topic["heat"])
         cards.append({"path": path, "label": topic["source"], "page": topic["source"]})
@@ -787,6 +828,14 @@ async def compose(job_id: int, tid: int, params: dict, video_path: str, photo_pa
             ai_label=ai_label or "AI生成", font_path=font_path(), source=topic.get("source", ""),
             out=final)
         await asyncio.to_thread(_run_render, args)
+        # 页面预览用小体积版（540p，约成片的 1/4），老板手机上能秒开；下载仍是高清成片
+        progress("start", "📱 生成手机预览版…")
+        try:
+            await asyncio.to_thread(_run_render, preview_args(final, base + "-preview.mp4", base + "-poster.jpg"))
+            has_preview = os.path.isfile(base + "-preview.mp4") and os.path.isfile(base + "-poster.jpg")
+        except Exception as exc:  # 预览只是加分项
+            log.info("studio preview skipped error_type=%s", type(exc).__name__)
+            has_preview = False
         if ai_label:
             await asyncio.to_thread(avatar.stamp_video_label, final, ai_label)
         progress("start", "🖼 做封面（3:4 + 9:16）…")
@@ -812,6 +861,8 @@ async def compose(job_id: int, tid: int, params: dict, video_path: str, photo_pa
         "pack": rel + "-pack.zip", "copy": copy, "checks": checks,
         "broll": len(cards), "title": studio.get("title", ""),
         "edit": stats,
+        "preview": rel + "-preview.mp4" if has_preview else rel + ".mp4",
+        "poster": rel + "-poster.jpg" if has_preview else rel + "-cover916.jpg",
     }
     await db.arun(_save_state, job_id, state)
     return state
@@ -854,8 +905,12 @@ async def run_after_delivery(job_id: int, tid: int, params: dict, video_path: st
         if op:
             await db.arun(billing.complete_operation, op)
         progress("done", "📦 剪辑版成片 + 封面 + 三平台发布包已就绪")
+        await asyncio.to_thread(avatar.notify_done, tid, job_id, (params.get("studio") or {}).get("title", ""),
+                                True, "剪辑版成片、封面和三平台发布包都好了，去下载发布")
     except Exception as exc:
         log.error("studio compose failed job=%s error_type=%s", job_id, type(exc).__name__)
         await db.arun(_save_state, job_id, {"status": "failed", "error": "自动剪辑失败，剪辑包点数已退回；原片可正常下载"})
         await db.arun(refund_pack, job_id, params, "自动剪辑失败自动退回")
         progress("error", "自动剪辑失败，剪辑包点数已退回；数字人原片可正常下载")
+        await asyncio.to_thread(avatar.notify_done, tid, job_id, (params.get("studio") or {}).get("title", ""),
+                                True, "数字人原片已交付；自动剪辑没成功（剪辑包点数已退回），可点「重新剪辑」")

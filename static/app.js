@@ -6727,6 +6727,7 @@ async function avatarView(){
     api("/avatar/meta"),api(listPath("/avatar/jobs","avatar")),api("/avatar/photos"),
     api("/avatar/store-photos").catch(()=>[])
   ]);
+  AV_VOICES = await api("/avatar/voice-samples").catch(()=>[]);
   AV_META = meta;
   const stores = Array.isArray(storePayload)?storePayload:[];
   if(ST.store && !stores.some(p=>p.name===ST.store.name)) ST.store=null;
@@ -6804,6 +6805,10 @@ async function avatarView(){
             <div class="sub" id="av-clone-status"></div>
           </details></div>
         <div id="av-voice-own" style="${AV_VOICE_MODE==="own"?"":"display:none;"}margin-top:6px">
+          ${(AV_VOICES||[]).length?`<div class="sub" style="margin-bottom:4px">用以前传过的声音(点选即可,不用重传):</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px">${AV_VOICES.map((v,i)=>`<span class="chip ${AV_OWN_AUDIO&&AV_OWN_AUDIO.name===v.name?"on":""}" style="cursor:pointer" onclick="AV_OWN_AUDIO={name:${cp(v.name)},preview:${cp(v.preview)}};render()">🎙 声音${i+1}${v.ts?" · "+new Date(v.ts*1000).toLocaleDateString("zh-CN"):""}</span>`).join("")}</div>
+          ${AV_OWN_AUDIO?`<audio controls src="${esc(safeAssetUrl(AV_OWN_AUDIO.preview))}" style="height:28px;margin-bottom:6px"></audio>`:""}
+          <div class="sub">或上传新的:</div>`:""}
           <input type="file" accept=".mp3,.m4a,.wav" onchange="avUploadVoice(this)">
           <div class="sub" id="av-own-status" style="margin-top:4px">上传一段您念这份口播稿的录音(手机录就行,成片就是您的原声)</div></div>
         <label>③ 口播稿 *(建议 60-200 字,约 30-60 秒)</label>
@@ -6906,6 +6911,7 @@ async function avUploadVoice(input){
   const fd = new FormData(); fd.append("file", f); fd.append("kind", "voice"); fd.append("consent", "1");
   try{
     AV_OWN_AUDIO = await xhrUpload("/api/avatar/upload", fd, input);
+    AV_VOICES = [...(AV_VOICES||[]), {name:AV_OWN_AUDIO.name, preview:AV_OWN_AUDIO.preview, ts:Date.now()/1000}];
     $("#av-own-status").innerHTML = `✅ 已上传:${esc(f.name)} <audio controls src="${esc(safeAssetUrl(AV_OWN_AUDIO.preview))}" style="vertical-align:middle;height:28px"></audio>`;
   }catch(e){ toast(e.message); }
 }
@@ -7011,7 +7017,7 @@ async function avSubmit(btn){
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🎬 开拍"; }
 }
 /* ---------- 门店数字人一条龙(内容流水线 v3.1 融合) ---------- */
-let AV_META = null, AV_DRAFT = "";
+let AV_META = null, AV_DRAFT = "", AV_VOICES = [];
 let ST = {store:null, scene:"door", topics:null, topic:null, title:"", cover:"", pack:true, industry:"", note:"", scanNote:""};
 function stPackOn(){ return !!(ST.pack && (ST.topic || ST.title) && $("#st-pack")?.checked!==false); }
 function studioCard(meta, stores){
@@ -7048,9 +7054,9 @@ function studioCard(meta, stores){
     ${ST.scanNote?`<div class="sub" style="margin-top:6px">🔎 ${esc(ST.scanNote)}</div>`:""}
     ${topics.length?`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:10px;margin-top:10px">${topics.map((t,i)=>`
       <div onclick="stPickTopic(${i})" style="cursor:pointer;border:2.5px solid ${ST.topic&&ST.topic.title===t.title?"var(--gold,#c9a227)":"var(--ink)"};border-radius:12px;padding:10px 12px;background:${ST.topic&&ST.topic.title===t.title?"#fff6dc":"#fff"}">
-        <div style="display:flex;gap:6px;align-items:center"><b style="flex:1">${esc(t.title)}</b><span class="pill done">${Number(t.score)||0}分</span></div>
+        <div style="display:flex;gap:6px;align-items:center"><b style="flex:1">${esc(t.title)}</b>${t.evergreen?`<span class="pill">常青</span>`:`<span class="pill done">${Number(t.score)||0}分</span>`}</div>
         <div class="sub" style="margin-top:4px">🔥 ${esc(t.heat)}</div>
-        <div class="sub">📰 ${esc(t.source)} · 约 ${Number(t.hours_ago)||0} 小时前</div>
+        <div class="sub">${t.evergreen?"🌲 常青题(72 小时热点不够时补位,不是新闻,稿子里不会编出处)":`📰 ${esc(t.source)} · 约 ${Number(t.hours_ago)||0} 小时前`}</div>
         ${t.angle?`<div style="font-size:13px;margin-top:4px">👉 ${esc(t.angle)}</div>`:""}
       </div>`).join("")}</div>`:""}
     ${stepHead("C","写稿：按选好的热点写口播稿（自动填进下方「开拍 ③」）")}
@@ -7112,12 +7118,13 @@ function studioJobBlock(j){
   if(s.status==="done"){
     // 重剪后文件名不变：带上完成时间做版本号，浏览器不会继续放旧片
     const ver=`?v=${Math.round(Number(s.finished_at)||0)}`;
-    s={...s, video:s.video&&s.video+ver, cover34:s.cover34&&s.cover34+ver, cover916:s.cover916&&s.cover916+ver, pack:s.pack&&s.pack+ver};
+    s={...s, video:s.video&&s.video+ver, cover34:s.cover34&&s.cover34+ver, cover916:s.cover916&&s.cover916+ver, pack:s.pack&&s.pack+ver,
+       preview:(s.preview||s.video)&&(s.preview||s.video)+ver, poster:(s.poster||s.cover916)&&(s.poster||s.cover916)+ver};
     const c=s.copy||{}, names={douyin:"抖音",shipinhao:"视频号",xiaohongshu:"小红书"};
     return `<div style="border:2px dashed #e0a100;border-radius:12px;padding:10px;margin-top:8px;background:#fffaf0">
       <b>📦 剪辑版 + 发布包</b> <span class="sub">${Number(s.broll)||0} 张证据卡</span>
       <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px;align-items:flex-start">
-        ${safeAssetUrl(s.video)?`<video controls style="width:200px;border:3px solid var(--ink);border-radius:12px" src="${esc(safeAssetUrl(s.video))}"></video>`:""}
+        ${safeAssetUrl(s.preview)?`<video controls preload="none" playsinline poster="${esc(safeAssetUrl(s.poster))}" style="width:200px;border:3px solid var(--ink);border-radius:12px" src="${esc(safeAssetUrl(s.preview))}"></video>`:""}
         ${[s.cover34,s.cover916].filter(u=>safeAssetUrl(u)).map(u=>`<a href="${esc(safeAssetUrl(u))}" target="_blank" rel="noopener"><img src="${esc(safeAssetUrl(u))}" style="height:200px;border-radius:10px;border:2px solid var(--ink)"></a>`).join("")}
       </div>
       <div class="actions" style="margin-top:6px">${safeAssetUrl(s.pack)?`<a class="btn sm pri" href="${esc(safeAssetUrl(s.pack))}" download>⬇️ 下载发布包(zip)</a>`:""}
@@ -7126,7 +7133,9 @@ function studioJobBlock(j){
       <details style="margin-top:6px"><summary style="cursor:pointer;font-weight:800">📝 三平台文案 & 体检</summary>
         ${Object.entries(names).map(([k,l])=>{const x=c[k]||{}; const txt=[x.title,x.body,(x.tags||[]).map(t=>"#"+t).join(" ")].filter(Boolean).join("\n\n");
           if(!txt) return "";
+          const body=[x.body,(x.tags||[]).map(t=>"#"+t).join(" ")].filter(Boolean).join("\n\n");
           return `<div style="margin-top:8px"><b>${l}</b> <button class="btn sm" onclick="navigator.clipboard.writeText(${cp(txt)}).then(()=>toast('已复制${l}文案'))">复制</button>
+            <button class="btn sm pri" onclick="stSemiPub(${cp(k)},${cp(x.title||"")},${cp(body)},${cp(safeAssetUrl(s.video))},${cp(safeAssetUrl(k==="xiaohongshu"?s.cover34:s.cover916))})">🪄 半自动发布</button>
           <div class="notice" style="white-space:pre-wrap;font-size:12.5px;margin-top:4px">${esc(txt)}</div></div>`;}).join("")}
         <div style="margin-top:8px">${(s.checks||[]).map(x=>`<div style="font-size:13px">${x.ok?"✅":"🔴"} ${esc(x.text)}</div>`).join("")}</div>
       </details></div>`;
@@ -7135,6 +7144,24 @@ function studioJobBlock(j){
     ${j.status==="done"?`<button class="btn sm pri" style="margin-left:8px" onclick="stRetry(${j.id},this)">🔁 重新剪辑(${AV_META?.studio?.prices?.studio_pack||3}点)</button>`:""}</div>`;
   if(j.status==="done"||s.status==="running") return `<div class="sub" style="margin-top:6px">✂️ 自动剪辑 + 发布包制作中…(约 1-3 分钟,完成后刷新)</div>`;
   return `<div class="sub" style="margin-top:6px">📦 出片后自动剪辑 + 发布包</div>`;
+}
+const ST_PUB_URL={douyin:["抖音","https://creator.douyin.com/creator-micro/content/upload"],
+  shipinhao:["视频号","https://channels.weixin.qq.com/platform/post/create"],
+  xiaohongshu:["小红书","https://creator.xiaohongshu.com/publish/publish"]};
+function stSemiPub(key,title,body,video,cover){
+  const [platform,url]=ST_PUB_URL[key]||[key,""];
+  const dl=(href)=>()=>{const a=document.createElement('a');a.href=href;a.download='';document.body.appendChild(a);a.click();a.remove();};
+  const step=(n,label,hint)=>`<div class="topic" id="sp-${n}" style="margin:8px 0;display:flex;gap:10px;align-items:center;cursor:pointer">
+    <span style="font-size:20px;font-weight:900">${n}</span><div style="flex:1"><b>${label}</b><div class="sub">${hint}</div></div>
+    <span class="sp-ok" style="font-size:18px;opacity:.15">✅</span></div>`;
+  window.__spAct={1:()=>copyText(title),2:()=>copyText(body),3:dl(video),4:dl(cover),5:()=>url&&window.open(url,'_blank')};
+  document.body.insertAdjacentHTML("beforeend",`<div class="overlay" id="sp-ov" onclick="if(event.target===this)this.remove()">
+    <div class="panel" style="max-width:620px;width:94vw;padding:18px">
+      <div style="display:flex;gap:10px;align-items:center"><h2 style="flex:1;margin:0">🪄 ${esc(platform)} · 半自动发布</h2><button class="btn sm" onclick="$('#sp-ov').remove()">✕</button></div>
+      <div class="sub" style="margin:6px 0">不用绑账号、不交登录态：照着点五步，每步点完自动打勾。发布那一下由您本人点。</div>
+      ${[["复制标题","粘到平台的标题框"],["复制正文(带话题标签)","粘到正文/描述框"],["下载成片(高清)","上传到平台的视频框"],["下载封面",key==="xiaohongshu"?"3:4 封面":"9:16 封面,在平台里选「上传封面」"],["打开"+platform+"发布后台","新窗口打开;粘贴、上传后,记得勾选平台的「AI 生成」声明再发布"]]
+        .map(([l,h],i)=>`<div onclick="spDo(${i+1},window.__spAct[${i+1}])">${step(i+1,l,h)}</div>`).join("")}
+    </div></div>`);
 }
 async function stRetry(id,btn){
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 提交中…`;

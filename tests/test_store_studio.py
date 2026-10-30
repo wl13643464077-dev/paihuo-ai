@@ -254,3 +254,62 @@ class RunningHubTextEngineTests(unittest.TestCase):
         self.assertEqual("https://cdn.example.com/x.mp4", url)
         self.assertEqual(["/media/upload/binary", "/media/upload/binary",
                           "/run/ai-app/1961397507056144386", "/query"], calls)
+
+
+class StudioPolishTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old = db.DB_PATH
+        if db._conn is not None:
+            db._conn.close()
+        db._conn = None
+        db.DB_PATH = os.path.join(self.tmp.name, "p.db")
+        db.conn()
+
+    def tearDown(self):
+        if db._conn is not None:
+            db._conn.close()
+        db._conn = None
+        db.DB_PATH = self.old
+        self.tmp.cleanup()
+
+    def test_new_studio_prices_fall_back_to_defaults_in_old_saved_tables(self):
+        import json as _json
+        saved = {"avatar_video": {"points": 12, "label": "x"}}
+        db.set_setting("prices", _json.dumps(saved))
+        prices = billing.prices()
+        self.assertEqual(3, prices["studio_pack"]["points"])
+        self.assertEqual(2, prices["studio_scene"]["points"])
+        self.assertNotIn("avatar_sales", prices)  # 老动作仍保持缺项语义
+        saved["studio_pack"] = {"points": 0, "label": "免费"}
+        db.set_setting("prices", _json.dumps(saved))
+        self.assertEqual(0, billing.prices()["studio_pack"]["points"])  # 管理员改过的价不覆盖
+
+    def test_avatar_done_notification_is_avatar_scoped_and_links_to_studio(self):
+        from app import notify
+        title, body, link = notify._inbox_item("avatar_done", {"job_id": 9, "title": "t", "ok": True, "summary": "好了"})
+        self.assertEqual("#/avatar", link)
+        self.assertIn("出片", title)
+        self.assertEqual(frozenset({"avatar"}), notify.KIND_MODULES["avatar_done"])
+        self.assertIn("#/avatar", notify.build_msg("avatar_done", {"job_id": 9, "title": "t"}))
+
+    def test_preview_is_small_and_poster_is_one_frame(self):
+        args = storestudio.preview_args("f.mp4", "p.mp4", "poster.jpg")
+        self.assertIn("scale=540:960", args)
+        self.assertEqual(["-frames:v", "1"], args[args.index("-frames:v"):args.index("-frames:v") + 2])
+        self.assertTrue(assetfiles._AVATAR_RE.match("/files/avatar/avatar_3_studio-preview.mp4"))
+        self.assertTrue(assetfiles._AVATAR_RE.match("/files/avatar/avatar_3_studio-poster.jpg"))
+
+    def test_evergreen_script_prompt_forbids_made_up_sources(self):
+        from app import growth
+        seen = {}
+
+        async def fake(idx, prompt, **kw):
+            seen["prompt"] = prompt
+            return {"data": {"script": "老板们，今天说说回头客为什么不来。" * 3, "title": "t", "cover_title": "c"}}
+
+        with mock.patch.object(growth, "_call_toolbox_employee_json", side_effect=fake):
+            asyncio.run(storestudio.write_script(
+                1, {"title": "回头客为什么不来", "heat": "常青题", "source": "", "evergreen": True}, "餐饮", "", 30))
+        self.assertIn("不要提任何媒体", seen["prompt"])
+        self.assertNotIn("出处：）", seen["prompt"])
