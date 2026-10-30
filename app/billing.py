@@ -99,9 +99,18 @@ def subscription_catalog() -> dict:
     }
 
 
+# 后加的功能：老价格表里没有这些项时按默认价，避免被兜底成 1 点（页面显示价和实扣不一致）。
+# 老动作仍保持「缺项=1 点」的历史语义，不在这里补。
+NEW_ACTION_DEFAULTS = ("studio_scene", "studio_topics", "studio_script", "studio_pack")
+
+
 def prices() -> dict:
     saved = db.jloads(db.get_setting("prices"), None)
-    return saved if saved else DEFAULT_PRICES
+    if not saved:
+        return DEFAULT_PRICES
+    missing = {k: DEFAULT_PRICES[k] for k in NEW_ACTION_DEFAULTS
+               if k in DEFAULT_PRICES and not isinstance(saved.get(k), dict)}
+    return {**saved, **missing} if missing else saved
 
 
 # “1 点能做什么”：给老板看的大白话说明。这里只定说法，点数一律取自 prices()，

@@ -702,6 +702,7 @@ def _studio_params(raw) -> dict | None:
              for k in ("title", "heat", "source", "published", "angle")}
     clean["keywords"] = [storestudio._clean_public(k, 16) for k in (topic.get("keywords") or [])
                          if isinstance(k, str) and k.strip()][:3]
+    clean["evergreen"] = bool(topic.get("evergreen"))
     title = storestudio._clean_public(raw.get("title"), 30)
     if not (title or clean["title"]):
         raise HTTPException(400, "自动剪辑需要视频标题：先选题写稿，或填一个标题")
@@ -774,6 +775,18 @@ async def avatar_studio_retry(jid: int):
 
     asyncio.create_task(storestudio.run_after_delivery(jid, tid, params, video, photo, progress))
     return {"ok": True}
+
+
+@router.get("/api/avatar/voice-samples")
+def avatar_voice_samples():
+    """声音卡槽：本企业传过的本人录音（有授权留痕的），开拍时直接选，不用每次重传。"""
+    _need_module("avatar")
+    tid = TEN()
+    consented = {c.get("asset") for c in avatar.consent_records(tid) if c.get("kind") == "voice"}
+    return [{"name": a["name"], "preview": f"/files/avatar-public/{a['name']}", "ts": a.get("ts")}
+            for a in avatar.saved_assets(tid)
+            if a.get("kind") == "voice" and a.get("name") in consented
+            and os.path.isfile(os.path.join(avatar.PUBLIC_DIR, os.path.basename(a["name"])))][-8:]
 
 
 @router.get("/api/avatar/store-photos")
