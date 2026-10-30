@@ -331,7 +331,7 @@ class TextVideoRenderBoundaryCase(unittest.TestCase):
         self.assertEqual(os.path.realpath(self.ffmpeg), arguments[0])
         self.assertNotIn("SHOULD_NOT_REACH_RENDERER", environment)
         self.assertEqual(
-            {"PATH", "LANG", "LC_ALL", "HOME"},
+            {"PATH", "LANG", "LC_ALL", "HOME", "MALLOC_ARENA_MAX"},
             set(environment),
         )
 

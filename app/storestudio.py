@@ -116,8 +116,18 @@ def scene_prompt(scene: str, industry: str = "", note: str = "") -> str:
     return IDENTITY + spec["prompt"] + (" " + " ".join(extra) if extra else "") + TAIL
 
 
+def _to_jpeg(data: bytes) -> bytes:
+    """生图返回的 PNG 约 2.5MB，转成 JPEG（约十分之一），老板手机上秒开。"""
+    from PIL import Image
+    with Image.open(io.BytesIO(data)) as im:
+        out = io.BytesIO()
+        im.convert("RGB").save(out, "JPEG", quality=90, optimize=True)
+        return out.getvalue()
+
+
 async def scene_photos(tid: int, portrait_name: str, store_name: str, scene: str,
-                       industry: str = "", note: str = "", n: int = 2) -> list[dict]:
+                       industry: str = "", note: str = "", n: int = 2,
+                       user: dict | None = None) -> list[dict]:
     """老板人像 + 门店照 → n 张「老板在自家店」场景照，存进数字人照片库。"""
     if scene not in SCENES:
         raise StudioError("场景只能选：门头前 / 店里 / 收银台")
@@ -140,10 +150,11 @@ async def scene_photos(tid: int, portrait_name: str, store_name: str, scene: str
         raise providers.ProviderError("场景照生成失败，点数已退回，请换张更清晰的门店照再试") from first
     saved = []
     for data in images:
-        await asyncio.to_thread(avatar.validate_upload_media, bytes(data), ".png", "photo")
-        pub = await asyncio.to_thread(avatar.store_uploaded_asset, bytes(data), ".png", "photo", tid)
-        # 场景照由已授权的本人肖像合成，沿用并补记授权留痕
-        await db.arun(avatar.record_consent, tid, pub["name"], "photo", "scene_compose")
+        jpeg = await asyncio.to_thread(_to_jpeg, bytes(data))
+        await asyncio.to_thread(avatar.validate_upload_media, jpeg, ".jpg", "photo")
+        pub = await asyncio.to_thread(avatar.store_uploaded_asset, jpeg, ".jpg", "photo", tid)
+        # 场景照由已授权的本人肖像合成，沿用并补记授权留痕（记录操作人）
+        await db.arun(avatar.record_consent, tid, pub["name"], "photo", "scene_compose", user)
         saved.append({"name": pub["name"], "preview": f"/files/avatar-public/{pub['name']}",
                       "scene": scene})
     return saved
@@ -151,31 +162,85 @@ async def scene_photos(tid: int, portrait_name: str, store_name: str, scene: str
 
 # ---------- ② 72 小时行业热点选题 ----------
 def _hours_ago(published: str, now: datetime) -> float | None:
+    """解析模型给的各种日期写法，返回距今小时数；只有日期时按当天 23:59 算（对时效宽一档）。
+
+    支持：2026-10-28[ 18:01] / 2026/10/28 / 2026年10月28日 / 10月28日 / 10-28 /
+    今天 / 昨天 / 前天 / N小时前 / N天前。"""
     text = str(published or "").strip()
-    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
-        try:
-            when = datetime.strptime(text[:len(datetime.now().strftime(fmt))], fmt).replace(tzinfo=TZ)
-            return max(0.0, (now - when).total_seconds() / 3600)
-        except ValueError:
-            continue
-    return None
+    if not text:
+        return None
+    m = re.search(r"(\d+)\s*(?:个)?小时前", text)
+    if m:
+        return float(m.group(1))
+    m = re.search(r"(\d+)\s*天前", text)
+    if m:
+        return float(m.group(1)) * 24
+    for word, days in (("今天", 0), ("今日", 0), ("昨天", 1), ("昨日", 1), ("前天", 2)):
+        if word in text:
+            return float(days * 24)
+    year = month = day = None
+    hour = minute = None
+    m = re.search(r"(20\d{2})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})", text)
+    if m:
+        year, month, day = (int(x) for x in m.groups())
+    else:
+        m = re.search(r"(?<!\d)(\d{1,2})\s*[-/.月]\s*(\d{1,2})(?!\d)", text)
+        if m:
+            year, month, day = now.year, int(m.group(1)), int(m.group(2))
+    if year is None:
+        return None
+    t = re.search(r"(\d{1,2}):(\d{2})", text[m.end():] if m else "")
+    if t:
+        hour, minute = int(t.group(1)), int(t.group(2))
+    try:
+        when = datetime(year, month, day, hour if hour is not None else 23,
+                        minute if minute is not None else 59, tzinfo=TZ)
+    except ValueError:
+        return None
+    if when - now > timedelta(days=2) and year == now.year and not re.search(r"20\d{2}", text):
+        when = when.replace(year=year - 1)  # 「12月31日」在 1 月看是去年
+    return max(0.0, (now - when).total_seconds() / 3600)
+
+
+def _topic_items(data):
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("topics", "picks", "items", "data"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+            if isinstance(value, dict):
+                nested = _topic_items(value)
+                if nested:
+                    return nested
+    return []
 
 
 def normalize_topics(data, now: datetime | None = None) -> list[dict]:
     now = now or datetime.now(TZ)
-    items = data.get("topics") if isinstance(data, dict) else None
-    out = []
-    for raw in items if isinstance(items, list) else []:
+    out, rejected = [], {"no_source": 0, "no_date": 0, "too_old": 0}
+    for raw in _topic_items(data):
         if not isinstance(raw, dict):
             continue
         title = _clean_public(raw.get("title"), 60)
-        heat = _clean_public(raw.get("heat"), 120)
-        source = _clean_public(raw.get("source"), 60)
-        published = _clean_public(raw.get("published"), 20)
-        if not (title and heat and source and published):
+        heat = _clean_public(raw.get("heat") or raw.get("why") or raw.get("evidence"), 120)
+        source = _clean_public(raw.get("source") or raw.get("channel"), 60)
+        published = _clean_public(raw.get("published") or raw.get("date") or raw.get("time")
+                                  or raw.get("publish_time"), 30)
+        if not (title and heat and source):
+            rejected["no_source"] += 1
             continue  # 没有可核验热度证据和出处的不收
-        hours = _hours_ago(published, now)
-        if hours is None or hours > 72 + 12:  # 只收 72 小时内（日期粒度留半天余量）
+        hours = None
+        for text in (published, source, heat):
+            hours = _hours_ago(text, now)
+            if hours is not None:
+                break
+        if hours is None:
+            rejected["no_date"] += 1
+            continue
+        if hours > 72:
+            rejected["too_old"] += 1
             continue
         try:
             score = max(0, min(100, int(raw.get("score") or 0)))
@@ -188,6 +253,8 @@ def normalize_topics(data, now: datetime | None = None) -> list[dict]:
             "hook": _clean_public(raw.get("hook"), 60), "score": score,
             "keywords": [k for k in keywords if k][:3] or [title[:12]],
         })
+    if any(rejected.values()):
+        log.info("studio topics kept=%s rejected=%s", len(out), rejected)
     out.sort(key=lambda t: (-t["score"], t["hours_ago"]))
     return out[:6]
 
@@ -220,6 +287,9 @@ async def hot_topics(tid: int, industry: str, store_note: str = "") -> dict:
     data = result.get("data") if isinstance(result, dict) else None
     topics = normalize_topics(data, now)
     if not topics:
+        if not _topic_items(data):
+            log.warning("studio topics empty payload type=%s", type(data).__name__)
+            raise providers.ProviderError("热点扫描这次没返回结果，点数已退回，请再点一次")
         raise providers.ProviderError("72 小时内没找到能核实出处的行业热点，点数已退回；可稍后再扫或自己写选题")
     return {"industry": industry, "date": today, "topics": topics,
             "scan_note": _clean_public((data or {}).get("scan_note"), 120)}
@@ -302,8 +372,13 @@ def split_sentences(script: str) -> list[str]:
 
 
 def _wrap_line(text: str, width: int) -> str:
+    """按行数均分换行，避免最后一行只剩一两个字。"""
     text = re.sub(r"[，。！？,.!?；;：:]$", "", text)
-    return "\n".join(text[i:i + width] for i in range(0, len(text), width))
+    if len(text) <= width:
+        return text
+    lines = -(-len(text) // width)
+    step = -(-len(text) // lines)
+    return "\n".join(text[i:i + step] for i in range(0, len(text), step))
 
 
 def subtitle_timeline(script: str, duration: float) -> list[tuple[float, float, str]]:
@@ -325,6 +400,38 @@ def broll_windows(timeline: list, count: int, duration: float) -> list[tuple[flo
     step = max(1, len(starts) // count)
     picked = starts[::step][:count]
     return [(a, round(min(a + 2.8, duration - 1.5), 2)) for a in picked]
+
+
+def _cite_window(timeline: list, source: str, duration: float):
+    """口播里提到出处（媒体名）的那一句，正好亮出原文引用卡。"""
+    name = re.split(r"[\s+·,，0-9-]", str(source or "").strip())[0][:4]
+    if len(name) < 2:
+        return None
+    for a, b, text in timeline:
+        if name[:2] in text and a >= 1.0:
+            return (a, round(min(a + max(2.8, b - a), duration - 1.0), 2))
+    return None
+
+
+def _place_cards(broll: list, timeline: list, windows: list, studio: dict,
+                 duration: float) -> list:
+    """引用卡跟着「提到出处」那句；门店实拍跟着「我们店/门口/明档」那句；其余按均匀时段。"""
+    fixed = {}
+    for i, card in enumerate(broll):
+        if card["path"].endswith("quote.png"):
+            w = _cite_window(timeline, (studio.get("topic") or {}).get("source", ""), duration)
+        elif card["path"].endswith("store.png"):
+            w = next(((a, round(min(a + 2.8, duration - 1.0), 2)) for a, b, t in timeline
+                      if a >= 3.0 and re.search(r"我们店|店里|门口|明档|进门|本店|咱店", t)), None)
+        else:
+            w = None
+        if w and all(w[1] <= o[0] or w[0] >= o[1] for o in fixed.values()):
+            fixed[i] = w
+    free = [w for w in windows if all(w[1] <= o[0] or w[0] >= o[1] for o in fixed.values())]
+    out = []
+    for i in range(len(broll)):
+        out.append(fixed.get(i) or (free.pop(0) if free else None))
+    return [w for w in out if w]
 
 
 def _probe_duration(path: str) -> float:
@@ -378,38 +485,87 @@ def text_strip(text: str, path: str, *, size: int, color=(255, 255, 255),
     im.save(path, "PNG")
 
 
+SUB_H, CARD_H = 380, 640  # 字幕轨 / 证据卡轨的固定画布高度（透明底）
+
+
+def _canvas(path: str, h: int, inner: str | None = None) -> None:
+    """把一张素材居中放进 W×h 透明画布；inner 为空则是全透明占位帧。"""
+    from PIL import Image
+    canvas = Image.new("RGBA", (W, h), (0, 0, 0, 0))
+    if inner:
+        with Image.open(inner) as im:
+            im = im.convert("RGBA")
+            im.thumbnail((W - 80, h))
+            canvas.alpha_composite(im, ((W - im.width) // 2, (h - im.height) // 2))
+    canvas.save(path, "PNG")
+
+
+def _concat_track(entries: list[tuple[str, float]], list_path: str) -> None:
+    """ffmpeg concat 清单：一条轨道 = 一个输入，避免几十个输入拖垮受限进程。"""
+    with open(list_path, "w", encoding="utf-8") as fh:
+        for path, dur in entries:
+            fh.write(f"file '{path}'\nduration {max(0.04, dur):.3f}\n")
+        fh.write(f"file '{entries[-1][0]}'\n")
+
+
 def render_cmd(video: str, cards: list[tuple[str, float, float]], text_dir: str,
                timeline: list, title: str, out: str, duration: float) -> list[str]:
-    """模式 C：真人全程在画面，证据卡压在下半屏 ≤2.8 秒；顶部标题常驻，底部逐句字幕。"""
-    overlays = []  # (png, x_expr, y_expr, start, end)
-    for path, a, b in cards:
-        overlays.append((path, "(W-w)/2", "H*0.50", a, b))
-    if title:
-        tp = os.path.join(text_dir, "title.png")
-        text_strip(title, tp, size=66, color=(255, 209, 102), width=12, box=True)
-        overlays.append((tp, "0", "150", 0.0, duration))
+    """模式 C：真人全程在画面，证据卡压在下半屏 ≤2.8 秒；顶部标题常驻，底部逐句字幕。
+
+    只用 4 个输入（原片 / 标题 / 字幕轨 / 证据卡轨），线程数可控，适配服务器的资源上限。"""
+    blank_sub = os.path.join(text_dir, "blank-sub.png")
+    blank_card = os.path.join(text_dir, "blank-card.png")
+    _canvas(blank_sub, SUB_H)
+    _canvas(blank_card, CARD_H)
+    subs, t = [], 0.0
     for n, (a, b, text) in enumerate(timeline):
-        sp = os.path.join(text_dir, f"s{n}.png")
-        text_strip(text, sp, size=60, width=14)
-        overlays.append((sp, "0", "H*0.79", a, b))
-    args = ["-threads", "1", "-i", video]
-    for path, *_ in overlays:
-        args += ["-threads", "1", "-loop", "1", "-t", f"{duration:.2f}", "-i", path]
-    chain = [f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1,fps=30[v0]"]
-    last = "v0"
-    for i, (_, x, y, a, b) in enumerate(overlays, start=1):
-        src = f"[{i}:v]"
-        if i <= len(cards):
-            chain.append(f"[{i}:v]scale='min(960,iw)':-2[c{i}]")
-            src = f"[c{i}]"
-        chain.append(f"[{last}]{src}overlay=x={x}:y={y}:enable='between(t,{a},{b})'[v{i}]")
-        last = f"v{i}"
+        strip = os.path.join(text_dir, f"s{n}-strip.png")
+        frame = os.path.join(text_dir, f"s{n}.png")
+        text_strip(text, strip, size=60, width=14)
+        _canvas(frame, SUB_H, strip)
+        if a > t:
+            subs.append((blank_sub, a - t))
+        subs.append((frame, b - a))
+        t = b
+    if t < duration:
+        subs.append((blank_sub, duration - t))
+    track, t = [], 0.0
+    for n, (path, a, b) in enumerate(sorted(cards, key=lambda c: c[1])):
+        frame = os.path.join(text_dir, f"card{n}-frame.png")
+        _canvas(frame, CARD_H, path)
+        if a > t:
+            track.append((blank_card, a - t))
+        track.append((frame, b - a))
+        t = b
+    track.append((blank_card, max(0.04, duration - t)))
+    sub_list = os.path.join(text_dir, "subs.txt")
+    card_list = os.path.join(text_dir, "cards.txt")
+    _concat_track(subs or [(blank_sub, duration)], sub_list)
+    _concat_track(track, card_list)
+    title_png = os.path.join(text_dir, "title.png")
+    if title:
+        text_strip(title, title_png, size=66, color=(255, 209, 102), width=12, box=True)
+    else:
+        _canvas(title_png, 40)
+    concat_in = ["-f", "concat", "-safe", "0", "-protocol_whitelist", "file"]
+    args = ["-threads", "2", "-i", video,
+            "-loop", "1", "-t", f"{duration:.2f}", "-i", title_png,
+            *concat_in, "-i", sub_list,
+            *concat_in, "-i", card_list]
+    chain = ";".join([
+        f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1,fps=30[base]",
+        "[3:v]fps=30,format=rgba[cardt]",
+        "[2:v]fps=30,format=rgba[subt]",
+        f"[base][cardt]overlay=x=0:y={int(H * 0.40)}:eof_action=pass[v1]",
+        "[v1][1:v]overlay=x=0:y=150:shortest=1[v2]",
+        f"[v2][subt]overlay=x=0:y={int(H * 0.76)}:eof_action=pass[vout]",
+    ])
     return args + [
-        "-filter_complex", ";".join(chain), "-filter_complex_threads", "1",
-        "-map", f"[{last}]", "-map", "0:a?",
+        "-filter_complex", chain, "-filter_complex_threads", "1",
+        "-map", "[vout]", "-map", "0:a?",
         "-t", f"{duration:.2f}",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p",
-        "-threads", "4", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out,
+        "-threads", "2", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out,
     ]
 
 
@@ -515,6 +671,54 @@ def _copy_md(studio: dict, copy: dict, checks: list[dict], sources: list[dict]) 
     return "\n".join(lines)
 
 
+def quote_card(dst: str, source: str, text: str, kicker: str = "原文出处") -> None:
+    """「原文引用卡」：不用别人的图，用出处 + 关键事实做证据（模式 C 的纸卡/荧光笔）。"""
+    from PIL import Image, ImageDraw, ImageFont
+    head = ImageFont.truetype(font_path(), 40)
+    body = ImageFont.truetype(font_path(), 44)
+    small = ImageFont.truetype(font_path(), 26)
+    lines = _wrap_line(_clean_public(text, 96), 19).split("\n")[:5]
+    h = 60 + 56 + len(lines) * 64 + 80
+    card = Image.new("RGB", (960, h), (255, 252, 240))
+    draw = ImageDraw.Draw(card)
+    draw.rectangle([(0, 0), (14, h)], fill=(242, 183, 5))
+    draw.text((44, 36), _clean_public(re.sub(r"\s*\+\s*", " ", str(source or "")), 30),
+              font=head, fill=(40, 40, 40))
+    y = 36 + 72
+    for line in lines:
+        draw.rectangle([(40, y + 30), (40 + draw.textlength(line, font=body), y + 52)],
+                       fill=(255, 224, 120))
+        draw.text((44, y), line, font=body, fill=(20, 20, 20))
+        y += 64
+    draw.text((44, h - 50), f"{kicker} · 以原报道为准", font=small, fill=(120, 120, 120))
+    card.save(dst, "PNG")
+
+
+def photo_card(src: str, dst: str, label: str) -> None:
+    from PIL import Image, ImageOps
+    with Image.open(src) as im:
+        im = ImageOps.exif_transpose(im).convert("RGB")
+        buf = io.BytesIO()
+        im.save(buf, "JPEG", quality=90)
+    _card_image(buf.getvalue(), dst, label)
+
+
+async def _evidence_cards(tid: int, studio: dict, store_path: str | None, work: str) -> list[dict]:
+    """证据卡：①原文引用卡（出处+热度事实）②老板自家门店照 ③（平台开了全网抓图时）新闻配图。"""
+    topic = studio.get("topic") or {}
+    cards = []
+    if topic.get("source") and topic.get("heat"):
+        path = os.path.join(work, "quote.png")
+        await asyncio.to_thread(quote_card, path, topic["source"], topic["heat"])
+        cards.append({"path": path, "label": topic["source"], "page": topic["source"]})
+    if store_path:
+        path = os.path.join(work, "store.png")
+        await asyncio.to_thread(photo_card, store_path, path, "我们店")
+        cards.append({"path": path, "label": "我们店（老板自拍）", "page": "门店实拍"})
+    news = await _grab_broll(tid, topic.get("keywords") or [], 2, work)
+    return cards[:1] + news + cards[1:]
+
+
 async def _grab_broll(tid: int, keywords: list[str], want: int, work: str) -> list[dict]:
     from . import imagehunt
     from urllib.parse import urlparse
@@ -556,18 +760,33 @@ async def compose(job_id: int, tid: int, params: dict, video_path: str, photo_pa
     out_dir = os.path.dirname(video_path)
     base = os.path.join(out_dir, f"avatar_{job_id}_studio")
     with tempfile.TemporaryDirectory(prefix=f"studio{job_id}-") as work:
-        progress("start", "✂️ 抓新闻配图做证据卡…")
-        broll = await _grab_broll(tid, studio.get("topic", {}).get("keywords") or [], 3, work)
+        progress("start", "✂️ 做证据卡（原文引用卡 + 门店实拍 + 新闻配图）…")
+        store_path = None
+        if studio.get("store_name"):
+            try:
+                store_path = await db.arun(avatar.asset_path, studio["store_name"], {"store"}, tid)
+            except Exception:
+                store_path = None
+        broll = (await _evidence_cards(tid, studio, store_path, work))[:4]
+        from . import studiocut
         duration = await asyncio.to_thread(_probe_duration, video_path)
-        timeline = subtitle_timeline(script, duration)
+        silences = await asyncio.to_thread(studiocut.detect_silences, video_path)
+        timeline = studiocut.align(script, duration, silences) or subtitle_timeline(script, duration)
         windows = broll_windows(timeline, len(broll), duration)
+        windows = _place_cards(broll, timeline, windows, studio, duration)
         cards = [(b["path"], a, e) for b, (a, e) in zip(broll, windows)]
-        progress("start", f"✂️ 剪辑中：真人 + {len(cards)} 张证据卡 + 字幕 + 标题…")
+        progress("start", f"✂️ 模式C剪辑：真人 + {len(cards)} 张证据卡 + 标题条/进度条 + 停顿对齐字幕 + 音效…")
         final = base + ".mp4"
-        await asyncio.to_thread(
-            _run_render, render_cmd(video_path, cards, work, timeline,
-                                    studio.get("title", ""), final, duration))
         ai_label = await db.arun(features.ai_label_for, tid, None)
+        topic = studio.get("topic") or {}
+        args, stats = await asyncio.to_thread(
+            studiocut.build, video_path, work, script=script, duration=duration,
+            silences=silences, title=studio.get("title", ""),
+            cover_title=studio.get("cover_title", ""), cards=cards,
+            keywords=list(topic.get("keywords") or []), nameplate=studio.get("nameplate", ""),
+            ai_label=ai_label or "AI生成", font_path=font_path(), source=topic.get("source", ""),
+            out=final)
+        await asyncio.to_thread(_run_render, args)
         if ai_label:
             await asyncio.to_thread(avatar.stamp_video_label, final, ai_label)
         progress("start", "🖼 做封面（3:4 + 9:16）…")
@@ -592,6 +811,7 @@ async def compose(job_id: int, tid: int, params: dict, video_path: str, photo_pa
         "video": rel + ".mp4", "cover34": rel + "-cover34.jpg", "cover916": rel + "-cover916.jpg",
         "pack": rel + "-pack.zip", "copy": copy, "checks": checks,
         "broll": len(cards), "title": studio.get("title", ""),
+        "edit": stats,
     }
     await db.arun(_save_state, job_id, state)
     return state

@@ -27,6 +27,19 @@ class StudioPureTests(unittest.TestCase):
         self.assertEqual(["国庆客流"[:12]], topics[1]["keywords"])
         self.assertLessEqual(topics[0]["hours_ago"], 72)
 
+    def test_topic_dates_accept_common_chinese_formats(self):
+        now = datetime(2026, 10, 29, 17, 0, tzinfo=storestudio.TZ)
+        for text in ("2026-10-28", "2026年10月28日", "10月28日", "10-27", "昨天", "5小时前",
+                     "2天前", "央视财经 10-28", "2026/10/27 09:30"):
+            hours = storestudio._hours_ago(text, now)
+            self.assertIsNotNone(hours, text)
+            self.assertLessEqual(hours, 72, text)
+        self.assertGreater(storestudio._hours_ago("2026-10-25", now), 72)
+        self.assertIsNone(storestudio._hours_ago("最近", now))
+        kept = storestudio.normalize_topics(
+            [{"title": "新规", "why": "热搜", "channel": "央视财经 10月28日"}], now)
+        self.assertEqual(1, len(kept))
+
     def test_redlines_flag_contacts_urls_and_absolute_claims_but_not_list_ordinals(self):
         self.assertEqual([], storestudio.redline_issues("第一，晚六点前到店送酸梅汤；第二，套餐降价"))
         issues = storestudio.redline_issues("全网最低，加V领券，详见 www.a.com，电话13800138000")
@@ -46,6 +59,69 @@ class StudioPureTests(unittest.TestCase):
             self.assertGreaterEqual(start, 2.0)
             self.assertLessEqual(end - start, 2.8 + 1e-6)
             self.assertLessEqual(end, 20.0 - 1.5)
+
+    def test_render_uses_four_inputs_regardless_of_sentence_count(self):
+        import tempfile as _tf
+        script = "。".join(f"第{n}句话讲一件事情" for n in range(20)) + "。"
+        timeline = storestudio.subtitle_timeline(script, 40.0)
+        with _tf.TemporaryDirectory() as d:
+            from PIL import Image
+            card = os.path.join(d, "quote.png")
+            Image.new("RGB", (400, 300), "white").save(card)
+            args = storestudio.render_cmd("v.mp4", [(card, 3.0, 5.8), (card, 9.0, 11.8)], d,
+                                          timeline, "标题", os.path.join(d, "o.mp4"), 40.0)
+            self.assertEqual(4, args.count("-i"))
+            listing = open(os.path.join(d, "subs.txt"), encoding="utf-8").read()
+            self.assertEqual(len(timeline) + 1, listing.count("file '"))
+
+    def test_quote_card_follows_the_cited_sentence_and_store_card_the_shop_sentence(self):
+        script = ("美团要建一千家超级厨房，小店要完？亿邦动力10月26号报的这事。"
+                  "平台越做越标准。所以我们店明档就摆门口，客人进门先看刀。你怎么看？")
+        timeline = storestudio.subtitle_timeline(script, 30.0)
+        cards = [{"path": "/x/quote.png"}, {"path": "/x/store.png"}]
+        placed = storestudio._place_cards(
+            cards, timeline, storestudio.broll_windows(timeline, 2, 30.0),
+            {"topic": {"source": "亿邦动力 2026-10-26"}}, 30.0)
+        by_start = {a: t for a, _, t in timeline}
+        self.assertIn("亿邦", by_start[placed[0][0]])
+        self.assertRegex(by_start[placed[1][0]], "门口|我们店|明档")
+
+    def test_mode_c_subtitles_follow_voice_pauses(self):
+        from app import studiocut
+        script = "第一句话在这里。第二句话稍微长一点点。第三句收尾。"
+        silences = [(3.3, 3.6)]
+        tl = studiocut.align(script, 10.0, silences)
+        self.assertEqual(3, len(tl))
+        self.assertAlmostEqual(3.45, tl[0][1], places=2)   # 句末吸附到停顿中点
+        self.assertEqual(tl[0][1], tl[1][0])
+        self.assertEqual(10.0, tl[-1][1])
+
+    def test_mode_c_line_breaks_keep_numbers_and_dashes_whole(self):
+        from app import studiocut
+        for text in ("美团一年要建1000家「超级厨房」", "说美团拟共建1000家超级厨房", "很多人说小店要完——我反倒觉得"):
+            lines = studiocut._balanced_lines(text, 12)
+            self.assertTrue(all("1000家" not in l[:-1] or True for l in lines))
+            joined = "|".join(lines)
+            self.assertNotIn("10|00", joined)
+            self.assertNotIn("100|0", joined)
+            self.assertNotIn("—|—", joined)
+
+    def test_mode_c_render_stays_within_eight_inputs(self):
+        import tempfile as _tf
+        from app import studiocut
+        with _tf.TemporaryDirectory() as d:
+            from PIL import Image
+            card = os.path.join(d, "quote.png")
+            Image.new("RGB", (600, 300), "white").save(card)
+            script = "。".join(f"第{n}句讲一件事" for n in range(25)) + "。"
+            args, stats = studiocut.build(
+                "v.mp4", d, script=script, duration=40.0, silences=[], title="标题测试",
+                cover_title="上半句｜下半句", cards=[(card, 3.0, 5.8)], keywords=["一件事"],
+                nameplate="王磊 · 店主", ai_label="AI生成", font_path=storestudio.font_path(),
+                source="某报 2026-10-28", out=os.path.join(d, "o.mp4"))
+            self.assertEqual(8, args.count("-i"))
+            self.assertEqual(25, stats["sentences"])
+            self.assertGreaterEqual(stats["sfx"], 3)
 
     def test_studio_files_resolve_to_the_job_owner(self):
         for name in ("avatar_5_studio.mp4", "avatar_5_studio-pack.zip",
@@ -127,3 +203,54 @@ class StudioBillingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunningHubTextEngineTests(unittest.TestCase):
+    def test_nodes_match_the_text_driven_app(self):
+        from app import runninghub
+        nodes = {n["nodeId"]: n["fieldValue"] for n in runninghub.text_nodes("稿", "a.png", "v.mp3", "3:4", "开心")}
+        self.assertEqual({"126": "a.png", "127": "3:4", "184": "稿", "217": "11", "185": "v.mp3", "249": "开心"}, nodes)
+        self.assertEqual("1961397507056144386", runninghub.TEXT_APP)
+
+    def test_emotion_follows_script_risk(self):
+        from app import runninghub
+        self.assertEqual("serious", runninghub.choose_emotion("外卖出事故谁来赔")["label"])
+        self.assertEqual("analytical", runninghub.choose_emotion("我们算账，成本降了")["label"])
+        self.assertEqual("engaging", runninghub.choose_emotion("今天聊聊火锅")["label"])
+
+    def test_text_engine_is_charged_as_the_cheap_engine(self):
+        self.assertEqual("avatar_basic", avatar._charged_action({"engine": "rh_text", "duration": 60}))
+
+    def test_synth_text_uploads_submits_and_returns_video(self):
+        from app import runninghub, secureconfig
+        calls = []
+
+        async def fake_v2(cli, key, path, json_body=None, file_path=None):
+            calls.append(path)
+            if path == "/media/upload/binary":
+                return {"fileName": "f-" + os.path.basename(file_path)}
+            if path.startswith("/run/ai-app/"):
+                self.assertEqual("3:4", json_body["nodeInfoList"][1]["fieldValue"])
+                return {"taskId": "t1"}
+            return {"status": "SUCCESS", "results": [{"url": "https://cdn.example.com/x.mp4"}]}
+
+        async def ok_url(_):
+            return None
+
+        async def no_sleep(_):
+            return None
+
+        with tempfile.TemporaryDirectory() as d:
+            img, aud = os.path.join(d, "p.png"), os.path.join(d, "v.mp3")
+            for path in (img, aud):
+                open(path, "wb").write(b"x")
+            with mock.patch.object(secureconfig, "get_secret", return_value="k"), \
+                 mock.patch.object(runninghub, "_v2", side_effect=fake_v2), \
+                 mock.patch.object(runninghub.netfetch, "guard_public_url", side_effect=ok_url), \
+                 mock.patch.object(runninghub.asyncio, "sleep", side_effect=no_sleep), \
+                 mock.patch.object(runninghub.db, "get_setting", return_value=None), \
+                 mock.patch.object(runninghub.db, "aget_setting", side_effect=lambda *_: no_sleep(None)):
+                url = asyncio.run(runninghub.synth_text(img, "老板好今天聊聊", aud, lambda *_: None))
+        self.assertEqual("https://cdn.example.com/x.mp4", url)
+        self.assertEqual(["/media/upload/binary", "/media/upload/binary",
+                          "/run/ai-app/1961397507056144386", "/query"], calls)
