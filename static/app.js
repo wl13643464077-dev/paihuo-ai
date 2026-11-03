@@ -560,6 +560,7 @@ const NAV_GROUPS = [
   {key:"store", label:"门店", icon:"🏪", hub:"store", extra:[],
     title:"门店", intro:"各门店的巡店、整改和员工表现，一处看全。",
     cards:[
+      {route:"cockpit", icon:"🧭", title:"数据驾驶舱", desc:"员工用派活做了什么、门店执行得怎样、哪些事等您拍板，一屏看完；能导出、AI 分析、一键下发", show:isOwnerLike},
       {route:"inspections", icon:"🔍", title:"巡店", desc:"拍照上传就能巡店，问题自动记下来、派给店长整改", show:()=>!!ME&&ME.role!=="tour"},
       {route:"checklists", icon:"✅", title:"开闭店清单", desc:"每天开店、闭店、交班要做的事，店员拍照打勾，哪家没做一眼看到", show:()=>isOwnerLike()||["director","manager"].includes(ME?.job_title)},
       {route:"store-rank", icon:"🏆", title:"门店排行", desc:"按清单、整改、派活、巡店算分，看哪家做得好、哪家要盯", show:()=>isOwnerLike()||["director","manager"].includes(ME?.job_title)},
@@ -721,7 +722,7 @@ async function forcedPasswordChange(){
 function routeLoading(page){
   const labels={tasks:"派出去的活",teamruns:"协同小队",brand:"品牌知识包",new:"下达任务",avatar:"数字人视频",meetings:"专家商量室",
     tools:"获客工具",channels:"发布渠道",schedules:"定时发布",profiles:"品牌人设",
-    assets:"资料库",knowledge:"经验库",production:"员工产出",boss:"老板看板",
+    assets:"资料库",knowledge:"经验库",production:"员工产出",boss:"老板看板",cockpit:"数据驾驶舱",
     inspections:"巡店工作台",company:"企业档案",
     billing:"套餐",team:"权限管理",admin:"后台",job:"任务详情",delivery:"交付中心",
     trash:"回收站",notifications:"通知记录",dispatch:"派活",store:"门店",growth:"获客",

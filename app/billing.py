@@ -47,6 +47,7 @@ DEFAULT_PRICES = {
     "studio_script": {"points": 1, "label": "门店数字人·选题写口播稿", "cost": "成本≈¥0.3"},
     "studio_pack": {"points": 3, "label": "门店数字人·自动剪辑+封面+三平台发布包", "cost": "成本≈¥1(抓图+文案+算力)"},
     # 第 2 期真人派活:只有调大模型的两步扣点,派活/拍照/审核本身不扣
+    "cockpit_ai": {"points": 1, "label": "数据驾驶舱·AI 经营分析", "cost": "成本≈¥0.1"},
     "staff_parse": {"points": 0.2, "label": "一句话派活·AI 拆任务", "cost": "成本≈¥0.03"},
     "staff_ai_check": {"points": 0.2, "label": "店员交差·AI 验照片", "cost": "成本≈¥0.05"},
 }
@@ -101,7 +102,8 @@ def subscription_catalog() -> dict:
 
 # 后加的功能：老价格表里没有这些项时按默认价，避免被兜底成 1 点（页面显示价和实扣不一致）。
 # 老动作仍保持「缺项=1 点」的历史语义，不在这里补。
-NEW_ACTION_DEFAULTS = ("studio_scene", "studio_topics", "studio_script", "studio_pack")
+NEW_ACTION_DEFAULTS = ("studio_scene", "studio_topics", "studio_script", "studio_pack",
+                       "cockpit_ai")
 
 
 def prices() -> dict:

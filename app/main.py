@@ -15343,6 +15343,8 @@ async def matrix_task_retry(pid: int):
 # 第 2 期:派给店员的任务(/api/staff/*),路由在独立模块里
 app.include_router(api_staff.router)
 app.include_router(api_checklist.router)  # 第2期:开闭店清单/门店排行
+from .routes import cockpit as _routes_cockpit  # noqa: E402
+app.include_router(_routes_cockpit.router)  # 老板数据驾驶舱
 
 
 # ---------------- 静态 ----------------
