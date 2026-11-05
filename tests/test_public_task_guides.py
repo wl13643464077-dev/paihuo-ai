@@ -42,8 +42,8 @@ class PublicExpertTaskGuideTests(unittest.TestCase):
             employee["name"]
             for employee in specialists.values()
         }
-        self.assertEqual(447, len(specialists))
-        self.assertEqual(447, len(published_names))
+        self.assertEqual(449, len(specialists))
+        self.assertEqual(449, len(published_names))
 
         for idx, employee in specialists.items():
             name = employee["name"]
@@ -171,7 +171,7 @@ class PublicExpertTaskGuideTests(unittest.TestCase):
 
     def test_all_specialists_have_unique_industry_and_role_guides(self):
         specialists = departments.specialists()
-        self.assertEqual(447, len(specialists))
+        self.assertEqual(449, len(specialists))
         rendered = {}
         for idx, employee in specialists.items():
             guide = departments.public_task_guide(employee)

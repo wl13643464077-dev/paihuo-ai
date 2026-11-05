@@ -73,6 +73,10 @@ INDUSTRY_METRIC_CATALOG: dict[str, tuple[tuple[str, str, str, str], ...]] = {
         ("food_cost_ratio", "食材成本率", "%", "采购+库存+营业额"),
         ("table_turnover", "翻台率", "次/台", "POS+桌台数"),
         ("service_complaint_rate", "服务投诉率", "%", "客诉+订单数"),
+        ("private_room_occupancy", "包房上座率", "%", "订台/包房使用记录"),
+        ("pre_order_rate", "预点餐率", "%", "包房预订+预点菜单"),
+        ("delivery_net_receipt_rate", "外卖实收率", "%", "外卖平台结算单"),
+        ("daily_labor_efficiency", "日人效", "元/工时", "POS+排班考勤"),
     ),
     "tea_coffee": (
         ("sales", "营业额", "元", "POS/收银系统"),
