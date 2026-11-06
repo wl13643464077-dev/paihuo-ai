@@ -209,6 +209,64 @@ class KnowledgeBlockTests(unittest.TestCase):
         self.assertEqual("", industryknowledge.block_for("broken", "坪效"))
 
 
+class PlaybookTests(unittest.TestCase):
+    """实战方法论:总方法论每个员工都带,其余按岗位挑;餐饮按一线顾问打法升级。"""
+
+    def setUp(self):
+        industryknowledge.reset_cache()
+
+    def tearDown(self):
+        industryknowledge.reset_cache()
+
+    def test_playbooks_are_well_formed(self):
+        for path in _files():
+            doc = json.load(open(path, encoding="utf-8"))
+            books = doc.get("playbooks") or []
+            self.assertLessEqual(sum(1 for b in books if b.get("core")), 1, path)
+            for book in books:
+                self.assertTrue(book.get("name"), path)
+                self.assertGreaterEqual(len(book.get("steps") or []), 3, book.get("name"))
+                self.assertTrue(book.get("core") or book.get("keywords"), book.get("name"))
+
+    def _block(self, idx):
+        from app import departments
+        e = departments.specialists()[idx]
+        return industryknowledge.block_for("restaurant", " ".join(
+            str(x) for x in (e.get("name"), e.get("group"), e.get("duty"), e.get("desc")) if x),
+            e.get("key", ""))
+
+    def test_restaurant_roles_get_matching_playbooks(self):
+        cases = {3001: "包房经营", 108: "菜品结构与大小份设计", 146: "外卖与团购", 144: "企微私域",
+                 3002: "日薪日效与千分制考核", 154: "周会月会复盘"}
+        for idx, playbook in cases.items():
+            block = self._block(idx)
+            self.assertIn("经营落地四步闭环", block, idx)   # 总方法论人人都带
+            self.assertIn("▶ " + playbook, block, idx)
+            self.assertLess(len(block), industryknowledge.MAX_BLOCK_CHARS + 600)
+
+    def test_room_and_performance_work_only_goes_to_their_owners(self):
+        """包房和绩效两块活只派给新来的两位专岗(3001/3002)，其他员工只标注转交、不分摊。"""
+        for idx in (135, 101, 133):
+            block = self._block(idx)
+            self.assertNotIn("▶ 包房经营", block, idx)
+        for idx in (149, 136, 154):
+            block = self._block(idx)
+            self.assertNotIn("▶ 日薪日效与千分制考核", block, idx)
+            self.assertIn("交给「门店绩效考核官」", block, idx)
+        self.assertIn("交给「包房经营经理」", self._block(135))
+
+    def test_restaurant_outputs_must_end_in_trackable_actions(self):
+        block = self._block(154)
+        self.assertIn("负责人", block)
+        self.assertIn("追踪", block)
+        self.assertIn("一店三效", json.dumps(industryknowledge.get("restaurant"), ensure_ascii=False))
+
+    def test_text_items_rank_by_role_but_keep_filling(self):
+        items = ["通用要点甲", "包房要前置预订", "通用要点乙"]
+        picked = industryknowledge._rank_text(items, industryknowledge._terms("包房预订"), 2)
+        self.assertEqual(["包房要前置预订", "通用要点甲"], picked)
+
+
 class SpecialistPromptInjectionTests(unittest.TestCase):
     """端到端:专家的 system 提示里应当出现本行业的口径。"""
 

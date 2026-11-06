@@ -12,7 +12,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 class SceneRosterTests(unittest.TestCase):
     def test_27_scene_roles_live_in_their_own_range_and_are_assignable(self):
         scene = [e for e in departments.specialists().values() if e.get("scene_role")]
-        self.assertEqual(27, len(scene))
+        self.assertEqual(29, len(scene))
         for employee in scene:
             self.assertIn(employee["idx"], departments.SCENE_IDX_RANGE)
             self.assertEqual("AI场景专岗", employee["group"])
@@ -27,9 +27,11 @@ class SceneRosterTests(unittest.TestCase):
             per_dept[employee["dept_key"]] = per_dept.get(employee["dept_key"], 0) + 1
         self.assertEqual(
             {"convenience", "snack", "grocery", "pharmacy", "hotel", "auto",
-             "fitness", "beauty", "pet"},
+             "fitness", "beauty", "pet", "restaurant"},
             set(per_dept),
         )
+        # 9 个行业各 3 名场景专岗；餐饮 2 名实战专岗（包房经营经理、门店绩效考核官）
+        self.assertEqual(2, per_dept.pop("restaurant"))
         self.assertTrue(all(n == 3 for n in per_dept.values()))
 
     def test_scene_people_and_names_never_collide_with_frozen_roster(self):
@@ -74,7 +76,7 @@ class ResumeTests(unittest.TestCase):
                 self.assertTrue(job["company"].startswith("某"), job["company"])
             card = resume.card(r)
             self.assertLessEqual(len(card["tags"]), 3)
-        self.assertEqual(447, count)
+        self.assertEqual(449, count)
 
     def test_every_resume_shows_professional_depth_from_its_own_spec(self):
         for employee in self._all():

@@ -622,8 +622,10 @@ def build_ai_prompt(data: Mapping[str, Any]) -> str:
         "工作构成": {m["label"]: m["count"] for m in data["mix"]},
         "已发布内容": data["content"],
     }
+    method = _industry_method(int(data["tenant"]["id"]))
     return (
         "你是连锁门店老板的经营助理。下面是派活系统里这段时间的真实统计（JSON）。\n"
+        + method + (
         "只根据这些数据说话，不要编造任何数字、门店或人名，没有数据就说没有数据；"
         "不要估算营业额、利润或节省的钱。用老板听得懂的大白话。\n"
         "输出 JSON：{\"verdict\":\"一句话总评(40字内)\","
@@ -632,8 +634,31 @@ def build_ai_prompt(data: Mapping[str, Any]) -> str:
         "\"actions\":[{\"title\":\"要下发的具体动作(25字内)\",\"detail\":\"怎么做、做到什么程度(80字内)\","
         "\"branch\":\"涉及的门店名，没有就空\",\"owner\":\"建议负责的账号名，没有就空\","
         "\"priority\":\"high|normal|low\",\"due_days\":完成期限天数}]} actions 最多5条。\n"
-        "数据：" + json.dumps(facts, ensure_ascii=False, default=str)
+        "数据：") + json.dumps(facts, ensure_ascii=False, default=str)
     )
+
+
+def _industry_method(tid: int) -> str:
+    """企业开通了餐饮行业时，按餐饮实战打法（周会追差、一店三效）组织分析。"""
+    try:
+        keys = {str(r["industry_key"]) for r in db.q(
+            "SELECT industry_key FROM tenant_industry WHERE tenant_id=?", (tid,))}
+    except Exception:
+        return ""
+    if "restaurant" not in keys:
+        return ""
+    from . import industryknowledge
+    books = {b.get("name"): b for b in (industryknowledge.get("restaurant").get("playbooks") or [])}
+    lines = []
+    for name in ("周会月会复盘与执行追踪", "经营落地四步闭环"):
+        book = books.get(name)
+        if book:
+            lines.append(f"【{name}】" + "；".join(book.get("steps") or []))
+    if not lines:
+        return ""
+    return ("按下面的餐饮实战打法组织分析：先找本期与上期差异最大的点并归因，"
+            "每个建议动作都要落到门店、负责人、期限和验收指标，便于老板一键下发和下周追踪。\n"
+            + "\n".join(lines) + "\n")
 
 
 def _clean_list(raw: Any, limit: int, size: int) -> list[str]:
@@ -688,7 +713,8 @@ async def analyze(tid: int, days: Any = DEFAULT_DAYS, *, call: Callable | None =
         err.status = getattr(exc, "status", 400)
         raise err from None
     try:
-        result = await (call or _default_ai_call)(build_ai_prompt(data), tid)
+        prompt = await db.arun(build_ai_prompt, data)
+        result = await (call or _default_ai_call)(prompt, tid)
         analysis = normalize_ai((result or {}).get("data"), data["branches"], data["people"])
     except Exception as exc:
         await db.arun(stafftask._finish_charge, op_key, False, "AI 分析没做成，自动退回")

@@ -145,6 +145,14 @@ class AiTests(CockpitBase):
         self.assertEqual(9, billing.balance(2))
         self.assertEqual(out["verdict"], cockpit.summary(2, 7, now=NOW)["ai_analysis"]["verdict"])
 
+    def test_restaurant_tenant_analysis_follows_weekly_review_playbook(self):
+        db.execute("INSERT INTO tenant_industry(tenant_id,industry_key,is_primary,created_at) "
+                   "VALUES(2,'restaurant',0,0)")
+        prompt = cockpit.build_ai_prompt(cockpit.summary(2, 7, now=NOW))
+        self.assertIn("周会月会复盘与执行追踪", prompt)
+        db.execute("DELETE FROM tenant_industry WHERE tenant_id=2 AND industry_key='restaurant'")
+        self.assertNotIn("周会月会复盘", cockpit.build_ai_prompt(cockpit.summary(2, 7, now=NOW)))
+
     def test_failed_analysis_refunds(self):
         async def broken(prompt, tid):
             return {"data": {"oops": 1}}

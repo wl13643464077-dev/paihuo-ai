@@ -3419,6 +3419,7 @@ def build_task_prompt(e: dict, brief: dict, skills_text: str, knowledge_text: st
             e.get("name"), e.get("group"), e.get("duty"), e.get("desc"),
             caps_txt, (brief or {}).get("direction"),
         ) if x),
+        employee_key=str(e.get("key") or ""),
     )
     decision_block = ""
     decision_evidence_block = ""

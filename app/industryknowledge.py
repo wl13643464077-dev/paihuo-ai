@@ -12,6 +12,9 @@
 - practices 该行业区别于通用零售/服务业的经营动作
 - compliance中国大陆合规要点(法规名 + 主要要求 + 检索时点)
 - pitfalls  真实的经营失败原因
+- playbooks 实战方法论(可选):一线顾问把生意做起来的打法,每条是「先做什么、
+            盯哪些数、怎么追」的步骤;core=true 的总方法论每个员工都带,
+            其余按岗位相关性挑选。只写做法与口径,不写无来源的数值
 
 注入纪律(见 discipline_note):参考区间只是校准起点,与老板提供的实际数据冲突时
 以实际数据为准,超出适用范围不得套用。这与手册自身"禁止无来源行业基准"的要求一致。
@@ -36,7 +39,8 @@ MAX_GLOSSARY = 14
 MAX_PRACTICES = 6
 MAX_COMPLIANCE = 6
 MAX_PITFALLS = 6
-MAX_BLOCK_CHARS = 4200
+MAX_PLAYBOOKS = 3
+MAX_BLOCK_CHARS = 5600
 
 _cache: dict | None = None
 
@@ -114,6 +118,45 @@ def _rank(items: list, query: set, fields: tuple, limit: int) -> list:
     return picked
 
 
+def _rank_text(items: list, query: set, limit: int) -> list:
+    """纯文本条目(经营要点/陷阱)按岗位相关性挑选;都不相关时保留原顺序。"""
+    rows = [{"text": str(item)} for item in items if str(item or "").strip()]
+    if len(rows) <= limit:
+        return [row["text"] for row in rows]
+    picked = [row["text"] for row in _rank(rows, query, ("text",), limit)]
+    # 相关的排前面,名额没用完时按原顺序补足,通用要点不会因为不"相关"被丢掉
+    picked += [row["text"] for row in rows if row["text"] not in picked]
+    return picked[:limit]
+
+
+def _playbooks(data: dict, query: set, employee_key: str = "") -> tuple[list, list]:
+    """返回(要注入的方法论, 要转交的专项)。
+
+    - core=true 的总方法论每个员工都带;
+    - 带 owners 的专项方法论只给负责人(owners 里的员工 key),负责人一定带上;
+      其他员工碰到相关话题时只得到一句「转交给谁」,不分摊这块活;
+    - 其余方法论按岗位相关性补足到上限。
+    """
+    books = [b for b in (data.get("playbooks") or [])
+             if isinstance(b, dict) and b.get("name") and b.get("steps")]
+    core = [b for b in books if b.get("core")][:1]
+    owned = [b for b in books if not b.get("core") and b.get("owners")]
+    mine = [b for b in owned if employee_key and employee_key in b["owners"]]
+    rest = [b for b in books if not b.get("core") and not b.get("owners")]
+
+    def score(book):
+        text = " ".join([str(book.get("name") or ""), str(book.get("when") or ""),
+                         " ".join(str(k) for k in book.get("keywords") or [])])
+        return len(query & _terms(text))
+
+    room = max(0, MAX_PLAYBOOKS - len(core) - len(mine))
+    scored = sorted(((score(b), -i, b) for i, b in enumerate(rest)),
+                    key=lambda x: (x[0], x[1]), reverse=True)
+    picked = core + mine + [b for s, _p, b in scored if s > 0][:room]
+    handoffs = [b for b in owned if b not in mine and score(b) > 0]
+    return picked, handoffs
+
+
 def discipline_note() -> str:
     return (
         "以下行业资料用于校准口径与常识,不替代老板给的实际数据:"
@@ -124,7 +167,7 @@ def discipline_note() -> str:
     )
 
 
-def block_for(industry_key: str, role_text: str = "") -> str:
+def block_for(industry_key: str, role_text: str = "", employee_key: str = "") -> str:
     """按岗位相关性组装该行业的知识块;没有资料时返回空串。"""
     data = get(industry_key)
     if not data:
@@ -142,6 +185,25 @@ def block_for(industry_key: str, role_text: str = "") -> str:
                 line += f"(口径注意:{m['trap']})"
             lines.append(line)
         parts.append("【本行业核心指标与计算口径】\n" + "\n".join(lines))
+
+    books, handoffs = _playbooks(data, query, str(employee_key or ""))
+    if books:
+        lines = []
+        for book in books:
+            lines.append(f"▶ {book['name']}" + (f"(适用:{book['when']})" if book.get("when") else ""))
+            lines.extend(f"  {i}. {step}" for i, step in enumerate(book["steps"][:7], 1))
+            if book.get("track"):
+                lines.append("  盯的数:" + "、".join(str(t) for t in book["track"][:8]))
+        parts.append(
+            "【实战方法论(按这个打法组织方案,每一步都要落到数字、责任人和追踪)】\n"
+            + "\n".join(lines)
+        )
+    if handoffs:
+        parts.append(
+            "【专项转交(这些活由专人负责,你不要展开设计,在方案里标注转交即可)】\n"
+            + "\n".join(f"- {b['name']}:交给「{b.get('owner_name') or '专项负责人'}」"
+                         for b in handoffs)
+        )
 
     benchmarks = _rank(data.get("benchmarks") or [], query,
                        ("metric", "scope", "note"), MAX_BENCHMARKS)
@@ -180,8 +242,7 @@ def block_for(industry_key: str, role_text: str = "") -> str:
             )
         )
 
-    practices = data.get("practices") or []
-    practices = [p for p in practices if str(p).strip()][:MAX_PRACTICES]
+    practices = _rank_text(data.get("practices") or [], query, MAX_PRACTICES)
     if practices:
         parts.append(
             "【本行业区别于通用零售/服务业的经营要点】\n"
@@ -199,8 +260,7 @@ def block_for(industry_key: str, role_text: str = "") -> str:
             )
         parts.append("【中国大陆合规要点】\n" + "\n".join(lines))
 
-    pitfalls = data.get("pitfalls") or []
-    pitfalls = [p for p in pitfalls if str(p).strip()][:MAX_PITFALLS]
+    pitfalls = _rank_text(data.get("pitfalls") or [], query, MAX_PITFALLS)
     if pitfalls:
         parts.append(
             "【本行业常见的经营陷阱(方案里要主动规避并说明如何规避)】\n"
