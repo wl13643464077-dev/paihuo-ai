@@ -29,7 +29,27 @@ class PublicLabelTests(unittest.TestCase):
         refund = billing.public_reason("退回:数字人视频·基础版(RunningHub) · #12")
         self.assertEqual("数字人视频·基础版 · #12", charge)
         self.assertEqual("退回:" + charge, refund)
-        self.assertEqual("内容流水线整单 · #3", billing.public_reason("内容流水线整单 · #3"))
+        # 默认价目的流水也换成白话名(和价目表一致),扣款与退款同一规则
+        self.assertEqual("写一整篇带配图的营销内容 · #3", billing.public_reason("内容流水线整单 · #3"))
+        self.assertEqual("退回:写一整篇带配图的营销内容 · #3",
+                         billing.public_reason("退回:内容流水线整单 · #3"))
+        self.assertEqual("开通企业版(月付)", billing.public_reason("开通企业版(月付)"))
+
+    def test_every_default_action_has_a_plain_name_and_a_group(self):
+        """N-18:价目名换成白话并分 4 组,门店日常排第一;不改点数、不改原 label。"""
+        internal = ("流水线", "进修", "审查官", "口播矩阵", "军师", "盯梢", "雷达", "·AI ")
+        for action, row in billing.DEFAULT_PRICES.items():
+            label = billing.public_label(action, row["label"])
+            for word in internal:
+                self.assertNotIn(word, label, action)
+            self.assertNotEqual("other", billing.price_group(action)["group"], action)
+        self.assertEqual(["门店日常", "找专家", "做内容", "做视频"],
+                         [label for _key, label, _actions in billing.PRICE_GROUPS])
+        self.assertEqual(0, billing.price_group("staff_ai_check")["group_order"])
+        self.assertEqual("other", billing.price_group("not_a_real_action")["group"])
+        self.assertEqual("内容流水线整单", billing.DEFAULT_PRICES["content_job"]["label"])
+        # 后台改过名字的价目不套白话名(只按规则去供应商)
+        self.assertEqual("我们自己的叫法", billing.public_label("content_job", "我们自己的叫法"))
 
 
 if __name__ == "__main__":

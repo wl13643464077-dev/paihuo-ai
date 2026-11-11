@@ -454,6 +454,8 @@
     const text = cleanAction(opts.title);
     SA.prefill = {title:text.slice(0, 60), detail:text.length>60?text:(opts.detail||""),
       source:opts.source||"boss", source_ref:String(opts.source_ref||"").slice(0, 200)};
+    // 从门店卡「派活到这家店」进来时预选门店；没传就沿用默认(只有一家店时自动选上)
+    if(Number(opts.branch_id)>0) SA.prefill.branch_id = Number(opts.branch_id);
     if(location.hash.startsWith("#/staff-tasks")){
       SA.drafts = SA.drafts.filter(d=>!d.sent).concat([blankDraft(SA.prefill)]); SA.prefill = null;
       if(!document.getElementById("sa-drafts")){ SA.dispatchOpen = true; draw(); }

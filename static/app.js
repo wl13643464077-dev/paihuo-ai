@@ -559,14 +559,16 @@ function noStoreEmptyState(text="还没有门店，先建一家门店吧。",can
     ? emptyState({icon:"🏪",text,actionLabel:"＋ 新建门店",onAction:"openStoreForm()"})
     : emptyState({icon:"🏪",text:"老板还没给您分配门店，请联系老板。"});
 }
-/* ---------- 新建门店:一张表单填完(名称必填,区域/地址选填) ---------- */
+/* ---------- 新建门店:一张表单填完(名称必填,区域/地址选填) ----------
+   传 edit={id,name,region,address} 时是「改门店资料」:同一张表单,保存时 PATCH 三栏 */
 function closeStoreForm(){ $("#store-form")?.remove(); }
-async function openStoreForm({industryKey="",onCreated=null}={}){
+async function openStoreForm({industryKey="",onCreated=null,edit=null,onSaved=null}={}){
   closeStoreForm();
   const openedHash=location.hash;
+  const editing=!!(edit&&Number(edit.id)>0);
   document.body.insertAdjacentHTML("beforeend",`<div class="overlay store-form-overlay" id="store-form" role="presentation" style="z-index:1000">
     <form class="panel ui-dialog-panel store-form" role="dialog" aria-modal="true" aria-labelledby="store-form-title" novalidate>
-      <div class="phead"><h2 id="store-form-title" style="margin:0;flex:1">🏪 新建门店</h2></div>
+      <div class="phead"><h2 id="store-form-title" style="margin:0;flex:1">${editing?"✏️ 改门店资料":"🏪 新建门店"}</h2></div>
       <div class="pbody">
         <div class="store-form-row"><label for="store-form-name">门店名称 <span class="store-form-req">必填</span></label>
           <input id="store-form-name" name="name" maxlength="80" placeholder="例：人民路店" autocomplete="off" aria-describedby="store-form-error">
@@ -580,10 +582,15 @@ async function openStoreForm({industryKey="",onCreated=null}={}){
         <div class="sub store-form-error" id="store-form-submit-error" role="alert"></div>
         <div class="actions" style="justify-content:flex-end">
           <button class="btn" type="button" data-store-form-cancel>取消</button>
-          <button class="btn pri" type="submit" data-store-form-ok>建好门店</button>
+          <button class="btn pri" type="submit" data-store-form-ok>${editing?"保存":"建好门店"}</button>
         </div></div></form></div>`);
   const overlay=$("#store-form"),form=overlay.querySelector("form"),name=$("#store-form-name"),err=$("#store-form-error"),
     submitErr=$("#store-form-submit-error"),ok=overlay.querySelector("[data-store-form-ok]"),industrySel=$("#store-form-industry");
+  if(editing){
+    name.value=String(edit.name||"");
+    $("#store-form-region").value=String(edit.region||"");
+    $("#store-form-address").value=String(edit.address||"");
+  }
   overlay.querySelector("[data-store-form-cancel]").addEventListener("click",closeStoreForm);
   overlay.addEventListener("click",event=>{ if(event.target===overlay) closeStoreForm(); });
   overlay.addEventListener("keydown",event=>{ if(event.key==="Escape"){ event.preventDefault(); closeStoreForm(); } });
@@ -595,6 +602,21 @@ async function openStoreForm({industryKey="",onCreated=null}={}){
     if(!body.name){ err.textContent="请填写门店名称"; name.setAttribute("aria-invalid","true"); name.focus(); return; }
     const industry_key=String((!$("#store-form-industry-row").hidden&&industrySel.value)||industryKey||"");
     if(industry_key) body.industry_key=industry_key;
+    if(editing){
+      submitErr.textContent=""; ok.disabled=true; ok.innerHTML='<span class="spin"></span> 正在保存…';
+      try{
+        const saved=await api(`/inspections/branches/${Number(edit.id)}`,{method:"PATCH",body,routeScoped:false});
+        closeStoreForm(); STORE_TODAY={key:"",at:0,data:null};
+        toast(`「${body.name}」的资料已保存`);
+        if(location.hash!==openedHash) return;
+        if(typeof onSaved==="function") await onSaved(saved); else await render(true);
+      }catch(e){
+        if(!$("#store-form")) return;
+        submitErr.textContent=e.message||"没保存成，请稍后再试";
+        ok.disabled=false; ok.textContent="保存";
+      }
+      return;
+    }
     submitErr.textContent=""; ok.disabled=true; ok.innerHTML='<span class="spin"></span> 正在建…';
     try{
       const qs=industry_key?`?${new URLSearchParams({industry_key})}`:"";
@@ -610,8 +632,8 @@ async function openStoreForm({industryKey="",onCreated=null}={}){
     }
   });
   setTimeout(()=>name.focus(),0);
-  // 没指定行业、企业又开了多个行业时,让老板选一下门店属于哪个行业
-  if(!industryKey){
+  // 没指定行业、企业又开了多个行业时,让老板选一下门店属于哪个行业(改资料时不换行业)
+  if(!industryKey&&!editing){
     try{
       const meta=await api("/inspections/meta",{routeScoped:false});
       const list=Array.isArray(meta?.industries)?meta.industries:[];
@@ -753,24 +775,25 @@ const canSeeBilling = () => isOwnerLike() || seesCompanyMoney() || ME?.role==="t
 const NAV_GROUPS = [
   {key:"today", label:"今天", icon:"☀️", hub:"", extra:[], cards:[]},
   {key:"dispatch", label:"派活", icon:"📋", hub:"dispatch", extra:["job","delivery"],
-    title:"派活", intro:"把活交给数字员工，它们干完会通知您。",
+    title:"派活", intro:"派给店员，或者交给 AI 专家，干完会通知您。",
+    // 「派给店员」排第一(连锁老板最常用的入口)；企业还没有门店时 hubView 把它挪到最后
     cards:[
+      {route:"staff-tasks", icon:"🧑‍🍳", title:"派给店员", desc:"把活派给店里的人，店员拍照交差，AI 先帮您看照片", show:()=>!!window.PH_STAFF_ADMIN?.canDispatch()},
       {route:"new", icon:"✍️", title:"下达任务(内容)", desc:"说一句想发什么，图文或短视频脚本从选题到成稿自动写好", show:()=>canWork("content")},
       {route:"experts", icon:"🧑‍🔧", title:"找行业专家", desc:"您这一行的专家一人一岗，店里遇到的事直接问、直接派", show:hasExperts},
       {route:"meetings", icon:"🪑", title:"多位专家一起商量", desc:"大事拿不准，拉几位专家各出方案、互相挑错，最后给您结论", show:canMeet},
       {route:"tasks", icon:"📦", title:"派出去的活", desc:"所有派出去的活都在这：谁在干、卡在哪、哪些等您看", show:()=>!!ME&&ME.role!=="tour"&&hasExperts()},
       {route:"teamruns", icon:"🤝", title:"协同小队", desc:"一句话拉起专业团队，可逐个确认或同时开工，队长拆解并汇总结果", show:()=>!!ME&&ME.role!=="tour"&&hasExperts()},
-      {route:"staff-tasks", icon:"🧑‍🍳", title:"派给店员", desc:"把活派给店里的人，店员拍照交差，AI 先帮您看照片", show:()=>!!window.PH_STAFF_ADMIN?.canDispatch()},
+      {route:"production", icon:"📊", title:"AI 专家产出", desc:"每位 AI 专家这段时间干了多少活、花了多少", show:isOwnerLike},
     ]},
   {key:"store", label:"门店", icon:"🏪", hub:"store", extra:[],
-    title:"门店", intro:"各门店的巡店、整改和员工表现，一处看全。",
+    title:"门店", intro:"各门店的巡店、整改和店员表现，一处看全。",
     cards:[
-      {route:"cockpit", icon:"🧭", title:"数据驾驶舱", desc:"员工用派活做了什么、门店执行得怎样、哪些事等您拍板，一屏看完；能导出、AI 分析、一键下发", show:isOwnerLike},
+      {route:"cockpit", icon:"🧭", title:"数据驾驶舱", desc:"每个账号用派活做了什么、门店执行得怎样、哪些事等您拍板，一屏看完；能导出、AI 分析、一键下发", show:isOwnerLike},
       {route:"inspections", icon:"🔍", title:"巡店", desc:"拍照上传就能巡店，问题自动记下来、派给店长整改", show:()=>!!ME&&ME.role!=="tour"},
       {route:"checklists", icon:"✅", title:"开闭店清单", desc:"每天开店、闭店、交班要做的事，店员拍照打勾，哪家没做一眼看到", show:()=>isOwnerLike()||["director","manager"].includes(ME?.job_title)},
       {route:"store-rank", icon:"🏆", title:"门店排行", desc:"按清单、整改、派活、巡店算分，看哪家做得好、哪家要盯", show:()=>isOwnerLike()||["director","manager"].includes(ME?.job_title)},
       {route:"boss", icon:"📈", title:"老板看板", desc:"各店得分、没整改完的问题、谁拖了后腿，一眼看清", show:isOwnerLike},
-      {route:"production", icon:"📊", title:"员工产出", desc:"每位数字员工这段时间干了多少活、花了多少", show:isOwnerLike},
     ]},
   {key:"growth", label:"获客", icon:"📣", hub:"growth", extra:[],
     title:"获客", intro:"每天该发什么、发之前查一遍、定好时间自动发出去。",
@@ -890,6 +913,9 @@ function hubRecentRow(g, cards){
 function hubView(key, top=""){
   const g = NAV_GROUPS.find(x=>x.key===key);
   const cards = navVisibleCards(g);
+  if(g.key==="dispatch" && cards[0]?.route==="staff-tasks" && !STATE?.setup?.store){
+    cards.push(cards.shift());   // 还没有门店：先用 AI 专家，「派给店员」放最后
+  }
   const normal = cards.filter(c=>!c.rootOnly), root = cards.filter(c=>c.rootOnly);
   $("#main").innerHTML = `<div class="hubhead"><h2>${g.icon} ${esc(g.title)}</h2><div class="sub">${esc(g.intro)}</div></div>`
     + hubRecentRow(g, normal)
@@ -909,7 +935,7 @@ async function storeHub(){
 }
 /* 「门店」页顶部的「我的门店」:几家店、新建、批量导入、前几家店名(点店名看这家店的巡店记录),
    「管理」展开后可改名、停用 */
-let MY_STORES_CTX={industry:"",manage:false};
+let MY_STORES_CTX={industry:"",manage:false,items:[]};
 async function myStoresBlock(){
   const meta=await api("/inspections/meta"),industry_key=String(meta?.industry_key||"");
   const manage=!!MY_STORES_CTX.manage&&MY_STORES_CTX.industry===industry_key;
@@ -920,6 +946,7 @@ async function myStoresBlock(){
     api(`/inspections?${new URLSearchParams({industry_key,limit:"1"})}`).catch(e=>{ if(e?.name==="NavigationAbort") throw e; return null; }),
   ]);
   const items=Array.isArray(found?.items)?found.items:[];
+  MY_STORES_CTX.items=items;
   const total=Math.max(Number(list?.summary?.total_branches)||0,items.length);
   const canManage=canCreateStore()||!!meta?.permissions?.can_manage_branches;
   const head=`<div class="my-stores-head"><h2>🏪 我的门店</h2><span class="sub" data-my-stores-count>${total?`共 ${total} 家`:"还没有门店"}</span>
@@ -930,15 +957,78 @@ async function myStoresBlock(){
   const href=esc(inspectionRecordHash(0,industry_key));
   if(manage&&canManage){
     return head+`<div class="my-stores-manage" data-my-stores-manage-list>
-      <div class="sub">改名后，巡店记录、派活和清单里都会显示新名字；停用的门店不再出现在可巡门店里，历史记录仍可查看。</div>
-      ${items.map(b=>`<div class="my-store-row"><span class="my-store-row-name"><b>${esc(b.name||"未命名门店")}</b>${b.region?`<span class="sub">${esc(b.region)}</span>`:""}</span>
-        <button type="button" class="btn sm" onclick="myStoreRename(${Number(b.id)},${cp(String(b.name||""))})">改名</button>
+      <div class="sub">可以改名称、区域和地址；改名后，巡店记录、派活和清单里都会显示新名字；停用的门店不再出现在可巡门店里，历史记录仍可查看。</div>
+      ${[...items].sort((x,y)=>String(x.name||"").localeCompare(String(y.name||""),"zh")).map(b=>`<div class="my-store-row"><span class="my-store-row-name"><b>${esc(b.name||"未命名门店")}</b>${b.region||b.address?`<span class="sub">${esc([b.region,b.address].filter(Boolean).join(" · "))}</span>`:""}</span>
+        <button type="button" class="btn sm" onclick="myStoreRename(${Number(b.id)},${cp(String(b.name||""))},${cp(String(b.region||""))},${cp(String(b.address||""))})">改资料</button>
         <button type="button" class="btn sm bad" onclick="myStoreDisable(${Number(b.id)},${cp(String(b.name||""))})">停用</button></div>`).join("")}
       ${total>items.length?`<div class="sub">只列出前 ${items.length} 家，其余请到 <a href="${href}" style="text-decoration:underline">巡店页</a> 搜索。</div>`:""}</div>`;
   }
   const shown=items.slice(0,6);
-  return head+`<div class="my-stores-list">${shown.map(b=>`<a class="my-store-chip${b.active===false?" off":""}" href="${href}" onclick="myStoreOpen(${Number(b.id)},${cp(industry_key)})" title="看「${esc(b.name||"未命名门店")}」的巡店记录">${esc(b.name||"未命名门店")}${b.region?`<span class="sub">${esc(b.region)}</span>`:""}<span class="my-store-go" aria-hidden="true">›</span></a>`).join("")}
+  return head+`<div class="my-stores-list">${shown.map(b=>`<button type="button" class="my-store-chip${b.active===false?" off":""}" onclick="myStoreCard(${Number(b.id)})" title="看「${esc(b.name||"未命名门店")}」今天的情况">${esc(b.name||"未命名门店")}${b.region?`<span class="sub">${esc(b.region)}</span>`:""}<span class="my-store-go" aria-hidden="true">›</span></button>`).join("")}
     ${(items.length>6||total>6)?`<a class="btn sm" href="${href}">全部门店 ›</a>`:""}</div>`;
+}
+/* 点门店胶囊:弹一张轻量的「门店卡」——今天的清单、店员在做/等审核、未闭环整改、负责人,
+   再给两个动作「派活到这家店」「发起巡店」。数据各自取,哪块读不到就不显示那块。 */
+function closeStoreCard(){ $("#store-card")?.remove(); }
+window.addEventListener("hashchange",closeStoreCard);
+async function myStoreCard(branchId){
+  closeStoreCard();
+  const id=Number(branchId)||0, industry=MY_STORES_CTX.industry||"";
+  const b=(MY_STORES_CTX.items||[]).find(x=>Number(x.id)===id)||{id,name:"门店"};
+  const canDispatch=!!window.PH_STAFF_ADMIN?.canDispatch();
+  document.body.insertAdjacentHTML("beforeend",`<div class="overlay store-form-overlay" id="store-card" role="presentation" style="z-index:1000">
+    <div class="panel ui-dialog-panel store-form store-card" role="dialog" aria-modal="true" aria-labelledby="store-card-title">
+      <div class="phead"><h2 id="store-card-title" style="margin:0;flex:1">🏪 ${esc(b.name||"门店")}</h2>
+        <button type="button" class="btn sm" data-store-card-close aria-label="关闭">✕</button></div>
+      <div class="pbody">
+        ${b.region||b.address?`<div class="sub">${esc([b.region,b.address].filter(Boolean).join(" · "))}</div>`:""}
+        <div class="store-card-stats" data-store-card-stats><div class="sub"><span class="spin"></span> 正在读这家店今天的情况…</div></div>
+        <div class="actions" style="justify-content:flex-end;margin-top:12px">
+          ${canDispatch?`<button type="button" class="btn" data-store-card-dispatch>📤 派活到这家店</button>`:""}
+          <button type="button" class="btn pri" data-store-card-inspect>🔍 发起巡店</button>
+        </div></div></div></div>`);
+  const overlay=$("#store-card");
+  overlay.querySelector("[data-store-card-close]").addEventListener("click",closeStoreCard);
+  overlay.addEventListener("click",e=>{ if(e.target===overlay) closeStoreCard(); });
+  overlay.addEventListener("keydown",e=>{ if(e.key==="Escape"){ e.preventDefault(); closeStoreCard(); } });
+  overlay.querySelector("[data-store-card-inspect]").addEventListener("click",()=>{
+    closeStoreCard(); myStoreOpen(id,industry); INSPECTION_CAPTURE_BRANCH_ID=id;
+    location.hash=inspectionRecordHash(0,industry);
+  });
+  overlay.querySelector("[data-store-card-dispatch]")?.addEventListener("click",()=>{
+    closeStoreCard(); window.PH_STAFF_ADMIN.openDispatch({title:"",source:"boss",branch_id:id});
+  });
+  setTimeout(()=>overlay.querySelector("[data-store-card-close]")?.focus(),0);
+  const quiet=p=>p.catch(e=>{ if(e?.name==="NavigationAbort") throw e; return null; });
+  const seesChecklist=isOwnerLike()||["director","manager"].includes(ME?.job_title);
+  const taskCount=status=>quiet(api(`/staff/tasks?${new URLSearchParams({branch:String(id),status,limit:"50"})}`,{routeScoped:false}))
+    .then(r=>r?{n:(r.items||[]).length,more:!!r.next_before_id}:null);
+  const [ck,todo,redo,review,insp]=await Promise.all([
+    seesChecklist?quiet(api("/checklist/runs",{routeScoped:false})):Promise.resolve(null),
+    canDispatch?taskCount("todo"):null, canDispatch?taskCount("rejected"):null, canDispatch?taskCount("submitted"):null,
+    quiet(api(`/inspections?${new URLSearchParams({...(industry?{industry_key:industry}:{}),branch_id:String(id),limit:"1"})}`,{routeScoped:false})),
+  ]);
+  const box=$("#store-card [data-store-card-stats]");
+  if(!box) return;
+  const cells=[];
+  const st=(ck?.stores||[]).find(x=>Number(x.branch_id)===id);
+  if(st){
+    const tot=st.items_total!=null?st.items_total:st.total, done=st.items_done!=null?st.items_done:st.done;
+    cells.push(`<a href="#/checklists"><b>${tot?`${done}/${tot}`:"—"}</b><span>${tot?"今天清单(项)":"今天没有清单"}</span></a>`);
+  }
+  if(todo||redo){
+    const n=(todo?.n||0)+(redo?.n||0), more=todo?.more||redo?.more;
+    cells.push(`<a href="#/staff-tasks"><b>${n}${more?"+":""}</b><span>店员在做</span></a>`);
+  }
+  if(review) cells.push(`<a href="#/staff-tasks"><b>${review.n}${review.more?"+":""}</b><span>等审核</span></a>`);
+  const row=(insp?.summary?.branches||[]).find(x=>Number(x.id)===id);
+  if(insp?.summary&&insp.summary.availability!==false){
+    const open=Number(row?.open_issues)||0, overdue=Number(row?.overdue_actions)||0;
+    cells.push(`<a href="${esc(inspectionRecordHash(0,industry))}" onclick="myStoreOpen(${id},${cp(industry)})" class="${overdue?"bad":""}"><b>${open}</b><span>未闭环整改${overdue?`（逾期 ${overdue}）`:""}</span></a>`);
+  }
+  const people=(b.assignees||[]).map(a=>`${esc(a.username)}（${a.job_title==="manager"?"店长":a.job_title==="director"?"总监":"店员"}）`);
+  box.innerHTML=(cells.length?`<div class="today-stats store-card-grid">${cells.join("")}</div>`:`<div class="sub">这家店今天还没有记录。</div>`)
+    +(isOwnerLike()||canCreateStore()?`<div class="sub" style="margin-top:10px">负责人：${people.length?people.join("、"):`还没分人，去 <a href="#/team" style="text-decoration:underline">团队与权限</a> 给这家店分店长、店员`}</div>`:"");
 }
 /* 点店名:进巡店页并只看这家店(和巡店页里选门店是同一个筛选) */
 function myStoreOpen(branchId,industry){
@@ -953,20 +1043,10 @@ async function myStoresRefresh(){
   catch(e){ if(e?.name==="NavigationAbort") return; toast(e.message||"门店列表暂时读不到，请稍后刷新"); }
 }
 async function myStoresManage(){ MY_STORES_CTX.manage=!MY_STORES_CTX.manage; await myStoresRefresh(); }
-async function myStoreRename(branchId,name){
-  const next=await uiPrompt({title:"给门店改名",message:`现在叫「${name}」。`,value:name,label:"门店名称",
-    confirmText:"保存",requiredMessage:"请填写门店名称",
-    validate:v=>String(v).trim().length>80?"门店名称不能超过 80 个字":""});
-  if(next===null||next===undefined) return;
-  const clean=String(next).trim();
-  if(!clean||clean===name) return;
-  const body={name:clean}; if(MY_STORES_CTX.industry) body.industry_key=MY_STORES_CTX.industry;
-  try{
-    await api(`/inspections/branches/${Number(branchId)}`,{method:"PATCH",body,routeScoped:false});
-    STORE_TODAY={key:"",at:0,data:null};
-    toast(`已改名为「${clean}」`);
-    await myStoresRefresh();
-  }catch(e){ toast(e.message); }
+/* 「改资料」:复用新建门店那张表单的编辑模式,名称、区域、地址一起改 */
+async function myStoreRename(branchId,name,region="",address=""){
+  await openStoreForm({industryKey:MY_STORES_CTX.industry||"",
+    edit:{id:Number(branchId),name,region,address},onSaved:()=>myStoresRefresh()});
 }
 async function myStoreDisable(branchId,name){
   if(!await uiConfirm(`停用后「${name}」不再出现在可巡门店里，它的未闭环整改也不再计入统计；历史巡店记录仍可查看。`,{title:"停用门店",confirmText:"确定停用"})) return;
@@ -1077,7 +1157,7 @@ async function forcedPasswordChange(){
 }
 const ROUTE_LABELS={"":"今天",tasks:"派出去的活",teamruns:"协同小队",brand:"品牌知识包",new:"下达任务",avatar:"数字人视频",meetings:"多位专家一起商量",
     tools:"获客工具",channels:"发布渠道",schedules:"定时发布",profiles:"品牌人设",
-    assets:"资料库",knowledge:"经验库",production:"员工产出",boss:"老板看板",cockpit:"数据驾驶舱",
+    assets:"资料库",knowledge:"经验库",production:"AI 专家产出",boss:"老板看板",cockpit:"数据驾驶舱",
     inspections:"巡店",censor:"内容审查",company:"企业档案",
     billing:"套餐与点数",team:"权限管理",admin:"后台",job:"任务详情",delivery:"交付中心",
     trash:"回收站",notifications:"通知记录",dispatch:"派活",store:"门店",growth:"获客",
@@ -1682,7 +1762,7 @@ function deptFloorHtml(d,{finder=true}={}){
   const group=TM_GROUP[key]||"";
   const chip=(name,label,n,extra="")=>`<button type="button" class="chip tm-chip ${group===name?"on":""} ${extra}" data-group="${esc(name)}" onclick="tmPick(${cp(key)},${cp(name)})">${label}<span class="tm-n">${n}</span></button>`;
   return `<div class="tm ${group?"tm-filtering":""}" data-tm="${esc(key)}">
-    <div class="notice" style="margin-top:0">${d.emoji} <b>${esc(d.name)}</b> — ${esc(deptTagline(d))}。${ME&&ME.role==="tour"?"点任何员工看TA的履历。":"点卡片看履历，满意就直接派活；产出自动进资产库。"}</div>
+    <div class="sub" style="margin:0 0 8px">${ME&&ME.role==="tour"?"点任何一位专家看 TA 的履历。":"点卡片看履历，满意就直接派活；产出自动进资料库。"}</div>
     ${ME&&ME.role==="tour"||!finder?"":expFinderCard(key)}
     <div class="tm-bar">
       <input class="tm-q" type="search" placeholder="🔍 搜名字、岗位、技能，例如：选址、差评、医保" oninput="tmApply(${cp(key)})" aria-label="搜索员工">
@@ -1751,6 +1831,8 @@ function staffReviewOpen(){
   if(typeof window.PH_STAFF_ADMIN?.openReview==="function") window.PH_STAFF_ADMIN.openReview();
   else location.hash = "#/staff-tasks";
 }
+// 今天页「点数快用完了」提醒的门槛(只给老板/总监看；不改任何扣费逻辑)
+const LOW_BALANCE_POINTS = 5;
 async function dashboard(){
   const inbox = STATE.inbox||[];
   const notifications = STATE.notifications||[];
@@ -1771,22 +1853,42 @@ async function dashboard(){
     ? `<a class="today-money" href="#/billing">余额 ${Math.round(STATE.balance||0)} 点${STATE.plan?` · ${esc(STATE.plan)}`:""} ›</a>` : "";
   const hello = `<div class="today-hello"><h2>☀️ ${ME.role==="member"?"同事好":"老板好"} <span class="sub">${dateLabel}</span></h2>${money}</div>`;
   // 等我处理的:等拍板 / 失败要处理 / 待审核整改 + 新进展
+  // todoCount = 各行件数之和(一行「2 件店员交差」算 2),标题数字和行里的数字对得上
   const rows = [];
+  let todoCount = 0;
+  const lowBal = seesCompanyMoney() && STATE.balance!=null ? Number(STATE.balance) : NaN;
+  if(Number.isFinite(lowBal) && lowBal<LOW_BALANCE_POINTS){
+    const left = Math.max(0, Math.round(lowBal*10)/10);
+    const canBuy = ME.role==="owner";
+    rows.push(todayTodoRow("💎", left>0?`点数快用完了（剩 ${left} 点）`:"点数用完了",
+      "AI 验照片、找专家、写文案这些要花点数的活会停下来",
+      canBuy?"去充值":"去看看", "location.hash='#/billing'"));
+    todoCount += 1;
+  }
   inbox.forEach(j=>{
+    todoCount += 1;
     const name = esc(j.title&&j.title!=="(未产出标题)"?j.title:(j.brief?.direction||`任务 #${j.id}`));
     if(j.status==="failed") rows.push(todayTodoRow("❌",`失败了:${name}`,"点数已按规则退回，去看看怎么处理","去处理",`location.hash='#/job/${Number(j.id)}'`,"blue"));
     else if(j.status==="gate_blocked") rows.push(todayTodoRow("🛡️",`审查拦下了:${name}`,"内容有风险表述，要您看一眼","去处理",`location.hash='#/job/${Number(j.id)}'`,"blue"));
     else rows.push(todayTodoRow("👔",`等您拍板:${name}`,"数字员工做到一半，等您点头再往下做","去拍板",`location.hash='#/job/${Number(j.id)}'`));
   });
-  if(store?.rechecks) rows.push(todayTodoRow("🧾",`${store.rechecks} 条门店整改等您审核`,"店长已经整改完，要您确认是否合格","去审核","location.hash='#/inspections'"));
+  if(store?.rechecks){
+    rows.push(todayTodoRow("🧾",`${store.rechecks} 条门店整改等您审核`,"店长已经整改完，要您确认是否合格","去审核","location.hash='#/inspections'"));
+    todoCount += Number(store.rechecks)||0;
+  }
   const staffReviews = Number(STATE.staff_review_count)||0;
-  if(staffReviews>0) rows.push(todayTodoRow("📷",`${staffReviews} 件店员交差等您审核`,"店员已经拍照交上来了，要您看一眼是否合格","去审核","staffReviewOpen()"));
-  const noteRows = notifications.slice(0,5).map(n=>todayTodoRow("🔔",esc(n.title),n.body?esc(n.body):tcFmt(n.created_at),"查看",
+  if(staffReviews>0){
+    rows.push(todayTodoRow("📷",`${staffReviews} 件店员交差等您审核`,"店员已经拍照交上来了，要您看一眼是否合格","去审核","staffReviewOpen()"));
+    todoCount += staffReviews;
+  }
+  // 店员交差已经汇总成上面那一行，「新进展」里不再一条条重复
+  const notes = staffReviews>0 ? notifications.filter(n=>n.kind!=="staff_task_submitted") : notifications;
+  const noteRows = notes.slice(0,5).map(n=>todayTodoRow("🔔",esc(n.title),n.body?esc(n.body):tcFmt(n.created_at),"查看",
     `notificationOpen(${Number(n.id)},${cp(safeRouteUrl(n.link)||"#/")})`,""));
   const todoCard = `<div class="card today-todo">
-    <div class="today-head"><h2>📥 等我处理的${rows.length?`(${rows.length})`:""}</h2></div>
+    <div class="today-head"><h2>📥 等我处理的${todoCount?`（${todoCount}）`:""}</h2></div>
     ${rows.length?rows.join(""):`<div class="sub today-empty">✅ 眼下没有要您拍板的事。</div>`}
-    ${noteRows.length?`<div class="today-head" style="margin-top:12px"><h3>🔔 新进展(${notifications.length})</h3>
+    ${noteRows.length?`<div class="today-head" style="margin-top:12px"><h3>🔔 新进展（${notes.length}）</h3>
       <a class="btn sm" href="#/notifications">全部通知</a>
       ${isAdmin()?`<button class="btn sm" onclick="notificationReadAll(this)">全部已读</button>`:""}</div>${noteRows.join("")}`:""}
   </div>`;
@@ -1858,7 +1960,7 @@ async function expertsView(){
     const orderedDepts = [...allowedDepts].sort((a,b)=>(b.key===primaryKey)-(a.key===primaryKey));
     const sections = [];
     orderedDepts.forEach(d=> sections.push(deptSection(d.key, d.emoji, d.name, d.employees.length+"人",
-      deptTagline(d)||"行业精品员工，一人一岗随叫随到", ()=>deptFloorHtml(d,{finder:d.key!==finderKey}))));
+      deptTagline(d)||"行业 AI 专家，一人一岗随叫随到", ()=>deptFloorHtml(d,{finder:d.key!==finderKey}))));
     if(can("content")) sections.push(deptSection("content","🎬","内容生产部",(META.stations.length+1)+"人",
       "选题→写稿→配图→审查，一步步接力出成品",
       ()=>`<div class="floor">${META.stations.map(roomCard).join("")}${gateRoom()}</div>`));
@@ -1870,7 +1972,7 @@ async function expertsView(){
       ${sections.join("")}${avatarRow}
       ${can("content")?jobsCard:""}`;
   }
-  $("#main").innerHTML = `<div class="hubhead"><h2>🧑‍🔧 找行业专家 <span class="sub" style="font-weight:600;font-size:13px">行业市场 · 每个行业一支精品员工队伍，点行业标题展开/收起</span></h2>
+  $("#main").innerHTML = `<div class="hubhead"><h2>🧑‍🔧 找行业专家 <span class="sub" style="font-weight:600;font-size:13px">每个行业一支 AI 专家队伍，点行业标题展开/收起</span></h2>
     <div class="sub">点任何一位专家看介绍、直接派活；不知道找谁，就在下面「不知道找谁？」里说说您遇到的事。</div></div>`
     + howtoCard()
     + (await industryPickCard())
@@ -3759,7 +3861,8 @@ function expCard(p){
 /* ---------- AgentTeams 风格:协同小队可视化(队长/成员/任务依赖,复用卡通员工形象) ---------- */
 // 部门 tagline 里的「N 位」人数动态跟随实际花名册,配置文案不再与真实人数漂移。
 function deptTagline(d){
-  const tagline = String(d?.tagline||"");
+  // 行业行只写一句,不带句号结尾(避免拼接成「新上岗。。」)
+  const tagline = String(d?.tagline||"").replace(/[。.]+$/,"");
   const count = (d?.employees||[]).length;
   if(!count) return tagline;
   return tagline.replace(/^\d+\s*位/, `${count} 位`);
@@ -5684,7 +5787,7 @@ function bossDashboardDraw(){
   const activeEmployees=employees.filter(bossEmpActive), idleEmployees=employees.filter(e=>!bossEmpActive(e));
   $("#main").innerHTML=`<div class="card" style="background:linear-gradient(120deg,#172126,#24343b);color:#fff;border-color:#172126">
     <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap"><div style="flex:1;min-width:250px"><div class="sub" style="color:#b8c9c4">${esc(scope.industry_emoji||"")} ${esc(industryLabel)} · ${esc(scope.tenant_name||"")}</div>
-      <h2 style="margin:4px 0;color:#fff">老板看板</h2><div style="color:#d9e4df">先看风险，再看员工产出与执行效率；所有数字都来自派活任务和巡店记录。</div></div>
+      <h2 style="margin:4px 0;color:#fff">老板看板</h2><div style="color:#d9e4df">先看风险，再看 AI 专家产出与执行效率；所有数字都来自派活任务和巡店记录。</div></div>
       ${scopes.can_cross_tenant?`<div><label style="color:#d9e4df;margin-top:0">企业</label><select style="${selectStyle}" onchange="bossDashTenant(this.value)">${tenants.map(t=>`<option value="${t.id}" ${Number(t.id)===Number(tenant.id)?"selected":""}>${esc(t.name)}</option>`).join("")}</select></div>`:""}
       <div><label style="color:#d9e4df;margin-top:0">行业</label><select style="${selectStyle}" onchange="bossDashIndustry(this.value)">${industries.map(i=>`<option value="${esc(i.key)}" ${i.key===scope.industry_key?"selected":""}>${esc(i.emoji||"")} ${esc(i.short_label||i.name)}</option>`).join("")}</select></div>
       <div><label style="color:#d9e4df;margin-top:0">周期</label><select style="width:auto" onchange="bossDashDays(this.value)">${BOSS_DASH_PERIODS.map(x=>`<option value="${x}" ${Number(period.days)===x?"selected":""}>近${x}天</option>`).join("")}</select></div></div></div>
@@ -5694,13 +5797,13 @@ function bossDashboardDraw(){
     ${[["超24小时仍在跑（到现在还没处理的）",risk.stale_active_tasks],["等您拍板（到现在还没处理的）",risk.waiting_for_decision],["本期失败任务",risk.failed_tasks],["本期已退款任务",risk.refunded_tasks],["高风险巡店问题",risk.critical_inspection_issues],["逾期整改",risk.overdue_inspection_actions]].map(([l,v])=>`<div style="display:flex;justify-content:space-between;border-bottom:1px solid #eadfc4;padding:9px 0"><span>${l}</span><b style="color:${Number(v)>0?"#b4292f":"#28734f"}">${v===null||v===undefined?"未接入":v}</b></div>`).join("")}
   </div><div class="card" style="flex:2;min-width:330px;margin:0"><h3 style="margin-top:0">🏪 巡店执行</h3>${ins.availability?`<div class="grid3" style="grid-template-columns:repeat(3,1fr)">
     ${[["本期巡店",bossDashNumber(ins.visits)],["本期平均分",bossDashNumber(ins.average_score,1)],["还没解决的问题",bossDashNumber(inspectionBacklog.open_issues)],["还没解决的高风险问题",bossDashNumber(inspectionBacklog.critical_issues)],["正在整改",bossDashNumber(inspectionBacklog.open_actions)],["整改已逾期",bossDashNumber(inspectionBacklog.overdue_actions)]].map(([l,v])=>`<div><b style="font-size:21px">${v}</b><div class="sub">${l}</div></div>`).join("")}</div><div class="sub" style="margin-top:8px">“本期”两项只算上方选的时间段；其余四项是到现在还没处理的，不管是哪天发现的。</div>${d.can_open_records?`<div class="actions"><a class="btn sm pri" href="${inspectionRecordHash(0,scope.industry_key)}">打开巡店工作台</a></div>`:`<div class="sub" style="margin-top:8px">跨企业看板仅供查看，不提供可写工作台跳转。</div>`}`:`<div class="notice violet"><b>巡店数据源暂不可用</b><div class="sub">系统已显式标记“未接入”，不会把缺失数据伪装成 0。原因码：${esc(ins.reason_code||"inspection_schema_unavailable")}</div></div>`}</div></div>
-  <div class="card"><h3 style="margin-top:0">📈 ${esc(industryLabel||"本行业")} 经营指标</h3><div class="sub" style="margin-bottom:10px">这些是该行业老板需要关注的经营卡。没有接入可信业务数据源时明确标记“待接入”，不用员工任务数伪造经营数。</div>
+  <div class="card"><h3 style="margin-top:0">📈 ${esc(industryLabel||"本行业")} 经营指标</h3><div class="sub" style="margin-bottom:10px">这些是该行业老板需要关注的经营卡。没有接入可信业务数据源时明确标记“待接入”，不用 AI 专家任务数伪造经营数。</div>
     ${bizMetrics.length?`<div class="grid3" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr))">${bizMetrics.map(metric=>`<div class="topic" style="margin:0"><div class="sub">${esc(metric.label)}</div><b style="font-size:21px">${metric.availability?`${bossDashNumber(metric.value,2)} ${esc(metric.unit||"")}`:"待接入"}</b><div class="sub">所需数据：${esc(metric.source_required||"业务系统")}</div></div>`).join("")}</div>`:`<div class="notice violet">当前行业指标目录待配置。</div>`}</div>
-  <div class="card"><h3 style="margin-top:0">📦 最近交付 / 动态</h3><div class="sub" style="margin-bottom:8px">仅展示员工、状态、轮次和时间，不在看板里暴露业务正文。</div>${recent.length?recent.map(item=>{const rawRoute=safeRouteUrl(item.target_route),route=inspectionScopedRoute(rawRoute,scope.industry_key),kind=item.kind==="inspection"?"巡店":"任务",carry=item.kind==="inspection"?` onclick="bossCarryInspectionIndustry(${cp(scope.industry_key)})"`:"";return `<div style="display:flex;gap:8px;align-items:center;border-top:1px solid #eadfc4;padding:9px 0;flex-wrap:wrap"><span class="pill ${bossStatusClass(item.status_group)}">${esc(bossStatusLabel(item.status))}</span><span class="tag">${kind}</span><b>${esc(item.employee_name||"员工")}</b>${item.revision_no?`<span class="sub">第 ${bossDashNumber(item.revision_no)} 轮</span>`:""}<span class="sub" style="margin-left:auto">${item.occurred_at?new Date(item.occurred_at*1000).toLocaleString("zh-CN"):"—"}</span>${route?`<a class="btn sm" href="${esc(route)}"${carry}>查看</a>`:""}</div>`;}).join(""):`<div class="empty">当前周期还没有交付动态。</div>`}</div>
-  <div class="card"><h3 style="margin-top:0">🧑‍💼 每个员工做了什么、效率怎么样</h3>${activeEmployees.length?`<div class="dimwrap"><table class="dimtable"><thead><tr><th>员工</th><th>本期新建</th><th>本期交付</th><th>派的活完成了多少</th><th>平均周期</th><th>等待/失败/退款</th><th>巡店</th><th></th></tr></thead><tbody>${activeEmployees.map(e=>`<tr><td><b>${esc(e.name)}</b>${e.employee_kind==="inspection"?`<div class="sub">区域巡店</div>`:`<div class="sub">${esc(employeeIdentityLabel(e))}${isBoss()&&Number(e.config_revision)>0?` · 配置 r${Number(e.config_revision)}`:""}</div>`}</td><td>${bossDashNumber(e.tasks)}</td><td>${bossDashNumber(e.completed)}</td><td>${bossDashPct(e.completion_rate)}</td><td>${bossDashDuration(e.average_cycle_seconds)}</td><td>${bossDashNumber(e.waiting)} / ${bossDashNumber(e.failed)} / ${bossDashNumber(e.refunded)}</td><td>${bossDashNumber(e.inspection_visits)}</td><td><button class="btn sm" onclick="bossEmployeeDetail(${e.idx},${cp(e.identity_ref||"")},this,0)">看记录</button></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">这个周期还没有员工干活。</div>`}
-    ${idleEmployees.length?`<details class="boss-idle" data-boss-idle><summary>另有 ${idleEmployees.length} 位本期没干活</summary><div class="boss-idle-list">${idleEmployees.map(e=>`<span>${esc(e.name||"员工")}</span>`).join("")}</div></details>`:""}<div id="boss-employee-detail"></div></div>
+  <div class="card"><h3 style="margin-top:0">📦 最近交付 / 动态</h3><div class="sub" style="margin-bottom:8px">仅展示 AI 专家、状态、轮次和时间，不在看板里暴露业务正文。</div>${recent.length?recent.map(item=>{const rawRoute=safeRouteUrl(item.target_route),route=inspectionScopedRoute(rawRoute,scope.industry_key),kind=item.kind==="inspection"?"巡店":"任务",carry=item.kind==="inspection"?` onclick="bossCarryInspectionIndustry(${cp(scope.industry_key)})"`:"";return `<div style="display:flex;gap:8px;align-items:center;border-top:1px solid #eadfc4;padding:9px 0;flex-wrap:wrap"><span class="pill ${bossStatusClass(item.status_group)}">${esc(bossStatusLabel(item.status))}</span><span class="tag">${kind}</span><b>${esc(item.employee_name||"AI 专家")}</b>${item.revision_no?`<span class="sub">第 ${bossDashNumber(item.revision_no)} 轮</span>`:""}<span class="sub" style="margin-left:auto">${item.occurred_at?new Date(item.occurred_at*1000).toLocaleString("zh-CN"):"—"}</span>${route?`<a class="btn sm" href="${esc(route)}"${carry}>查看</a>`:""}</div>`;}).join(""):`<div class="empty">当前周期还没有交付动态。</div>`}</div>
+  <div class="card"><h3 style="margin-top:0">🤖 AI 专家干了什么、效率怎么样</h3>${activeEmployees.length?`<div class="dimwrap"><table class="dimtable"><thead><tr><th>AI 专家</th><th>本期新建</th><th>本期交付</th><th>派的活完成了多少</th><th>平均周期</th><th>等待/失败/退款</th><th>巡店</th><th></th></tr></thead><tbody>${activeEmployees.map(e=>`<tr><td><b>${esc(e.name)}</b>${e.employee_kind==="inspection"?`<div class="sub">区域巡店</div>`:`<div class="sub">${esc(employeeIdentityLabel(e))}${isBoss()&&Number(e.config_revision)>0?` · 配置 r${Number(e.config_revision)}`:""}</div>`}</td><td>${bossDashNumber(e.tasks)}</td><td>${bossDashNumber(e.completed)}</td><td>${bossDashPct(e.completion_rate)}</td><td>${bossDashDuration(e.average_cycle_seconds)}</td><td>${bossDashNumber(e.waiting)} / ${bossDashNumber(e.failed)} / ${bossDashNumber(e.refunded)}</td><td>${bossDashNumber(e.inspection_visits)}</td><td><button class="btn sm" onclick="bossEmployeeDetail(${e.idx},${cp(e.identity_ref||"")},this,0)">看记录</button></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">这个周期还没有 AI 专家干活。</div>`}
+    ${idleEmployees.length?`<details class="boss-idle" data-boss-idle><summary>另有 ${idleEmployees.length} 位本期没干活</summary><div class="boss-idle-list">${idleEmployees.map(e=>`<span>${esc(e.name||"AI 专家")}</span>`).join("")}</div></details>`:""}<div id="boss-employee-detail"></div></div>
   <div class="card"><h3 style="margin-top:0">📅 近14天节奏 <span class="sub" style="font-weight:400">（无论选多长周期，此表固定展示最近14天）</span></h3>${trend.length?`<div class="dimwrap"><table class="dimtable"><thead><tr><th>日期</th><th>新任务</th><th>完成</th><th>失败</th><th>巡店</th><th>巡店均分</th></tr></thead><tbody>${trend.map(x=>`<tr><td>${esc(x.day)}</td><td>${bossDashNumber(x.tasks_created)}</td><td>${bossDashNumber(x.tasks_completed)}</td><td>${bossDashNumber(x.tasks_failed)}</td><td>${bossDashNumber(x.inspection_visits)}</td><td>${bossDashNumber(x.inspection_average_score,1)}</td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">暂无趋势数据</div>`}</div>
-  <div class="notice">💡 经营卡与派活员工效率分开计算；只有真实 POS、库存、排班、CRM 等数据接入后才会显示经营数值。</div>`;
+  <div class="notice">💡 经营卡与 AI 专家效率分开计算；只有真实 POS、库存、排班、CRM 等数据接入后才会显示经营数值。</div>`;
   if(BOSS_EMPLOYEE_DETAIL) bossEmployeeDetailDraw();
 }
 async function bossDashTenant(value){BOSS_DASH_FILTER.tenantId=Number(value);BOSS_DASH_FILTER.industryKey="";await bossDashboardView().catch(e=>toast(e.message));}
@@ -5725,7 +5828,7 @@ function bossEmployeeDetailDraw(){
   const taskTotal=Number(tasks.total)||0,visitAvailable=visits.availability!==false;
   const visitTotal=visitAvailable?(Number(visits.total)||0):null;
   const hasPrevious=offset>0,hasNext=taskTotal>offset+pageSize||(visitTotal!==null&&visitTotal>offset+pageSize);
-  box.innerHTML=`<div class="topic" style="margin-top:14px"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><h3 style="margin:0;flex:1">${esc(d.employee?.name||"员工")} · ${esc(state.sectionLabel)}</h3><button class="btn sm" onclick="BOSS_EMPLOYEE_DETAIL=null;$('#boss-employee-detail').innerHTML=''">收起</button></div>
+  box.innerHTML=`<div class="topic" style="margin-top:14px"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><h3 style="margin:0;flex:1">${esc(d.employee?.name||"AI 专家")} · ${esc(state.sectionLabel)}</h3><button class="btn sm" onclick="BOSS_EMPLOYEE_DETAIL=null;$('#boss-employee-detail').innerHTML=''">收起</button></div>
     <div class="sub" style="margin:7px 0">任务 ${bossDashNumber(tasks.total)} 条 · 巡店 ${visitAvailable?bossDashNumber(visits.total):"未接入"}条。为保护业务内容，看板只展示结构化状态，点记录后才进入原交付。</div>
     ${taskItems.map(t=>{const route=safeRouteUrl(t.target_route),eventAt=t.period_event_at||t.created_at;return `<div style="display:flex;gap:8px;align-items:center;border-top:1px solid #eadfc4;padding:9px 0;flex-wrap:wrap"><span class="pill ${bossStatusClass(t.status_group)}">${esc(bossStatusLabel(t.status))}</span>${route?`<a href="${esc(route)}">任务 #${t.id}</a>`:`<b>任务 #${t.id}</b>`}${t.source_task_id?`<span class="tag">连续修订</span>`:""}<span class="sub" style="margin-left:auto">${eventAt?new Date(eventAt*1000).toLocaleString("zh-CN"):""}</span></div>`;}).join("")}
     ${visitItems.map(v=>{const scopedIndustry=d.scope?.industry_key||BOSS_DASH_FILTER.industryKey,route=inspectionScopedRoute(v.target_route,scopedIndustry),eventAt=v.period_event_at||v.created_at;return `<div style="display:flex;gap:8px;align-items:center;border-top:1px solid #eadfc4;padding:9px 0;flex-wrap:wrap"><span class="pill ${bossStatusClass(v.status==="completed"?"completed":v.status==="failed"?"failed":"active")}">${esc(bossStatusLabel(v.status))}</span>${route?`<a href="${esc(route)}" onclick="bossCarryInspectionIndustry(${cp(scopedIndustry)})">巡店 #${v.id}</a>`:`<b>巡店 #${v.id}</b>`}<span class="sub">评分 ${bossDashNumber(v.score,1)}</span><span class="sub" style="margin-left:auto">${eventAt?new Date(eventAt*1000).toLocaleString("zh-CN"):""}</span></div>`;}).join("")}
@@ -6008,7 +6111,16 @@ function inspectionChecklistHtml(){
     <details><summary><b>查看分层检查标准（mandatory / recommended / operations）</b></summary><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr));gap:10px;margin-top:9px">${tierHtml}</div></details>
     <h4>七个现场采集位</h4><div id="inspection-capture-progress" class="notice" role="status">必拍覆盖 0 / ${capture_slots.filter(slot=>slot.required).length}</div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr));gap:10px">${slotHtml||`<div class="empty">暂无采集位</div>`}</div>
-    <h4>经营指标</h4>${inspectionMetricsHtml(metrics)}`;
+    ${inspectionMetricsSection(metrics)}`;
+}
+/* 经营指标:一个数都还没接进来(全是「待接入」)时收成一行,要手填现场核对值再点开 */
+function inspectionMetricsSection(metrics=[]){
+  const empty=v=>v===null||v===undefined||v==="";
+  const allPending=metrics.length>0&&metrics.every(m=>[m.actual??m.value,m.target,m.previous_period??m.previous,
+    m.same_period_last_year??m.same_year??m.same_year_previous,m.benchmark].every(empty));
+  if(!allPending) return `<h4>经营指标</h4>${inspectionMetricsHtml(metrics)}`;
+  return `<details class="inspection-metrics-fold" data-metrics-fold><summary><b>经营指标</b> <span class="sub">接上收银数据后显示 · 要手填本次核对值点这里</span></summary>
+    <div style="margin-top:8px">${inspectionMetricsHtml(metrics)}</div></details>`;
 }
 function inspectionCaptureChanged(){
   const inputs=[...document.querySelectorAll("[data-capture-slot]")],required=inputs.filter(input=>input.dataset.required==="true"),covered=required.filter(input=>input.files?.length).length;
@@ -6410,22 +6522,22 @@ async function productionView(){
   const ktok = n => n>=10000? (n/10000).toFixed(1)+"万" : String(n||0);
   // 模型成本（美元/tokens）只给平台方看；客户看产出本身，花费去「套餐与点数」按点核对。
   const showCost=isBoss();
-  $("#main").innerHTML = `<div class="card"><h2>📊 员工产出</h2>
-    <div class="sub">${showCost?"您手下每个数字员工干了多少活、产出什么、模型成本多少，一目了然。":"您手下每个数字员工干了多少活、产出了什么，一目了然；花了多少点请到「套餐与点数」查看。"}点某一行看 TA 的逐条产出。</div>
+  $("#main").innerHTML = `<div class="card"><h2>📊 AI 专家产出</h2>
+    <div class="sub">${showCost?"您手下每位 AI 专家干了多少活、产出什么、模型成本多少，一目了然。":"您手下每位 AI 专家干了多少活、产出了什么，一目了然；花了多少点请到「套餐与点数」查看。"}点某一行看 TA 的逐条产出。</div>
     <div style="display:flex;gap:12px;flex-wrap:wrap;margin:12px 0">
       ${[["产出身份",t.employees],["总产出",t.runs],...(showCost?[["总 tokens",ktok(t.tokens)],["模型成本",rmb(t.cost_usd)]]:[])]
         .map(([l,v])=>`<div style="flex:1;min-width:110px;background:#fff6dc;border:2px solid var(--ink);border-radius:12px;padding:10px 14px">
           <div style="font-size:22px;font-weight:800">${v}</div><div class="sub">${l}</div></div>`).join("")}
     </div>
     ${d.employees.length?`<div class="dimwrap"><table class="dimtable">
-      <thead><tr><th>员工</th><th>部门</th><th>产出数</th>${showCost?"<th>tokens</th><th>模型成本</th>":""}<th>最近</th><th></th></tr></thead>
+      <thead><tr><th>AI 专家</th><th>部门</th><th>产出数</th>${showCost?"<th>tokens</th><th>模型成本</th>":""}<th>最近</th><th></th></tr></thead>
       <tbody>${d.employees.map(e=>{const rowKey=`pd-${e.idx}-${e.identity_ref||"unknown"}`;return `<tr>
         <td><b>${esc(e.name)}</b><div class="sub">${esc(employeeIdentityLabel(e))}${showCost&&Number(e.config_revision)>0?` · 配置 r${Number(e.config_revision)}`:""}</div></td><td class="sub">${esc(e.dept)}</td>
         <td>${e.runs}</td>${showCost?`<td>${ktok(e.tokens)}</td><td><b>${rmb(e.cost_usd)}</b></td>`:""}
         <td class="sub">${fmtDate(e.last_at)}</td>
         <td><button class="btn sm" onclick="prodDetail(${e.idx},${cp(e.identity_ref||"")},this)">看产出</button></td>
       </tr><tr id="${esc(rowKey)}" style="display:none"><td colspan="${showCost?7:5}" style="background:#faf6ec"></td></tr>`}).join("")}</tbody>
-    </table></div>`:emptyState({icon:"📊",text:"还没有产出记录。派活给员工或下达一个内容任务，这里就会有数据。",
+    </table></div>`:emptyState({icon:"📊",text:"还没有产出记录。把活交给 AI 专家或下达一个内容任务，这里就会有数据。",
       actionLabel:canWork("content")?"✍️ 下达任务":"🧑‍🔧 去找行业专家",href:canWork("content")?"#/new":"#/experts"})}
   </div>`;
 }
@@ -8733,6 +8845,13 @@ async function loadPurchaseContext(){
   PURCHASE_CONTEXT=context;
   return context;
 }
+/* 套餐卖点按门店数说(只换显示文案,价格、点数、套餐 key 都不动) */
+const PLAN_FIT={
+  trial:"1 家店，先试试水",
+  startup:"1–3 家店：天天派活、写文案",
+  biz:"4–10 家店：店长、店员都开账号一起用",
+  flagship:"连锁 10 家以上：全部功能放开用",
+};
 function purchasePlanHtml(plan){
   const active=activePurchase(plan.key);
   const pending=pendingPurchase();
@@ -8763,7 +8882,7 @@ function purchasePlanHtml(plan){
     ${ME?.role==="owner"?`<select aria-label="${esc(plan.name)}购买周期" onchange="purchasePlanPeriodChanged(${cp(plan.key)},this.value)">${periods}</select>`:""}
     <div class="sub purchase-quote" style="margin:8px 0">${quote?`${esc(quote.period_label)}合计 <b>¥${Number(quote.price)}</b> · ${Number(quote.points)} 点`:"以服务端报价为准"}</div>
     ${reference?`<div class="sub" style="color:#b45309;font-weight:700">参考价，以实际报价为准</div>`:""}
-    <div class="sub">${esc(plan.desc||"")}</div><div class="actions" style="justify-content:center">${action}</div>
+    <div class="sub plan-fit">${esc(PLAN_FIT[plan.key]||plan.desc||"")}</div><div class="actions" style="justify-content:center">${action}</div>
     ${ME?.role==="owner"&&!active?`<div class="sub purchase-next-hint" style="margin-top:6px">${esc(PURCHASE_NEXT_STEP_HINT)}</div>`:""}</div>`;
 }
 /* 购买申请提交后的承诺时间；代码和文档里没有更早的约定，统一按 24 小时。 */
@@ -8951,6 +9070,25 @@ function billingPlansCardHtml(){
     <div class="grid3" style="grid-template-columns:repeat(auto-fit,minmax(210px,1fr));margin-top:12px">
     ${plans.map(p=>purchasePlanHtml(p)).join("")}</div></div>`;
 }
+/* 价目表按「门店日常 / 找专家 / 做内容 / 做视频」分组:门店日常、找专家默认展开,其余点开看。
+   只是显示分组,点数和动作 key 都来自服务端。 */
+function billingPriceTableHtml(prices){
+  const rows=Object.entries(prices||{}).map(([action,p])=>({action,...(p||{})}));
+  const groups=new Map();
+  rows.forEach(p=>{
+    const key=p.group||"other";
+    if(!groups.has(key)) groups.set(key,{key,label:p.group_label||"其他",order:p.group_order??99,items:[]});
+    groups.get(key).items.push(p);
+  });
+  const OPEN=new Set(["store","expert"]);
+  const table=items=>`<div class="dimwrap"><table class="dimtable" style="min-width:min(560px,100%)"><thead><tr><th>做什么</th><th>消耗</th>${isBoss()?"<th>成本参考</th>":""}</tr></thead>
+    <tbody>${items.map(p=>`<tr><td>${esc(p.label||p.action)}</td><td><b>${p.points} 点</b></td>${isBoss()?`<td class="sub">${esc(p.cost||"")}</td>`:""}</tr>`).join("")}</tbody></table></div>`;
+  const list=[...groups.values()].sort((a,b)=>a.order-b.order);
+  return `<div class="card" id="billing-prices"><h2>📋 价目表(按次消耗)</h2>
+    <div class="sub">派活、拍照、审核本身不花点，只有用到 AI 的这些动作才按次扣。</div>
+    ${list.map(g=>`<details class="price-group" data-price-group="${esc(g.key)}" ${OPEN.has(g.key)?"open":""} style="margin-top:10px">
+      <summary><b>${esc(g.label)}</b> <span class="sub">${g.items.length} 项</span></summary>${table(g.items)}</details>`).join("")}</div>`;
+}
 async function billingView(){
   if(!canSeeBilling()){
     // 店员、店长等成员账号不看企业的账:后端同样不返回流水和套餐。
@@ -9050,9 +9188,7 @@ async function billingView(){
         <td><b style="color:${l.merged?"var(--ink2)":l.delta<0?"#e5484d":"#2f9e6e"}">${l.delta>0?"+":""}${l.delta}</b></td>
         <td class="sub">${l.balance.toFixed(0)}</td></tr>`).join("")}</tbody></table></div>`
       :`<div class="empty" style="padding:26px">${b.is_platform?"平台自用不产生账单":BILL_TAB==="in"?"还没有充值记录":BILL_TAB==="out"?"还没有消耗记录":"暂无点数变动记录"}</div>`}</div>
-  <div class="card"><h2>📋 价目表(按次消耗)</h2>
-    <div class="dimwrap"><table class="dimtable" style="min-width:min(560px,100%)"><thead><tr><th>动作</th><th>消耗</th>${isBoss()?"<th>成本参考</th>":""}</tr></thead>
-    <tbody>${Object.values(b.prices).map(p=>`<tr><td>${esc(p.label)}</td><td><b>${p.points} 点</b></td>${isBoss()?`<td class="sub">${esc(p.cost||"")}</td>`:""}</tr>`).join("")}</tbody></table></div></div>
+  ${billingPriceTableHtml(b.prices)}
   ${billingPlansCardHtml()}
 `;
   enhanceResponsiveTables($("#main"));

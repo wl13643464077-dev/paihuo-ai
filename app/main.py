@@ -2403,7 +2403,9 @@ def state(limit: int | None = None, offset: int = 0):
              "wechat": bool(_wc.get_conf(TEN()).get("appid")) or bool(_nt.get_webhook(TEN())),
              "clone": len(avatar.cloned_voices()) > 0,
              # 上手卡「接下来 3 件事」里的「建门店」是否已完成
-             "store": bool(db.one("SELECT id FROM store_branch WHERE tenant_id=? AND active=1 LIMIT 1", (TEN(),)))}
+             "store": bool(db.one("SELECT id FROM store_branch WHERE tenant_id=? AND active=1 LIMIT 1", (TEN(),))),
+             # 「给店员开账号」是否已完成(企业里有启用的成员账号)
+             "staff": bool(db.one("SELECT id FROM users WHERE tenant_id=? AND role='member' AND enabled=1 LIMIT 1", (TEN(),)))}
     # V27.2:「发布三件套」向导进度(成片→审查→排版/发出去,各查一条就够)
     trio = {"video": bool(db.one("SELECT id FROM tv_job WHERE tenant_id=? AND status='done' LIMIT 1", (TEN(),))),
             "censor": bool(db.one("SELECT id FROM censor_log WHERE tenant_id=? LIMIT 1", (TEN(),))),

@@ -1885,16 +1885,17 @@ def inspection_branch_create(body: dict, industry_key: str | None = None):
 
 @router.patch("/api/inspections/branches/{branch_id}")
 def inspection_branch_update(branch_id: int, body: dict):
-    """改名、停用/恢复门店：老板或总监（一次可只改一项）。"""
+    """改名称/区域/地址、停用/恢复门店：老板或总监（一次可只改一项）。"""
     try:
         selected, _choices = _inspection_scope(body.get("industry_key"))
-        if "active" not in body and "name" not in body:
+        info_keys = [k for k in ("name", "region", "address") if k in body]
+        if "active" not in body and not info_keys:
             raise inspection.InspectionError("缺少门店启用状态")
         result = None
-        if "name" in body:
-            result = inspection.rename_branch(
+        if info_keys:
+            result = inspection.update_branch_info(
                 TEN(), _inspection_actor_id(), selected, branch_id,
-                body.get("name"),
+                {k: body.get(k) for k in info_keys},
             )
         if "active" in body:
             result = inspection.set_branch_active(

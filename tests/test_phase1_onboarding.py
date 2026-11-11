@@ -488,10 +488,10 @@ class OnboardingCardBrowserCase(unittest.IsolatedAsyncioTestCase):
             await page.wait_for_selector(".ph-onb-done")
             done_text = await page.locator("#ph-onb").inner_text()
             self.assertIn("接下来 3 件事", done_text)
-            for item in ("建门店", "派第一个活", "绑定微信"):
+            for item in ("建门店", "给店员开账号", "绑定微信"):
                 self.assertIn(item, done_text)
             self.assertEqual(
-                ["#/store", "#/new", "#/channels"],
+                ["#/store", "#/team", "#/channels"],
                 await page.evaluate(
                     "[...document.querySelectorAll('#ph-onb .ph-next-i')].map(a => a.getAttribute('href'))"),
             )
@@ -587,6 +587,19 @@ class OnboardingCardBrowserCase(unittest.IsolatedAsyncioTestCase):
             # 今天页的门店卡跟着刷新,不再是「还没录入门店」
             await page.wait_for_function(
                 "document.querySelector('#main .today-store:not(.today-store-empty)')")
+
+            # N-05:有门店以后上手卡收成一行,开账号/派活/写文案三个去处
+            await page.wait_for_selector("#ph-onb .ph-onb-line")
+            line = await page.locator("#ph-onb").inner_text()
+            self.assertIn("基本信息好了", line)
+            self.assertEqual("#/team", await page.locator(
+                "#ph-onb .ph-onb-line a", has_text="开店员账号").get_attribute("href"))
+            self.assertEqual(0, await page.locator("#ph-s-name").count())
+            card_h = await page.evaluate(
+                "document.querySelector('#ph-onb .ph-onb').getBoundingClientRect().height")
+            self.assertLess(card_h, 140)
+            # 点「写今天的文案」再展开 3 步
+            await page.click("#ph-onb .ph-onb-line >> text=写今天的文案")
 
             # 再改一次店铺信息:已经有门店了,不再问
             await page.click("text=改一下")
