@@ -472,9 +472,10 @@ class FrontendFlowsFeedbackTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("套餐和点数由老板管理。", text)
             self.assertNotIn("/api/billing", self.api_hits)
             self.assertNotIn("/api/purchases", self.api_hits)
-            # 「点数不够」的按钮逻辑对成员照常可用
+            # 第四轮 N-01:成员的花点数按钮只写「本次 N 点」,不带企业余额
             note = await page.evaluate("costNoteText(12)")
-            self.assertEqual("本次 12 点 · 余额 100 点", note)
+            self.assertEqual("本次 12 点", note)
+            self.assertIsNone(await page.evaluate("knownBalance()"))
             self._assert_no_browser_errors(errors)
             await browser.close()
 

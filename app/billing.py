@@ -215,6 +215,48 @@ def balance(tid: int = None) -> float:
     return (r or {}).get("balance") or 0
 
 
+def points_flags(tid: int, bal) -> dict:
+    """给看不到余额的成员:只说「点数够不够」,不带具体余额。
+
+    points_ok:够不够最便宜的一个动作;points_ok_by_cost:按价目表里出现过的每个点数
+    (键是去掉多余小数的字符串,如 "0.2"、"18")给一个布尔值,前端按按钮的点数查表。
+    平台自有租户(1)免扣,恒为够。
+    """
+    costs = set()
+    for row in prices().values():
+        try:
+            pts = float((row or {}).get("points") or 0)
+        except (TypeError, ValueError):
+            continue
+        if pts > 0:
+            costs.add(pts)
+    free = int(tid or 0) == 1
+    try:
+        have = float(bal or 0)
+    except (TypeError, ValueError):
+        have = 0.0
+
+    def key(pts: float) -> str:
+        return str(int(pts)) if float(pts).is_integer() else f"{pts:g}"
+
+    by_cost = {key(c): (free or have >= c) for c in sorted(costs)}
+    cheapest = min(costs) if costs else 0
+    return {"points_ok": bool(free or have >= cheapest), "points_ok_by_cost": by_cost}
+
+
+_BALANCE_IN_TEXT = re.compile(r"[,，、;；]?\s*(?:当前)?余额\s*-?[\d.]+\s*点")
+
+
+_RECHARGE_HINT = re.compile(r"请充值[^。]*。?")
+
+
+def hide_balance_text(text: str) -> str:
+    """把「点数不足:本次需 18 点,余额 5 点。请充值或升级套餐」改成成员能看的说法:
+    去掉余额数字,充值引导换成「点数由老板管理，请联系老板充值」。"""
+    out = _BALANCE_IN_TEXT.sub("", str(text or ""))
+    return _RECHARGE_HINT.sub("点数由老板管理，请联系老板充值。", out)
+
+
 class InsufficientPoints(Exception):
     pass
 

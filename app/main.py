@@ -115,6 +115,10 @@ async def _friendly_http_exception(request, exc: HTTPException):
     detail = exc.detail
     if isinstance(detail, str) and detail in _BARE_DETAIL_CN:
         detail = _BARE_DETAIL_CN[detail]
+    if (exc.status_code == 402 and isinstance(detail, str)
+            and auth.current() and not auth.can_see_balance()):
+        # 店长/店员看不到企业余额:「点数不足」提示里的余额数字在出口统一去掉
+        detail = billing.hide_balance_text(detail)
     return JSONResponse({"detail": detail}, status_code=exc.status_code,
                         headers=getattr(exc, "headers", None))
 
@@ -1814,7 +1818,32 @@ def auth_me(request: Request = None):
             # 已分门店的店员/店长默认用手机版 /staff;首登改密后前端据此跳回去。
             "prefers_staff_home": stafftask.prefers_staff_home(u),
             # 首登改密是否还要再输当前密码:由服务端按会话判断,前端只据此决定显示。
-            "password_change_needs_old": not _forced_change_without_old(u, request)}
+            "password_change_needs_old": not _forced_change_without_old(u, request),
+            # 成员能用几位 AI 专家(老板/root 不限=None);前端据此藏掉用不了的入口
+            **_member_expert_counts(u)}
+
+
+def _member_expert_counts(u: dict) -> dict:
+    """成员账号实际能用的 AI 专家人数(板块授权 + 员工白名单 + 已启用)。
+
+    expert_count:能派活的专家总数;meeting_expert_count:其中能进商量室的
+    (巡店经理不参加无照片圆桌会议)。老板/root 返回 None,表示不限。
+    """
+    if (u or {}).get("role") != "member":
+        return {"expert_count": None, "meeting_expert_count": None}
+    idxs: list[int] = []
+    if auth.allowed("content"):
+        idxs.extend(int(s["idx"]) for s in registry.STATIONS)
+    for department in departments.list_depts():
+        if not auth.dept_visible(department["key"]) or not auth.allowed(department["key"]):
+            continue
+        idxs.extend(
+            int(e["idx"]) for e in department["employees"]
+            if auth.employee_allowed(e["idx"], department["key"]))
+    cfgs = employees.get_configs(idxs) if idxs else {}
+    usable = [i for i in idxs if (cfgs.get(i) or {"enabled": True}).get("enabled", True)]
+    return {"expert_count": len(usable),
+            "meeting_expert_count": sum(1 for i in usable if i != inspection.EMPLOYEE_IDX)}
 
 
 @app.get("/api/guest/industries")
@@ -2382,6 +2411,11 @@ def state(limit: int | None = None, offset: int = 0):
               "balance": ten_row.get("balance") or 0,
               "plan": ten_row.get("plan") or "",
               "setup": setup, "trio": trio}
+    if not auth.can_see_balance():
+        # 店长、店员、办公室同事不看企业余额:不下发数字,只给「点数够不够」
+        result["balance"] = None
+        result["plan"] = ""
+        result.update(billing.points_flags(TEN(), ten_row.get("balance")))
     if paged:
         page = _page_result(jobs, jobs_total, page_limit, page_offset)
         page.pop("items")
@@ -2973,14 +3007,20 @@ def depts_list():
         viewer.get("allowed_emp_idxs")
         if viewer.get("role") == "member" else None
     )
+    is_member = viewer.get("role") == "member"
     for d in visible:
         emps = []
+        dept_allowed = (not is_member) or auth.allowed(d["key"])
         for e in d["employees"]:
             if (
                 member_whitelist is not None
                 and int(e["idx"]) not in member_whitelist
             ):
                 # 白名单成员只看到被分配的数字员工；楼层可见性即使用权。
+                continue
+            if not dept_allowed:
+                # 成员没开通这个行业板块:楼层里的专家一个都派不了,不列出来,
+                # 商量室选人、找行业专家的人数都只算这个账号真能用的人。
                 continue
             cfg = cfgs.get(e["idx"]) or employees.get_config(e["idx"])
             scoped_employee = {

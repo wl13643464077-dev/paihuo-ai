@@ -125,6 +125,18 @@ def team_get():
         for x in users:
             x["branch_ids"] = assignments.get(int(x["id"]), [])
         out["store_branches"] = inspection.assignable_branches(TEN())
+    else:
+        # 总监/经理的受限视图:只读地带上每人负责的门店名(不给门店多选候选),
+        # 店长据此看到「您负责的店员」,也能按「店长 / 店员」称呼人。
+        assignments = inspection.member_branch_assignments(TEN())
+        branch_names = {
+            int(row["id"]): str(row.get("name") or "")
+            for row in db.q("SELECT id,name FROM store_branch WHERE tenant_id=? AND active=1",
+                            (TEN(),))
+        }
+        for x in users:
+            x["branch_names"] = [branch_names[b] for b in assignments.get(int(x["id"]), [])
+                                 if b in branch_names]
     if auth.is_root():
         tenants = db.q("SELECT t.*, (SELECT COUNT(*) FROM users u WHERE u.tenant_id=t.id) n_users "
                        "FROM tenants t ORDER BY t.id")
