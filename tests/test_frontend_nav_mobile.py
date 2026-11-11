@@ -57,7 +57,7 @@ class FrontendNavMobileTests(unittest.IsolatedAsyncioTestCase):
     _assert_no_browser_errors = _browser.FrontendBrowserBehaviorTests._assert_no_browser_errors
 
     async def _open(self, playwright, *, me=OWNER, width=390, height=844,
-                    hash_="#/", init_script=""):
+                    hash_="#/", init_script="", api_overrides=None, posts=None):
         api = {
             "/api/auth/me": me,
             "/api/meta": {"app": {"name": "派活", "slogan": "测试"}, "stations": []},
@@ -66,6 +66,7 @@ class FrontendNavMobileTests(unittest.IsolatedAsyncioTestCase):
             "/api/depts": [],
             "/api/inspections": INSPECTIONS,
             "/api/notifications": {"items": [], "total": 0},
+            **(api_overrides or {}),
         }
         browser = await _launch_chromium(playwright, self.executable)
         page = await browser.new_page(viewport={"width": width, "height": height})
@@ -76,7 +77,10 @@ class FrontendNavMobileTests(unittest.IsolatedAsyncioTestCase):
         )
 
         async def api_route(route):
-            payload = api.get(urlparse(route.request.url).path, {})
+            path = urlparse(route.request.url).path
+            if posts is not None and route.request.method == "POST" and path.startswith("/api/inspections"):
+                posts.append((path, route.request.post_data_json))
+            payload = api.get(path, {})
             await route.fulfill(status=200, content_type="application/json",
                                 body=json.dumps(payload, ensure_ascii=False))
 
@@ -290,6 +294,77 @@ class FrontendNavMobileTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertTrue(dismiss)
             self.assertTrue(all(side >= 44 for side in dismiss), dismiss)
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_store_hub_has_my_stores_block_and_one_form_new_store(self):
+        posts = []
+        overrides = {
+            "/api/inspections/meta": {"industry_key": "tea", "industries": [{"key": "tea", "name": "茶饮"}],
+                                      "permissions": {"can_manage_branches": True}},
+            "/api/inspections/branches/search": {"items": []},
+            "/api/inspections": {"items": [], "summary": {"total_branches": 0}},
+            "/api/inspections/branches": {"id": 9, "name": "人民路店"},
+        }
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(
+                playwright, hash_="#/store", api_overrides=overrides, posts=posts)
+            await page.wait_for_selector("#my-stores [data-empty-state]")
+            block = await page.locator("#my-stores").inner_text()
+            self.assertIn("我的门店", block)
+            self.assertIn("还没有门店", block)
+            self.assertIn("批量导入", block)
+            # 空状态里只有一个按钮,点了直接弹出建店表单
+            self.assertEqual(1, await page.locator("#my-stores [data-empty-state] [data-empty-action]").count())
+            await page.locator("#my-stores [data-empty-action]").click()
+            await page.wait_for_selector("#store-form")
+            form = await page.locator("#store-form").inner_text()
+            for word in ("门店名称", "城市 / 区域（选填）", "详细地址（选填）", "建好门店", "取消"):
+                self.assertIn(word, form)
+            # 一张表单,不再连弹三个对话框
+            self.assertEqual(0, await page.locator("#ui-dialog").count())
+            # 名称没填:就地提示,不发请求
+            await page.locator("#store-form [data-store-form-ok]").click()
+            self.assertEqual("请填写门店名称", (await page.locator("#store-form-error").inner_text()).strip())
+            self.assertEqual([], posts)
+            # Esc 关掉
+            await page.keyboard.press("Escape")
+            await page.wait_for_function("!document.querySelector('#store-form')")
+            # 再开一次,回车提交
+            await page.evaluate("() => { openStoreForm(); return true; }")
+            await page.wait_for_selector("#store-form-name")
+            await page.fill("#store-form-name", "人民路店")
+            await page.fill("#store-form-region", "上海·静安")
+            await page.locator("#store-form-region").press("Enter")
+            await page.wait_for_function("!document.querySelector('#store-form')")
+            self.assertEqual(1, len(posts))
+            path, body = posts[0]
+            self.assertEqual("/api/inspections/branches", path)
+            self.assertEqual("人民路店", body["name"])
+            self.assertEqual("上海·静安", body["region"])
+            self.assertEqual("", body["address"])
+            # 表单开着时切走页面:表单收起,不会在别的页面冒出来
+            await page.evaluate("() => { openStoreForm(); return true; }")
+            await page.wait_for_selector("#store-form")
+            await page.evaluate("location.hash='#/dispatch'")
+            await page.wait_for_function("!document.querySelector('#store-form')")
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_store_hub_lists_first_six_stores_with_all_link(self):
+        branches = [{"id": i, "name": f"第{i}店", "region": "", "active": True} for i in range(1, 8)]
+        overrides = {
+            "/api/inspections/meta": {"industry_key": "tea", "permissions": {"can_manage_branches": True}},
+            "/api/inspections/branches/search": {"items": branches},
+            "/api/inspections": {"items": [], "summary": {"total_branches": 12}},
+        }
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(playwright, hash_="#/store", api_overrides=overrides)
+            await page.wait_for_selector("#my-stores .my-store-chip")
+            self.assertEqual(6, await page.locator("#my-stores .my-store-chip").count())
+            self.assertEqual("共 12 家", (await page.locator("[data-my-stores-count]").inner_text()).strip())
+            self.assertEqual("#/inspections", await page.locator("#my-stores a", has_text="全部门店").get_attribute("href"))
+            self.assertTrue(await page.locator("#my-stores button", has_text="新建门店").is_visible())
             self._assert_no_browser_errors(errors)
             await browser.close()
 

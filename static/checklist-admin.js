@@ -108,7 +108,7 @@
         <div><b>${s.open||0}</b><span>待完成</span></div>
         <div><b style="color:var(--bad)">${s.missed||0}</b><span>超时没做完</span></div></div></div>`;
     if(!ov.stores.length){
-      $("#ck-body").innerHTML = head + `<div class="card"><div class="empty">还没有门店，或者老板还没给您分配门店。先在「巡店」里建门店、在「团队」里把店员绑定到门店。</div></div>`;
+      $("#ck-body").innerHTML = head + `<div class="card">${noStoreEmptyState("还没有门店。建好门店，再在「团队与权限」里把店员分到门店，就能每天按清单打勾。")}</div>`;
       return;
     }
     // 没做完的门店排前面，老板先看要盯的
@@ -243,7 +243,7 @@
           ${why}<div class="ck-parts">${parts}</div></div></div>`;
     }).join("");
     $("#ck-rank").innerHTML = `<details class="notice"><summary>分数怎么算的？</summary><div style="margin-top:6px">${esc(r.formula||"")}</div></details>`
-      + (cards || `<div class="card"><div class="empty">还没有门店，或者老板还没给您分配门店。</div></div>`);
+      + (cards || `<div class="card">${noStoreEmptyState("还没有门店，建好门店后这里会给各店排名。")}</div>`);
   }
 
   routes["checklists"] = checklistsView;

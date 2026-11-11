@@ -465,6 +465,29 @@ html,body{max-width:100%;overflow-x:hidden}
   font-size:19px;padding:15px 18px;border-radius:16px}
 .btn.today-post .sub{font-size:12.5px;font-weight:700;color:var(--ink)}
 .hubhead+.btn.today-post{margin-bottom:16px}
+/* ---------- 统一空状态(emptyState):居中一句话 + 一个按钮 ---------- */
+.empty-state{display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;padding:30px 12px;color:var(--ink2)}
+.empty-state .es-ic{font-size:34px;line-height:1}
+.empty-state .es-tx{margin:0;max-width:440px;font-weight:700;line-height:1.55}
+.empty-state .btn{margin-top:4px}
+/* ---------- 新建门店表单 ---------- */
+.store-form{max-width:460px;width:100%}
+.store-form-row{margin-bottom:12px}
+.store-form-row label{display:block;font-weight:800;margin-bottom:5px}
+.store-form-row input,.store-form-row select{width:100%;font-size:16px}
+.store-form-req{font-size:12px;color:var(--bad);font-weight:700;margin-left:4px}
+.store-form-error{color:var(--bad);font-size:13px;margin-top:5px;min-height:0}
+.store-form-error:empty{display:none}
+.store-form input[aria-invalid="true"]{border-color:var(--bad)}
+/* ---------- 「门店」页:我的门店 ---------- */
+.my-stores{margin-bottom:16px}
+.my-stores-head{display:flex;align-items:center;gap:6px 12px;flex-wrap:wrap}
+.my-stores-head h2{margin:0;font-size:19px}
+.my-stores-acts{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
+.my-stores-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;align-items:center}
+.my-store-chip{display:inline-flex;align-items:baseline;gap:6px;border:2px solid var(--ink);border-radius:12px;padding:5px 11px;font-weight:800;background:var(--card);max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.my-store-chip .sub{font-size:12px;font-weight:600}
+.my-store-chip.off{opacity:.55}
 /* ---------- 第 1 期:「今天」页 ---------- */
 .today-hello{display:flex;align-items:baseline;gap:6px 14px;flex-wrap:wrap;margin:2px 0 14px}
 .today-hello h2{font-size:22px;margin:0}

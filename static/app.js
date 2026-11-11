@@ -449,6 +449,88 @@ function uiAlert(options={}){
   return openUiDialog({title:config.title||"提示",message:config.message||"",
     confirmText:config.confirmText||"知道了",alertOnly:true});
 }
+/* ---------- 统一空状态:居中一句话 + 一个按钮 ----------
+   onAction 是点击时执行的 JS 字符串(和全站 onclick 写法一致);也可以给 href 直接跳转。 */
+function emptyState({icon="",text="",actionLabel="",onAction="",href=""}={}){
+  const btn=!actionLabel?"":href
+    ?`<a class="btn pri" href="${esc(href)}" data-empty-action>${esc(actionLabel)}</a>`
+    :`<button type="button" class="btn pri" onclick="${esc(onAction)}" data-empty-action>${esc(actionLabel)}</button>`;
+  return `<div class="empty-state" data-empty-state>${icon?`<div class="es-ic" aria-hidden="true">${icon}</div>`:""}
+    <p class="es-tx">${esc(text)}</p>${btn}</div>`;
+}
+/* 能不能新建门店:和后端 can_manage_branches 一致(老板/平台/总监)。 */
+const canCreateStore = () => !!ME && (ME.role==="owner"||ME.role==="root"||(ME.role==="member"&&ME.job_title==="director"));
+/* 「还没有门店」的统一空状态:能建门店的人给一个「新建门店」按钮,直接弹出建店表单 */
+function noStoreEmptyState(text="还没有门店，先建一家门店吧。",canCreate=canCreateStore()){
+  return canCreate
+    ? emptyState({icon:"🏪",text,actionLabel:"＋ 新建门店",onAction:"openStoreForm()"})
+    : emptyState({icon:"🏪",text:"老板还没给您分配门店，请联系老板。"});
+}
+/* ---------- 新建门店:一张表单填完(名称必填,区域/地址选填) ---------- */
+function closeStoreForm(){ $("#store-form")?.remove(); }
+async function openStoreForm({industryKey="",onCreated=null}={}){
+  closeStoreForm();
+  const openedHash=location.hash;
+  document.body.insertAdjacentHTML("beforeend",`<div class="overlay store-form-overlay" id="store-form" role="presentation" style="z-index:1000">
+    <form class="panel ui-dialog-panel store-form" role="dialog" aria-modal="true" aria-labelledby="store-form-title" novalidate>
+      <div class="phead"><h2 id="store-form-title" style="margin:0;flex:1">🏪 新建门店</h2></div>
+      <div class="pbody">
+        <div class="store-form-row"><label for="store-form-name">门店名称 <span class="store-form-req">必填</span></label>
+          <input id="store-form-name" name="name" maxlength="80" placeholder="例：人民路店" autocomplete="off" aria-describedby="store-form-error">
+          <div class="store-form-error" id="store-form-error" role="alert"></div></div>
+        <div class="store-form-row" id="store-form-industry-row" hidden><label for="store-form-industry">所属行业</label>
+          <select id="store-form-industry" name="industry"></select></div>
+        <div class="store-form-row"><label for="store-form-region">城市 / 区域（选填）</label>
+          <input id="store-form-region" name="region" maxlength="60" placeholder="例：上海·静安" autocomplete="off"></div>
+        <div class="store-form-row"><label for="store-form-address">详细地址（选填）</label>
+          <input id="store-form-address" name="address" maxlength="200" placeholder="例：人民路 88 号" autocomplete="off"></div>
+        <div class="sub store-form-error" id="store-form-submit-error" role="alert"></div>
+        <div class="actions" style="justify-content:flex-end">
+          <button class="btn" type="button" data-store-form-cancel>取消</button>
+          <button class="btn pri" type="submit" data-store-form-ok>建好门店</button>
+        </div></div></form></div>`);
+  const overlay=$("#store-form"),form=overlay.querySelector("form"),name=$("#store-form-name"),err=$("#store-form-error"),
+    submitErr=$("#store-form-submit-error"),ok=overlay.querySelector("[data-store-form-ok]"),industrySel=$("#store-form-industry");
+  overlay.querySelector("[data-store-form-cancel]").addEventListener("click",closeStoreForm);
+  overlay.addEventListener("click",event=>{ if(event.target===overlay) closeStoreForm(); });
+  overlay.addEventListener("keydown",event=>{ if(event.key==="Escape"){ event.preventDefault(); closeStoreForm(); } });
+  name.addEventListener("input",()=>{ if(name.value.trim()){ err.textContent=""; name.removeAttribute("aria-invalid"); } });
+  form.addEventListener("submit",async event=>{
+    event.preventDefault();
+    if(ok.disabled) return;
+    const body={name:name.value.trim(),region:$("#store-form-region").value.trim(),address:$("#store-form-address").value.trim()};
+    if(!body.name){ err.textContent="请填写门店名称"; name.setAttribute("aria-invalid","true"); name.focus(); return; }
+    const industry_key=String((!$("#store-form-industry-row").hidden&&industrySel.value)||industryKey||"");
+    if(industry_key) body.industry_key=industry_key;
+    submitErr.textContent=""; ok.disabled=true; ok.innerHTML='<span class="spin"></span> 正在建…';
+    try{
+      const qs=industry_key?`?${new URLSearchParams({industry_key})}`:"";
+      const created=await api(`/inspections/branches${qs}`,{method:"POST",body,routeScoped:false});
+      closeStoreForm(); STORE_TODAY={key:"",at:0,data:null};
+      toast(`「${body.name}」已建好`);
+      if(location.hash!==openedHash) return;
+      if(typeof onCreated==="function") await onCreated(created); else await render(true);
+    }catch(e){
+      if(!$("#store-form")) return;
+      submitErr.textContent=e.message||"没建成，请稍后再试";
+      ok.disabled=false; ok.textContent="建好门店";
+    }
+  });
+  setTimeout(()=>name.focus(),0);
+  // 没指定行业、企业又开了多个行业时,让老板选一下门店属于哪个行业
+  if(!industryKey){
+    try{
+      const meta=await api("/inspections/meta",{routeScoped:false});
+      const list=Array.isArray(meta?.industries)?meta.industries:[];
+      if(list.length>1&&$("#store-form")===overlay){
+        industrySel.innerHTML=list.map(item=>`<option value="${esc(item.key)}" ${item.key===meta.industry_key?"selected":""}>${esc(`${item.emoji||""} ${item.name||item.key}`.trim())}</option>`).join("");
+        $("#store-form-industry-row").hidden=false;
+      }
+    }catch(_){ /* 读不到行业就按企业主行业建 */ }
+  }
+}
+// 切页时收起建店表单,不在别的页面突然冒出来
+window.addEventListener("hashchange",closeStoreForm);
 function pay402(msg){
   // 点数不足不再是死胡同:给一条可点的充值出路(root在#/team充值,老板线下收款)
   let b = $("#paybar");
@@ -660,7 +742,39 @@ function hubView(key, top=""){
     + (root.length?`<h3 class="hub-section">平台运营(仅平台账号可见)</h3><div class="hubgrid">${root.map(hubCardHtml).join("")}</div>`:"");
 }
 async function dispatchHub(){ hubView("dispatch"); }
-async function storeHub(){ hubView("store"); }
+async function storeHub(){
+  if(!ME||ME.role==="tour") return hubView("store");
+  hubView("store",`<div class="card my-stores" id="my-stores" data-my-stores><div class="sub">正在读取门店…</div></div>`);
+  let html="";
+  try{ html=await myStoresBlock(); }
+  catch(e){ if(e?.name==="NavigationAbort") throw e; html=`<div class="sub">门店列表暂时读不到，请稍后刷新。</div>`; }
+  const box=$("#my-stores"); if(box) box.innerHTML=html;
+}
+/* 「门店」页顶部的「我的门店」:几家店、新建、批量导入、前几家店名 */
+async function myStoresBlock(){
+  const meta=await api("/inspections/meta"),industry_key=String(meta?.industry_key||"");
+  const q=new URLSearchParams({industry_key,limit:"7"});
+  const [found,list]=await Promise.all([
+    api(`/inspections/branches/search?${q}`).catch(e=>{ if(e?.name==="NavigationAbort") throw e; return {items:[]}; }),
+    api(`/inspections?${new URLSearchParams({industry_key,limit:"1"})}`).catch(e=>{ if(e?.name==="NavigationAbort") throw e; return null; }),
+  ]);
+  const items=Array.isArray(found?.items)?found.items:[];
+  const total=Math.max(Number(list?.summary?.total_branches)||0,items.length);
+  const canManage=canCreateStore()||!!meta?.permissions?.can_manage_branches;
+  const head=`<div class="my-stores-head"><h2>🏪 我的门店</h2><span class="sub" data-my-stores-count>${total?`共 ${total} 家`:"还没有门店"}</span>
+    ${canManage?`<span class="my-stores-acts"><button type="button" class="btn pri sm" onclick="openStoreForm()">＋ 新建门店</button>
+      <button type="button" class="btn sm" onclick="openStoreImport()">⇩ 批量导入</button></span>`:""}</div>`;
+  if(!items.length) return head+noStoreEmptyState("还没有门店。建好门店，店长拍照就能巡店，清单、派活也都按门店来。",canManage);
+  const shown=items.slice(0,6);
+  return head+`<div class="my-stores-list">${shown.map(b=>`<span class="my-store-chip${b.active===false?" off":""}">${esc(b.name||"未命名门店")}${b.region?`<span class="sub">${esc(b.region)}</span>`:""}</span>`).join("")}
+    ${(items.length>6||total>6)?`<a class="btn sm" href="#/inspections">全部门店 ›</a>`:""}</div>`;
+}
+/* 「批量导入」:进巡店页并直接展开导入区(复用巡店页已有的导入工作台) */
+function openStoreImport(){
+  INSPECTION_IMPORT_PENDING=true;
+  if(location.hash.replace(/\?.*$/,"")==="#/inspections") inspectionView().catch(e=>toast(e.message));
+  else location.hash="#/inspections";
+}
 async function growthHub(){
   hubView("growth", canWork("content")?`<a class="btn pri today-post" href="#/tools/hot">🔥 今天发什么<span class="sub">每天挑好今天该发的内容,照着发就行</span></a>`:"");
 }
@@ -1424,8 +1538,8 @@ async function dashboard(){
         <div class="${store.overdue?"bad":""}"><b>${store.overdue}</b><span>逾期</span></div>
       </div></a>`;
   }else if(store && isAdmin()){
-    storeCard = `<a class="card today-store" href="#/inspections"><div class="today-head"><h2>🏪 门店</h2><span class="sub">›</span></div>
-      <div class="sub">还没录入门店。录好门店，店长拍照就能巡店，问题自动派给店长整改。</div></a>`;
+    storeCard = `<div class="card today-store today-store-empty"><div class="today-head"><h2>🏪 门店</h2></div>
+      ${noStoreEmptyState("还没录入门店。录好门店，店长拍照就能巡店，问题自动派给店长整改。")}</div>`;
   }
   // 获客:一个醒目的「今天发什么」
   const growthCard = canWork("content") ? `<div class="card today-growth">
@@ -3534,7 +3648,7 @@ async function teamRunsView(rawId){
       ${items.length?items.map(run=>`<a class="topic" style="display:block;margin-top:12px;text-decoration:none" href="#/teamruns/${Number(run.id)}">
         <b>${esc(run.team_name||"经营协同小队")}</b> · ${esc(TEAM_RUN_STATUS[run.status]||run.status)}
         <div class="sub">${esc(String(run.query||"").slice(0,140))} · ${Number(run.members?.length||0)} 名成员</div></a>`).join("")
-        :`<div class="empty">还没有协同小队。去行业数字员工页面，在「不知道找谁」里说一句要办的事即可组队。</div>`}
+        :emptyState({icon:"🤝",text:"还没有协同小队。在「找行业专家」页的「不知道找谁？」里说一句要办的事，就能组队。",actionLabel:"去找行业专家组队",href:"#/experts"})}
       <div class="actions"><a class="btn" href="#/tasks">查看全部任务</a></div></div>`;
     return;
   }
@@ -5359,6 +5473,7 @@ let INSPECTION_BRANCH_PICKER={status:"idle",items:[],q:"",region:"",cursorStack:
 let INSPECTION_CAPTURE_BRANCH_ID=0,INSPECTION_CHECKLIST={status:"idle",data:null,branchId:0,error:""};
 let INSPECTION_STANDARD_ADMIN={status:"idle",scopeKind:"tenant",scopeKey:"",data:null,error:"",branchId:0,industry:""};
 let INSPECTION_IMPORT_OPEN=false;
+let INSPECTION_IMPORT_PENDING=false;
 let INSPECTION_IMPORT={status:"idle",preview:null,error:"",requestKey:"",fingerprint:""};
 let INSPECTION_IMPORT_PAGE={rowKind:"all",errorsOnly:false,cursorStack:[null],page:0,nextCursor:null,loading:false,error:""};
 function inspectionRecordHash(id=0,industry=INSPECTION_INDUSTRY){
@@ -5671,6 +5786,8 @@ async function inspectionView(rawId,rawIndustry){
     if(INSPECTION_CAPTURE_BRANCH_ID)await inspectionChecklistLoad(INSPECTION_CAPTURE_BRANCH_ID,{silent:true});
   }
   inspectionDraw();
+  // 从「门店」页点「批量导入」进来:直接展开导入区
+  if(INSPECTION_IMPORT_PENDING&&!detail){INSPECTION_IMPORT_PENDING=false;inspectionImportToggle(true);}
 }
 async function inspectionSelectIndustry(value){
   const selected=String(value||"");if(!selected||selected===INSPECTION_INDUSTRY)return;
@@ -5896,11 +6013,8 @@ function inspectionDraw(){
   enhanceResponsiveTables($("#main"));inspectionCaptureChanged();
 }
 async function inspectionNewBranch(){
-  const name=await uiPrompt({title:"新建门店",label:"门店名称",placeholder:"例：人民路店",requiredMessage:"请填写门店名称"});if(name===null)return;
-  const region=await uiPrompt({title:"所属区域",label:"城市 / 区域（选填）",placeholder:"例：上海·静安",required:false});if(region===null)return;
-  const address=await uiPrompt({title:"门店地址",label:"详细地址（选填）",required:false});if(address===null)return;
-  const industry_key=INSPECTION_INDUSTRY;
-  try{const qs=new URLSearchParams({industry_key});await api(`/inspections/branches?${qs}`,{method:"POST",body:{name:name.trim(),region:region.trim(),address:address.trim(),industry_key}});toast("门店已创建");await inspectionView();}catch(e){toast(e.message);}
+  // 一张表单填完名称/区域/地址(原来是连着弹三个单字段对话框)
+  await openStoreForm({industryKey:INSPECTION_INDUSTRY,onCreated:()=>inspectionView()});
 }
 async function inspectionSubmit(btn){
   const checklist=INSPECTION_CHECKLIST.data||{},slots=Array.isArray(checklist.capture_slots)?checklist.capture_slots:Array.isArray(checklist.slots)?checklist.slots:[];
