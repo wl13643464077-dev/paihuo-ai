@@ -7,8 +7,9 @@
   const $ = s=>document.querySelector(s);
   const esc = v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   const main = ()=>$("#main");
-  const URGENCY = {overdue:"已逾期", today:"今天要做完", later:"", waiting:"已交，等审核",
-    done:"已完成", submitted:"已交，等审核", awaiting_recheck:"已交复查，等审核", missed:"已错过"};
+  const URGENCY = {overdue:"已逾期", today:"今天要做完", later:"", waiting:"已交，等店长或老板看",
+    done:"已完成", submitted:"已交，等店长或老板看", awaiting_recheck:"已交复查，等审核", missed:"已错过",
+    approved:"✅ 已通过"};
   const KIND_ICON = {task:"📌", checklist:"✅", inspection_action:"🔧"};
 
   /* ---------- 网络 ---------- */
@@ -35,8 +36,13 @@
     finally{ clearTimeout(timer); }
     return handle(r.status, await r.json().catch(()=>null));
   }
+  /* 登录后回到手机版(和当前这件活)。登录页只认站内固定形状的路径 */
+  function loginUrl(){
+    const hash = /^#[A-Za-z0-9_\-\/]*$/.test(location.hash) ? location.hash : "";
+    return "/login?next="+encodeURIComponent("/staff"+hash);
+  }
   function handle(status, data){
-    if(status===401){ location.href="/login"; throw new Error("请先登录"); }
+    if(status===401){ location.href=loginUrl(); throw new Error("请先登录"); }
     if(status===428){ location.href="/?full=1"; throw new Error("请先改密码"); }
     if(status<200||status>=300){
       const e = new Error(detailText(data, status>=500?"服务器开小差了，请稍后再试":"没办成，请刷新后再试"));
@@ -97,7 +103,7 @@
   function msg(text, kind="err"){ return `<div class="msg ${kind}" role="${kind==="err"?"alert":"status"}">${esc(text)}</div>`; }
   function back(){ return `<button type="button" class="back" data-go="">← 回我的待办</button>`; }
   function dueLine(it){
-    if(!it.due_text) return "";
+    if(!it.due_text || it.urgency==="approved") return "";   // 已通过的活不用再提截止时间
     return (it.urgency==="overdue"?"⏰ 已过截止 ":"截止 ")+esc(it.due_text);
   }
   function tag(it){
@@ -172,17 +178,43 @@
         <div id="err"></div>
         <button type="button" class="btn pri" data-act="submit" style="margin-top:14px">✅ 提交</button>`;
     } else {
-      body += msg(`这件事${esc(t.status_label||"")}`, "info") + photosHtml(t.photos) + aiHtml(t);
+      const label = {approved:"✅ 这件活通过了", submitted:"已交，等店长或老板看"}[t.status] || `这件事${t.status_label||""}`;
+      // AI 验照片的建议是写给审核人的：店员看自己交的活时不显示
+      body += msg(label, t.status==="approved"?"ok":"info") + photosHtml(t.photos) + (t.can_manage ? aiHtml(t) : "");
     }
     main().innerHTML = body;
   }
   function photosHtml(list){
     if(!list || !list.length) return "";
-    return `<div class="photos">${list.map(p=>`<a href="${esc(p.url)}" target="_blank" rel="noopener"><img src="${esc(p.url)}" alt="交差照片" loading="lazy"></a>`).join("")}</div>`;
+    return `<div class="photos">${list.map((p,i)=>`<a href="${esc(p.url)}" data-view="${i}" aria-label="看大图 第 ${i+1} 张"><img src="${esc(p.url)}" alt="交差照片" loading="lazy"></a>`).join("")}</div>`;
   }
+  /* 页内看大图：点照片放大，左右翻，点 × 或按返回关掉，不新开标签页 */
+  function openViewer(urls, start){
+    closeViewer();
+    let i = Math.max(0, Math.min(urls.length-1, start||0));
+    const box = document.createElement("div");
+    box.className = "viewer"; box.id = "viewer";
+    box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true"); box.setAttribute("aria-label", "看照片");
+    const draw = ()=>{
+      box.innerHTML = `<img src="${esc(urls[i])}" alt="交差照片 第 ${i+1} 张">
+        <button type="button" class="vx" data-v="x" aria-label="关掉">×</button>
+        ${urls.length>1?`<button type="button" class="vp" data-v="p" aria-label="上一张">‹</button><button type="button" class="vn" data-v="n" aria-label="下一张">›</button>
+        <div class="vc">${i+1} / ${urls.length}</div>`:""}`;
+      box.querySelector(".vx").focus();
+    };
+    box.addEventListener("click", e=>{
+      const v = e.target.closest("[data-v]"); e.stopPropagation();
+      if(v && v.dataset.v==="p"){ i = (i-1+urls.length)%urls.length; draw(); }
+      else if(v && v.dataset.v==="n"){ i = (i+1)%urls.length; draw(); }
+      else if(!e.target.closest("img")) closeViewer();
+    });
+    document.body.appendChild(box); draw();
+  }
+  function closeViewer(){ const v = $("#viewer"); if(v) v.remove(); }
+  document.addEventListener("keydown", e=>{ if(e.key==="Escape") closeViewer(); });
   function aiHtml(t){
     const a = t.ai_check;
-    if(!a) return t.status==="submitted"&&t.photos&&t.photos.length ? `<div class="ai none">暂无 AI 验照片建议，等待负责人核对照片</div>` : "";
+    if(!a) return "";   // 没开 AI 验照片或还没看完：不提，直接看照片
     if(a.error || !a.verdict) return `<div class="ai none">🤖 ${esc(a.reason||"AI 这次没看成，请直接看照片")}</div>`;
     const label = {pass:"像是做好了", doubt:"拿不准，建议再看看", fail:"像是没做好"}[a.verdict]||"";
     return `<div class="ai ${esc(a.verdict)}">🤖 AI 建议：${esc(label)}${a.reason?`。${esc(a.reason)}`:""}<div class="sub">只是建议，最后由人来定</div></div>`;
@@ -225,7 +257,7 @@
       list.forEach(p=>URL.revokeObjectURL(p.url));
       delete S.pending[key]; delete S.pending[key+":note"];
       await loadTodo();
-      go("", msg("✅ 交上去了，等老板看", "ok"));
+      go("", msg("✅ 交上去了，等店长或老板看", "ok"));
     }catch(e){
       $("#up").classList.add("hidden");
       err.innerHTML = msg(e.message);
@@ -245,24 +277,34 @@
       <div id="err"></div>
       <div class="panel">${items.length ? items.map((it,i)=>{
         const done = !!it.done, text = it.text||it.title||it.key;
+        // 「已经做完」和「点这里标记做完」要一眼分开：没做的是按钮，做完的是绿色「✅ 已完成 · 时间」+ 撤回
+        const at = done ? hhmm(it.done_at) : "";
         return `<div class="item"><div class="tx ${done?"done":""}">${i+1}. ${esc(text)}${it.require_photo&&!done?` <span class="tag today">要拍照</span>`:""}</div>
-          ${done?`<span class="tag done">✓ 做完了</span>`:`<button type="button" class="btn ${it.require_photo?"":"ok"}" data-item="${esc(it.key)}">${it.require_photo?"📷 拍照打勾":"✓ 做完了"}</button>`}</div>`;
+          ${done?`<div class="donebox"><span class="tag checked">✅ 已完成${at?` · ${esc(at)}`:""}</span>
+              ${run.status==="done"?"":`<button type="button" class="linkbtn" data-undo="${esc(it.key)}" aria-label="撤回第 ${i+1} 项">撤回</button>`}</div>`
+            :`<button type="button" class="btn" data-item="${esc(it.key)}">${it.require_photo?"📷 拍照，标记做完":"点一下，标记做完"}</button>`}</div>`;
       }).join("") : `<div class="empty">这张清单没有项目</div>`}</div>`;
   }
-  async function checkItem(key){
+  function hhmm(ts){
+    if(!ts) return "";
+    const d = new Date(Number(ts)*1000+8*3600e3);
+    if(isNaN(d.getTime())) return "";
+    return String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0");
+  }
+  async function checkItem(key, undo){
     const run = S.current; if(!run || S.busy) return;
     const it = (run.items||[]).find(x=>String(x.key)===String(key)); if(!it) return;
     const err = $("#err"); err.innerHTML = "";
     const form = new FormData();
-    if(it.require_photo){
+    if(!undo && it.require_photo){
       const files = await pickPhoto(false);
       if(!files.length) return;
       try{ form.append("photo", await compress(files[0]), "photo.jpg"); }
       catch(e){ err.innerHTML = msg(e.message); return; }
     }
-    form.append("done", "1"); form.append("note", "");
+    form.append("done", undo?"0":"1"); form.append("note", "");
     S.busy = true;
-    const btn = document.querySelector(`[data-item="${CSS.escape(String(key))}"]`);
+    const btn = document.querySelector(`[data-${undo?"undo":"item"}="${CSS.escape(String(key))}"]`);
     if(btn){ btn.disabled = true; btn.textContent = "提交中…"; }
     try{
       await upload(`/checklist/runs/${encodeURIComponent(run.id)}/items/${encodeURIComponent(key)}`, form);
@@ -271,7 +313,7 @@
       if(fresh) checklistView(run.id); else go("", msg("✅ 清单做完了", "ok"));
     }catch(e){
       err.innerHTML = msg(e.message);
-      if(btn){ btn.disabled = false; btn.textContent = "🔁 重试"; }
+      if(btn){ btn.disabled = false; btn.textContent = undo ? "再点一次撤回" : "🔁 重试"; }
     }finally{ S.busy = false; }
   }
 
@@ -316,7 +358,7 @@
     main().innerHTML = back()+`<div class="empty"><span class="spin"></span> 正在加载…</div>`;
     try{ S.meta = await api("/staff/meta"); }catch(e){ main().innerHTML = back()+msg(e.message); return; }
     const m = S.meta;
-    if(!m.can_dispatch || !m.branches.length){ main().innerHTML = back()+msg("你还没有可以派活的门店，请联系老板分配门店"); return; }
+    if(!m.can_dispatch || !m.branches.length){ main().innerHTML = back()+msg("您还没有可以派活的门店，请联系老板分配门店"); return; }
     const d = new Date(Date.now()+8*3600e3), pad = n=>String(n).padStart(2,"0");
     const def = `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}T18:00`;
     S.dispatchKey = reqKey();
@@ -365,13 +407,14 @@
       + (list.length ? list.map(t=>`<div class="panel" data-review="${t.id}">
           <div class="t" style="font-size:18px;font-weight:900">${esc(t.title)}</div>
           <p class="sub">${[t.branch_name, t.assignee_name?`${t.assignee_name} 交的`:"", t.submit_note?`备注：${t.submit_note}`:""].filter(Boolean).map(esc).join(" · ")}</p>
+          ${t.review_note&&t.reviewed_at?msg(`上次打回：${t.review_note}${t.submit_count>1?`（第 ${t.submit_count} 次交）`:"（重交）"}`, "info"):""}
           ${photosHtml(t.photos)}${aiHtml(t)}
           <div class="err-slot"></div>
           <div class="row"><button type="button" class="btn ok" data-review-act="approve" data-id="${t.id}">👍 通过</button>
             <button type="button" class="btn bad" data-review-act="reject" data-id="${t.id}">↩️ 打回</button></div>
           <div class="reject-box hidden"><label>打回原因（店员会看到）</label><textarea maxlength="500" placeholder="比如：冷柜底层没擦干净，再拍一张近照"></textarea>
             <button type="button" class="btn bad" data-review-act="reject-send" data-id="${t.id}" style="margin-top:8px">确认打回</button></div>
-        </div>`).join("") : `<div class="empty">没有等你审核的活</div>`);
+        </div>`).join("") : `<div class="empty">没有等您审核的活</div>`);
   }
   async function review(id, action, box){
     if(S.busy) return;
@@ -410,8 +453,14 @@
   }
   const OPEN_HASH = {task:"task-", checklist:"checklist-", inspection_action:"action-"};
   document.addEventListener("click", e=>{
-    const el = e.target.closest("[data-open],[data-go],[data-act],[data-del],[data-item],[data-review-act]");
+    const el = e.target.closest("[data-open],[data-go],[data-act],[data-del],[data-item],[data-undo],[data-review-act],[data-view]");
     if(!el) return;
+    if(el.dataset.view!==undefined){
+      e.preventDefault();
+      const urls = [...el.closest(".photos").querySelectorAll("[data-view]")].map(a=>a.getAttribute("href"));
+      openViewer(urls, +el.dataset.view); return;
+    }
+    if(el.dataset.undo!==undefined){ checkItem(el.dataset.undo, true); return; }
     if(el.dataset.open){ const [k, id] = el.dataset.open.split(":"); go((OPEN_HASH[k]||"task-")+id); return; }
     if(el.dataset.go!==undefined){ go(el.dataset.go); return; }
     if(el.dataset.del!==undefined && S.current){
@@ -429,7 +478,7 @@
     else if(act==="refresh") refresh();
     else if(act==="logout") logout();
   });
-  window.addEventListener("hashchange", ()=>route());
+  window.addEventListener("hashchange", ()=>{ closeViewer(); route(); });
   function setNet(){ $("#net").classList.toggle("show", navigator.onLine===false); }
   window.addEventListener("offline", setNet);
   window.addEventListener("online", ()=>{ setNet(); if(!location.hash) refresh(); });
@@ -442,7 +491,7 @@
   }
   async function logout(){
     try{ await api("/auth/logout", {method:"POST"}); }catch(_){}
-    location.href = "/login";
+    location.href = "/login?next=%2Fstaff";
   }
   async function boot(){
     setNet();

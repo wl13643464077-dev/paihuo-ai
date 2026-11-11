@@ -71,6 +71,17 @@ class HtmlEntryCachePolicyTests(unittest.TestCase):
             with open(os.path.join(root, name), encoding="utf-8") as fh:
                 self.assertIn('rel="icon"', fh.read(), name)
 
+    def test_staff_page_sends_anonymous_visitors_to_staff_login(self):
+        anonymous = TestClient(main.app)
+        try:
+            response = anonymous.get("/staff", follow_redirects=False)
+        finally:
+            anonymous.close()
+        self.assertEqual(302, response.status_code)
+        self.assertEqual("/login?next=/staff", response.headers["location"])
+        # 登录了照常打开
+        self.assertEqual(200, self.client.get("/staff", follow_redirects=False).status_code)
+
     def test_static_assets_do_not_inherit_html_no_store_policy(self):
         response = self.client.get("/static/app.js")
 

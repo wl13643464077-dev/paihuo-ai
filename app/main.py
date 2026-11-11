@@ -840,6 +840,10 @@ async def _auth_mw(request: Request, call_next):
                 )
         finally:
             request._receive = original_receive
+    if path == "/staff" and not user and not tour:
+        # 店员手机版没登录：去「店员登录」页，登录后回到 /staff(next 只认站内固定路径)
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse("/login?next=/staff", status_code=302)
     if (path == "/" or path.startswith("/files/")) and not user and not tour:
         from fastapi.responses import RedirectResponse
         if path == "/":

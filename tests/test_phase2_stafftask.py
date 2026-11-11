@@ -176,6 +176,7 @@ class IndustryScopeTests(StaffTaskBase):
 
 class LifecycleTests(StaffTaskBase):
     def test_submit_requires_photo_and_stores_watermarked_evidence(self):
+        stafftask.set_ai_check_enabled(2, self.u(20), True)   # 老板明确打开过才会排 AI 验照片
         task = self.create(20, assignee_user_id=23)
         with self.assertRaises(stafftask.StaffTaskError) as caught:
             self.submit(23, task["id"], photos=0)
@@ -360,6 +361,36 @@ class TodoTests(StaffTaskBase):
         self.assertTrue(manager["user"]["can_dispatch"])
         self.assertEqual([], stafftask.todo_for_user(2, 25, now=NOW)["reviews"])
 
+    def test_approved_today_stays_on_staff_home_until_next_day(self):
+        task = self.create(20, assignee_user_id=23, due_at=_cn(2026, 9, 25, 18))
+        self.submit(23, task["id"], now=_cn(2026, 9, 25, 9))
+        stafftask.review_task(2, self.u(20), task["id"], approve=True, now=_cn(2026, 9, 25, 10))
+        todo = stafftask.todo_for_user(2, 23, now=_cn(2026, 9, 25, 21))
+        mine = [t for t in todo["items"] if t["kind"] == "task"]
+        self.assertEqual([(task["id"], "approved", "approved")],
+                         [(t["id"], t["status"], t["urgency"]) for t in mine])
+        self.assertEqual(0, todo["counts"]["todo"])             # 不算在「要做的」里
+        # 别的店员看不到别人通过的活；第二天收起
+        self.assertEqual([], [t for t in stafftask.todo_for_user(2, 24, now=_cn(2026, 9, 25, 21))["items"]
+                              if t["kind"] == "task"])
+        tomorrow = stafftask.todo_for_user(2, 23, now=_cn(2026, 9, 26, 8))
+        self.assertEqual([], [t for t in tomorrow["items"] if t["kind"] == "task"])
+
+    def test_resubmitted_task_tells_reviewer_last_reason_and_round(self):
+        task = self.create(22, assignee_user_id=23)
+        self.submit(23, task["id"], now=NOW + 60)
+        first = stafftask.todo_for_user(2, 22, now=NOW + 90)["reviews"][0]
+        self.assertEqual("", first["review_note"])
+        self.assertEqual(1, first["submit_count"])
+        stafftask.review_task(2, self.u(22), task["id"], approve=False,
+                              note="底层没擦", now=NOW + 120)
+        self.submit(23, task["id"], now=NOW + 180)
+        again = stafftask.todo_for_user(2, 22, now=NOW + 200)["reviews"][0]
+        self.assertEqual("底层没擦", again["review_note"])
+        self.assertEqual(2, again["submit_count"])
+        listed = stafftask.list_tasks(2, self.u(20), status="submitted")["items"][0]
+        self.assertEqual(2, listed["submit_count"])
+
     def test_todo_has_any_task_tells_never_assigned_from_all_done(self):
         # 从没被派过活：空待办 + has_any_task=False（手机端显示「还没有人给您派活」）
         fresh = stafftask.todo_for_user(2, 24, now=NOW)
@@ -472,6 +503,45 @@ class OneLinerTests(StaffTaskBase):
 
 
 class AiCheckTests(StaffTaskBase):
+    def setUp(self):
+        super().setUp()
+        stafftask.set_ai_check_enabled(2, self.u(20), True)
+
+    def test_switch_defaults_off_until_owner_decides(self):
+        # 从没设置过：默认关，且还没问过老板；明确打开过的企业保持打开
+        db.execute("DELETE FROM app_setting WHERE key=?", ("staff_ai_check:2",))
+        self.assertFalse(stafftask.ai_check_enabled(2))
+        self.assertFalse(stafftask.ai_check_asked(2))
+        meta = stafftask.dispatch_options(2, self.u(20))
+        self.assertFalse(meta["ai_check_enabled"])
+        self.assertFalse(meta["ai_check_asked"])
+        task_id = self.submitted()
+        result, seen = self.run_check(task_id, {"verdict": "pass"})
+        self.assertIsNone(result)
+        self.assertEqual({}, seen)                       # 没打开就不调模型、不扣点
+        self.assertAlmostEqual(10.0, self.balance())
+        stafftask.set_ai_check_enabled(2, self.u(20), False)   # 「先不用」也算表过态
+        self.assertTrue(stafftask.ai_check_asked(2))
+        self.assertFalse(stafftask.ai_check_enabled(2))
+        stafftask.set_ai_check_enabled(2, self.u(20), True)
+        self.assertTrue(stafftask.ai_check_enabled(2))
+        self.assertTrue(stafftask.dispatch_options(2, self.u(20))["ai_check_asked"])
+
+    def test_ai_verdict_only_reaches_reviewers(self):
+        task_id = self.submitted()
+        self.run_check(task_id, {"verdict": "pass", "reason": "干净", "confidence": 0.9})
+        self.assertEqual("pass", stafftask.get_task(2, self.u(20), task_id)["ai_check"]["verdict"])
+        self.assertEqual("pass", stafftask.get_task(2, self.u(22), task_id)["ai_check"]["verdict"])
+        # 交差的店员自己看不到 AI 建议(详情、列表、待办都不带)
+        self.assertIsNone(stafftask.get_task(2, self.u(23), task_id)["ai_check"])
+        listed = stafftask.list_tasks(2, self.u(23))["items"]
+        self.assertTrue(listed)
+        self.assertTrue(all(t["ai_check"] is None for t in listed))
+        todo = stafftask.todo_for_user(2, 23, now=NOW + 120)
+        self.assertTrue(all(t.get("ai_check") is None for t in todo["tasks"]))
+        manager = stafftask.todo_for_user(2, 22, now=NOW + 120)
+        self.assertEqual("pass", manager["reviews"][0]["ai_check"]["verdict"])
+
     def run_check(self, task_id, raw=None, exc=None):
         seen = {}
 

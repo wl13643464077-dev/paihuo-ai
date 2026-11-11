@@ -6,7 +6,8 @@
    对外只暴露 window.PH_STAFF_ADMIN = {canDispatch, openDispatch}。 */
 (function(){
   "use strict";
-  const SA = {meta:null, list:null, drafts:[], prefill:null, filter:{status:"", branch:""}, parsing:false, sending:false};
+  const SA = {meta:null, list:null, drafts:[], prefill:null, filter:{status:"", branch:""}, parsing:false, sending:false,
+    reviewMode:false, dispatchOpen:false};
   const me = ()=>{ try{ return typeof ME!=="undefined" ? ME : null; }catch(_){ return null; } };
   const h = s=>esc(s);
   const STATUS = {todo:"待做", submitted:"等审核", approved:"已通过", cancelled:"已取消", rejected:"被打回"};
@@ -31,8 +32,19 @@
 .sa-task{border:2px solid rgba(51,41,31,.22);border-radius:14px;padding:12px;margin-top:10px;background:#fff}
 .sa-task.sa-over{border-color:#e03131;background:#fff5f5}
 .sa-task.sa-focus{outline:3px solid #ffd166}
-.sa-photos{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:6px;margin-top:8px}
+.sa-photos{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;margin-top:8px}
+.sa-photos a{display:block;cursor:zoom-in}
 .sa-photos img{width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:9px;border:2px solid rgba(51,41,31,.3);display:block}
+@media(max-width:520px){.sa-photos{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.sa-viewer{position:fixed;inset:0;z-index:1000;background:rgba(20,16,12,.92);display:flex;align-items:center;justify-content:center;padding:56px 12px 64px}
+.sa-viewer img{max-width:100%;max-height:100%;object-fit:contain;border-radius:8px;background:#fff}
+.sa-viewer button{position:absolute;min-width:48px;min-height:48px;border:2px solid #fff;border-radius:24px;background:rgba(0,0,0,.4);color:#fff;font-size:22px;font-weight:900;cursor:pointer}
+.sa-viewer .vx{top:10px;right:10px}.sa-viewer .vp{left:10px;bottom:10px}.sa-viewer .vn{right:10px;bottom:10px}
+.sa-viewer .vc{position:absolute;bottom:22px;left:0;right:0;text-align:center;color:#fff;font-weight:800;pointer-events:none}
+.sa-one .actions{align-items:flex-start}
+.sa-ask{border:2px solid #f4a261;background:#fff6dc;border-radius:12px;padding:10px 12px;margin-top:8px}
+.sa-ask .actions{margin-top:8px}
+.sa-filtered{font-size:13px;font-weight:700;color:#8b7355}
 .sa-ai{border-radius:10px;padding:7px 10px;margin-top:8px;font-weight:700;font-size:14px}
 .sa-ai.pass{background:#d3f9d8}.sa-ai.doubt{background:#fff1bd}.sa-ai.fail{background:#ffe3e3}.sa-ai.none{background:#f1f3f5}
 .sa-events{margin:8px 0 0 18px;font-size:13px}
@@ -179,15 +191,46 @@
   /* ---------- 列表 ---------- */
   function aiHtml(t){
     const a = t.ai_check;
-    if(!a){ return t.status==="submitted"&&(t.photos||[]).length ? `<div class="sa-ai none">${SA.meta?.ai_check_enabled===false?"AI 验照片已关闭，请人工核对照片":"暂无 AI 验照片建议，可先人工核对照片"}</div>` : ""; }
+    // 没开 AI 验照片就什么都不说(开关就在「等您审核」标题旁边)，不在每件活下面重复一遍
+    if(!a){ return t.status==="submitted"&&(t.photos||[]).length&&SA.meta?.ai_check_enabled ? `<div class="sa-ai none">AI 还没看完，可以先直接看照片</div>` : ""; }
     if(a.error||!a.verdict) return `<div class="sa-ai none">🤖 ${h(a.reason||"AI 这次没看成,请直接看照片")}</div>`;
     const label = {pass:"像是做好了", doubt:"拿不准,建议细看", fail:"像是没做好"}[a.verdict]||"";
     return `<div class="sa-ai ${h(a.verdict)}">🤖 AI 建议:${h(label)}${a.reason?`。${h(a.reason)}`:""}
       <span class="sub">(把握 ${Math.round((a.confidence||0)*100)}%,只是建议,您说了算)</span></div>`;
   }
   function photosHtml(list){
-    return (list||[]).length ? `<div class="sa-photos">${list.map(p=>`<a href="${h(p.url)}" target="_blank" rel="noopener"><img src="${h(p.url)}" alt="交差照片" loading="lazy"></a>`).join("")}</div>` : "";
+    return (list||[]).length ? `<div class="sa-photos">${list.map((p,i)=>`<a href="${h(p.url)}" onclick="return PH_STAFF_ADMIN._view(this,${i})" aria-label="看大图 第 ${i+1} 张"><img src="${h(p.url)}" alt="交差照片" loading="lazy"></a>`).join("")}</div>` : "";
   }
+  /* 页内看大图：点缩略图放大，左右翻，点空白 / × / Esc 关掉，不新开标签页 */
+  function openViewer(anchor, start){
+    const urls = [...anchor.closest(".sa-photos").querySelectorAll("a")].map(a=>a.getAttribute("href"));
+    closeViewer();
+    let i = Math.max(0, Math.min(urls.length-1, start||0));
+    const box = document.createElement("div");
+    box.className = "sa-viewer"; box.id = "sa-viewer";
+    box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true"); box.setAttribute("aria-label", "看交差照片");
+    const draw = ()=>{
+      box.innerHTML = `<img src="${h(urls[i])}" alt="交差照片 第 ${i+1} 张">
+        <button type="button" class="vx" data-v="x" aria-label="关掉">×</button>
+        ${urls.length>1?`<button type="button" class="vp" data-v="p" aria-label="上一张">‹</button><button type="button" class="vn" data-v="n" aria-label="下一张">›</button>
+        <div class="vc">${i+1} / ${urls.length}</div>`:""}`;
+      box.querySelector(".vx").focus();
+    };
+    box.addEventListener("click", e=>{
+      const v = e.target.closest("[data-v]");
+      if(v && v.dataset.v==="p"){ i = (i-1+urls.length)%urls.length; draw(); }
+      else if(v && v.dataset.v==="n"){ i = (i+1)%urls.length; draw(); }
+      else if(!e.target.closest("img")) closeViewer();
+    });
+    box.addEventListener("keydown", e=>{
+      if(e.key==="Escape") closeViewer();
+      else if(e.key==="ArrowLeft" && urls.length>1){ i = (i-1+urls.length)%urls.length; draw(); }
+      else if(e.key==="ArrowRight" && urls.length>1){ i = (i+1)%urls.length; draw(); }
+    });
+    document.body.appendChild(box); draw();
+    return false;
+  }
+  function closeViewer(){ document.getElementById("sa-viewer")?.remove(); }
   function reassignHtml(t){
     const b = branchOf(t.branch_id);
     if(!b || !t.can_manage_hint) return "";
@@ -205,7 +248,8 @@
         ${t.require_photo?`<span class="sub">📷 要照片</span>`:""}</div>
       <div class="sub" style="margin-top:4px">${meta.map(h).join(" · ")}</div>
       ${t.detail?`<div style="margin-top:4px">${h(t.detail)}</div>`:""}
-      ${rejected?`<div class="sa-hint">↩️ 打回过:${h(t.review_note)}</div>`:""}
+      ${rejected?`<div class="sa-hint">↩️ 打回过：${h(t.review_note)}</div>`:""}
+      ${t.status==="submitted"&&t.review_note&&t.reviewed_at?`<div class="sa-hint">↩️ 上次打回：${h(t.review_note)}${t.submit_count>1?`（第 ${t.submit_count} 次交）`:"（重交）"}</div>`:""}
       ${t.status==="submitted"?`${t.submit_note?`<div style="margin-top:6px">📝 ${h(t.submit_note)}</div>`:""}${photosHtml(t.photos)}${aiHtml(t)}`:""}
       ${t.status==="approved"&&(t.photos||[]).length?`<details style="margin-top:6px"><summary class="sub">看交差照片(${t.photos.length})</summary>${photosHtml(t.photos)}</details>`:""}
       <div class="actions" style="margin-top:8px">
@@ -218,24 +262,41 @@
       <div id="sa-ev-${t.id}"></div>
     </div>`;
   }
-  function listHtml(){
-    const items = ((SA.list&&SA.list.items)||[]).map(t=>({...t, can_manage_hint:true}));
-    const groups = [
-      ["submitted", "🧐 等您审核"], ["todo", "⏳ 店员在做"],
-    ];
-    const over = items.filter(t=>t.status==="todo").sort((a,b)=>(b.overdue-a.overdue)||((a.due_at||9e12)-(b.due_at||9e12)));
-    const pick = s=>s==="todo"?over:items.filter(t=>t.status===s);
-    const ended = items.filter(t=>["approved","cancelled","rejected"].includes(t.status));
+  function items(){ return ((SA.list&&SA.list.items)||[]).map(t=>({...t, can_manage_hint:true})); }
+  function filterNote(){
+    const label = {submitted:"等审核", todo:"待做", approved:"已通过", cancelled:"已取消"}[SA.filter.status];
+    return label ? ` <span class="sa-filtered">（已按「${label}」筛选）</span>` : "";
+  }
+  /* 「AI 先看照片」：老板没表过态时，审核区第一次有交差就问一句；表过态后变成一个开关 */
+  function aiControl(){
     const m = SA.meta || {};
     const u = me();
-    const owner = u && (u.role==="owner"||u.role==="root");
-    // 「AI 先看照片」是审核时用的计费开关:放在「等您审核」标题旁边,一眼能看到也好找
-    const aiToggle = owner ? `<label class="sa-ai-toggle"><input type="checkbox" ${m.ai_check_enabled?"checked":""} onchange="PH_STAFF_ADMIN._aiToggle(this.checked)">
-      AI 先看照片${m.prices&&m.prices.staff_ai_check?`（每次 ${m.prices.staff_ai_check} 点）`:""}</label>` : "";
-    let html = groups.map(([s, title])=>{ const list = pick(s);
-      return `<h3 style="margin-top:18px">${title}（${list.length}）${s==="submitted"?aiToggle:""}</h3>`
-        + (list.length ? list.map(taskHtml).join("") : `<div class="sub">暂时没有</div>`); }).join("");
-    if(ended.length) html += `<details style="margin-top:16px"><summary><b>已结束(${ended.length})</b></summary>${ended.map(taskHtml).join("")}</details>`;
+    if(!(u && (u.role==="owner"||u.role==="root"))) return "";
+    const price = m.prices&&m.prices.staff_ai_check ? `每次 ${m.prices.staff_ai_check} 点` : "";
+    if(m.ai_check_asked===false){
+      return `<div class="sa-ask" id="sa-ai-ask"><b>要不要让 AI 先帮您看照片？</b>${price?`<span class="sub">（${price}）</span>`:""}
+        <div class="sub" style="margin-top:4px">店员交差后，AI 先看一眼照片，给您一句「像是做好了 / 拿不准 / 像是没做好」，最后还是您来定。不开也能照常审核。</div>
+        <div class="actions"><button type="button" class="btn sm pri" onclick="PH_STAFF_ADMIN._aiToggle(true)">打开</button>
+          <button type="button" class="btn sm" onclick="PH_STAFF_ADMIN._aiToggle(false)">先不用</button></div></div>`;
+    }
+    return `<label class="sa-ai-toggle"><input type="checkbox" ${m.ai_check_enabled?"checked":""} onchange="PH_STAFF_ADMIN._aiToggle(this.checked)">
+      AI 先看照片${price?`（${price}）`:""}</label>`;
+  }
+  function reviewHtml(){
+    const list = items().filter(t=>t.status==="submitted");
+    const ai = aiControl();
+    const askFirst = ai.includes("sa-ask");
+    return `<h3 style="margin-top:0">🧐 等您审核（${list.length}）${filterNote()}${askFirst?"":ai}</h3>`
+      + (askFirst && list.length ? ai : "")
+      + (list.length ? list.map(taskHtml).join("") : `<div class="sub">暂时没有</div>`);
+  }
+  function restHtml(){
+    const all = items();
+    const doing = all.filter(t=>t.status==="todo").sort((a,b)=>(b.overdue-a.overdue)||((a.due_at||9e12)-(b.due_at||9e12)));
+    const ended = all.filter(t=>["approved","cancelled","rejected"].includes(t.status));
+    let html = `<h3 style="margin-top:18px">⏳ 店员在做（${doing.length}）${filterNote()}</h3>`
+      + (doing.length ? doing.map(taskHtml).join("") : `<div class="sub">暂时没有</div>`);
+    if(ended.length) html += `<details style="margin-top:16px" ${SA.filter.status&&!["submitted","todo"].includes(SA.filter.status)?"open":""}><summary><b>已结束(${ended.length})</b></summary>${ended.map(taskHtml).join("")}</details>`;
     if(SA.list&&SA.list.next_before_id) html += `<div class="actions"><button type="button" class="btn" onclick="PH_STAFF_ADMIN._more()">加载更多</button></div>`;
     return html;
   }
@@ -243,10 +304,14 @@
     const main = $("#main"); if(!main) return;
     const m = SA.meta || {branches:[]};
     const price = (m.prices||{}).staff_parse;
-    main.innerHTML = `<div class="hubhead"><h2>🧑‍🍳 派给店员</h2>
-        <div class="sub">把活派给店里的真人,店员用手机拍照交差,AI 先帮您看一眼照片,最后您来定。</div></div>
-      ${!m.branches.length?`<div class="card">${noStoreEmptyState("还没有可以派活的门店。建好门店，再到「我的 → 团队与权限」给店员分配门店。")}</div>`:""}
-      <div class="card sa-one">
+    const pending = items().filter(t=>t.status==="submitted").length;
+    // 有交差等着看：审核区放最上面；从「去审核」进来时派活区收成一行，要派再点开
+    const reviewFirst = pending>0 || SA.reviewMode;
+    const folded = SA.reviewMode && !SA.dispatchOpen && !SA.drafts.length && !SA.parsing && !(SA.oneText||"").trim();
+    const reviewCard = `<div class="card" id="sa-review">${reviewHtml()}</div>`;
+    const dispatchCard = folded
+      ? `<div class="card sa-one" id="sa-dispatch"><button type="button" class="btn" onclick="PH_STAFF_ADMIN._openDispatchBox()" ${!m.branches.length?"disabled":""}>＋ 派一件新活</button></div>`
+      : `<div class="card sa-one" id="sa-dispatch">
         <h3 style="margin-top:0">🗣️ 一句话派活</h3>
         <textarea id="sa-one" maxlength="500" placeholder="比如:人民路店明天中午前把冷柜清一遍,拍照给我">${h(SA.oneText||"")}</textarea>
         <div class="actions">
@@ -258,7 +323,12 @@
         </div>
         <div class="sub">AI 只帮您填表,门店和人对不上时会留空让您选,确认后才会派出去。</div>
         <div id="sa-drafts"></div>
-      </div>
+      </div>`;
+    main.innerHTML = `<div class="hubhead"><h2>🧑‍🍳 派给店员</h2>
+        <div class="sub">把活派给店里的真人,店员用手机拍照交差,您(或店长)看照片定通过还是打回。</div></div>
+      ${!m.branches.length?`<div class="card">${noStoreEmptyState("还没有可以派活的门店。建好门店，再到「我的 → 团队与权限」给店员分配门店。")}</div>`:""}
+      ${reviewFirst?reviewCard:""}
+      ${dispatchCard}
       <div class="card">
         <div class="sa-bar">
           <select onchange="PH_STAFF_ADMIN._filter('branch',this.value)" aria-label="按门店看">
@@ -267,7 +337,8 @@
             ${[["","全部状态"],["submitted","等审核"],["todo","待做"],["approved","已通过"],["cancelled","已取消"]].map(([v,l])=>`<option value="${v}" ${v===SA.filter.status?"selected":""}>${l}</option>`).join("")}</select>
           <button type="button" class="btn sm" onclick="PH_STAFF_ADMIN._reload()">🔄 刷新</button>
         </div>
-        ${listHtml()}
+        ${reviewFirst?"":`<div style="margin-top:12px">${reviewHtml()}</div>`}
+        ${restHtml()}
       </div>`;
     drawDrafts();
     if(SA.focus){ const el = document.getElementById("sa-task-"+SA.focus); if(el) el.scrollIntoView({block:"center"}); }
@@ -291,6 +362,10 @@
       return;
     }
     SA.focus = arg || null;
+    // 「去审核」只在这一次进来时生效；平时直接打开这一页是正常的派活视图
+    if(SA.pendingReview){ SA.reviewMode = true; SA.pendingReview = false; }
+    else if(!arg){ SA.reviewMode = false; }
+    SA.dispatchOpen = false;
     const [meta] = await Promise.all([api("/staff/meta"), loadList()]);
     SA.meta = {...(meta||{}), branches:Array.isArray(meta?.branches)?meta.branches:[]};
     if(SA.prefill){ SA.drafts = SA.drafts.filter(d=>!d.sent).concat([blankDraft(SA.prefill)]); SA.prefill = null; }
@@ -301,13 +376,20 @@
     try{
       SHELL_DIRTY = true;
       if(STATE?.notifications) STATE.notifications = STATE.notifications.filter(n=>!(n.kind==="staff_task_submitted" && n.link===`#/staff-tasks/${id}`));
+      if(typeof STATE==="object" && STATE && typeof STATE.staff_review_count==="number")
+        STATE.staff_review_count = Math.max(0, STATE.staff_review_count-1);
+      // 顶部导航「今天」上的待处理角标马上跟着变，不用等换页面
+      if(typeof nav==="function" && typeof ME!=="undefined" && ME && STATE) nav();
     }catch(_){}
   }
-  /* 今天页「N 件店员交差等您审核 → 去审核」:一次性把状态筛选预设成「等审核」 */
+  /* 今天页「N 件店员交差等您审核 → 去审核」:审核区放最上面、派活区收成一行。
+     不改状态筛选：审完打回的活回到「店员在做」，一直看得到 */
   async function openReview(){
-    SA.filter.status = "submitted";
-    if(location.hash.startsWith("#/staff-tasks")){ try{ await loadList(); draw(); }catch(e){ toast(e.message); } }
-    else location.hash = "#/staff-tasks";
+    SA.dispatchOpen = false;
+    if(location.hash.startsWith("#/staff-tasks")){
+      SA.reviewMode = true;
+      try{ await loadList(); draw(); document.getElementById("sa-review")?.scrollIntoView({block:"start"}); }catch(e){ toast(e.message); }
+    } else { SA.pendingReview = true; location.hash = "#/staff-tasks"; }
   }
   async function review(id, approve){
     let note = "";
@@ -319,9 +401,19 @@
     }
     try{
       await api(`/staff/tasks/${id}/review`, {method:"POST", body:{action:approve?"approve":"reject", note}});
-      toast(approve?"👍 已通过":"↩️ 已打回,店员会收到通知");
       reviewSettled(id);
-      await loadList(); draw();
+      await loadList();
+      let tip = approve ? "👍 已通过，在「已结束」里能找到" : "↩️ 已打回，这件活回到「店员在做」，店员会收到通知";
+      // 只看「等审核」时审完就空了：自动清掉筛选，别让打回的活看起来像丢了
+      if(SA.filter.status==="submitted" && !items().some(t=>t.status==="submitted")){
+        SA.filter.status = "";
+        await loadList();
+        if(!approve) tip = "↩️ 已打回。打回的活已回到「店员在做」";
+      }
+      if(!approve) SA.focus = id;
+      if(SA.reviewMode && !items().some(t=>t.status==="submitted")) SA.reviewMode = false;
+      toast(tip);
+      draw();
     }catch(e){ toast(e.message); }
   }
   async function cancel(id){
@@ -347,8 +439,11 @@
     }catch(e){ toast(e.message); }
   }
   async function aiToggle(on){
-    try{ await api("/staff/settings", {method:"PUT", body:{ai_check_enabled:!!on}}); SA.meta.ai_check_enabled = !!on;
-      toast(on?"已打开:店员交差后 AI 先看照片":"已关闭 AI 看照片"); }
+    const asking = SA.meta && SA.meta.ai_check_asked===false;
+    try{ await api("/staff/settings", {method:"PUT", body:{ai_check_enabled:!!on}});
+      SA.meta.ai_check_enabled = !!on; SA.meta.ai_check_asked = true;
+      toast(on?"已打开：以后店员交差，AI 先看照片":asking?"好的，先不用。想用时勾上「AI 先看照片」就行":"已关闭 AI 看照片");
+      if(asking) draw(); }
     catch(e){ toast(e.message); draw(); }
   }
   function cleanAction(text){
@@ -361,6 +456,7 @@
       source:opts.source||"boss", source_ref:String(opts.source_ref||"").slice(0, 200)};
     if(location.hash.startsWith("#/staff-tasks")){
       SA.drafts = SA.drafts.filter(d=>!d.sent).concat([blankDraft(SA.prefill)]); SA.prefill = null;
+      if(!document.getElementById("sa-drafts")){ SA.dispatchOpen = true; draw(); }
       drawDrafts(); document.getElementById("sa-drafts")?.scrollIntoView({block:"center"});
     } else location.hash = "#/staff-tasks";
   }
@@ -368,7 +464,8 @@
   window.PH_STAFF_ADMIN = {
     canDispatch, openDispatch, openReview,
     _set:setField, _parse:parse, _sendAll:sendAll, _review:review, _cancel:cancel, _assign:assign,
-    _events:events, _aiToggle:aiToggle,
+    _events:events, _aiToggle:aiToggle, _view:openViewer,
+    _openDispatchBox(){ SA.dispatchOpen = true; draw(); document.getElementById("sa-one")?.focus(); },
     _add(){ SA.drafts.push(blankDraft()); drawDrafts(); },
     _drop(i){ SA.drafts.splice(i, 1); drawDrafts(); },
     _clear(){ SA.drafts = []; drawDrafts(); },

@@ -75,7 +75,20 @@ class TeamCreateMobileTests(unittest.IsolatedAsyncioTestCase):
                                           "initial_password": "k7mn2pqr8stv3wxy", "branch_ids": [4]}})
             await page.wait_for_selector("text=新建账号")
             # 已分门店的员工在团队页也叫「店员」,和派活页一致
-            self.assertIn("店员", await page.locator(".topic", has_text="xiaoli").inner_text())
+            row = page.locator(".topic", has_text="xiaoli")
+            self.assertIn("店员", await row.inner_text())
+            # 店员行只露三个常用按钮，直接写出负责哪家店；其余收进「⋯ 更多」
+            self.assertIn("负责门店：人民路店", await row.inner_text())
+            visible = [b.strip() for b in await row.locator("button:visible").all_inner_texts()]
+            self.assertEqual(["🏪 负责门店", "🔑 重置密码", "⏸ 停用"], visible)
+            self.assertTrue(await row.locator(".tm-row-more summary", has_text="⋯ 更多").is_visible())
+            self.assertFalse(await row.get_by_role("button", name="🧩 行业/板块").is_visible())
+            await row.locator(".tm-row-more summary").click()
+            self.assertTrue(await row.get_by_role("button", name="🧩 行业/板块").is_visible())
+            self.assertTrue(await row.get_by_role("button", name="🤝 分配 AI 专家").is_visible())
+            await row.locator(".tm-row-more summary").click()
+            row_height = await row.evaluate("e=>e.getBoundingClientRect().height")
+            self.assertLess(row_height, 160)   # 以前 7 个按钮要折 3 行以上
             await page.get_by_role("button", name="➕ 新建账号").click()
             await page.wait_for_selector("#tm-create")
             kinds = await page.locator("#tm-create .tm-kind b").all_inner_texts()
@@ -114,7 +127,10 @@ class TeamCreateMobileTests(unittest.IsolatedAsyncioTestCase):
                               "allowed_emp_idxs": [], "branch_ids": [4]}, body)
             text = await page.locator("#tm-send-text").inner_text()
             origin = await page.evaluate("location.origin")
-            self.assertEqual(f"账号：xiaowang\n初始密码：k7mn2pqr8stv3wxy\n手机打开：{origin}/staff", text.strip())
+            # 有品牌、有用途、有首登提醒，店员收到不会当成陌生链接
+            self.assertEqual("【王记火锅】给您开了派活账号，用来看每天的活、拍照交差：\n"
+                             f"账号：xiaowang\n初始密码：k7mn2pqr8stv3wxy\n手机打开：{origin}/staff\n"
+                             "第一次登录会让您改一个自己好记的密码。", text.strip())
             self.assertIn("只显示这一次", await page.locator("#tm-sendcard").inner_text())
             await page.locator("#tm-send-copy").click()
             await page.wait_for_function("document.querySelector('#tm-send-copy').textContent.includes('已复制')")
