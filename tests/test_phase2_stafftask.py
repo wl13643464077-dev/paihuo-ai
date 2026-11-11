@@ -406,6 +406,71 @@ class TodoTests(StaffTaskBase):
         self.assertTrue(later["has_any_task"])
 
 
+class StoreTasksTests(StaffTaskBase):
+    """店长手机首页「本店在做的活」：只看自己门店，店员拿不到别人的活。"""
+
+    def test_manager_sees_own_store_tasks_only_and_staff_gets_nothing_extra(self):
+        mine_a = self.create(20, assignee_user_id=23, title="冷柜清洗", due_at=NOW + 3600)
+        other_b = self.create(20, branch_id=self.b, assignee_user_id=24, title="中山路盘点")
+        rejected = self.create(22, assignee_user_id=23, title="擦玻璃")
+        self.submit(23, rejected["id"], now=NOW + 60)
+        stafftask.review_task(2, self.u(22), rejected["id"], approve=False,
+                              note="没擦干净", now=NOW + 90)
+        waiting = self.create(20, assignee_user_id=23, title="补货")
+        self.submit(23, waiting["id"], now=NOW + 100)
+        approved = self.create(20, assignee_user_id=23, title="已通过的")
+        self.submit(23, approved["id"], now=NOW + 110)
+        stafftask.review_task(2, self.u(20), approved["id"], approve=True, now=NOW + 120)
+        own = self.create(20, assignee_user_id=22, title="店长自己的活")
+        foreign = stafftask.create_task(3, self.u(30), title="外家活", branch_id=self.other,
+                                        now=NOW)
+
+        manager = stafftask.todo_for_user(2, 22, now=NOW + 200)
+        got = {t["id"]: t for t in manager["store_tasks"]}
+        # 等审核排第一，其次被打回，再是在做的
+        self.assertEqual([waiting["id"], rejected["id"], mine_a["id"]],
+                         [t["id"] for t in manager["store_tasks"]])
+        self.assertEqual("submitted", got[waiting["id"]]["store_state"])
+        self.assertEqual("rejected", got[rejected["id"]]["store_state"])
+        self.assertEqual("xiaowang", got[mine_a["id"]]["assignee_name"])
+        self.assertTrue(got[mine_a["id"]]["due_text"])
+        for absent in (other_b, approved, own, foreign):
+            self.assertNotIn(absent["id"], got)
+        # 另一家店的店长只看到自己店
+        zhongshan = stafftask.todo_for_user(2, 25, now=NOW + 200)
+        self.assertEqual([other_b["id"]], [t["id"] for t in zhongshan["store_tasks"]])
+        # 店员一律没有
+        for uid in (23, 24):
+            self.assertEqual([], stafftask.todo_for_user(2, uid, now=NOW + 200)["store_tasks"])
+        self.assertEqual([], stafftask.store_tasks_for_manager(2, stafftask._load_user(2, 23)))
+        # 店长能打开只读详情，审核卡能用
+        detail = stafftask.get_task(2, self.u(22), waiting["id"])
+        self.assertTrue(detail["can_manage"])
+        # 被取消门店绑定后立即看不到
+        inspection.set_member_branches(20, 22, [self.b])
+        moved = stafftask.todo_for_user(2, 22, now=NOW + 200)
+        self.assertEqual({other_b["id"]}, {t["id"] for t in moved["store_tasks"]})
+
+    def test_unassigned_store_task_is_not_listed_twice(self):
+        open_task = self.create(20, title="谁有空谁做")
+        manager = stafftask.todo_for_user(2, 22, now=NOW)
+        self.assertIn(open_task["id"], [t["id"] for t in manager["items"] if t["kind"] == "task"])
+        self.assertNotIn(open_task["id"], [t["id"] for t in manager["store_tasks"]])
+
+    def test_dispatcher_label_shows_role(self):
+        by_boss = self.create(20, assignee_user_id=23)
+        by_manager = self.create(22, assignee_user_id=23)
+        by_director = self.create(21, assignee_user_id=23)
+        self.assertEqual("老板 boss", stafftask.get_task(2, self.u(23), by_boss["id"])["dispatcher_label"])
+        self.assertEqual("店长 renmin-dz",
+                         stafftask.get_task(2, self.u(23), by_manager["id"])["dispatcher_label"])
+        self.assertEqual("总监 zongjian",
+                         stafftask.get_task(2, self.u(23), by_director["id"])["dispatcher_label"])
+        system = stafftask.create_task(2, None, title="系统派的", branch_id=self.a,
+                                       assignee_user_id=23, now=NOW)
+        self.assertEqual("", stafftask.get_task(2, self.u(23), system["id"])["dispatcher_label"])
+
+
 class OneLinerTests(StaffTaskBase):
     def parse(self, uid, text, data=None, exc=None):
         prompts = []

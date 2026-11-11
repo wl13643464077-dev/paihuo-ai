@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#fff7e6">
-<title>派活 · 店员</title>
+<title>派活 · 门店</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <style>
 :root{--ink:#33291f;--bg:#fff7e6;--card:#fffdf7;--sub:#6f5f4c;--pri:#ffd166;--ok:#2f9e5b;--bad:#d9480f;--warn:#e8890c;--line:rgba(51,41,31,.18)}
@@ -36,6 +36,7 @@ h2{font-size:18px;margin:18px 0 8px}
 .tag.later{background:#fff}
 .tag.approved,.tag.checked{background:#d3f9d8}
 .empty{padding:28px 10px;text-align:center;color:var(--sub);font-size:17px}
+.empty.small{padding:12px 10px;font-size:16px}
 .panel{background:var(--card);border:2.5px solid var(--ink);border-radius:16px;padding:14px;margin:12px 0}
 .panel p{margin:6px 0}
 .back{background:none;border:none;font-size:17px;font-weight:800;color:var(--ink);padding:12px 0;min-height:48px;cursor:pointer;font-family:inherit}
@@ -54,14 +55,15 @@ textarea{min-height:96px;resize:vertical}
 .msg.err{background:#ffe3e3;color:#8a1c1c}
 .msg.ok{background:#d3f9d8;color:#1b5e2d}
 .msg.info{background:#fff1bd}
-.item{display:flex;gap:10px;align-items:center;border-top:2px dashed var(--line);padding:12px 0}
+/* 手机上事项文字占满一行，按钮放在下面整行，不把文字挤成一窄条 */
+.item{display:flex;flex-direction:column;gap:8px;align-items:stretch;border-top:2px dashed var(--line);padding:12px 0}
 .item:first-child{border-top:none}
-.item .tx{flex:1;min-width:0;font-size:17px;word-break:break-word}
+.item .tx{min-width:0;font-size:17px;word-break:break-word}
 .item .tx.done{color:var(--sub)}
-.item .btn{width:auto;min-width:108px;flex:none}
-.item .donebox{flex:none;display:flex;flex-direction:column;align-items:flex-end}
+.item .btn{width:100%;min-height:48px}
+.item .donebox{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:44px}
 .item .donebox .tag{margin-right:0}
-.item .donebox .linkbtn{padding:6px 4px;min-height:40px;font-size:15px}
+.item .donebox .linkbtn{padding:8px 12px;min-height:44px;min-width:64px;font-size:15px}
 .ai{border-radius:12px;padding:10px 12px;margin:8px 0;font-weight:700}
 .ai.pass{background:#d3f9d8}.ai.doubt{background:#fff1bd}.ai.fail{background:#ffe3e3}.ai.none{background:#f1f3f5}
 .photos{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:8px 0}
@@ -91,6 +93,6 @@ textarea{min-height:96px;resize:vertical}
   </header>
   <main id="main" aria-live="polite"><div class="empty"><span class="spin"></span> 正在打开…</div></main>
 </div>
-<script src="/static/staff.js?v=4"></script>
+<script src="/static/staff.js?v=5"></script>
 </body>
 </html>
