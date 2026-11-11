@@ -168,6 +168,7 @@
     }
     SA.sending = false;
     toast(ok===todo.length ? `✅ 派出去 ${ok} 件,店员手机上能看到` : `派出去 ${ok} 件,还有 ${todo.length-ok} 件没成功`);
+    if(ok>0){ try{ window.markSetupChanged?.({staff_task:true}); }catch(_){} }   // 上手卡「派第一件活」立刻打勾
     if(SA.drafts.every(d=>d.sent)) SA.drafts = [];
     await loadList(); draw();
   }
