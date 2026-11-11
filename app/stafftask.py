@@ -1248,6 +1248,30 @@ def _sort_key(item: Mapping[str, Any]) -> tuple:
     return (rank, due_value, str(item.get("kind") or ""), str(item.get("id") or ""))
 
 
+def _ever_had_task(tid: int, uid: int) -> bool:
+    """这个人以前有没有被派过活（派活 / 清单 / 巡店整改，任何状态都算）。"""
+    mine_or_branch = (
+        "(assignee_user_id=? OR (assignee_user_id IS NULL AND branch_id IN "
+        "(SELECT branch_id FROM user_branch WHERE tenant_id=? AND user_id=?)))"
+    )
+    checks = (
+        ("SELECT 1 FROM staff_task WHERE tenant_id=? AND deleted_at IS NULL AND "
+         + mine_or_branch + " LIMIT 1", (tid, uid, tid, uid)),
+        ("SELECT 1 FROM checklist_run WHERE tenant_id=? AND "
+         + mine_or_branch + " LIMIT 1", (tid, uid, tid, uid)),
+        ("SELECT 1 FROM inspection_action WHERE tenant_id=? AND assignee_user_id=? "
+         "LIMIT 1", (tid, uid)),
+    )
+    for sql, params in checks:
+        try:
+            if db.one(sql, params):
+                return True
+        except Exception:
+            # 清单 / 巡店模块的表可能还没建，不影响待办本身
+            continue
+    return False
+
+
 def todo_for_user(tid: int, uid: int, *, now: float | None = None) -> dict:
     """店员「我的待办」：派给我的活 + 今天的清单 + 派给我的巡店整改。
 
@@ -1309,6 +1333,8 @@ def todo_for_user(tid: int, uid: int, *, now: float | None = None) -> dict:
         "actions": actions,
         "items": items,
         "reviews": reviews,
+        # 店员手机首页的空状态要区分「从没人派过活」和「活都做完了」
+        "has_any_task": bool(items) or _ever_had_task(tid, uid),
         "counts": {
             "overdue": sum(1 for i in items if i.get("urgency") == "overdue"),
             "today": sum(1 for i in items if i.get("urgency") == "today"),

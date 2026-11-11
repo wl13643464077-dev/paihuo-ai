@@ -229,8 +229,14 @@ class V51FrontendContractTests(unittest.TestCase):
 
     def test_new_store_uses_product_dialog_not_native_prompt(self):
         handler = function(self.source, "inspectionNewBranch")
-        self.assertIn("uiPrompt(", handler)
+        form = function(self.source, "openStoreForm")
+        # 一张表单填完名称/区域/地址,不再连弹三个单字段对话框
+        self.assertIn("openStoreForm(", handler)
+        self.assertNotIn("uiPrompt(", handler)
         self.assertNotIn("isAdmin()", handler)
+        self.assertIn("建好门店", form)
+        self.assertIn("请填写门店名称", form)
+        self.assertIn('addEventListener("hashchange",closeStoreForm)', self.source)
         self.assertNotRegex(self.source, r"(?<!ui)\bprompt\s*\(")
 
     def test_boss_metrics_keep_null_unavailable_and_employee_detail_pages(self):

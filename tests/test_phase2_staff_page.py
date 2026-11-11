@@ -54,7 +54,7 @@ class StaffPageTests(unittest.IsolatedAsyncioTestCase):
     _capture_unexpected_browser_errors = _browser.FrontendBrowserBehaviorTests._capture_unexpected_browser_errors
     _assert_no_browser_errors = _browser.FrontendBrowserBehaviorTests._assert_no_browser_errors
 
-    async def _open(self, playwright):
+    async def _open(self, playwright, todo=TODO):
         self.submitted = []
         browser = await _launch_chromium(playwright, self.executable)
         context = await browser.new_context(viewport={"width": 390, "height": 844})
@@ -70,14 +70,28 @@ class StaffPageTests(unittest.IsolatedAsyncioTestCase):
             elif path == "/api/staff/tasks/41":
                 payload = TASK
             else:
-                payload = {"/api/staff/todo": TODO}.get(path, {})
+                payload = {"/api/staff/todo": todo}.get(path, {})
             await route.fulfill(status=200, content_type="application/json",
                                 body=json.dumps(payload, ensure_ascii=False))
 
         await page.route("**/api/**", api_route)
         await page.goto(f"{self.base}/static/staff.html")
-        await page.wait_for_function("document.querySelectorAll('.card').length===3")
+        if todo["items"]:
+            await page.wait_for_function("document.querySelectorAll('.card').length===3")
+        else:
+            await page.wait_for_selector(".empty")
         return browser, context, page, errors
+
+    async def test_empty_home_tells_never_assigned_from_all_done(self):
+        empty = {**TODO, "items": [], "reviews": [], "user": {**TODO["user"], "can_dispatch": False}}
+        async with async_playwright() as playwright:
+            browser, context, page, errors = await self._open(playwright, {**empty, "has_any_task": False})
+            self.assertEqual("还没有人给您派活", (await page.locator(".empty").inner_text()).strip())
+            await browser.close()
+            browser, context, page, errors = await self._open(playwright, {**empty, "has_any_task": True})
+            self.assertIn("今天的活都做完了", await page.locator(".empty").inner_text())
+            self._assert_no_browser_errors(errors)
+            await browser.close()
 
     async def test_phone_home_task_submit_and_offline_notice(self):
         async with async_playwright() as playwright:

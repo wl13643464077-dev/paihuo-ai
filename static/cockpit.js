@@ -122,7 +122,8 @@
 
   /* ---------- 图表（纯 SVG） ---------- */
   function trendChart(rows){
-    if(!rows?.length) return `<div class="cp-empty">暂无数据</div>`;
+    // 没数据（或全是 0）就不画坐标轴，免得出现「0 / 1 / 1」这种怪刻度
+    if(!rows?.length||!rows.some(r=>(r.ai+r.staff+r.checklist)>0)) return `<div class="cp-empty" data-trend-empty>这段时间还没有完成的活</div>`;
     const W=640,H=220,L=30,R=8,T=12,B=26, iw=W-L-R, ih=H-T-B;
     const max=Math.max(1,...rows.map(r=>r.ai+r.staff+r.checklist));
     const step=iw/rows.length, bw=Math.max(3,Math.min(26,step*.62));
@@ -271,7 +272,7 @@
   }
 
   function storeCards(rows){
-    if(!rows.length) return `<div class="cp-empty">还没有门店。在「巡店」里添加门店后，这里会显示每家店的执行情况</div>`;
+    if(!rows.length) return noStoreEmptyState("还没有门店。建好门店后，这里会显示每家店的执行情况。");
     CP.pick.stores=rows;
     const comp=(label,v)=>`<div class="cp-comp"><span>${label}</span><div class="bar"><i style="width:${v==null?0:Math.max(0,Math.min(100,v))}%"></i></div><span>${v==null?"—":Math.round(v)}</span></div>`;
     return `<div class="cp-stores">${rows.map((s,i)=>`<div class="cp-store ${s.needs_attention?"warn":""}">
@@ -335,7 +336,7 @@
   function openDispatch(o){
     const bs=branchesMeta();
     if(!CP.meta?.can_dispatch) return toast("当前账号不能派活");
-    if(!bs.length) return toast("还没有门店，先在「巡店」里添加门店，才能把事情下发下去");
+    if(!bs.length){ toast("还没有门店，先建一家门店，才能把事情下发下去"); openStoreForm(); return; }
     const st={title:o.title||"", detail:o.detail||"", branch_id:o.branch_id||bs[0].id, assignee:o.assignee||null,
       level:o.assignee?"person":"store", priority:o.priority||"normal", due:dueText(o.days), photo:true, ref:o.ref||"manual"};
     if(!bs.some(b=>b.id===st.branch_id)) st.branch_id=bs[0].id;

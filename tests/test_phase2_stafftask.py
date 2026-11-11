@@ -360,6 +360,20 @@ class TodoTests(StaffTaskBase):
         self.assertTrue(manager["user"]["can_dispatch"])
         self.assertEqual([], stafftask.todo_for_user(2, 25, now=NOW)["reviews"])
 
+    def test_todo_has_any_task_tells_never_assigned_from_all_done(self):
+        # 从没被派过活：空待办 + has_any_task=False（手机端显示「还没有人给您派活」）
+        fresh = stafftask.todo_for_user(2, 24, now=NOW)
+        self.assertEqual([], fresh["items"])
+        self.assertFalse(fresh["has_any_task"])
+        # 有活没做完：True
+        task = self.create(20, assignee_user_id=23)
+        self.assertTrue(stafftask.todo_for_user(2, 23, now=NOW)["has_any_task"])
+        # 交了、过了几天从列表里掉出去：待办空了，但仍然算「派过活」
+        self.submit(23, task["id"])
+        later = stafftask.todo_for_user(2, 23, now=NOW + 5 * 86400)
+        self.assertEqual([], later["items"])
+        self.assertTrue(later["has_any_task"])
+
 
 class OneLinerTests(StaffTaskBase):
     def parse(self, uid, text, data=None, exc=None):

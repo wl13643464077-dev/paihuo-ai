@@ -139,7 +139,8 @@
           <button type="button" class="btn pri" data-go="dispatch">📤 派活</button>
           <button type="button" class="btn" data-go="reviews">🧐 待我审核${t.reviews&&t.reviews.length?`（${t.reviews.length}）`:""}</button></div>` : "")
       + `<h2>我的待办${todo.length?`（${todo.length}）`:""}</h2>`
-      + (todo.length ? todo.map(cardHtml).join("") : `<div class="empty">🎉 今天的活都做完了</div>`)
+      + (todo.length ? todo.map(cardHtml).join("")
+          : (t.has_any_task===false ? `<div class="empty">还没有人给您派活</div>` : `<div class="empty">🎉 今天的活都做完了</div>`))
       + (rest.length ? `<h2>已交 / 已做完</h2>`+rest.map(cardHtml).join("") : "")
       + `<div class="foot"><button type="button" class="btn" data-act="refresh">🔄 刷新</button>
           <a class="btn" href="/?full=1">💻 完整版</a>

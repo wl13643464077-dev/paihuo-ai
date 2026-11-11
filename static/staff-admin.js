@@ -218,7 +218,7 @@
     const price = (m.prices||{}).staff_parse;
     main.innerHTML = `<div class="hubhead"><h2>🧑‍🍳 派给店员</h2>
         <div class="sub">把活派给店里的真人,店员用手机拍照交差,AI 先帮您看一眼照片,最后您来定。</div></div>
-      ${!m.branches.length?`<div class="card"><div class="empty">还没有可以派活的门店。先在「门店 → 巡店」里建门店,再到「我的 → 团队与权限」给店员分配门店。</div></div>`:""}
+      ${!m.branches.length?`<div class="card">${noStoreEmptyState("还没有可以派活的门店。建好门店，再到「我的 → 团队与权限」给店员分配门店。")}</div>`:""}
       <div class="card sa-one">
         <h3 style="margin-top:0">🗣️ 一句话派活</h3>
         <textarea id="sa-one" maxlength="500" placeholder="比如:人民路店明天中午前把冷柜清一遍,拍照给我">${h(SA.oneText||"")}</textarea>
