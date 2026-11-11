@@ -240,7 +240,7 @@
   function taskHtml(t){
     const rejected = t.status==="todo" && t.review_note && t.reviewed_at;
     const meta = [t.branch_name, t.assignee_name?`👤 ${t.assignee_name}`:"👤 还没指定人", t.due_text?`截止 ${t.due_text}`:"",
-      t.created_by_name?`${t.created_by_name} 派的`:"", t.remind_count?`已催 ${t.remind_count} 次`:""].filter(Boolean);
+      (t.dispatcher_label||t.created_by_name)?`${t.dispatcher_label||t.created_by_name} 派的`:"", t.remind_count?`已催 ${t.remind_count} 次`:""].filter(Boolean);
     return `<div class="sa-task ${t.overdue?"sa-over":""} ${String(SA.focus)===String(t.id)?"sa-focus":""}" id="sa-task-${t.id}">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <span class="pill ${t.status==="approved"?"done":t.status==="cancelled"?"cancelled":t.status==="submitted"?"awaiting_review":"running"}">${h(t.overdue?"逾期":STATUS[t.status]||t.status)}</span>

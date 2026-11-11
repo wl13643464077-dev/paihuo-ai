@@ -495,6 +495,21 @@ def _names(tid: int, table: str, ids: Iterable[Any], column: str) -> dict[int, s
     return result
 
 
+def _role_labels(tid: int, ids: Iterable[Any]) -> dict[int, str]:
+    """派活人的身份(老板/总监/店长/店员)，按库里的账号行算，前端不自己猜。"""
+    wanted = sorted({int(i) for i in ids if i})
+    result: dict[int, str] = {}
+    for start in range(0, len(wanted), 500):
+        chunk = wanted[start:start + 500]
+        marks = ",".join("?" for _ in chunk)
+        for row in db.q(
+            f"SELECT id,role,job_title FROM users WHERE tenant_id=? AND id IN ({marks})",
+            (int(tid), *chunk),
+        ):
+            result[int(row["id"])] = role_label(row)
+    return result
+
+
 def _urgency(due_at: Any, now: float) -> str:
     if due_at is None:
         return "later"
@@ -548,6 +563,7 @@ def _public(
     for r in rows:
         user_ids += [r.get("assignee_user_id"), r.get("created_by"), r.get("reviewed_by")]
     user_names = _names(tid, "users", user_ids, "username")
+    dispatcher_roles = _role_labels(tid, (r.get("created_by") for r in rows))
     submit_counts = _submit_counts(tid, [
         int(r["id"]) for r in rows
         if r.get("review_note") and r.get("reviewed_at") and r.get("submitted_at")
@@ -590,6 +606,11 @@ def _public(
             "overdue": status == "todo" and due_at is not None and float(due_at) < now,
             "created_by": r.get("created_by"),
             "created_by_name": user_names.get(int(r.get("created_by") or 0), ""),
+            # 「老板 wangji」/「店长 laowang」：店员一眼知道是谁派的
+            "dispatcher_label": " ".join(x for x in (
+                dispatcher_roles.get(int(r.get("created_by") or 0), ""),
+                user_names.get(int(r.get("created_by") or 0), ""),
+            ) if x) if user_names.get(int(r.get("created_by") or 0)) else "",
             "created_at": r.get("created_at"),
             "submitted_at": r.get("submitted_at"),
             "submit_note": r.get("submit_note") or "",
@@ -1357,6 +1378,56 @@ def _ever_had_task(tid: int, uid: int) -> bool:
     return False
 
 
+_STORE_RANK = {"submitted": 0, "rejected": 1, "overdue": 2, "today": 3, "later": 4}
+STORE_TASK_LIMIT = 100
+
+
+def store_tasks_for_manager(tid: int, user: Mapping[str, Any], *,
+                            now: float | None = None) -> list[dict]:
+    """店长手机首页「本店在做的活」：自己能派活/审核的门店里，别人手上没做完的活。
+
+    口径与派活/审核一致：只有能派活的人才有；店长只看自己绑定的门店，
+    老板/总监看自己能管的全部门店。店员一律是空列表。自己手上的活已经在
+    「我的待办」里，这里不重复。
+    """
+    if not can_dispatch(user):
+        return []
+    tid, uid = int(tid), int(user["id"])
+    branch_ids = [int(b["id"]) for b in _dispatch_branches(tid, user)]
+    if not branch_ids:
+        return []
+    ts = time.time() if now is None else float(now)
+    marks = ",".join("?" for _ in branch_ids)
+    rows = db.q(
+        "SELECT * FROM staff_task WHERE tenant_id=? AND deleted_at IS NULL "
+        "AND status IN ('todo','submitted','rejected') "
+        f"AND branch_id IN ({marks}) "
+        "AND (assignee_user_id IS NULL OR assignee_user_id<>?) "
+        "ORDER BY id DESC LIMIT ?",
+        (tid, *branch_ids, uid, STORE_TASK_LIMIT),
+    )
+    # 再按单条权限过一遍(防御：与详情页 / 审核同一套判定)
+    rows = [r for r in rows if _can_view(user, r) and _can_manage(user, r)]
+    items = _public(tid, rows, now=ts)
+    for item in items:
+        item["ai_check"] = None   # 列表不带 AI 建议，点进审核卡再看
+        rejected = item["status"] == "rejected" or (
+            item["status"] == "todo" and item.get("review_note") and item.get("reviewed_at")
+        )
+        if item["status"] == "submitted":
+            item["store_state"] = "submitted"
+        elif rejected:
+            item["store_state"] = "rejected"
+        else:
+            item["store_state"] = item["urgency"]
+    items.sort(key=lambda i: (
+        _STORE_RANK.get(str(i.get("store_state")), 5),
+        float(i["due_at"]) if i.get("due_at") is not None else float("inf"),
+        -int(i["id"]),
+    ))
+    return items
+
+
 def todo_for_user(tid: int, uid: int, *, now: float | None = None) -> dict:
     """店员「我的待办」：派给我的活 + 今天的清单 + 派给我的巡店整改。
 
@@ -1408,6 +1479,10 @@ def todo_for_user(tid: int, uid: int, *, now: float | None = None) -> dict:
         review_rows = list_tasks(tid, user, status="submitted", limit=50)["items"]
         reviews = [r for r in review_rows if r.get("assignee_user_id") != uid
                    or sees_all_branches(user)]
+    # 没指定人的活已经在「我的待办」里(谁有空谁做)，不在「本店在做的活」里重复
+    mine_ids = {int(t["id"]) for t in tasks}
+    store_tasks = [t for t in store_tasks_for_manager(tid, user, now=ts)
+                   if int(t["id"]) not in mine_ids]
     branch_names = _names(tid, "store_branch", bound, "name")
     return {
         "date": today,
@@ -1426,6 +1501,8 @@ def todo_for_user(tid: int, uid: int, *, now: float | None = None) -> dict:
         "actions": actions,
         "items": items,
         "reviews": reviews,
+        # 店长：本店店员手上正在做 / 被打回 / 等审核的活(店员没有这一项内容)
+        "store_tasks": store_tasks,
         # 店员手机首页的空状态要区分「从没人派过活」和「活都做完了」
         "has_any_task": bool(items) or _ever_had_task(tid, uid),
         "counts": {

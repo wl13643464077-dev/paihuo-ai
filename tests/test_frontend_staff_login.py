@@ -43,9 +43,9 @@ class StaffLoginPageTests(unittest.IsolatedAsyncioTestCase):
         async with async_playwright() as playwright:
             browser, page, errors = await self._page(playwright)
             await page.goto(f"{self.base}/static/login.html?next=/staff")
-            self.assertEqual("店员登录 · 派活", await page.title())
-            self.assertIn("店员登录", await page.locator("#staff-head").inner_text())
-            self.assertIn("看今天的活、拍照交差", await page.locator("#staff-head").inner_text())
+            self.assertEqual("门店登录 · 派活", await page.title())
+            self.assertIn("门店登录", await page.locator("#staff-head").inner_text())
+            self.assertIn("店长、店员看今天的活", await page.locator("#staff-head").inner_text())
             self.assertFalse(await page.locator("#slogan").is_visible())
             self.assertFalse(await page.get_by_text("申请开通账号").first.is_visible())
             self.assertFalse(await page.get_by_text("游客参观").is_visible())

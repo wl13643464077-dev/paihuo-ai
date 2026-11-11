@@ -123,7 +123,24 @@
   function findItem(kind, id){
     const all = (S.todo&&S.todo.items)||[];
     return all.find(x=>x.kind===kind && String(x.id)===String(id))
-      || (kind==="review" ? ((S.todo&&S.todo.reviews)||[]).find(x=>String(x.id)===String(id)) : null);
+      || (kind==="review" ? ((S.todo&&S.todo.reviews)||[]).find(x=>String(x.id)===String(id)) : null)
+      || (kind==="store" ? ((S.todo&&S.todo.store_tasks)||[]).find(x=>String(x.id)===String(id)) : null);
+  }
+
+  /* ---------- 店长:本店在做的活(谁、做什么、什么时候前、到哪一步了) ---------- */
+  const STORE_STATE = {submitted:["waiting","等您审核"], rejected:["overdue","被打回，在重做"],
+    overdue:["overdue","已逾期"], today:["today","今天要做完"], later:["later","在做"]};
+  function storeTag(it){
+    const [cls, text] = STORE_STATE[it.store_state] || STORE_STATE.later;
+    return `<span class="tag ${esc(cls)}">${esc(text)}</span>`;
+  }
+  function storeCardHtml(it){
+    const who = it.assignee_name ? `${it.assignee_name} 在做` : "还没指定人";
+    // dueLine 已经转义过
+    const sub = [esc(who), esc(it.branch_name||""), it.store_state==="submitted" ? "" : dueLine(it)].filter(Boolean);
+    return `<button type="button" class="card store" data-open="store:${esc(it.id)}">
+      <div class="t">📋 ${esc(it.title)}</div>
+      <div class="m">${storeTag(it)}${sub.join(" · ")}</div></button>`;
   }
 
   /* ---------- 首页:我的待办 ---------- */
@@ -133,6 +150,8 @@
     $("#today").textContent = `今天 ${t.date_text||""}` + (names.length ? " · "+names.slice(0,2).join("、")+(names.length>2?` 等 ${names.length} 家`:"") : "");
     const u = t.user || {};
     $("#who").textContent = [u.name, u.role_label].filter(Boolean).join(" · ");
+    // 浏览器标签：店长看到「派活 · 店长」，店员看到「派活 · 店员」，其他人「派活 · 门店」
+    document.title = "派活 · " + (["店长","店员"].includes(u.role_label) ? u.role_label : "门店");
   }
   function homeView(note){
     const t = S.todo || {items:[], reviews:[]};
@@ -147,10 +166,19 @@
       + `<h2>我的待办${todo.length?`（${todo.length}）`:""}</h2>`
       + (todo.length ? todo.map(cardHtml).join("")
           : (t.has_any_task===false ? `<div class="empty">还没有人给您派活</div>` : `<div class="empty">🎉 今天的活都做完了</div>`))
+      + (boss ? storeSection(t) : "")
       + (rest.length ? `<h2>已交 / 已做完</h2>`+rest.map(cardHtml).join("") : "")
       + `<div class="foot"><button type="button" class="btn" data-act="refresh">🔄 刷新</button>
           ${t.user && t.user.can_open_full ? `<a class="btn" href="/?full=1">💻 完整版</a>` : ""}</div>
         <div class="foot-links"><button type="button" class="linkbtn" data-act="logout">退出登录</button></div>`;
+  }
+
+  function storeSection(t){
+    const list = t.store_tasks || [];
+    const title = t.user && t.user.can_open_full ? "各店在做的活" : "本店在做的活";
+    return `<h2 id="store-head">${title}${list.length?`（${list.length}）`:""}</h2>`
+      + (list.length ? list.map(storeCardHtml).join("")
+          : `<div class="empty small">店里现在没有在做的活</div>`);
   }
 
   /* ---------- 派给我的活:拍照交差 ---------- */
@@ -167,7 +195,7 @@
     const key = "task:"+t.id;
     const rejected = t.status==="todo" && t.review_note && t.reviewed_at;
     let body = `${back()}<div class="panel"><div class="t" style="font-size:20px;font-weight:900">${esc(t.title)}</div>
-      <p class="sub">${[t.branch_name, t.created_by_name?`${t.created_by_name} 派的`:"", t.due_text?`截止 ${t.due_text}`:""].filter(Boolean).map(esc).join(" · ")}</p>
+      <p class="sub">${[t.branch_name, (t.dispatcher_label||t.created_by_name)?`${t.dispatcher_label||t.created_by_name} 派的`:"", t.due_text?`截止 ${t.due_text}`:""].filter(Boolean).map(esc).join(" · ")}</p>
       ${t.detail?`<p>${esc(t.detail)}</p>`:""}
       ${rejected?msg("上次被打回："+t.review_note,"info"):""}</div>`;
     if(t.status==="todo" && t.can_submit!==false){
@@ -404,7 +432,10 @@
   function reviewsView(){
     const list = (S.todo&&S.todo.reviews)||[];
     main().innerHTML = `${back()}<h2>🧐 待我审核${list.length?`（${list.length}）`:""}</h2>`
-      + (list.length ? list.map(t=>`<div class="panel" data-review="${t.id}">
+      + (list.length ? list.map(t=>reviewCard(t)).join("") : `<div class="empty">没有等您审核的活</div>`);
+  }
+  function reviewCard(t, after){
+    return `<div class="panel" data-review="${esc(t.id)}"${after?` data-after="${esc(after)}"`:""}>
           <div class="t" style="font-size:18px;font-weight:900">${esc(t.title)}</div>
           <p class="sub">${[t.branch_name, t.assignee_name?`${t.assignee_name} 交的`:"", t.submit_note?`备注：${t.submit_note}`:""].filter(Boolean).map(esc).join(" · ")}</p>
           ${t.review_note&&t.reviewed_at?msg(`上次打回：${t.review_note}${t.submit_count>1?`（第 ${t.submit_count} 次交）`:"（重交）"}`, "info"):""}
@@ -414,7 +445,33 @@
             <button type="button" class="btn bad" data-review-act="reject" data-id="${t.id}">↩️ 打回</button></div>
           <div class="reject-box hidden"><label>打回原因（店员会看到）</label><textarea maxlength="500" placeholder="比如：冷柜底层没擦干净，再拍一张近照"></textarea>
             <button type="button" class="btn bad" data-review-act="reject-send" data-id="${t.id}" style="margin-top:8px">确认打回</button></div>
-        </div>`).join("") : `<div class="empty">没有等您审核的活</div>`);
+        </div>`;
+  }
+  /* 店长点开本店一件活：只读详情；等审核的直接给审核卡 */
+  async function storeTaskView(id){
+    let t = findItem("store", id);
+    main().innerHTML = back()+`<div class="empty"><span class="spin"></span> 正在打开…</div>`;
+    try{ t = await api(`/staff/tasks/${encodeURIComponent(id)}`); }
+    catch(e){ if(!t){ main().innerHTML = back()+msg(e.message); return; } }
+    S.current = t;
+    const meId = S.todo && S.todo.user && S.todo.user.id;
+    const rejected = t.status==="rejected" || (t.status==="todo" && t.review_note && t.reviewed_at);
+    const who = t.assignee_name ? `交给 ${t.assignee_name}` : "还没指定人";
+    const by = t.dispatcher_label||t.created_by_name;
+    let body = `${back()}<div class="panel"><div class="t" style="font-size:20px;font-weight:900">${esc(t.title)}</div>
+      <p class="sub">${[t.branch_name, who, by?`${by} 派的`:"", t.due_text?`截止 ${t.due_text}`:""].filter(Boolean).map(esc).join(" · ")}</p>
+      ${t.detail?`<p>${esc(t.detail)}</p>`:""}</div>`;
+    const reviewable = t.status==="submitted" && t.can_manage && String(t.assignee_user_id)!==String(meId);
+    if(reviewable){
+      body += `<h2>🧐 交上来了，等您审核</h2>` + reviewCard(t, "home");
+    } else {
+      const label = t.status==="submitted" ? "已交，等审核"
+        : rejected ? `被打回，在重做：${t.review_note||""}`
+        : t.overdue ? "已过截止时间，还没交" : "在做，还没交";
+      body += msg(label, t.overdue||rejected ? "err" : "info") + photosHtml(t.photos)
+        + `<p class="sub">这里只看进度，不能替同事交差。</p>`;
+    }
+    main().innerHTML = body;
   }
   async function review(id, action, box){
     if(S.busy) return;
@@ -427,7 +484,8 @@
       await api(`/staff/tasks/${encodeURIComponent(id)}/review`, {method:"POST",
         body:{action:action==="approve"?"approve":"reject", note}});
       await loadTodo();
-      reviewsView();
+      if(box.dataset.after==="home") go("", msg(action==="approve" ? "✅ 已通过" : "↩️ 已打回，店员会看到原因", "ok"));
+      else reviewsView();
     }catch(e){ slot.innerHTML = msg(e.message); }
     finally{ S.busy = false; }
   }
@@ -449,9 +507,10 @@
     if((m = /^action-(.+)$/.exec(h))) return actionView(m[1]);
     if(h==="dispatch") return dispatchView();
     if(h==="reviews") return reviewsView();
+    if((m = /^store-(\d+)$/.exec(h))) return storeTaskView(m[1]);
     homeView(note);
   }
-  const OPEN_HASH = {task:"task-", checklist:"checklist-", inspection_action:"action-"};
+  const OPEN_HASH = {task:"task-", checklist:"checklist-", inspection_action:"action-", store:"store-"};
   document.addEventListener("click", e=>{
     const el = e.target.closest("[data-open],[data-go],[data-act],[data-del],[data-item],[data-undo],[data-review-act],[data-view]");
     if(!el) return;

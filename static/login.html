@@ -81,7 +81,7 @@ button:active{transform:translateY(1px);box-shadow:2px 2px 0 rgba(51,41,31,.2)}
 <div class="wrap">
   <div class="logo"><span class="bulb"></span><h1>派 活</h1><span class="bulb"></span></div>
   <div class="slogan" id="slogan"><b>老板会派活，数字员工去干活</b> · 11 大连锁行业·专属决策员工听您调遣</div>
-  <div class="staff-head" id="staff-head" hidden><h2>店员登录</h2><div class="slogan">看今天的活、拍照交差</div></div>
+  <div class="staff-head" id="staff-head" hidden><h2>门店登录</h2><div class="slogan">店长、店员看今天的活</div></div>
   <div class="card">
     <div class="tabs" id="login-tabs" role="tablist">
       <button type="button" id="tab-pw" class="on" role="tab" aria-selected="true" onclick="switchMode('pw')">账号密码登录</button>
@@ -168,7 +168,7 @@ function afterLogin(){
 }
 if(STAFF_LOGIN){
   // 从店员手机版跳过来：换成店员版，不给老板用的申请、参观、购买入口
-  document.title='店员登录 · 派活';
+  document.title='门店登录 · 派活';
   document.getElementById('slogan').hidden=true;
   document.getElementById('staff-head').hidden=false;
   document.getElementById('alt-entries').hidden=true;

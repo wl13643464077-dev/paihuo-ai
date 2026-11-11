@@ -270,6 +270,106 @@ class StaffPageTests(unittest.IsolatedAsyncioTestCase):
             self._assert_no_browser_errors(errors)
             await browser.close()
 
+    async def test_manager_home_shows_store_tasks_and_opens_review_or_readonly(self):
+        waiting = {"kind": "task", "id": 60, "title": "补货", "branch_name": "人民路店",
+                   "assignee_user_id": 23, "assignee_name": "xiaowang", "status": "submitted",
+                   "store_state": "submitted", "due_text": "09-25 18:00", "photos": []}
+        doing = {"kind": "task", "id": 61, "title": "冷柜除霜", "branch_name": "人民路店",
+                 "assignee_user_id": 24, "assignee_name": "xiaoli", "status": "todo",
+                 "store_state": "overdue", "urgency": "overdue", "overdue": True,
+                 "due_text": "09-24 18:00", "photos": []}
+        todo = {**TODO, "store_tasks": [waiting, doing]}
+        posts = []
+        detail = {
+            "/api/staff/tasks/60": {**waiting, "can_manage": True, "dispatcher_label": "老板 boss",
+                                    "photos": [{"id": 1, "url": "/static/img/avatar.png"}]},
+            "/api/staff/tasks/61": {**doing, "can_manage": True, "can_submit": False,
+                                    "dispatcher_label": "店长 renmin-dz"},
+        }
+        async with async_playwright() as playwright:
+            browser, context, page, errors = await self._open(playwright, todo, cards=5, extra=detail)
+            self.assertEqual("派活 · 店长", await page.title())
+            self.assertIn("本店在做的活（2）", await page.locator("#main").inner_text())
+            first = page.locator(".card.store").first
+            self.assertIn("等您审核", await first.inner_text())
+            self.assertIn("xiaowang 在做", await first.inner_text())
+            second = await page.locator(".card.store").nth(1).inner_text()
+            self.assertIn("已逾期", second)
+            self.assertIn("09-24 18:00", second)
+
+            # 在做的活：只读，不给提交按钮
+            await page.locator(".card.store", has_text="冷柜除霜").click()
+            await page.wait_for_function("location.hash==='#store-61'")
+            await page.wait_for_selector("text=只看进度")
+            main = await page.locator("#main").inner_text()
+            self.assertIn("交给 xiaoli", main)
+            self.assertIn("店长 renmin-dz 派的", main)
+            self.assertEqual(0, await page.locator("[data-act=submit],[data-act=shoot]").count())
+            await page.locator(".back").click()
+
+            # 等审核的活：直接给审核卡，通过后回首页
+            async def review_route(route):
+                posts.append(json.loads(route.request.post_data or "{}"))
+                await route.fulfill(status=200, content_type="application/json", body="{}")
+            await page.route("**/api/staff/tasks/60/review", review_route)
+            await page.locator(".card.store", has_text="补货").click()
+            await page.wait_for_selector("[data-review-act=approve]")
+            self.assertIn("等您审核", await page.locator("#main").inner_text())
+            await page.locator("[data-review-act=approve]").click()
+            await page.wait_for_function("document.querySelector('.msg.ok')?.textContent.includes('已通过')")
+            self.assertEqual([{"action": "approve", "note": ""}], posts)
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_staff_title_and_dispatcher_role_on_task_detail(self):
+        staff = {**TODO, "reviews": [], "user": {**TODO["user"], "role_label": "店员",
+                                                  "can_dispatch": False}}
+        async with async_playwright() as playwright:
+            browser, context, page, errors = await self._open(
+                playwright, staff,
+                extra={"/api/staff/tasks/41": {**TASK, "dispatcher_label": "老板 wangji"}})
+            self.assertEqual("派活 · 店员", await page.title())
+            self.assertEqual(0, await page.locator("#store-head").count())
+            await page.locator(".card").first.click()
+            await page.wait_for_selector("[data-act=shoot]")
+            self.assertIn("老板 wangji 派的", await page.locator(".panel .sub").first.inner_text())
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_checklist_item_text_gets_full_width_on_375_phone(self):
+        long_text = "剩余食材分类封好、贴上日期标签放进冷藏，拍一张冷藏柜里面"
+        run = {"kind": "checklist", "id": 7, "title": "闭店清单", "branch_name": "人民路店",
+               "status": "open", "due_text": "22:00", "urgency": "today",
+               "progress": {"done": 1, "total": 2},
+               "items": [{"key": "a", "text": "关灯", "done": True, "done_at": 1790000520},
+                         {"key": "b", "text": long_text, "done": False, "require_photo": True}]}
+        todo = {**TODO, "items": [run], "reviews": []}
+        async with async_playwright() as playwright:
+            browser, context, page, errors = await self._open(playwright, todo, cards=1)
+            await page.set_viewport_size({"width": 375, "height": 812})
+            await page.locator(".card").first.click()
+            await page.wait_for_selector("[data-item=b]")
+            box = await page.evaluate("""() => {
+              const item = document.querySelectorAll('.item')[1];
+              const tx = item.querySelector('.tx').getBoundingClientRect();
+              const btn = item.querySelector('[data-item]').getBoundingClientRect();
+              const undo = document.querySelector('[data-undo=a]').getBoundingClientRect();
+              const lh = parseFloat(getComputedStyle(item.querySelector('.tx')).lineHeight);
+              return {txW: tx.width, itemW: item.getBoundingClientRect().width, lines: Math.round(tx.height / lh),
+                      below: btn.top >= tx.bottom - 1, btnW: btn.width, btnH: btn.height, undoH: undo.height,
+                      doc: document.documentElement.scrollWidth};
+            }""")
+            self.assertTrue(box["below"])                         # 按钮在文字下面
+            self.assertGreater(box["txW"], box["itemW"] - 4)      # 文字占满整行
+            self.assertLessEqual(box["lines"], 3)
+            self.assertGreater(box["btnW"], box["itemW"] - 4)
+            self.assertGreaterEqual(box["btnH"], 44)
+            self.assertGreaterEqual(box["undoH"], 44)
+            self.assertLessEqual(box["doc"], 375)
+            self.assertIn("✅ 已完成 · 22:22", await page.locator(".item", has_text="关灯").inner_text())
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
 
 OWNER = {"id": 20, "username": "boss", "role": "owner", "tenant": "连锁",
          "modules": ["content", "library"], "all_modules": [], "job_title": ""}
