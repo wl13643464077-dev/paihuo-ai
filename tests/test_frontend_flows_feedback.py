@@ -1,0 +1,289 @@
+"""浏览器行为:花点数按钮、余额不够去充值、中转页「最近用过」、筛选记忆、顶栏账号区、
+下达任务三步 + 更多设置、专家商量室按本行业分组、回车提交。"""
+from __future__ import annotations
+
+import json
+import unittest
+from pathlib import Path
+from urllib.parse import urlparse
+
+from playwright.async_api import async_playwright
+
+# 只导入模块,不把对方的 TestCase 类放进本模块命名空间(否则会被重复发现执行)。
+from tests import test_frontend_browser_behavior as _browser
+
+_launch_chromium = _browser._launch_chromium
+APP_JS = (Path(__file__).resolve().parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+
+OWNER = {
+    "id": 9,
+    "username": "shop-owner",
+    "role": "owner",
+    "tenant": "浏览器测试门店",
+    "modules": ["content", "avatar", "library", "restaurant", "pet"],
+    "all_modules": [],
+    "industries": ["restaurant"],
+}
+
+META = {
+    "app": {"name": "派活", "slogan": "测试"},
+    "stations": [],
+    "industries": ["通用", "餐饮", "宠物"],
+    "brief_templates": ["蹭热点", "日更选题", "产品软文"],
+    "platforms": ["小红书", "抖音", "公众号"],
+    "platform_specs": {},
+    "image_modes": [{"key": "ai", "label": "AI生成"}, {"key": "real", "label": "真实图"}],
+    "job_points": 18,
+    "modes": {"auto": "全自动"},
+    "default_mode": "auto",
+}
+
+
+def _employee(idx, name, group):
+    return {"idx": idx, "name": name, "person": "", "emoji": "🧑", "color": "#fff",
+            "group": group, "person_status": "active", "identity_status": "current",
+            "can_assign_new": True, "identity_ref": "a" * 64,
+            "config_revision": 1, "config_sha256": "b" * 64, "bundle_sha256": "c" * 64}
+
+
+DEPTS = [
+    {"key": "restaurant", "name": "餐饮", "emoji": "🍜",
+     "employees": [_employee(2001, "店长参谋", "餐饮·经营"), _employee(2002, "后厨顾问", "餐饮·后厨")]},
+    {"key": "pet", "name": "宠物", "emoji": "🐶",
+     "employees": [_employee(3001, "宠物店顾问", "宠物·门店")]},
+]
+
+
+def _api(balance):
+    return {
+        "/api/auth/me": OWNER,
+        "/api/meta": META,
+        "/api/state": {"inbox": [], "notifications": [], "jobs": [], "items": [],
+                       "total": 0, "balance": balance, "setup": {}, "trio": {},
+                       "profiles": []},
+        "/api/employees": [],
+        "/api/depts": DEPTS,
+        "/api/meetings": {"items": [], "total": 0, "offset": 0, "limit": 20},
+        "/api/task-center": {"items": [], "total": 0, "counts": {}},
+    }
+
+
+class FrontendFlowsFeedbackTests(unittest.IsolatedAsyncioTestCase):
+    setUpClass = classmethod(_browser.FrontendBrowserBehaviorTests.setUpClass.__func__)
+    tearDownClass = classmethod(_browser.FrontendBrowserBehaviorTests.tearDownClass.__func__)
+    _capture_unexpected_browser_errors = _browser.FrontendBrowserBehaviorTests._capture_unexpected_browser_errors
+    _assert_no_browser_errors = _browser.FrontendBrowserBehaviorTests._assert_no_browser_errors
+
+    async def _open(self, playwright, *, balance=100, init_script="", width=1280, hash_="#/"):
+        browser = await _launch_chromium(playwright, self.executable)
+        page = await browser.new_page(viewport={"width": width, "height": 900})
+        errors = self._capture_unexpected_browser_errors(page)
+        await page.add_init_script(
+            "window.EventSource = class { constructor(){} close(){} };" + init_script)
+        payloads = _api(balance)
+
+        async def api_route(route):
+            path = urlparse(route.request.url).path
+            await route.fulfill(status=200, content_type="application/json",
+                                body=json.dumps(payloads.get(path, {}), ensure_ascii=False))
+
+        await page.route("**/api/**", api_route)
+        await page.goto(f"{self.base}/static/index.html{hash_}")
+        await page.wait_for_function("document.querySelector('#nav')?.textContent.includes('退出')")
+        return browser, page, errors
+
+    async def test_points_action_shows_cost_under_button_and_recharges_when_short(self):
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(playwright, balance=0)
+            result = await page.evaluate(
+                """() => {
+                  window.__ran = 0;
+                  const box = document.createElement('div');
+                  box.innerHTML = pointsAction({label:'🚀 派活', onclick:'window.__ran=1', cost:12, id:'t-go'});
+                  document.querySelector('#main').appendChild(box);
+                  const btn = document.querySelector('#t-go');
+                  btn.click();
+                  return {text: btn.textContent, note: document.querySelector('#t-go-cost').textContent,
+                          ran: window.__ran, hash: location.hash};
+                }"""
+            )
+            self.assertEqual("点数不够，去充值", result["text"])
+            self.assertEqual("本次 12 点 · 余额 0 点", result["note"])
+            self.assertEqual(0, result["ran"])  # 原动作不会执行
+            self.assertEqual("#/billing", result["hash"])
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_points_action_keeps_action_text_when_balance_is_enough(self):
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(playwright, balance=100)
+            result = await page.evaluate(
+                """() => {
+                  const box = document.createElement('div');
+                  box.innerHTML = pointsAction({label:'🚀 派活', onclick:'', cost:0.2, id:'t-go'});
+                  document.querySelector('#main').appendChild(box);
+                  const btn = document.querySelector('#t-go');
+                  const before = {text: btn.textContent, note: document.querySelector('#t-go-cost').textContent};
+                  syncPointsAction(btn, 120);
+                  return {before, after: btn.textContent, recharge: btn.dataset.recharge || ''};
+                }"""
+            )
+            self.assertEqual("🚀 派活", result["before"]["text"])
+            self.assertEqual("本次 0.2 点 · 余额 100 点", result["before"]["note"])
+            self.assertEqual("点数不够，去充值", result["after"])
+            self.assertEqual("1", result["recharge"])
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_new_brief_has_three_steps_and_remembers_more_settings(self):
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(playwright, balance=5, hash_="#/new")
+            await page.wait_for_selector("#brief-form")
+            info = await page.evaluate(
+                """() => ({
+                  industry: document.querySelector('#b-ind .chip.on')?.textContent,
+                  moreOpen: document.querySelector('#b-more').open,
+                  tplInMore: !!document.querySelector('#b-more #b-tpl'),
+                  modeInMore: !!document.querySelector('#b-more #b-mode'),
+                  shortAboveSubmit: !!(document.querySelector('#b-short')?.compareDocumentPosition(
+                    document.querySelector('#b-submit')) & Node.DOCUMENT_POSITION_FOLLOWING),
+                  submit: document.querySelector('#b-submit').textContent,
+                  note: document.querySelector('#b-submit-cost').textContent,
+                })"""
+            )
+            self.assertEqual("餐饮", info["industry"])  # 按企业自己的行业预选
+            self.assertFalse(info["moreOpen"])
+            self.assertTrue(info["tplInMore"])
+            self.assertTrue(info["modeInMore"])
+            self.assertTrue(info["shortAboveSubmit"])
+            self.assertEqual("点数不够，去充值", info["submit"])
+            self.assertEqual("本次 18 点 · 余额 5 点", info["note"])
+            # 记住上次的「更多设置」(按账号)
+            await page.evaluate(
+                """() => { selectBriefChips('b-tpl','产品软文'); selectBriefChips('b-pf',['抖音'],'data-p');
+                           saveBriefPrefs(); }""")
+            stored = await page.evaluate("localStorage.getItem('ui_pref_shop-owner_brief')")
+            self.assertIn("产品软文", stored)
+            await page.evaluate("render()")
+            await page.wait_for_selector("#brief-form")
+            await page.wait_for_timeout(100)
+            restored = await page.evaluate(
+                """() => ({tpl: document.querySelector('#b-tpl .chip.on')?.textContent,
+                          pf: [...document.querySelectorAll('#b-pf .chip.on')].map(x => x.dataset.p)})""")
+            self.assertEqual({"tpl": "产品软文", "pf": ["抖音"]}, restored)
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_meetings_expand_own_industry_and_fold_the_rest(self):
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(playwright, hash_="#/meetings")
+            await page.wait_for_selector("#mt-suggest")
+            info = await page.evaluate(
+                """() => ({
+                  suggestPrimary: document.querySelector('#mt-suggest').classList.contains('pri'),
+                  open: [...document.querySelectorAll('#main details[open] > summary')].map(x => x.textContent.trim()),
+                  other: document.querySelector('details.mt-other > summary')?.textContent.trim(),
+                  otherOpen: document.querySelector('details.mt-other')?.open,
+                  otherHas: document.querySelector('details.mt-other')?.textContent.includes('宠物店顾问'),
+                  intro: document.querySelector('#main .notice')?.textContent,
+                })"""
+            )
+            self.assertTrue(info["suggestPrimary"])
+            self.assertEqual(["餐饮·经营(1)", "餐饮·后厨(1)"], info["open"])
+            self.assertEqual("其他行业(1 组)", info["other"])
+            self.assertFalse(info["otherOpen"])
+            self.assertTrue(info["otherHas"])
+            self.assertIn("每位专家各出一个方案，互相挑毛病，最后给您一个做或不做的结论", info["intro"])
+            for jargon in ("Top N", "GO / NO-GO", "单位经济反向验证"):
+                self.assertNotIn(jargon, info["intro"])
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_hub_shows_recently_used_pages_per_account(self):
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(playwright)
+            await page.evaluate("hubRecordVisit('tasks'); hubRecordVisit('meetings'); hubRecordVisit('tasks');")
+            stored = await page.evaluate("localStorage.getItem('ui_pref_shop-owner_hub_recent_dispatch')")
+            self.assertEqual(["tasks", "meetings"], json.loads(stored))
+            await page.evaluate("location.hash = '#/dispatch'")
+            await page.wait_for_selector(".hub-recent")
+            links = await page.evaluate(
+                "[...document.querySelectorAll('.hub-recent a')].map(a => a.getAttribute('href'))")
+            self.assertEqual(["#/tasks", "#/meetings"], links)
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_filters_are_restored_per_account(self):
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(
+                playwright,
+                init_script="""
+                  localStorage.setItem('ui_pref_shop-owner_tc_status', JSON.stringify('done'));
+                  localStorage.setItem('ui_pref_shop-owner_tc_kind', JSON.stringify('job'));
+                  localStorage.setItem('ui_pref_shop-owner_boss_days', JSON.stringify(90));
+                  localStorage.setItem('ui_pref_shop-owner_inspection_industry', JSON.stringify('restaurant'));
+                  localStorage.setItem('ui_pref_someone-else_tc_status', JSON.stringify('failed'));
+                """,
+            )
+            result = await page.evaluate(
+                "({status: TC_STATUS, kind: TC_KIND, days: BOSS_DASH_FILTER.days, industry: INSPECTION_INDUSTRY})")
+            self.assertEqual(
+                {"status": "done", "kind": "job", "days": 90, "industry": "restaurant"}, result)
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_ui_prefs_survive_storage_that_throws(self):
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(
+                playwright,
+                init_script="""
+                  Object.defineProperty(window, 'localStorage', {
+                    configurable: true,
+                    get() { throw new DOMException('storage disabled', 'SecurityError'); }
+                  });
+                """,
+            )
+            result = await page.evaluate(
+                """() => { hubRecordVisit('tasks'); saveBriefPrefs();
+                  return {wrote: uiPrefSet('tc_status','done'), read: uiPrefGet('tc_status','open'),
+                          row: hubRecentRow(NAV_GROUPS[1], navVisibleCards(NAV_GROUPS[1]))}; }""")
+            self.assertEqual({"wrote": False, "read": "open", "row": ""}, result)
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_desktop_account_area_sits_next_to_online_status(self):
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(playwright)
+            info = await page.evaluate(
+                """() => { const out = document.querySelector('#nav .navlogout').getBoundingClientRect();
+                  const conn = document.querySelector('#conn').getBoundingClientRect();
+                  return {who: document.querySelector('#nav .nav-who')?.textContent,
+                          inAcct: !!document.querySelector('#nav .nav-acct .navlogout'),
+                          gap: conn.left - out.right}; }""")
+            self.assertEqual("浏览器测试门店 · shop-owner · 余额 100 点", info["who"])
+            self.assertTrue(info["inAcct"])
+            self.assertGreaterEqual(info["gap"], 0)
+            self.assertLess(info["gap"], 60)
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_enter_submits_single_action_forms(self):
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(playwright)
+            await page.evaluate(
+                """() => { window.__hit = 0;
+                  document.body.insertAdjacentHTML('beforeend',
+                    `<input id="enter-probe" ${enterSubmit('window.__hit++')}>`); }""")
+            await page.locator("#enter-probe").press("Enter")
+            self.assertEqual(1, await page.evaluate("window.__hit"))
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    def test_team_and_tenant_forms_submit_on_enter(self):
+        for call, count in (('enterSubmit("tmMyPw()")', 4), ('enterSubmit("tmUserCreate()")', 2),
+                            ('enterSubmit("tmTenantCreate()")', 3)):
+            self.assertEqual(count, APP_JS.count(call), call)
+
+
+if __name__ == "__main__":
+    unittest.main()

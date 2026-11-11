@@ -25,6 +25,56 @@ function passwordPolicyError(value){
   ].filter(Boolean).length;
   return classes<2?"密码至少包含字母、数字、符号中的两类":"";
 }
+// 单一主操作的小表单:在输入框里按回车 = 点主按钮(输入法选字时的回车不算)。
+function enterSubmit(call){
+  return `onkeydown="if(event.key==='Enter'&&!event.isComposing){event.preventDefault();${call}}"`;
+}
+/* 花点数的按钮统一写法:按钮里只写动作,按钮下面一行小字「本次 N 点 · 余额 M 点」。
+   已知余额不够时按钮改成「点数不够，去充值」,点了去套餐页(由下面的全局点击拦截处理,原动作不会执行)。 */
+function fmtPoints(value){
+  const n=Number(value)||0;
+  return Number.isInteger(n)?String(n):String(+n.toFixed(2));
+}
+function knownBalance(){
+  // 平台方/参观模式不按余额拦;状态还没取到时也当作未知,不误拦
+  if(!ME||ME.role==="root"||ME.role==="tour"||!STATE||STATE.balance==null) return null;
+  const n=Number(STATE.balance);
+  return Number.isFinite(n)?n:null;
+}
+function pointsShort(cost,balance=knownBalance()){
+  return balance!=null&&Number(cost)>0&&balance<Number(cost);
+}
+function costNoteText(cost,balance=knownBalance()){
+  return `本次 ${fmtPoints(cost)} 点${balance!=null?` · 余额 ${fmtPoints(Math.floor(balance*100)/100)} 点`:""}`;
+}
+const RECHARGE_LABEL="点数不够，去充值";
+function pointsAction({label,onclick,cost,balance=knownBalance(),cls="pri",id="",attrs="",style=""}){
+  const short=pointsShort(cost,balance);
+  return `<div class="cost-act">
+    <button type="button" class="btn ${cls}"${id?` id="${id}"`:""}${style?` style="${style}"`:""} data-label="${esc(label)}" onclick="${onclick}" ${short?'data-recharge="1"':""} ${attrs}>${short?RECHARGE_LABEL:label}</button>
+    <div class="cost-note"${id?` id="${id}-cost"`:""}>${costNoteText(cost,balance)}</div></div>`;
+}
+/* 价格会随选项变化的按钮(数字人等):重新算一次按钮文字和小字 */
+function syncPointsAction(btn,cost,balance=knownBalance()){
+  if(!btn) return;
+  const short=pointsShort(cost,balance);
+  if(short) btn.dataset.recharge="1"; else delete btn.dataset.recharge;
+  if(!btn.disabled) btn.textContent=short?RECHARGE_LABEL:(btn.dataset.label||btn.textContent);
+  const note=btn.id?document.getElementById(btn.id+"-cost"):btn.parentElement?.querySelector(".cost-note");
+  if(note) note.textContent=costNoteText(cost,balance);
+}
+/* 动作结束后把按钮恢复成原来的动作文字(不再在按钮里写价格) */
+function restoreActionButton(btn){
+  if(!btn) return;
+  btn.disabled=false;
+  btn.textContent=btn.dataset.recharge?RECHARGE_LABEL:(btn.dataset.label||btn.textContent);
+}
+document.addEventListener("click",event=>{
+  const btn=event.target?.closest?.('[data-recharge="1"]');
+  if(!btn) return;
+  event.preventDefault(); event.stopPropagation();
+  location.hash="#/billing";
+},true);
 function safeExternalUrl(value){
   try{
     const raw=String(value??"").trim(), u=new URL(raw);
@@ -470,7 +520,29 @@ function lsDel(key){ try{ localStorage.removeItem(key); }catch(_){} }
 /* 退出登录时只保留纯界面偏好(楼层展开、引导卡"不再提示"、公众号排版主题);
    工具箱缓存(含获客线索)、购买联系方式、草稿、待提交请求等业务数据一律清掉——
    店里常几个人共用一台手机/电脑,下一个登录的人不能看到上一个人的东西。 */
-const LS_UI_PREF_PREFIXES=["deptopen_","trio_hide_","howto_hide_","ob_hide_","ob_force_","mp_theme"];
+const LS_UI_PREF_PREFIXES=["deptopen_","trio_hide_","howto_hide_","ob_hide_","ob_force_","mp_theme","ui_pref_"];
+/* 按账号记住的界面选择(筛选条件、最近用过、下达任务的「更多设置」);键里带账号,换人登录互不影响。
+   读写都包在 try 里:存储被禁用时照常用默认值。 */
+function uiPrefKey(name){ return `ui_pref_${ME?.username||ME?.id||"none"}_${name}`; }
+function uiPrefGet(name,fallback=null){
+  const raw=lsGet(uiPrefKey(name));
+  if(raw===null||raw===undefined) return fallback;
+  try{ const v=JSON.parse(raw); return v===null?fallback:v; }catch(_){ return fallback; }
+}
+function uiPrefSet(name,value){ try{ return lsSet(uiPrefKey(name),JSON.stringify(value)); }catch(_){ return false; } }
+/* 每个账号第一次进页面时,把上次的筛选条件恢复回来(任务中心状态/类型、看板周期、巡店行业) */
+let UI_PREFS_BOOTED_FOR=null;
+function uiPrefsBoot(){
+  const who=ME?.username||ME?.id||"";
+  if(!who||UI_PREFS_BOOTED_FOR===who) return;
+  UI_PREFS_BOOTED_FOR=who;
+  const status=uiPrefGet("tc_status"), kind=uiPrefGet("tc_kind"), days=Number(uiPrefGet("boss_days"));
+  if(typeof status==="string"&&/^[a-z_]{1,24}$/.test(status)) TC_STATUS=status;
+  if(typeof kind==="string"&&/^[a-z_]{1,24}$/.test(kind)) TC_KIND=kind;
+  if([7,30,60,90].includes(days)) BOSS_DASH_FILTER.days=days;
+  const industry=uiPrefGet("inspection_industry");
+  if(!INSPECTION_INDUSTRY&&typeof industry==="string"&&/^[a-z0-9_-]{1,64}$/i.test(industry)) INSPECTION_INDUSTRY=industry;
+}
 function clearBusinessStorage(){
   let keys=[];
   try{
@@ -591,7 +663,7 @@ const NAV_GROUPS = [
       {route:"notifications", icon:"🔔", title:"通知记录", desc:"看过的通知都能在这里翻到", show:()=>!!ME&&ME.role!=="tour"},
       {route:"trash", icon:"🗑", title:"回收站", desc:"误删的任务和资料可以在这里找回", show:()=>!!isAdmin()},
       // 引导卡只对 owner/root 展示,重看入口同样只给他们
-      {route:"guide", icon:"🧭", title:"新手引导重看", desc:"重新打开「今天」页里的新手上路说明", show:isOwnerLike},
+      {route:"guide", icon:"🧭", title:"新手引导重看", desc:"重新打开「今天」页最上面的上手卡片", show:isOwnerLike},
       // 以下仅平台 root:放在最下面
       {action:"openEmployeeLearningBatchManager()", icon:"🏭", title:"员工进修管理", desc:"平台运营:批量安排数字员工进修、审核进修结果", show:()=>!!isBoss(), rootOnly:true},
       {route:"admin", icon:"🛠", title:"后台", desc:"平台运营:模型、租户和系统设置", show:()=>!!ME&&ME.role==="root", rootOnly:true},
@@ -632,8 +704,13 @@ function nav(){
     + `<span class="nav-ic" aria-hidden="true">${g.icon}</span><span class="nav-tx">${g.label}</span>`
     + `${g.key==="today"&&inbox?`<span class="badge" aria-label="${inbox} 条待处理">${inbox}</span>`:""}</a>`;
   // 桌面:顶部导航;手机:同样的 5 个入口放进底部 Tab 栏(#tabbar),顶部只留退出
+  // 右侧账号区:企业名 · 账号 · 余额(用已加载的数据,不额外请求) + 退出,紧挨着在线状态
+  const balance = ME&&STATE&&ME.role!=="root"&&ME.role!=="tour"&&STATE.balance!=null
+    ? ` · 余额 ${Math.round(Number(STATE.balance)||0)} 点` : "";
+  const who = ME ? `${esc(ME.tenant||"")}${ME.tenant?" · ":""}${esc(ME.username||"")}${balance}` : "";
   $("#nav").innerHTML = items.map(x=>link(x,"nav-top")).join("")
-    + `<button type="button" class="nav-action navlogout" onclick="logout()" title="${ME?esc(ME.tenant)+" · "+esc(ME.username):""}">🚪 退出</button>`;
+    + `<span class="nav-acct">${who?`<a class="nav-who" href="#/mine" title="${who}">${who}</a>`:""}`
+    + `<button type="button" class="nav-action navlogout" onclick="logout()" title="${ME?esc(ME.tenant)+" · "+esc(ME.username):""}">🚪 退出</button></span>`;
   const bar = $("#tabbar");
   if(bar) bar.innerHTML = items.map(x=>link(x,"tab")).join("");
   document.body.classList.toggle("has-tabbar", !!bar && items.length>0);
@@ -649,11 +726,31 @@ function hubCardHtml(c){
       ${subs?`<span class="hc-subs">${subs}</span>`:""}</span>
     <span class="hc-arrow" aria-hidden="true">→</span></div>`;
 }
+/* 「最近用过」:派活/门店/获客三个中转页顶部列出最近进过的 2 个子页面,少点一次(按账号存本机) */
+const HUB_RECENT_GROUPS = ["dispatch","store","growth"];
+function hubRecordVisit(page){
+  const p = String(page||"");
+  if(!p) return;
+  const g = NAV_GROUPS.find(x=>HUB_RECENT_GROUPS.includes(x.key) && x.cards.some(c=>c.route===p));
+  if(!g) return;
+  const prev = uiPrefGet("hub_recent_"+g.key,[]);
+  const list = [p, ...(Array.isArray(prev)?prev:[]).filter(x=>typeof x==="string"&&x!==p)].slice(0,2);
+  uiPrefSet("hub_recent_"+g.key,list);
+}
+function hubRecentRow(g, cards){
+  if(!HUB_RECENT_GROUPS.includes(g.key)) return "";
+  const saved = uiPrefGet("hub_recent_"+g.key,[]);
+  const picks = (Array.isArray(saved)?saved:[]).map(r=>cards.find(c=>c.route===r)).filter(Boolean).slice(0,2);
+  if(!picks.length) return "";
+  return `<div class="hub-recent"><span class="sub">最近用过：</span>${picks.map(c=>
+    `<a class="btn sm" href="#/${esc(c.route)}">${c.icon} ${esc(c.title)}</a>`).join("")}</div>`;
+}
 function hubView(key, top=""){
   const g = NAV_GROUPS.find(x=>x.key===key);
   const cards = navVisibleCards(g);
   const normal = cards.filter(c=>!c.rootOnly), root = cards.filter(c=>c.rootOnly);
   $("#main").innerHTML = `<div class="hubhead"><h2>${g.icon} ${esc(g.title)}</h2><div class="sub">${esc(g.intro)}</div></div>`
+    + hubRecentRow(g, normal)
     + top
     + (normal.length?`<div class="hubgrid">${normal.map(hubCardHtml).join("")}</div>`
       :`<div class="card"><div class="empty">您的账号还没有开通这里的功能，请联系企业主账号开通。</div></div>`)
@@ -685,39 +782,45 @@ function forcedPasswordView(){
     <button type="button" class="nav-action navlogout" onclick="logout()">🚪 退出</button>`;
   const bar=$("#tabbar"); if(bar) bar.innerHTML="";
   document.body.classList.remove("has-tabbar");
-  $("#main").innerHTML=`<div class="card" style="max-width:620px;margin:42px auto">
+  // 是否还要输当前密码由服务端按会话判断(刚用密码登录的首登改密免输)。
+  const needsOld=ME?.password_change_needs_old!==false;
+  $("#main").innerHTML=`<form class="card" id="forced-pw-form" style="max-width:620px;margin:42px auto" onsubmit="event.preventDefault();forcedPasswordChange()">
     <h2>请先设置您自己的密码</h2>
     <div class="notice">为了账号安全,初始/旧密码需要换成您自己的新密码(仅需一次),之后就能正常查看任务和使用数字员工。</div>
-    <div style="margin-top:14px"><label>当前密码</label>
-      <input id="forced-pw-old" type="password" autocomplete="current-password"></div>
+    ${needsOld?`<div style="margin-top:14px"><label>当前密码</label>
+      <input id="forced-pw-old" type="password" autocomplete="current-password"></div>`:""}
     <div class="row" style="margin-top:10px">
       <div><label>新密码（12—128 位，至少两类字符）</label>
         <input id="forced-pw-new" type="password" autocomplete="new-password"></div>
       <div><label>再次输入新密码</label>
         <input id="forced-pw-confirm" type="password" autocomplete="new-password"></div>
     </div>
-    <div class="actions"><button class="btn pri" onclick="forcedPasswordChange()">保存新密码</button></div>
-    <div class="sub">修改成功后需要使用新密码重新登录。</div>
-  </div>`;
-  setTimeout(()=>$("#forced-pw-old")?.focus(),50);
+    <div class="actions"><button type="submit" class="btn pri">保存新密码</button></div>
+    <div class="sub">保存后直接进入，不用重新登录。</div>
+  </form>`;
+  setTimeout(()=>$(needsOld?"#forced-pw-old":"#forced-pw-new")?.focus(),50);
 }
+let FORCED_PW_BUSY=false;
 async function forcedPasswordChange(){
-  const oldPassword=$("#forced-pw-old")?.value||"";
+  if(FORCED_PW_BUSY) return;
+  const oldField=$("#forced-pw-old");
+  const oldPassword=oldField?.value||"";
   const newPassword=$("#forced-pw-new")?.value||"";
   const confirmation=$("#forced-pw-confirm")?.value||"";
   const policyError=passwordPolicyError(newPassword);
-  if(!oldPassword) return toast("请输入当前密码");
+  if(oldField&&!oldPassword) return toast("请输入当前密码");
   if(policyError) return toast(policyError);
   if(newPassword!==confirmation) return toast("两次输入的新密码不一致");
+  FORCED_PW_BUSY=true;
   try{
-    await api("/auth/password",{
-      method:"PUT",
-      body:{old:oldPassword,new:newPassword},
-      routeScoped:false,
-    });
-    toast("密码已更新，请重新登录");
-    setTimeout(()=>{location.href="/login";},500);
+    const body=oldField?{old:oldPassword,new:newPassword}:{new:newPassword};
+    await api("/auth/password",{method:"PUT",body,routeScoped:false});
+    // 服务端已给这台设备补发新会话，直接进入工作台。
+    toast("密码已更新");
+    ME=null;
+    await render();
   }catch(e){ toast(e.message); }
+  finally{ FORCED_PW_BUSY=false; }
 }
 function routeLoading(page){
   const labels={tasks:"派出去的活",teamruns:"协同小队",brand:"品牌知识包",new:"下达任务",avatar:"数字人视频",meetings:"专家商量室",
@@ -770,6 +873,7 @@ async function render(reuseShell=false){
       forcedPasswordView();
       return;
     }
+    uiPrefsBoot();
     if(!META) META = await api("/meta");
     // 页面之间切换复用办公室总览；SSE 标脏或数据变更时再取最新状态。
     if(!reuseShell||!STATE||!EMP||SHELL_DIRTY){
@@ -782,6 +886,7 @@ async function render(reuseShell=false){
     await (routes[page]||dashboard)(arg,scopeArg);
     if(renderSeq!==NAV_SEQ||location.hash!==targetHash) return;
     trackPageView(page||"office");
+    hubRecordVisit(page);
     if(MODAL_IDX!==null) drawModal();
     enhanceResponsiveTables();
     if(page==="team") setTimeout(()=>{ if(typeof tmAutoLoad==="function") tmAutoLoad(); }, 0);
@@ -1369,26 +1474,19 @@ function todayTodoRow(icon, title, sub, btnText, onclick, cls="pri"){
     <div class="todo-tx"><b>${title}</b>${sub?`<div class="sub">${sub}</div>`:""}</div>
     <button type="button" class="btn sm ${cls}" onclick="${onclick}">${btnText}</button></div>`;
 }
-/* 新手上路:原来的「开工四步 / 四步用人法 / 发布三件套」合并成一个默认折叠的区块 */
-let GUIDE_FOLD_OPEN = false;
-function guideFold(){
-  const parts = [obCard(), howtoCard(), trioCard()].filter(Boolean);
-  if(!parts.length) return "";
-  const open = GUIDE_FOLD_OPEN; GUIDE_FOLD_OPEN = false;
-  return `<details class="card guide-fold" data-guide-fold ${open?"open":""}>
-    <summary><b>🧭 新手上路</b><span class="sub">第一次用?点开看怎么上手</span></summary>
-    ${parts.join("")}</details>`;
-}
 async function dashboard(){
   const inbox = STATE.inbox||[];
   const notifications = STATE.notifications||[];
   // 第 1 期新手引导(另一个模块提供):函数存在就把它返回的卡片放在最上面
+  // 上手卡和门店数据并行取，等卡片数据到了再一起首屏渲染，避免卡片晚一拍出现把页面顶下去。
   let onboarding = "";
-  try{
-    const fn = window.PH_ONBOARDING?.card;
-    if(typeof fn==="function") onboarding = String((await fn()) || "");
-  }catch(e){ if(e?.name==="NavigationAbort") throw e; reportClientError("onboarding_card",e); }
-  const store = await storeTodaySummary();
+  const onboardingTask = (async()=>{
+    try{
+      const fn = window.PH_ONBOARDING?.card;
+      if(typeof fn==="function") onboarding = String((await fn()) || "");
+    }catch(e){ if(e?.name==="NavigationAbort") throw e; reportClientError("onboarding_card",e); }
+  })();
+  const [store] = await Promise.all([storeTodaySummary(), onboardingTask]);
   const tourBanner = ME&&ME.role==="tour" ? `<div class="notice" style="background:#ece3ff;margin-top:0">👀 <b>参观模式</b>:去看看每位数字员工能帮您的店做什么。<a href="#/experts" style="text-decoration:underline;font-weight:900">看数字员工 →</a> <a href="/promo#plans" style="text-decoration:underline;font-weight:900">查看套餐</a> 或联系开通企业账号后直接派活。</div>` : "";
   const d = new Date();
   const dateLabel = `${d.getMonth()+1}月${d.getDate()}日 周${"日一二三四五六"[d.getDay()]}`;
@@ -1434,8 +1532,7 @@ async function dashboard(){
   $("#main").innerHTML = onboarding + tourBanner + hello
     // 上手卡片第 1 步已含"选行业"，有它时不再重复出单独的选行业卡
     + (onboarding.trim() ? "" : await industryPickCard())
-    + todoCard + storeCard + growthCard
-    + guideFold();
+    + todoCard + storeCard + growthCard;
 }
 /* ---------- 派活 → 找行业专家:原办公室首页的行业专家楼层 + 内容任务列表 ---------- */
 async function expertsView(){
@@ -1484,6 +1581,7 @@ async function expertsView(){
   }
   $("#main").innerHTML = `<div class="hubhead"><h2>🧑‍🔧 找行业专家 <span class="sub" style="font-weight:600;font-size:13px">行业市场 · 每个行业一支精品员工队伍,点行业标题展开/收起</span></h2>
     <div class="sub">点任何一位专家看介绍、直接派活;不知道找谁,就在行业里的「找专家」框里说说您遇到的事。</div></div>`
+    + howtoCard()
     + (await industryPickCard())
     + floorSection;
 }
@@ -1571,55 +1669,13 @@ async function notificationHistoryReadAll(btn){
     await notificationsView(0);
   }catch(e){ toast(e.message); btn.disabled=false; }
 }
-/* V27.2:「发布三件套」向导——把 成片→审查→排版 串成一条可点的流程(对外主推卖点的上手版)
-   第 1 期起与「开工四步」「四步用人法」一起收进「今天」页默认折叠的「新手上路」里 */
-function trioCard(){
-  if(!ME || !["owner","root"].includes(ME.role) || !can("content")) return "";
-  if(lsGet("trio_hide_"+(ME.tenant||""))) return "";
-  const tr = STATE.trio||{};
-  const steps = [
-    {done:tr.video, e:"🎬", t:"① 图文一键成片", act:"trioGo('video')",
-      d:"把已交付的图文自动变成竖版口播视频,配音+字幕全包",
-      how:"怎么做:任务交付页→「一键成片」,选模板等几分钟即可;抖音/视频号直接用"},
-    {done:tr.censor, e:"🛡️", t:"② 发前审查", act:"location.hash='#/censor'",
-      d:"发布前免费扫一遍广告法、违禁词和敏感表述",
-      how:"怎么做:内容审查页贴上正文→秒出风险报告和替换建议,发出去才踏实"},
-    {done:tr.publish, e:"📰", t:"③ 公众号排版发出去", act:"trioGo('mp')",
-      d:"12套主题排版,一键复制或直接发进公众号草稿箱",
-      how:"怎么做:交付页→「公众号排版」选主题;绑定公众号后可一键发草稿箱"},
-  ];
-  const undone = steps.filter(x=>!x.done).length;
-  if(!undone) return "";
-  return `<section class="guide-sec">
-    <div class="guide-sec-head">
-      <h3>🧰 发布三件套 · 一篇图文这样发出去(还差 ${undone} 步)</h3>
-      <button type="button" class="link-btn dismiss" onclick="lsSet('trio_hide_'+(ME.tenant||''),1);GUIDE_FOLD_OPEN=true;render()">不再提示</button></div>
-    <div class="grid3" style="grid-template-columns:repeat(auto-fill,minmax(250px,1fr));margin-top:10px">
-      ${steps.map(x=>`<div class="topic" style="margin:0;cursor:pointer;${x.done?"opacity:.55":""}" onclick="${x.act}">
-        <b>${x.done?"✅":x.e} ${x.t}</b><div class="sub" style="margin-top:3px">${x.d}${x.done?"":" →"}</div>
-        ${x.done?"":`<div class="sub" style="margin-top:4px;opacity:.85">${x.how}</div>`}</div>`).join("")}
-    </div>
-    <div class="sub" style="margin-top:8px">一条内容的完整出路:数字员工写好 → 成片 → 审查 → 排版发出去;三步都在您已交付的任务上操作,不重复扣点</div></section>`;
-}
-/* 「数字员工怎么用」教程卡:收在「新手上路」里,可不再提示,重看引导时恢复 */
+/* 「数字员工怎么用」:原「四步用人法」收成「找专家」页顶部的一行提示,可不再提示,重看引导时恢复 */
 function howtoCard(){
   if(!ME || !["owner","root"].includes(ME.role)) return "";
   if(lsGet("howto_hide_"+(ME.tenant||""))) return "";
-  const steps = [
-    {e:"🧭", t:"① 挑人", d:"点「派活 → 找行业专家」进您的行业,每个岗位一位专职员工;不知道找谁就用行业里的「找专家」搜索框,直接搜您遇到的事(比如“顾客要退卡”)"},
-    {e:"📋", t:"② 派活", d:"点员工→「派活」。一句话说清背景+想要什么结果,再把手头材料(数据/记录/照片)贴上;说得越具体,交付越准"},
-    {e:"📬", t:"③ 收活", d:"8-15分钟出交付:结论+依据+能直接执行的清单。不满意就在同一单里继续追问,每轮按专家任务计点,执行失败自动退点"},
-    {e:"📚", t:"④ 攒经验", d:"交付自动进资料库;好内容一键存进经验库,之后全部员工开工都会带上,越用越懂您的店"},
-  ];
-  return `<section class="guide-sec">
-    <div class="guide-sec-head">
-      <h3>📖 数字员工怎么用 · 四步用人法</h3>
-      <button type="button" class="link-btn dismiss" onclick="lsSet('howto_hide_'+(ME.tenant||''),1);GUIDE_FOLD_OPEN=true;render()">不再提示</button></div>
-    <div class="grid3" style="grid-template-columns:repeat(auto-fill,minmax(250px,1fr));margin-top:10px">
-      ${steps.map(x=>`<div class="topic" style="margin:0"><b>${x.e} ${x.t}</b>
-        <div class="sub" style="margin-top:3px">${x.d}</div></div>`).join("")}
-    </div>
-    <div class="sub" style="margin-top:8px">进阶玩法:🪑 大事拿不准就用 <a href="#/meetings" style="text-decoration:underline;font-weight:700">多位专家一起商量</a>,几位员工各出方案、互相挑错;勾选「多位专家接力完成」还能让他们接力干活、队长整合交付 · 🧰 <a href="#/tools" style="text-decoration:underline;font-weight:700">获客工具</a>处理一次性小活 · ⏰ 定时发布让内容天天自动来</div></section>`;
+  return `<div class="notice howto-hint" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+    <span style="flex:1;min-width:200px">💡 <b>怎么用：</b>挑一位专家 → 说清背景和想要的结果 → 8—15 分钟收交付 → 好内容存进经验库，越用越懂您的店。</span>
+    <button type="button" class="link-btn dismiss" onclick="lsSet('howto_hide_'+(ME.tenant||''),1);render()">不再提示</button></div>`;
 }
 let MP_AUTO = null;   // trio 向导:进交付页后自动弹公众号排版(照 AV_OPEN_CLONE 的路子)
 function trioGo(step){
@@ -1628,63 +1684,14 @@ function trioGo(step){
   if(step==="mp") MP_AUTO = j.id;
   location.hash = "#/delivery/"+j.id;
 }
-/* 「我的 → 新手引导重看」:不是真页面,清掉三块引导的「不再提示」标记后回「今天」并展开「新手上路」。
+/* 「我的 → 新手引导重看」:不是真页面,恢复「今天」顶部的上手卡片和「找专家」页的用法提示后回「今天」。
    借用 routes 机制(入口统一是 #/xxx 链接);改 hash 后本次 render 会因 hash 变化自动中止,由 hashchange 重新渲染「今天」 */
 function guideReset(){
-  try{
-  localStorage.removeItem("ob_hide_"+((ME&&ME.tenant)||""));
-  localStorage.removeItem("trio_hide_"+((ME&&ME.tenant)||""));
-  localStorage.removeItem("howto_hide_"+((ME&&ME.tenant)||""));
-  // 四步都完成时引导卡默认不渲染;点了"重看"就强制展示一次完成态
-  localStorage.setItem("ob_force_"+((ME&&ME.tenant)||""),"1");
-  }catch(_){}   // 存储被禁用时引导卡本来就不会被隐藏,无需处理
-  GUIDE_FOLD_OPEN = true;
-  toast("新手引导已恢复,在「今天」页的「新手上路」里");
+  try{ localStorage.removeItem("howto_hide_"+((ME&&ME.tenant)||"")); }
+  catch(_){}   // 存储被禁用时提示本来就不会被隐藏,无需处理
+  try{ window.PH_ONBOARDING?.reopen?.(); }catch(_){}
+  toast("新手引导已恢复,在「今天」页最上面");
   location.hash = "#/";
-}
-function obCard(){
-  if(!ME || !["owner","root"].includes(ME.role)) return "";
-  if(lsGet("ob_hide_"+(ME.tenant||""))) return "";
-  const su = STATE.setup||{};
-  const steps = [
-    {done:su.profile, t:"① 建品牌人设", h:"#/profiles",
-      d:"把企业介绍、品牌调性和两三篇您写过的东西喂给AI",
-      why:"为什么:有了它,产出才像您本人写的,不是千篇一律的通稿",
-      how:"怎么做:点进去→粘贴企业介绍+往期文章→保存,约2分钟"},
-    {done:su.first_job, t:"② 派出第一个任务", h:"#/new", pts:`${META?.job_points??18} 点`,
-      d:"发一个真实的内容任务,看 10 位数字员工一步步接力写出来",
-      why:"为什么:跑通一次您就知道整套团队怎么干活、交付长什么样",
-      how:"怎么做:选方向和模板→提交→8-15分钟收成品,全程可看"},
-    {done:su.wechat, t:"③ 打通微信", h:"#/channels",
-      d:"绑定公众号草稿箱或企业微信群机器人",
-      why:"为什么:交付完成微信里直接收通知,排版好的文章一键进草稿箱",
-      how:"怎么做:渠道页按提示扫码/填密钥,约1分钟"},
-    {done:su.clone, t:"④ 克隆您的声音", h:"#/avatar", pts:`${META?.voice_clone_points??9} 点`,
-      d:"录30秒话或传一段清晰人声",
-      why:"为什么:以后所有视频都用您的原声配音,不是机器人腔",
-      how:"怎么做:数字人视频→声音克隆→跟着念一段文字即可"},
-  ];
-  const undone = steps.filter(x=>!x.done).length;
-  const forced = lsGet("ob_force_"+(ME.tenant||""));
-  if(!undone && !forced) return "";
-  if(!undone && forced){
-    lsDel("ob_force_"+(ME.tenant||""));
-    return `<section class="guide-sec">
-      <h3>🎉 开工四步已全部完成</h3>
-      <div class="sub" style="margin-top:6px">配置齐了:品牌人设、首个任务、微信通知、原声克隆都已就绪。日常从「派活 → 下达任务」或「获客 → 定时发布」开工即可。</div></section>`;
-  }
-  return `<section class="guide-sec">
-    <div class="guide-sec-head">
-      <h3>🚀 开工四步(还差 ${undone} 步)</h3>
-      <button type="button" class="link-btn dismiss" onclick="lsSet('ob_hide_'+(ME.tenant||''),1);GUIDE_FOLD_OPEN=true;render()">不再提示</button></div>
-    <div class="grid3" style="grid-template-columns:repeat(auto-fill,minmax(250px,1fr));margin-top:10px">
-      ${steps.map(x=>`<a href="${x.h}" class="topic" style="margin:0;display:block;text-decoration:none;${x.done?"opacity:.55":""}">
-        <b>${x.done?"✅":"⬜"} ${x.t}</b>${x.pts?` <span class="sub">${esc(x.pts)}</span>`:""}
-        <div class="sub" style="margin-top:3px">${x.d}${x.done?"":" →"}</div>
-        ${x.done?"":`<div class="sub" style="margin-top:4px;opacity:.85">${x.why}</div>
-        <div class="sub" style="margin-top:2px;opacity:.85">${x.how}</div>`}</a>`).join("")}
-    </div>
-    <div class="sub" style="margin-top:8px">试用额度有限?②必做,其余可开通后再补,不影响先跑通第一个任务</div></section>`;
 }
 function jobRow(j){
   const stn = META.stations[j.current_idx];
@@ -1925,13 +1932,13 @@ function tcRow(x){
 }
 function tcSetStatus(s){
   if(TC_STATUS===s) return;
-  TC_STATUS=s;
+  TC_STATUS=s; uiPrefSet("tc_status",s);
   tcInvalidateRequests();
   tasksView().catch(e=>toast(e.message||"任务筛选失败"));
 }
 function tcSetKind(k){
   if(TC_KIND===k) return;
-  TC_KIND=k;
+  TC_KIND=k; uiPrefSet("tc_kind",k);
   tcInvalidateRequests();
   tasksView().catch(e=>toast(e.message||"任务筛选失败"));
 }
@@ -2810,7 +2817,7 @@ function soloTab(s,e){
       <div class="sub" style="margin-top:5px;color:#795548">🔒 ${esc(TASK_DATA_PRIVACY_NOTE)}</div></div>
   </div>
   ${lenOpts("solo-len")}
-  <div class="actions"><button class="btn pri" onclick="soloSubmit(${s.idx},this)">🚀 派活(1点)</button></div>
+  <div class="actions">${pointsAction({label:"🚀 派活",onclick:`soloSubmit(${s.idx},this)`,cost:1})}</div>
   ${cur}`;
 }
 async function soloSubmit(idx, btn){
@@ -3288,8 +3295,8 @@ function specTaskTab(e){
   </div>
   ${decisionEvidenceChecklist(guide.evidence_requirements,{panelId:`spec-evidence-${Number(e.idx)}`})}
   ${lenOpts("spec-len")}
-  <div class="actions"><button class="btn pri" onclick="specSubmit(${e.idx},this)">🚀 派活(1点)</button>
-    <span class="sub">缺失的信息可以先不填，TA 会明确标注假设与待补数据</span></div>
+  <div class="actions" style="align-items:flex-start">${pointsAction({label:"🚀 派活",onclick:`specSubmit(${e.idx},this)`,cost:1})}
+    <span class="sub" style="margin-top:10px">缺失的信息可以先不填，TA 会明确标注假设与待补数据</span></div>
   <div id="spec-fit"></div>
   ${curHtml}
   ${tasks.length?`<h3>历史任务(${tasks.length})</h3>${tasks.map(t=>`
@@ -3315,7 +3322,7 @@ async function specSubmit(idx, btn, force){
     const body = {emp_idx:idx,brief,request_key:requestKey,...binding};
     if(force) body.force = true;
     const r = await api("/tasks",{method:"POST",body, timeout:20000});
-    if(r.mismatch){ btn.disabled=false; btn.innerHTML="🚀 派活(1点)"; return specShowMismatch(idx, r); }
+    if(r.mismatch){ restoreActionButton(btn); return specShowMismatch(idx, r); }
     createdTaskId=Number(r.task_id||0);
     if(!Number.isInteger(createdTaskId)||createdTaskId<1) throw new Error("任务已接收，但返回编号异常；请到任务中心核对");
     clearPersistentMutationRequestKey("initialtask",String(idx),requestKey);
@@ -3329,7 +3336,7 @@ async function specSubmit(idx, btn, force){
   }catch(e){
     if(createdTaskId) return;
     toast(e.uncertain?"响应超时，本次请求号已保留；点击重试不会重复扣点":e.message);
-    btn.disabled=false; btn.innerHTML="🚀 派活(1点)";
+    restoreActionButton(btn);
   }
 }
 async function specOpenTask(tid,preserveDraft=false){
@@ -4046,7 +4053,7 @@ function saveBriefDraft(){
       platforms:[...document.querySelectorAll("#b-pf .chip.on")].map(
         el=>el.dataset.p||el.textContent.trim()).slice(0,20),
     },
-    advanced:!!form.querySelector("details")?.open,
+    advanced:!!$("#b-more")?.open,
   };
   try{ localStorage.setItem(briefDraftKey(),JSON.stringify(draft)); }catch(_){}
 }
@@ -4077,7 +4084,8 @@ function restoreBriefDraft(draft=readBriefDraft()){
   if(c.imageCount) selectBriefChips("b-imgn",c.imageCount);
   if(c.imageMode) selectBriefChips("b-imode",c.imageMode,"data-k");
   if(Array.isArray(c.platforms)) selectBriefChips("b-pf",c.platforms,"data-p");
-  const details=$("#brief-form details"); if(details) details.open=!!draft.advanced;
+  const details=$("#b-more"); if(details) details.open=!!draft.advanced;
+  const adv=$("#b-adv"); if(adv&&(f.ref||f.material||f.deck)) adv.open=true;
   return true;
 }
 function clearBriefDraft(){
@@ -4085,6 +4093,50 @@ function clearBriefDraft(){
   try{ localStorage.removeItem(briefDraftKey()); }catch(_){}
 }
 function discardBriefDraft(){ clearBriefDraft(); render(); }
+/* ① 行业默认用企业自己的行业(开户/上手时选的),不用每次再点 */
+const BRIEF_INDUSTRY_LABEL={restaurant:"餐饮",tea_coffee:"茶咖现制",convenience:"便利店",snack:"量贩零食",
+  grocery:"商超",pharmacy:"零售药房",hotel:"酒店住宿",auto:"汽车后市场",fitness:"健身瑜伽",beauty:"美容美业",pet:"宠物"};
+function briefIndustryDefault(){
+  const label=BRIEF_INDUSTRY_LABEL[(ME?.industries||[])[0]]||"";
+  if(!label) return {chip:"",custom:""};
+  return (META?.industries||[]).includes(label)?{chip:label,custom:""}:{chip:"",custom:label};
+}
+/* 「更多设置」记住上次的选择(按账号);存储不可用时照常用默认值 */
+function briefPrefsKey(){ return uiPrefKey("brief"); }
+function saveBriefPrefs(){
+  try{
+    const xhs=$("#b-xhs")?.value, dy=$("#b-dy")?.value;
+    localStorage.setItem(briefPrefsKey(),JSON.stringify({
+      template:selectedBriefChip("b-tpl"),
+      imageCount:selectedBriefChip("b-imgn"),
+      imageMode:selectedBriefChip("b-imode","data-k"),
+      platforms:[...document.querySelectorAll("#b-pf .chip.on")].map(el=>el.dataset.p||el.textContent.trim()).slice(0,20),
+      xhs:xhs!==""&&XHS_ALL[+xhs]?XHS_ALL[+xhs].name:"",
+      dy:dy!==""&&DY_ALL[+dy]?DY_ALL[+dy].name:"",
+      profile:$("#b-profile")?.value||"",
+      mode:$("#b-mode")?.value||"",
+    }));
+  }catch(_){}
+}
+function applyBriefPrefs(){
+  let p=null;
+  try{ p=JSON.parse(localStorage.getItem(briefPrefsKey())||"null"); }catch(_){ p=null; }
+  if(!p||typeof p!=="object") return false;
+  const hasChip=(id,value,attr="")=>value&&[...document.querySelectorAll(`#${id} .chip`)]
+    .some(el=>(attr?el.getAttribute(attr):el.textContent.trim())===String(value));
+  if(hasChip("b-tpl",p.template)) selectBriefChips("b-tpl",p.template);
+  if(hasChip("b-imgn",p.imageCount)) selectBriefChips("b-imgn",p.imageCount);
+  if(hasChip("b-imode",p.imageMode,"data-k")) selectBriefChips("b-imode",p.imageMode,"data-k");
+  const pfs=(Array.isArray(p.platforms)?p.platforms:[]).filter(x=>hasChip("b-pf",x,"data-p"));
+  if(pfs.length) selectBriefChips("b-pf",pfs,"data-p");
+  const setSelect=(sel,value)=>{ const el=$(sel); if(el&&value!==undefined&&[...el.options].some(o=>o.value===String(value))) el.value=String(value); };
+  const xi=XHS_ALL.findIndex(x=>x.name===p.xhs), di=DY_ALL.findIndex(x=>x.name===p.dy);
+  if(xi>=0) setSelect("#b-xhs",xi);
+  if(di>=0) setSelect("#b-dy",di);
+  setSelect("#b-profile",p.profile);
+  if(p.mode&&p.mode!=="fullauto") setSelect("#b-mode",p.mode);
+  return true;
+}
 async function newBrief(){
   const profiles = STATE.profiles;
   const PRE = (()=>{ try{ const v=JSON.parse(localStorage.getItem("prefill_brief")||"null"); localStorage.removeItem("prefill_brief"); return v; }catch(e){ return null; } })();
@@ -4092,25 +4144,28 @@ async function newBrief(){
   const ps = await api("/pstyles").catch(optionalResult({}));
   XHS_ALL = [...((ps["小红书"]||{}).custom||[]), ...((ps["小红书"]||{}).presets||[])];
   DY_ALL = [...((ps["抖音"]||{}).custom||[]), ...((ps["抖音"]||{}).presets||[])];
+  const indDefault = briefIndustryDefault();
+  const jobPoints = META?.job_points??18;
   $("#main").innerHTML = `<div class="card" id="brief-form" style="max-width:820px;margin:0 auto">
     <h2>➕ 下达任务</h2>
     <div id="brief-draft-notice"></div>
-    <div class="notice" style="margin-top:8px">👔 <b>老板只需要三步</b>:①选行业 ②说方向 ③点提交。剩下的交给制作流程:趋势官找热点 → 情报员查资料 → 拆解师学爆款 → 撰稿改稿配图封面 → 质检 → 各平台发布包。默认全交给 AI,只在发出去之前请您看一眼。</div>
+    <div class="notice" style="margin-top:8px">👔 <b>老板只需要三步</b>:①选行业 ②说方向 ③点提交。剩下的交给制作流程:找热点 → 查资料 → 写稿改稿配图 → 质检 → 各平台发布包。其余设置都有默认值,想细调再点「更多设置」。</div>
     <label>① 行业/赛道(内容会贴着这个行业做:渠道、黑话、案例、对标)</label>
-    <div class="chips" id="b-ind">${META.industries.map((t,i)=>`<span class="chip${i===0?" on":""}" onclick="pick(this)">${t}</span>`).join("")}</div>
-    <input id="b-ind-c" value="${esc(PRE?.industry||"")}" placeholder="✏️ 或自己输入行业/赛道(如:宠物烘焙、二手奢侈品)——填了就用您输入的" style="margin-top:6px">
+    <div class="chips" id="b-ind">${META.industries.map((t,i)=>`<span class="chip${t===indDefault.chip||(!indDefault.chip&&i===0)?" on":""}" onclick="pick(this)">${t}</span>`).join("")}</div>
+    <input id="b-ind-c" value="${esc(PRE?.industry||indDefault.custom||"")}" placeholder="✏️ 或自己输入行业/赛道(如:宠物烘焙、二手奢侈品)——填了就用您输入的" style="margin-top:6px">
     <label>② 内容方向 * <span class="sub">(一句话说清"聊什么",越具体越好;没灵感点下面的例子)</span></label>
     <textarea id="b-dir" placeholder="例:${esc(BRIEF_EXAMPLES[0])}">${esc(PRE?.direction||"")}</textarea>
     ${PRE?`<div class="notice green">🔥 来自「今日必发」:${esc(PRE.why||"")}</div>`:""}
     <div class="chips" style="margin-top:4px">${BRIEF_EXAMPLES.map(x=>`<span class="chip" style="font-size:11px" onclick="$('#b-dir').value=this.textContent;scheduleBriefDraftSave()">${esc(x)}</span>`).join("")}</div>
-    <label>③ 内容类型 <span class="sub">(决定整个制作流程的打法)</span></label>
+    <details id="b-more" style="margin-top:12px"><summary style="cursor:pointer;font-weight:800">⚙️ 更多设置 <span class="sub">内容类型、配图、平台、风格、人设、管控程度(会记住您上次的选择)</span></summary>
+    <label>内容类型 <span class="sub">(决定整个制作流程的打法)</span></label>
     <div class="chips" id="b-tpl">${META.brief_templates.map((t,i)=>`<span class="chip${i===1?" on":""}" onclick="pick(this)" title="${{蹭热点:"追当下热点,时效优先",日更选题:"从趋势里挑题,稳定日更",产品软文:"带货种草,卖点前置",观点输出:"独到观点,人设优先",教程干货:"手把手教程,信息密度高",二创改写:"对标内容二次创作"}[t]||t}">${t}</span>`).join("")}</div>
     <input id="b-tpl-c" value="${esc(PRE?.template||"")}" placeholder="✏️ 或自己输入内容类型(如:门店探访日记、老板问答)——填了就用您输入的" style="margin-top:6px">
-    <label>④ 配图 · 张数</label>
+    <label>配图 · 张数</label>
     <div class="chips" id="b-imgn">${["自动","2","3","4","5","6"].map((n,i)=>`<span class="chip${i===0?" on":""}" onclick="pick(this)">${n}${i?"张":""}</span>`).join("")}</div>
     <label>配图来源 <span class="sub">${(META.image_modes||[]).length>1?"(真实图=全网抓取真实照片,适合公众号/资讯类;AI=生成插画)":"(全网抓图已由平台关闭:用 AI 生图;自己拍的照片可在「营销工具箱→📸 产品图」上传)"}</span></label>
     <div class="chips" id="b-imode">${(META.image_modes||[{key:"ai",label:"🎨 AI生成"}]).map((m,i)=>`<span class="chip${i===0?" on":""}" data-k="${m.key}" onclick="pick(this)">${m.label}</span>`).join("")}</div>
-    <label>⑤ 发到哪些平台(多选,每个平台出专属版本+专属封面尺寸)</label>
+    <label>发到哪些平台(多选,每个平台出专属版本+专属封面尺寸)</label>
     <div class="chips" id="b-pf">${META.platforms.map((p,i)=>`<span class="chip${i===0?" on":""}" data-p="${p}" onclick="this.classList.toggle('on')">${META.platform_specs[p]?.emoji||""} ${p}</span>`).join("")}</div>
     <div class="row">
       <div><label>小红书风格 <span class="sub">(选了小红书时生效)</span></label>
@@ -4121,23 +4176,26 @@ async function newBrief(){
       ${DY_ALL.map((s,i)=>`<option value="${i}">${esc(s.name)}${s.preset?" · 预设":" · 自定义"}</option>`).join("")}</select></div>
     </div>
     <div class="row">
-      <div><label>⑥ 用哪个账号人设 <span class="sub">(写出来像您本人)</span></label><select id="b-profile"><option value="">(不使用品牌人设)</option>
+      <div><label>用哪个账号人设 <span class="sub">(写出来像您本人)</span></label><select id="b-profile"><option value="">(不使用品牌人设)</option>
         ${profiles.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join("")}</select>
         <div class="sub" style="margin-top:4px">还没档案?<a href="#/profiles" style="text-decoration:underline">30秒去建一个 →</a></div></div>
-      <div><label>⑦ 您想管多少 <span class="sub">(随时可打断)</span></label><select id="b-mode">
+      <div><label>您想管多少 <span class="sub">(随时可打断)</span></label><select id="b-mode">
         ${jobModeOptions(DEFAULT_JOB_MODE)}</select></div>
     </div>
-    <details style="margin-top:12px"><summary class="sub" style="cursor:pointer">📎 高级选项:参考链接 / 附加素材 / 演绎稿(选填)</summary>
+    <details id="b-adv" style="margin-top:12px"><summary class="sub" style="cursor:pointer">📎 高级选项:参考链接 / 附加素材 / 演绎稿(选填)</summary>
       <label>参考链接</label><input id="b-ref" placeholder="热点新闻/对标文章链接,情报员会精读" value="${esc(PRE?.ref_link||"")}">
       <label>附加素材(可传文件:txt/pdf/图片自动读成文字)</label>
       <input type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.jpg,.jpeg,.png,.webp" onchange="parseFileInto(this,'#b-mat')" style="margin-bottom:6px">
       <textarea id="b-mat" placeholder="产品资料、您的观点、必须包含的数据…都塞进来,员工会用上">${esc(PRE?.material||"")}</textarea>
       <label style="display:flex;align-items:center"><input type="checkbox" id="b-deck" style="width:auto;margin-right:8px">启用「演绎师」:额外产出一页交互式 HTML 演绎稿(适合教程/知识类)</label>
     </details>
-    <div class="actions" style="margin-top:16px"><button class="btn pri" style="font-size:15px" onclick="submitBrief(this)">🚀 提交,让团队开工</button>
-      <span class="sub">💎 本单 ${META?.job_points??18} 点 · 余额 ${Math.round(STATE?.balance||0)} 点 · 提交后可看全程直播,随时打断</span></div>
-    ${(STATE&&Math.round(STATE.balance||0)<(META?.job_points??18))?`<div class="notice" style="background:#fff3d6;margin-top:8px">⚠️ 余额不足本单所需 ${META?.job_points??18} 点。${ME?.role==="member"?"充值请联系贵司主账号(企业主)。":`<a href="#/billing" style="font-weight:800;text-decoration:underline">先去充值 →</a>`}(余额不够时提交会直接提示,不会扣费)</div>`:""}
+    </details>
+    ${pointsShort(jobPoints)?`<div class="notice" id="b-short" style="background:#fff3d6;margin-top:12px">⚠️ 余额不足本单所需 ${jobPoints} 点。${ME?.role==="member"?"充值请联系贵司主账号(企业主)。":`<a href="#/billing" style="font-weight:800;text-decoration:underline">先去充值 →</a>`}(余额不够时提交会直接提示,不会扣费)</div>`:""}
+    <label>③ 提交</label>
+    <div class="actions" style="margin-top:6px;align-items:flex-start">${pointsAction({label:"🚀 提交,让团队开工",onclick:"submitBrief(this)",cost:jobPoints,id:"b-submit",style:"font-size:15px"})}
+      <span class="sub" style="margin-top:10px">提交后可看全程直播,随时打断</span></div>
   </div>`;
+  if(!PRE) applyBriefPrefs();
   const restored=!PRE&&restoreBriefDraft();
   if(restored) $("#brief-draft-notice").innerHTML=`<div class="notice green" role="status">
     已恢复您上次未提交的需求草稿。
@@ -4165,11 +4223,12 @@ async function submitBrief(btn){
         enable_deck:$("#b-deck").checked},
       profile_id: $("#b-profile").value?+$("#b-profile").value:null,
       mode: $("#b-mode").value}});
+    saveBriefPrefs();
     clearBriefDraft();
     location.hash = "#/job/"+r.job_id;
   }catch(e){
     if(e.status===409||e.status===429){ toast(e.message); setTimeout(()=>location.hash="#/tasks", 900); return; }
-    toast(e.message); btn.disabled=false; btn.textContent="🚀 提交,让团队开工"; }
+    toast(e.message); restoreActionButton(btn); }
 }
 
 function rebrief(id){
@@ -5323,7 +5382,7 @@ function bossDashboardDraw(){
 }
 async function bossDashTenant(value){BOSS_DASH_FILTER.tenantId=Number(value);BOSS_DASH_FILTER.industryKey="";await bossDashboardView().catch(e=>toast(e.message));}
 async function bossDashIndustry(value){BOSS_DASH_FILTER.industryKey=String(value||"");await bossDashboardView().catch(e=>toast(e.message));}
-async function bossDashDays(value){BOSS_DASH_FILTER.days=Number(value)||30;await bossDashboardView().catch(e=>toast(e.message));}
+async function bossDashDays(value){BOSS_DASH_FILTER.days=Number(value)||30;uiPrefSet("boss_days",BOSS_DASH_FILTER.days);await bossDashboardView().catch(e=>toast(e.message));}
 async function bossEmployeeDetail(idx,identityRef,btn,offset=0){
   const requestSeq=++BOSS_EMPLOYEE_REQUEST_SEQ;
   const scopeToken=`${BOSS_DASH_FILTER.tenantId}:${BOSS_DASH_FILTER.industryKey}:${BOSS_DASH_FILTER.days}`;
@@ -5674,6 +5733,7 @@ async function inspectionView(rawId,rawIndustry){
 }
 async function inspectionSelectIndustry(value){
   const selected=String(value||"");if(!selected||selected===INSPECTION_INDUSTRY)return;
+  uiPrefSet("inspection_industry",selected);
   inspectionResetScope(selected);
   const target=inspectionRecordHash(0,selected);if(location.hash!==target)location.hash=target;else await inspectionView().catch(e=>toast(e.message));
 }
@@ -6825,8 +6885,7 @@ async function avatarView(){
         ${meta.heygen_ready&&meta.heygen_exhausted?`<div class="notice" style="font-size:12px">⚠️ HeyGen 余额不足,选它会自动改用可灵。想继续用请去 <a href="https://app.heygen.com/settings?nav=Subscriptions" target="_blank" style="text-decoration:underline">HeyGen 充值</a>;日常口播用<b>基础版/可灵</b>即可。</div>`:""}
         <label>⑤ 表演提示(选填)</label>
         <input id="av-prompt" placeholder="如:微笑讲述,偶尔点头,手势自然">
-        <div class="actions"><button class="btn pri" onclick="avSubmit(this)">🎬 开拍</button>
-          <span class="sub" id="av-price"></span></div>
+        <div class="actions" id="av-price">${pointsAction({label:"🎬 开拍",onclick:"avSubmit(this)",cost:12,id:"av-go"})}</div>
       </div>
     </div>
   </div>
@@ -6839,8 +6898,8 @@ async function avatarView(){
     <div class="row">
       <div style="flex:1;min-width:180px"><label>场景(选填)</label><input id="sv-scene" maxlength="80" placeholder="如:下班后朋友聚餐的餐桌"></div>
       <div style="flex:2;min-width:240px"><label>口播台词(选填,≤60字;留空由 AI 写)</label><input id="sv-script" maxlength="60" placeholder="如:红油一浇,牛肉片滑得停不下来,下班约上朋友来尝尝"></div></div>
-    <div class="actions"><button class="btn pri" onclick="svSubmit(this)">🛒 生成带货视频</button>
-      <span class="sub">💎 本单 <b>24 点</b>(失败自动退点) · 不写价格/联系方式,画面不加字,发布时记得勾选「AI 生成」</span></div></div>
+    <div class="actions" style="align-items:flex-start">${pointsAction({label:"🛒 生成带货视频",onclick:"svSubmit(this)",cost:24,id:"sv-go"})}
+      <span class="sub" style="margin-top:10px">失败自动退点 · 不写价格/联系方式,画面不加字,发布时记得勾选「AI 生成」</span></div></div>
   ${active.length?`<div class="card" style="background:#fffaf0"><h2>🎬 进行中(${active.length} 个并行)</h2>
     ${active.map(j=>`<div style="border:2px solid var(--ink);border-radius:14px;padding:12px;margin-bottom:10px;background:#fff">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -6994,7 +7053,7 @@ function avPriceSync(){
   const el=$("#av-price"); if(!el) return;
   const eng=$("#av-engine")?.value||"", dur=+($("#av-dur")?.value||30);
   const pts = ((eng==="basic"||eng==="rh_text") ? 6 : (dur<=30 ? 12 : 20)) + (stPackOn()?+(AV_META?.studio?.prices?.studio_pack||3):0);
-  el.innerHTML = `💎 本单 <b>${pts} 点</b> · 余额 ${Math.round(STATE?.balance||0)} 点`;
+  syncPointsAction($("#av-go"),pts);
 }
 async function avSubmit(btn){
   if(!AV_PHOTO) return toast("先上传照片");
@@ -7003,7 +7062,7 @@ async function avSubmit(btn){
   const script = $("#av-script").value.trim();
   if(!script) return toast("口播稿必填");
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 开拍中…`;
-  if(AV_VOICE_MODE==="own" && !AV_OWN_AUDIO) { btn.disabled=false; btn.textContent="🎬 开拍"; return toast(($("#av-engine")?.value||"")==="rh_text"?"文本驱动要先上传 10-30 秒的声音样本":"先上传您的录音"); }
+  if(AV_VOICE_MODE==="own" && !AV_OWN_AUDIO) { restoreActionButton(btn); return toast(($("#av-engine")?.value||"")==="rh_text"?"文本驱动要先上传 10-30 秒的声音样本":"先上传您的录音"); }
   try{
     await api("/avatar/jobs",{method:"POST",body:{photo_name:AV_PHOTO.name,
       voice_id:$("#av-voice")?.value, script, prompt:$("#av-prompt").value.trim(),
@@ -7015,7 +7074,7 @@ async function avSubmit(btn){
     if(stPackOn()){ ST.topic=null; ST.topics=null; ST.title=""; ST.cover=""; }
     AV_DRAFT="";
     toast(`已开拍${AV_VOICE_MODE==="own"?"(用您的原声)":""},可继续开新的任务`); render();
-  }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🎬 开拍"; }
+  }catch(e){ toast(e.message); restoreActionButton(btn); }
 }
 /* ---------- 门店数字人一条龙(内容流水线 v3.1 融合) ---------- */
 let AV_META = null, AV_DRAFT = "", AV_VOICES = [];
@@ -7179,7 +7238,7 @@ async function svSubmit(btn){
       selling_points:$("#sv-points").value.trim(),scene:$("#sv-scene").value.trim(),
       script:$("#sv-script").value.trim(),consent:AV_CONSENT}});
     toast("🛒 带货视频已开工,约 3-8 分钟出片,完成后在下方任务列表查看"); render();
-  }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🛒 生成带货视频"; }
+  }catch(e){ toast(e.message); restoreActionButton(btn); }
 }
 async function avCancel(id){
   if(!await uiConfirm(`取消这个数字人任务 #${id}? 未完成的渲染会退回。`,{
@@ -7675,8 +7734,8 @@ async function teamView(){
       ${managed.length?managed.map(u=>tmMemberRow(u,t)).join(""):`<div class="empty">暂时没有职级低于您的成员;请老板先创建员工级副账号。</div>`}
       <div id="tm-allocbox"></div></div>
     <div class="card"><h2>🔑 改我自己的密码</h2>
-      <div class="row"><div><label>旧密码</label><input id="tm-old" type="password"></div>
-        <div><label>新密码(≥12位，至少两类字符)</label><input id="tm-new" type="password"></div></div>
+      <div class="row"><div><label>旧密码</label><input id="tm-old" type="password" autocomplete="current-password" ${enterSubmit("tmMyPw()")}></div>
+        <div><label>新密码(≥12位，至少两类字符)</label><input id="tm-new" type="password" autocomplete="new-password" ${enterSubmit("tmMyPw()")}></div></div>
       <div class="actions"><button class="btn pri" onclick="tmMyPw()">💾 修改</button></div></div>`;
     return;
   }
@@ -7696,8 +7755,8 @@ async function teamView(){
     ${t.users.map(u=>tmMemberRow(u,t)).join("")}
     <div id="tm-modbox"></div><div id="tm-allocbox"></div></div>
   <div class="card"><h2>🔑 改我自己的密码</h2>
-    <div class="row"><div><label>旧密码</label><input id="tm-old" type="password"></div>
-      <div><label>新密码(≥12位，至少两类字符)</label><input id="tm-new" type="password"></div></div>
+    <div class="row"><div><label>旧密码</label><input id="tm-old" type="password" autocomplete="current-password" ${enterSubmit("tmMyPw()")}></div>
+      <div><label>新密码(≥12位，至少两类字符)</label><input id="tm-new" type="password" autocomplete="new-password" ${enterSubmit("tmMyPw()")}></div></div>
     <div class="actions"><button class="btn pri" onclick="tmMyPw()">💾 修改</button></div></div>
   ${ME.role==="root"&&(t.guests||[]).length?`
   <div class="card"><h2>📇 客资(访客留资 ${t.guests.length} 条)</h2>
@@ -7753,7 +7812,7 @@ function tmUserForm(){
   const titles=(window.__TEAM?.job_titles)||[{key:"director",label:"总监"},{key:"manager",label:"经理"},{key:"staff",label:"员工"}];
   const titleDesc={director:"可给经理和员工分配数字员工",manager:"可给员工分配数字员工",staff:"只用被分配的数字员工"};
   $("#tm-uform").innerHTML = `<div class="card" style="background:#fff6dc">
-    <div class="row"><div><label>用户名</label><input id="tm-u"></div><div><label>密码(≥12位，至少两类字符)</label><input id="tm-p" type="password"></div></div>
+    <div class="row"><div><label>用户名</label><input id="tm-u" ${enterSubmit("tmUserCreate()")}></div><div><label>密码(≥12位，至少两类字符)</label><input id="tm-p" type="password" autocomplete="new-password" ${enterSubmit("tmUserCreate()")}></div></div>
     <label>职级</label><div class="chips" id="tm-title">${titles.map((x,i)=>`<span class="chip${x.key==="staff"?" on":""}" data-k="${x.key}" onclick="document.querySelectorAll('#tm-title .chip').forEach(c=>c.classList.remove('on'));this.classList.add('on')">${{director:"🎖",manager:"📋",staff:"👤"}[x.key]||""} ${esc(x.label)}<span class="sub" style="margin-left:4px">${titleDesc[x.key]||""}</span></span>`).join("")}</div>
     <label>开通行业/板块(多选)</label><div class="chips" id="tm-mods">${window.__modChips([])}</div>
     <div class="sub" style="margin-top:4px">建好后可点成员行的「🤝 分配数字员工」进一步限定TA能用行业里的哪些人;不限定=行业内全部可用。</div>
@@ -7899,16 +7958,18 @@ async function tmMyPw(){
   const password=$("#tm-new").value, passwordError=passwordPolicyError(password);
   if(passwordError) return toast(passwordError);
   try{ await api("/auth/password",{method:"PUT",body:{old:$("#tm-old").value,new:password}});
-    toast("密码已修改，请重新登录"); setTimeout(()=>{location.href="/login";},500);
+    // 服务端已给这台设备补发新会话，不用重新登录；其他设备上的旧登录会失效。
+    toast("密码已修改，其他设备需要用新密码重新登录");
+    $("#tm-old").value=""; $("#tm-new").value="";
   }catch(e){ toast(e.message); }
 }
 let TM_INDS = [];
 function tmTenantForm(){
   TM_INDS = window.__TEAM?.all_industries || [];
   $("#tm-tform").innerHTML = `<div class="card">
-    <div class="row"><div><label>企业名</label><input id="tt-name" placeholder="如:某某科技服务公司"></div>
-      <div><label>主账号用户名</label><input id="tt-owner"></div>
-      <div><label>初始密码(≥12位，至少两类字符)</label><input id="tt-pw" type="password"></div></div>
+    <div class="row"><div><label>企业名</label><input id="tt-name" placeholder="如:某某科技服务公司" ${enterSubmit("tmTenantCreate()")}></div>
+      <div><label>主账号用户名</label><input id="tt-owner" ${enterSubmit("tmTenantCreate()")}></div>
+      <div><label>初始密码(≥12位，至少两类字符)</label><input id="tt-pw" type="password" autocomplete="new-password" ${enterSubmit("tmTenantCreate()")}></div></div>
     <label>该企业所属行业(勾选后,他们只能看到「内容部+数字人+库+所选行业」,看不到别的行业)</label>
     <div class="chips" id="tt-inds">${TM_INDS.map(m=>`<span class="chip" data-k="${m.key}" onclick="this.classList.toggle('on')">${m.emoji} ${esc(m.name)}</span>`).join("")}</div>
     <div class="actions"><button class="btn pri" onclick="tmTenantCreate()">💾 开通</button>
@@ -8687,11 +8748,22 @@ async function meetingsView(mid){
   const cur = MT_CUR ? await api("/meetings/"+MT_CUR).catch(optionalResult(null)) : null;
   const pool = [
     ...META.stations.filter(employeeCanAssignNew).map(s=>({idx:s.idx,label:s.name,color:s.color,emoji:s.emoji,group:"内容生产部",...employeeIdentityMutationFields(s)})),
-    ...DEPTS.filter(d=>can(d.key)).flatMap(d=>d.employees.filter(e=>employeeCanAssignNew(e)).map(e=>({idx:e.idx,label:`${e.person||""}${e.person?"·":""}${e.name}`,color:e.color,emoji:e.emoji,group:e.group,...employeeIdentityMutationFields(e)})))];
+    ...DEPTS.filter(d=>can(d.key)).flatMap(d=>d.employees.filter(e=>employeeCanAssignNew(e)).map(e=>({idx:e.idx,label:`${e.person||""}${e.person?"·":""}${e.name}`,color:e.color,emoji:e.emoji,group:e.group,dept:d.key,...employeeIdentityMutationFields(e)})))];
   const availableMemberIds=new Set(pool.map(member=>Number(member.idx)));
   MT_SEL=new Set([...MT_SEL].filter(idx=>availableMemberIds.has(Number(idx))));
   const groups = {};
   pool.forEach(p=>(groups[p.group]=groups[p.group]||[]).push(p));
+  // 本企业自己的行业分组默认展开;别的行业统一收进一个「其他行业」,不用一路滚过去。
+  const ownInds = new Set(ME?.industries||[]);
+  const groupDept = g => (groups[g].find(p=>p.dept)||{}).dept||"";
+  const mtGroupHtml = ([g,ps],open)=>`<details ${open?"open":""} style="margin-top:6px"><summary style="cursor:pointer;font-weight:800;font-size:13px">${esc(g)}(${ps.length})</summary>
+      <div class="chips" style="margin-top:6px">${ps.map(p=>`<span class="chip mt-chip${MT_SEL.has(p.idx)?" on":""}" data-i="${p.idx}" onclick="mtToggle(this)">${p.emoji} ${esc(p.label)}</span>`).join("")}</div></details>`;
+  const groupEntries = Object.entries(groups);
+  const otherEntries = ownInds.size ? groupEntries.filter(([g])=>groupDept(g)&&!ownInds.has(groupDept(g))) : [];
+  const mainEntries = groupEntries.filter(entry=>!otherEntries.includes(entry));
+  const pickerHtml = mainEntries.map(entry=>mtGroupHtml(entry, ownInds.has(groupDept(entry[0])))).join("")
+    + (otherEntries.length?`<details class="mt-other" style="margin-top:8px"><summary style="cursor:pointer;font-weight:800">其他行业(${otherEntries.length} 组)</summary>
+      <div style="padding-left:10px">${otherEntries.map(entry=>mtGroupHtml(entry,false)).join("")}</div></details>`:"");
   $("#main").innerHTML = `
   ${cur?`<div class="card" style="background:#fffaf0"><h2>会议 #${cur.id} ${{queued:"排队",running:"🗣 进行中…",done:"✅ 已收口",failed:"中断"}[cur.status]||cur.status}
     ${cur.team_execute?`<span class="tag" style="background:#e7d9ff;font-weight:900">🤝 专家接力</span>`:""}
@@ -8721,17 +8793,17 @@ async function meetingsView(mid){
         <div><button class="btn pri" ${(cur.intervention_count||0)>=2?"disabled":""} onclick="mtAsk(${cur.id},this)">重新验证(${(cur.members||[]).length}点)</button></div></div>
       <div class="sub" style="margin-top:4px">这不是继续闲聊：员工只补新证据，主持人立即重做决定并更新 Next Action。每场最多 2 次，已用 ${cur.intervention_count||0} 次。</div></div>`:""}
   </div>`:""}
-  <div class="notice"${cur?"":' style="margin-top:0"'}>🪑 <b>AI 结果型会议</b>:不是让数字员工无限聊天，而是强制走完「每人一案并按有效方案排 Top N（最多 3 个）→ 失败/市场/单位经济反向验证 → GO / NO-GO 并执行」。每人 1 点。</div>
+  <div class="notice"${cur?"":' style="margin-top:0"'}>🪑 <b>AI 结果型会议</b>:每位专家各出一个方案，互相挑毛病，最后给您一个做或不做的结论。每人 1 点。</div>
   <div class="card"><h2>🎯 发起结果型会议</h2>
-    <label>议题 *</label><textarea id="mt-q" placeholder="例:我们准备在新城市开第二个直营网点,预算 40 万,请判断 GO / NO-GO、最大风险和本周验证动作"></textarea>
+    <label>议题 *</label><textarea id="mt-q" placeholder="例：我们准备在新城市开第二家直营店，预算 40 万，请判断做不做、最大风险和本周先做什么"></textarea>
     <div class="row"><div><label>已知约束(选填)</label><input id="mt-constraints" placeholder="例:预算40万；30天内开业；不能增加全职员工"></div>
-      <div><label>什么算有结果(选填)</label><input id="mt-acceptance" placeholder="例:必须给明确GO/NO-GO、最大风险和本周可执行动作"></div></div>
-    <div class="actions" style="margin-top:8px"><button class="btn blue" onclick="mtSuggest(this)">🤖 按议题自动选人</button>
-      <span class="sub">或在下面手动勾选</span></div>
+      <div><label>什么算有结果(选填)</label><input id="mt-acceptance" placeholder="例：必须给明确的做或不做、最大风险和本周能做的事"></div></div>
+    <div class="actions" style="margin-top:8px"><button class="btn pri" id="mt-suggest" onclick="mtSuggest(this)">🤖 按议题自动选人</button>
+      <span class="sub">写好议题点一下，系统帮您挑合适的专家</span></div>
     <label>拉谁进群(2-6 人,已选 <b id="mt-n">0</b> 人)</label>
     <div id="mt-picked" style="margin:6px 0">${mtPickedHtml(pool)}</div>
-    ${Object.entries(groups).map(([g,ps])=>`<details ${g==="内容生产部"?"":""} style="margin-top:6px"><summary style="cursor:pointer;font-weight:800;font-size:13px">${esc(g)}(${ps.length})</summary>
-      <div class="chips" style="margin-top:6px">${ps.map(p=>`<span class="chip mt-chip${MT_SEL.has(p.idx)?" on":""}" data-i="${p.idx}" onclick="mtToggle(this)">${p.emoji} ${esc(p.label)}</span>`).join("")}</div></details>`).join("")}
+    <div class="sub" style="margin-top:6px">也可以自己挑人：</div>
+    ${pickerHtml}
     <label style="display:flex;gap:8px;align-items:flex-start;margin-top:12px;cursor:pointer">
       <input id="mt-auto" type="checkbox" checked style="width:auto;margin-top:3px">
       <span><b>决策后自动执行</b><span class="sub" style="display:block">GO 或 NEED INFO 后，自动启动最多 3 个真实员工任务；包含在本次会议中，不重复扣点。取消勾选则等您看完共识后再点执行。</span></span>
@@ -8740,7 +8812,8 @@ async function meetingsView(mid){
       <input id="mt-team" type="checkbox" style="width:auto;margin-top:3px">
       <span><b>🤝 多位专家接力完成</b><span class="sub" style="display:block">不再各干各的：成员按分工接力开工，每一棒自动拿到前面队友的交付内容，最后由队长把全部交付整合成一份最终交付包。适合需要多人共创一个成果的议题；包含在本次会议中，不重复扣点。</span></span>
     </label>
-    <div class="actions"><button class="btn pri" onclick="mtStart(this)">🎯 开会并收敛(每人1点)</button></div></div>
+    <div class="actions" style="align-items:flex-start">${pointsAction({label:"🎯 开会并收敛",onclick:"mtStart(this)",cost:MT_SEL.size,id:"mt-go"})}
+      <span class="sub" style="margin-top:10px">每位专家 1 点</span></div></div>
   ${list.length||meetingsContract.offset>0?`<div class="card"><h2>历史会议(${meetingsContract.total??list.length})</h2>
     ${listContractNotice(meetingsContract,"历史会议")}${list.length?list.map(x=>`
     <div class="topic" style="cursor:pointer" onclick="location.hash='#/meetings/${x.id}'">
@@ -8759,7 +8832,7 @@ function mtPickedHtml(pool){
   return picked.map(p=>`<span class="tag" style="font-size:13px;padding:3px 10px">${p.emoji} ${esc(p.label)}
     <span style="cursor:pointer;font-weight:900" onclick="mtToggleIdx(${p.idx})">✕</span></span>`).join("");
 }
-function mtRefreshPicked(){ const box=$("#mt-picked"); if(box) box.innerHTML=mtPickedHtml(MT_POOL); $("#mt-n").textContent=MT_SEL.size; }
+function mtRefreshPicked(){ const box=$("#mt-picked"); if(box) box.innerHTML=mtPickedHtml(MT_POOL); $("#mt-n").textContent=MT_SEL.size; syncPointsAction($("#mt-go"),MT_SEL.size); }
 function mtToggleIdx(i){
   MT_SEL.delete(i);
   document.querySelectorAll(`.mt-chip[data-i="${i}"]`).forEach(el=>el.classList.remove("on"));
@@ -8868,7 +8941,7 @@ async function mtStart(btn){
       team_execute:$("#mt-team")?.checked===true}});
     MT_CUR = r.meeting_id; MT_SEL = new Set(); toast("结果型会议开始：提案 → 验证 → 执行");
     location.hash="#/meetings/"+r.meeting_id;
-  }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🎯 开会并收敛(每人1点)"; }
+  }catch(e){ toast(e.message); restoreActionButton(btn); }
 }
 
 /* ---------- 启动 ---------- */
