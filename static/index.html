@@ -327,6 +327,11 @@ body.forced-pw #conn,body.forced-pw #fb-btn{display:none!important}
 .tm-check:has(input:checked){border-color:var(--ink);background:#fff1bd}
 .tm-check span{min-width:0;word-break:break-all}
 .tm-sendcard{background:#eefaf1;border:2.5px solid var(--ink)}
+.tm-row-more{position:relative;display:inline-block}
+.tm-row-more>summary{list-style:none;cursor:pointer}
+.tm-row-more>summary::-webkit-details-marker{display:none}
+.tm-row-more-box{position:absolute;right:0;top:calc(100% + 4px);z-index:20;display:flex;flex-direction:column;gap:6px;min-width:150px;padding:8px;background:#fffdf7;border:2px solid var(--ink);border-radius:12px;box-shadow:3px 3px 0 rgba(51,41,31,.15)}
+.tm-row-more-box .btn{justify-content:flex-start;white-space:nowrap}
 .tm-sendcard pre{white-space:pre-wrap;word-break:break-all;background:#fff;border:2px dashed rgba(51,41,31,.35);border-radius:12px;padding:12px;font-family:inherit;font-size:15px;line-height:1.8;font-weight:700;margin:10px 0}
 .sa-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .sa-bar select{width:auto;flex:1 1 130px;min-width:0;max-width:240px;min-height:40px;margin:0}
@@ -766,7 +771,7 @@ html:has(.overlay),html:has(.overlay) body{overflow:hidden}
 <div class="toast" id="toast"></div>
 <script src="/static/app.js?v=54"></script>
 <script src="/static/onboarding.js?v=3"></script>
-<script src="/static/staff-admin.js?v=4"></script>
+<script src="/static/staff-admin.js?v=5"></script>
 <script src="/static/checklist-admin.js?v=2"></script>
 <script src="/static/cockpit.js?v=6"></script>
 </body>

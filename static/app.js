@@ -8013,10 +8013,20 @@ function tmAllocSummary(u,t){
   // 巡店负责门店:只有老板视图带门店数据;总监本来就看全部门店。
   const stores = !t.store_branches ? "" : (u.job_title==="director"
     ? "总监可看全部门店"
-    : (u.branch_ids||[]).length ? `负责 ${(u.branch_ids||[]).length} 家门店` : "还没分配门店（派活、巡店都看不到门店）");
+    : (u.branch_ids||[]).length ? tmStoreNames(u.branch_ids, t) : "还没分配门店（派活、巡店都看不到门店）");
+  // 店长/店员只关心负责哪家店；行业和 AI 专家的分配收在「⋯ 更多」里
+  if(tmIsStorePerson(u)) return stores?`<div class="sub" style="margin-top:4px">负责门店：${esc(stores)}</div>`:"";
   return `<div class="sub" style="margin-top:4px">行业/板块：${industries}</div>
     <div class="sub" style="margin-top:2px">AI 专家：${emp}</div>
     ${stores?`<div class="sub" style="margin-top:2px">负责门店：${esc(stores)}</div>`:""}`;
+}
+/* 直接写出门店名：最多 2 家，超出写「等 N 家」 */
+function tmStoreNames(ids, t){
+  const all=((t.store_branches||{}).items||[]);
+  const names=(ids||[]).map(id=>(all.find(b=>Number(b.id)===Number(id))||{}).name).filter(Boolean);
+  if(!names.length) return `${(ids||[]).length} 家门店`;
+  const total=(ids||[]).length;
+  return names.slice(0,2).join("、")+(total>2?` 等 ${total} 家`:"");
 }
 function tmBranchLabel(b){ return `${b.store_code?b.store_code+" · ":""}${b.name}${b.region?` · ${b.region}`:""}`; }
 /* 门店多选一律用复选框:手机上也能点,不用「按住 Ctrl 多选」 */
@@ -8050,15 +8060,20 @@ function tmMemberRow(u,t){
   const isSelf = ME && Number(ME.id)===Number(u.id);
   const btns = [];
   if(t.is_admin && u.role==="member"){
-    btns.push(`<button class="btn sm" onclick="tmEditMods(${u.id},${cp(u.username)},${cp(u.modules)})">🧩 行业/板块</button>`);
-    btns.push(`<button class="btn sm" onclick="tmEditTitle(${u.id},${cp(u.username)},${cp(u.job_title||"staff")})">🎖 职级</button>`);
-    btns.push(`<button class="btn sm" onclick="tmAllocForm(${u.id},${cp(u.username)})">🤝 分配数字员工</button>`);
-    if(t.store_branches && u.job_title!=="director") btns.push(`<button class="btn sm" onclick="tmBranchForm(${u.id},${cp(u.username)})">🏪 负责门店</button>`);
-    btns.push(`<button class="btn sm" onclick="tmResetPw(${u.id})">🔑 重置密码</button>`);
-    btns.push(`<button class="btn sm" onclick="tmToggle(${u.id},${u.enabled?0:1})">${u.enabled?"⏸ 停用":"▶️ 启用"}</button>`);
-    btns.push(`<button class="btn sm bad" onclick="tmDel(${u.id},${cp(u.username)})">🗑</button>`);
+    const mods=`<button class="btn sm" onclick="tmEditMods(${u.id},${cp(u.username)},${cp(u.modules)})">🧩 行业/板块</button>`;
+    const title=`<button class="btn sm" onclick="tmEditTitle(${u.id},${cp(u.username)},${cp(u.job_title||"staff")})">🎖 职级</button>`;
+    const alloc=`<button class="btn sm" onclick="tmAllocForm(${u.id},${cp(u.username)})">🤝 分配 AI 专家</button>`;
+    const stores=t.store_branches && u.job_title!=="director" ? `<button class="btn sm" onclick="tmBranchForm(${u.id},${cp(u.username)})">🏪 负责门店</button>` : "";
+    const reset=`<button class="btn sm" onclick="tmResetPw(${u.id})">🔑 重置密码</button>`;
+    const toggle=`<button class="btn sm" onclick="tmToggle(${u.id},${u.enabled?0:1})">${u.enabled?"⏸ 停用":"▶️ 启用"}</button>`;
+    const del=`<button class="btn sm bad" onclick="tmDel(${u.id},${cp(u.username)})" aria-label="删除 ${esc(u.username)}">🗑${tmIsStorePerson(u)?" 删除账号":""}</button>`;
+    if(tmIsStorePerson(u)){
+      // 店长/店员常用的只有这三个；其余收进「⋯ 更多」，手机上一行放得下
+      btns.push(stores, reset, toggle,
+        `<details class="tm-row-more"><summary class="btn sm">⋯ 更多</summary><div class="tm-row-more-box">${mods}${title}${alloc}${del}</div></details>`);
+    }else btns.push(mods, title, alloc, stores, reset, toggle, del);
   }else if(!t.is_admin && u.role==="member" && !isSelf){
-    btns.push(`<button class="btn sm pri" onclick="tmAllocForm(${u.id},${cp(u.username)})">🤝 分配数字员工</button>`);
+    btns.push(`<button class="btn sm pri" onclick="tmAllocForm(${u.id},${cp(u.username)})">🤝 分配 AI 专家</button>`);
   }
   return `<div class="topic">
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -8292,15 +8307,19 @@ async function tmUserCreate(){
 }
 function tmSendText(o){
   const store=o.kind!=="office";
-  return [`账号：${o.username}`, `初始密码：${o.password}`,
-    store?`手机打开：${location.origin}/staff`:`电脑打开：${location.origin}`].join("\n");
+  const name=String((window.__TEAM&&window.__TEAM.tenant&&window.__TEAM.tenant.name)||"").trim();
+  const brand=name?`【${name}】`:"";
+  return [store?`${brand}给您开了派活账号，用来看每天的活、拍照交差：`:`${brand}给您开了派活账号，电脑上打开就能用：`,
+    `账号：${o.username}`, `初始密码：${o.password}`,
+    store?`手机打开：${location.origin}/staff`:`电脑打开：${location.origin}`,
+    "第一次登录会让您改一个自己好记的密码。"].join("\n");
 }
 /* 建好后的「发给 TA」卡:密码只在这里出现一次,关掉就没了(服务端只存哈希) */
 function tmShowSendCard(o){
   const box=$("#tm-uform"); if(!box) return;
   const store=o.kind!=="office";
   box.innerHTML=`<div class="card tm-sendcard" id="tm-sendcard" role="status">
-    <h3 style="margin-top:0">✅ 账号建好了，把下面三行发给 TA</h3>
+    <h3 style="margin-top:0">✅ 账号建好了，把下面这段发给 TA</h3>
     <pre id="tm-send-text">${esc(tmSendText(o))}</pre>
     <div class="actions" style="margin-top:0"><button type="button" class="btn pri" id="tm-send-copy" onclick="tmCopySend()">📋 复制</button>
       <button type="button" class="btn" onclick="$('#tm-uform').innerHTML=''">我发好了</button></div>

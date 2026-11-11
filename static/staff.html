@@ -34,6 +34,7 @@ h2{font-size:18px;margin:18px 0 8px}
 .tag.today{background:#ffe8a3}
 .tag.waiting,.tag.done,.tag.submitted,.tag.awaiting_recheck{background:#e7f5ff}
 .tag.later{background:#fff}
+.tag.approved,.tag.checked{background:#d3f9d8}
 .empty{padding:28px 10px;text-align:center;color:var(--sub);font-size:17px}
 .panel{background:var(--card);border:2.5px solid var(--ink);border-radius:16px;padding:14px;margin:12px 0}
 .panel p{margin:6px 0}
@@ -56,13 +57,22 @@ textarea{min-height:96px;resize:vertical}
 .item{display:flex;gap:10px;align-items:center;border-top:2px dashed var(--line);padding:12px 0}
 .item:first-child{border-top:none}
 .item .tx{flex:1;min-width:0;font-size:17px;word-break:break-word}
-.item .tx.done{text-decoration:line-through;color:var(--sub)}
+.item .tx.done{color:var(--sub)}
 .item .btn{width:auto;min-width:108px;flex:none}
+.item .donebox{flex:none;display:flex;flex-direction:column;align-items:flex-end}
+.item .donebox .tag{margin-right:0}
+.item .donebox .linkbtn{padding:6px 4px;min-height:40px;font-size:15px}
 .ai{border-radius:12px;padding:10px 12px;margin:8px 0;font-weight:700}
 .ai.pass{background:#d3f9d8}.ai.doubt{background:#fff1bd}.ai.fail{background:#ffe3e3}.ai.none{background:#f1f3f5}
 .photos{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:8px 0}
 .photos a{display:block;border:2px solid var(--ink);border-radius:10px;overflow:hidden}
 .photos img{width:100%;display:block}
+.viewer{position:fixed;inset:0;z-index:50;background:rgba(20,16,12,.92);display:flex;align-items:center;justify-content:center;padding:56px 8px 64px}
+.viewer img{max-width:100%;max-height:100%;object-fit:contain;border-radius:8px;background:#fff}
+.viewer button{position:absolute;min-width:48px;min-height:48px;border:2px solid #fff;border-radius:24px;background:rgba(0,0,0,.4);color:#fff;font-size:20px;font-weight:900;cursor:pointer;font-family:inherit}
+.viewer .vx{top:8px;right:8px}
+.viewer .vp{left:8px;bottom:8px}.viewer .vn{right:8px;bottom:8px}
+.viewer .vc{position:absolute;bottom:20px;left:0;right:0;text-align:center;color:#fff;font-weight:800;pointer-events:none}
 .foot{display:flex;gap:10px;margin:26px 0 10px}
 .foot .btn{font-size:16px;min-height:48px;font-weight:700}
 .foot-links{text-align:center;margin:18px 0 6px}
@@ -81,6 +91,6 @@ textarea{min-height:96px;resize:vertical}
   </header>
   <main id="main" aria-live="polite"><div class="empty"><span class="spin"></span> 正在打开…</div></main>
 </div>
-<script src="/static/staff.js?v=3"></script>
+<script src="/static/staff.js?v=4"></script>
 </body>
 </html>

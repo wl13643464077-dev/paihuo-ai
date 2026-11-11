@@ -291,12 +291,13 @@ class FrontendNavMobileTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("等我处理的(1)", todo)
             self.assertIn("2 件店员交差等您审核", todo)
             self.assertNotIn("眼下没有要您拍板的事", todo)
-            # 去审核 → 派给店员页,状态筛选一次性预设为「等审核」
+            # 去审核 → 派给店员页:审核区排第一、派活区收成一行;不改状态筛选(打回的活不会被藏起来)
             await page.locator(".today-todo .todo-row", has_text="店员交差等您审核").locator("button").click()
             await page.wait_for_selector("#sa-task-41")
             self.assertEqual("#/staff-tasks", await page.evaluate("location.hash"))
-            self.assertTrue(any("/api/staff/tasks?status=submitted" in url for _m, url in requests), requests)
-            self.assertEqual("submitted", await page.locator("select[aria-label=按状态看]").input_value())
+            self.assertEqual("", await page.locator("select[aria-label=按状态看]").input_value())
+            self.assertEqual(1, await page.locator("#sa-review #sa-task-41").count())
+            self.assertEqual(0, await page.locator("#sa-one").count())
             # 审核完回到今天页:重新取数,待办行和那条通知都不在了
             state["staff_review_count"] = 0
             state["notifications"] = []
