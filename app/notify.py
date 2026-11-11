@@ -546,6 +546,23 @@ def mark_all_read(tid: int, user: dict | None) -> int:
 
 
 
+def resolve_staff_task_submitted(tid: int, task_id: int) -> int:
+    """店员交差已被审核/取消：把这件活的「等您审核」通知对所有收件人标成已读。
+
+    只动本租户、本任务、kind=staff_task_submitted 的未读行；别的通知不碰。
+    """
+    task_id = int(task_id)
+    if task_id <= 0:
+        return 0
+    now = time.time()
+    return int(db.execute(
+        "UPDATE notification SET read_at=?,updated_at=? "
+        "WHERE tenant_id=? AND kind='staff_task_submitted' AND read_at IS NULL "
+        "AND link=?",
+        (now, now, int(tid), f"#/staff-tasks/{task_id}"),
+    ) or 0)
+
+
 def record(
         tid: int,
         kind: str,
