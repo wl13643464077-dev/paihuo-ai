@@ -57,7 +57,8 @@
     if(S.loading && !force) return S.loading;
     S.loading = api("/onboarding",{routeScoped:false}).then(st=>{
       S.state=st||{show:false};
-      if(S.state.steps&&!S.state.steps.industry) loadIndustries();
+      if(!S.state.steps) S.state.steps={};   // 接口没带 steps 时也不能让卡片渲染报错
+      if(S.state.show!==false&&!S.state.steps.industry) loadIndustries();
       paint();
       return S.state;
     }).catch(()=>{ S.state={show:false}; paint(); }).finally(()=>{ S.loading=null; });
