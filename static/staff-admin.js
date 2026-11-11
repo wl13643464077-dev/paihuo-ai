@@ -223,7 +223,9 @@
         <h3 style="margin-top:0">🗣️ 一句话派活</h3>
         <textarea id="sa-one" maxlength="500" placeholder="比如:人民路店明天中午前把冷柜清一遍,拍照给我">${h(SA.oneText||"")}</textarea>
         <div class="actions">
-          <button type="button" class="btn pri" onclick="PH_STAFF_ADMIN._parse()" ${SA.parsing||!m.branches.length?"disabled":""}>${SA.parsing?"AI 正在拆…":"✨ 拆成任务"}${price?`(${price} 点)`:""}</button>
+          ${price&&typeof costButton==="function"
+            ?costButton({label:"✨ 拆成任务",onclick:"PH_STAFF_ADMIN._parse()",cost:price,disabled:SA.parsing||!m.branches.length,disabledLabel:SA.parsing?"AI 正在拆…":""})
+            :`<button type="button" class="btn pri" onclick="PH_STAFF_ADMIN._parse()" ${SA.parsing||!m.branches.length?"disabled":""}>${SA.parsing?"AI 正在拆…":"✨ 拆成任务"}</button>`}
           <button type="button" class="btn" onclick="PH_STAFF_ADMIN._add()" ${!m.branches.length?"disabled":""}>✍️ 手动派一件</button>
           <a class="btn" href="/staff" target="_blank" rel="noopener">📱 看店员手机版</a>
         </div>

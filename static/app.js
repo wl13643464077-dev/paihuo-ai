@@ -48,11 +48,23 @@ function costNoteText(cost,balance=knownBalance()){
   return `本次 ${fmtPoints(cost)} 点${balance!=null?` · 余额 ${fmtPoints(Math.floor(balance*100)/100)} 点`:""}`;
 }
 const RECHARGE_LABEL="点数不够，去充值";
-function pointsAction({label,onclick,cost,balance=knownBalance(),cls="pri",id="",attrs="",style=""}){
+/* 所有花点数的按钮都用它:按钮里只写动作,点数写在按钮下面。
+   btnClass 是按钮完整的 class(默认 "btn pri");disabled 时按钮置灰,可用 disabledLabel 说明还差什么(例:「先选 2 位专家」)。 */
+function costButton({label,onclick,cost,balance=knownBalance(),btnClass="btn pri",id="",attrs="",style="",disabled=false,disabledLabel="",noteCls="cost-note"}){
   const short=pointsShort(cost,balance);
+  const text=disabled&&disabledLabel?disabledLabel:short?RECHARGE_LABEL:label;
   return `<div class="cost-act">
-    <button type="button" class="btn ${cls}"${id?` id="${id}"`:""}${style?` style="${style}"`:""} data-label="${esc(label)}" onclick="${onclick}" ${short?'data-recharge="1"':""} ${attrs}>${short?RECHARGE_LABEL:label}</button>
-    <div class="cost-note"${id?` id="${id}-cost"`:""}>${costNoteText(cost,balance)}</div></div>`;
+    <button type="button" class="${btnClass}"${id?` id="${id}"`:""}${style?` style="${style}"`:""} data-label="${esc(label)}" onclick="${onclick}" ${short?'data-recharge="1"':""} ${disabled?"disabled":""} ${attrs}>${text}</button>
+    <div class="${noteCls}"${id?` id="${id}-cost"`:""}>${costNoteText(cost,balance)}</div></div>`;
+}
+function pointsAction({cls="pri",...options}){
+  return costButton({...options,btnClass:`btn ${cls}`});
+}
+/* 按钮的可用状态随页面变化时(例:商量室还没选够人):置灰并换成提示文字,恢复后回到动作或「去充值」 */
+function setCostButtonDisabled(btn,disabled,disabledLabel=""){
+  if(!btn) return;
+  btn.disabled=!!disabled;
+  btn.textContent=disabled&&disabledLabel?disabledLabel:btn.dataset.recharge?RECHARGE_LABEL:(btn.dataset.label||btn.textContent);
 }
 /* 价格会随选项变化的按钮(数字人等):重新算一次按钮文字和小字 */
 function syncPointsAction(btn,cost,balance=knownBalance()){
@@ -585,15 +597,18 @@ async function openStoreForm({industryKey="",onCreated=null}={}){
 }
 // 切页时收起建店表单,不在别的页面突然冒出来
 window.addEventListener("hashchange",closeStoreForm);
+/* 「点数不足」提示条只属于当前页面:换页就收掉,不在别的页面盖住正文 */
+function closePayBar(){ $("#paybar")?.remove(); }
+window.addEventListener("hashchange",closePayBar);
 function pay402(msg){
   // 点数不足不再是死胡同:给一条可点的充值出路(root在#/team充值,老板线下收款)
   let b = $("#paybar");
   if(!b){ b = document.createElement("div"); b.id = "paybar"; document.body.appendChild(b); }
   b.style.cssText = "position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:998;background:#fff6dc;border:2.5px solid var(--ink,#222);border-radius:13px;padding:10px 14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;box-shadow:4px 4px 0 rgba(0,0,0,.18);max-width:92vw";
   b.innerHTML = `<span style="font-weight:700">💎 ${esc(msg||"点数不足")}</span>
-    ${ME?.role==="member"?`<span class="sub">充值请联系贵司主账号(企业主)</span>`:""}
-    <a class="btn sm pri" href="#/billing" onclick="$('#paybar')?.remove()">看套餐 / 充值</a>
-    <button class="btn sm" onclick="$('#paybar')?.remove()">先不用</button>`;
+    ${ME?.role==="member"?`<span class="sub">充值请联系老板</span>`:""}
+    <a class="btn sm pri" href="#/billing" onclick="closePayBar()">看套餐 / 充值</a>
+    <button class="btn sm" onclick="closePayBar()">先不用</button>`;
 }
 function copyText(s){ navigator.clipboard?.writeText(s).then(()=>toast("已复制")).catch(()=>{
   const ta=document.createElement("textarea"); ta.value=s; document.body.appendChild(ta); ta.select();
@@ -749,7 +764,8 @@ const NAV_GROUPS = [
       {route:"assets", icon:"🗂️", title:"我的资料库", desc:"数字员工交付的成品都存在这，好内容可以存成经验反复用", show:()=>canWork("library"),
         subs:[{route:"knowledge", icon:"📚", title:"经验库", desc:"存下来的好经验，以后所有员工干活都会带上", show:()=>canWork("library")}]},
       {action:"location.href='/staff'", icon:"📱", title:"店员手机版", desc:"店员每天在手机上看待办、拍照交差，您也能打开看看", show:()=>!!ME&&ME.role!=="tour"},
-      {route:"notifications", icon:"🔔", title:"通知记录", desc:"看过的通知都能在这里翻到", show:()=>!!ME&&ME.role!=="tour"},
+      {action:"fbOpen()", icon:"💬", title:"意见反馈", desc:"用得顺不顺、缺什么功能，直接告诉我们", show:()=>!!ME&&ME.role!=="tour"},
+      {route:"notifications", icon:"🔔", title:"通知记录", desc:"看过的通知都能在这里翻到，每日经营简报也在这里开关", show:()=>!!ME&&ME.role!=="tour"},
       {route:"trash", icon:"🗑", title:"回收站", desc:"误删的任务和资料可以在这里找回", show:()=>!!isAdmin()},
       // 引导卡只对 owner/root 展示,重看入口同样只给他们
       {route:"guide", icon:"🧭", title:"新手引导重看", desc:"重新打开「今天」页最上面的上手卡片", show:isOwnerLike},
@@ -945,14 +961,15 @@ async function forcedPasswordChange(){
   }catch(e){ toast(e.message); }
   finally{ FORCED_PW_BUSY=false; }
 }
-function routeLoading(page){
-  const labels={tasks:"派出去的活",teamruns:"协同小队",brand:"品牌知识包",new:"下达任务",avatar:"数字人视频",meetings:"多位专家一起商量",
+const ROUTE_LABELS={"":"今天",tasks:"派出去的活",teamruns:"协同小队",brand:"品牌知识包",new:"下达任务",avatar:"数字人视频",meetings:"多位专家一起商量",
     tools:"获客工具",channels:"发布渠道",schedules:"定时发布",profiles:"品牌人设",
     assets:"资料库",knowledge:"经验库",production:"员工产出",boss:"老板看板",cockpit:"数据驾驶舱",
     inspections:"巡店",censor:"内容审查",company:"企业档案",
     billing:"套餐与点数",team:"权限管理",admin:"后台",job:"任务详情",delivery:"交付中心",
     trash:"回收站",notifications:"通知记录",dispatch:"派活",store:"门店",growth:"获客",
-    mine:"我的",experts:"行业专家"};
+    mine:"我的",experts:"行业专家",settings:"设置"};
+function routeLoading(page){
+  const labels=ROUTE_LABELS;
   const box=$("#main"); if(!box) return;
   box.innerHTML=`<div class="card route-loading" role="status" aria-live="polite">
     <div style="display:flex;align-items:center;gap:12px"><span class="spin"></span>
@@ -1012,6 +1029,7 @@ async function render(reuseShell=false){
     hubRecordVisit(page);
     if(MODAL_IDX!==null) drawModal();
     enhanceResponsiveTables();
+    document.title=ROUTE_LABELS[page||""]&&ROUTE_LABELS[page||""]!=="派活"?`${ROUTE_LABELS[page||""]} · 派活`:"派活";
     if(page==="team") setTimeout(()=>{ if(typeof tmAutoLoad==="function") tmAutoLoad(); }, 0);
     if(window.AV_OPEN_CLONE && page==="avatar"){
       window.AV_OPEN_CLONE = false;
@@ -1442,10 +1460,16 @@ function gateRoom(){
 }
 /* ---------- V27 首页聚焦:三大动作卡 + 部门楼层折叠(仅非 root 租户) ---------- */
 function deptOpenKey(key){ return "deptopen_"+((ME&&ME.tenant)||"")+"_"+key; }
+/* 企业主行业(开户时选的第 1 个行业)对应的、当前账号能看的楼层;没有就返回空 */
+function primaryDeptKey(){
+  const own = ((ME&&ME.industries)||[])[0]||"";
+  return own && (DEPTS||[]).some(d=>d.key===own&&can(d.key)) ? own : "";
+}
 function deptIsOpen(key){
   const v = lsGet(deptOpenKey(key));
-  // 无记录(新租户首访)时默认:内容生产部展开、其他楼层收起;手动开合过则完全尊重记录
-  if(v===null) return key==="content";
+  // 无记录(新租户首访)时默认:企业自己行业的楼层展开,内容生产部和别的行业收起;
+  // 企业还没有可看的行业楼层时才默认展开内容生产部。手动开合过则完全尊重记录。
+  if(v===null) return key===(primaryDeptKey()||"content");
   return v==="1";
 }
 function toggleDept(key){
@@ -1526,7 +1550,7 @@ function tmApply(key){
   const empty=root.querySelector(".tm-empty"); if(empty) empty.hidden=shown>0;
 }
 function tmPick(key,group){ TM_GROUP[key]=group; tmApply(key); }
-function deptFloorHtml(d){
+function deptFloorHtml(d,{finder=true}={}){
   const key=d.key;
   const visible=d.employees.filter(e=>e.enabled!==false||isBoss());
   const groups=d.groups.map(g=>({...g,members:visible.filter(e=>e.group===g.name)})).filter(g=>g.members.length);
@@ -1534,7 +1558,7 @@ function deptFloorHtml(d){
   const chip=(name,label,n,extra="")=>`<button type="button" class="chip tm-chip ${group===name?"on":""} ${extra}" data-group="${esc(name)}" onclick="tmPick(${cp(key)},${cp(name)})">${label}<span class="tm-n">${n}</span></button>`;
   return `<div class="tm ${group?"tm-filtering":""}" data-tm="${esc(key)}">
     <div class="notice" style="margin-top:0">${d.emoji} <b>${esc(d.name)}</b> — ${esc(deptTagline(d))}。${ME&&ME.role==="tour"?"点任何员工看TA的履历。":"点卡片看履历，满意就直接派活；产出自动进资产库。"}</div>
-    ${ME&&ME.role==="tour"?"":expFinderCard(key)}
+    ${ME&&ME.role==="tour"||!finder?"":expFinderCard(key)}
     <div class="tm-bar">
       <input class="tm-q" type="search" placeholder="🔍 搜名字、岗位、技能，例如：选址、差评、医保" oninput="tmApply(${cp(key)})" aria-label="搜索员工">
       <span class="sub tm-count">显示 ${visible.length} 人</span>
@@ -1547,7 +1571,7 @@ function deptFloorHtml(d){
       <div class="grouphead"><span style="font-size:18px">${g.emoji||"📂"}</span>${esc(g.name)}<span class="sub">(${g.members.length}人)</span><span class="gline"></span></div>
       <div class="tm-grid">${g.members.map(tmCard).join("")}</div>
       ${g.members.length>3?`<button type="button" class="btn sm tm-more" onclick="this.closest('.tm-sec').classList.add('open')">展开全部 ${g.members.length} 人 ▾</button>`:""}</section>`).join("")}
-    <div class="empty tm-empty" hidden>没找到对口的员工。试试换个词，或在上面「不知道找谁?」里说说你要办的事。</div>
+    <div class="empty tm-empty" hidden>没找到对口的员工。试试换个词，或在上面「不知道找谁？」里说说您要办的事。</div>
   </div>`;
 }
 function deptSection(key, emoji, name, count, tagline, innerFn){
@@ -1675,7 +1699,7 @@ async function expertsView(){
   if(CUR_DEPT==="content"&&!can("content")) CUR_DEPT = allowedDepts[0]?.key||(can("avatar")?"__avatar":"content");
   const jobsCard = `<div class="card" style="margin-top:22px"><h2>📋 内容任务(${jobsContract.total??jobs.length})</h2>
     ${listContractNotice(jobsContract,"内容任务")}
-    ${jobs.length?jobs.map(jobRow).join(""):`<div class="empty">${(jobsContract.total??0)===0?`还没有内容任务。<div class="actions" style="justify-content:center"><a class="btn sm pri" href="#/new">✍️ 下达任务</a></div>`:"这一页没有任务；返回上一页,或点「✍️ 下达任务」开工。"}</div>`}
+    ${jobs.length?jobs.map(jobRow).join(""):`<div class="empty">${(jobsContract.total??0)===0?`还没有内容任务。<div class="actions" style="justify-content:center"><a class="btn sm pri" href="#/new">✍️ 下达任务</a></div>`:"这一页没有任务；返回上一页，或点「✍️ 下达任务」开工。"}</div>`}
     ${listPager(jobsContract,"jobs")}</div>`;
   let floorSection;
   if(isRoot){
@@ -1690,27 +1714,32 @@ async function expertsView(){
       floor = `<div class="floor">${META.stations.map(roomCard).join("")}${gateRoom()}</div>`;
     }else{
       const d = DEPTS.find(x=>x.key===CUR_DEPT) || allowedDepts[0];
-      floor = !d ? `<div class="empty">您的账号还没有开通任何板块,请联系企业主账号</div>` : deptFloorHtml(d);
+      floor = !d ? `<div class="empty">您的账号还没有开通任何板块，请联系企业主账号</div>` : deptFloorHtml(d);
     }
     floorSection = `${deptTabs}${floor}
       ${CUR_DEPT==="content"?jobsCard:""}`;
   }else{
-    // 租户视图:部门楼层默认折叠为标题行,点击展开;展开状态按租户+部门记忆
+    // 租户视图:部门楼层默认折叠为标题行,点击展开;展开状态按租户+部门记忆。
+    // 企业自己的行业排第一并默认展开,「不知道找谁？」放在楼层上面,首屏就能看到;内容生产部排最后。
+    const primaryKey = primaryDeptKey();
+    const finderKey = ME&&ME.role==="tour" ? "" : (primaryKey||allowedDepts[0]?.key||"");
+    const orderedDepts = [...allowedDepts].sort((a,b)=>(b.key===primaryKey)-(a.key===primaryKey));
     const sections = [];
+    orderedDepts.forEach(d=> sections.push(deptSection(d.key, d.emoji, d.name, d.employees.length+"人",
+      deptTagline(d)||"行业精品员工，一人一岗随叫随到", ()=>deptFloorHtml(d,{finder:d.key!==finderKey}))));
     if(can("content")) sections.push(deptSection("content","🎬","内容生产部",(META.stations.length+1)+"人",
-      "选题→写稿→配图→审查,一步步接力出成品",
+      "选题→写稿→配图→审查，一步步接力出成品",
       ()=>`<div class="floor">${META.stations.map(roomCard).join("")}${gateRoom()}</div>`));
-    allowedDepts.forEach(d=> sections.push(deptSection(d.key, d.emoji, d.name, d.employees.length+"人",
-      deptTagline(d)||"行业精品员工,一人一岗随叫随到", ()=>deptFloorHtml(d))));
+    if(finderKey) sections.unshift(`<div class="exp-finder-top" data-finder-dept="${esc(finderKey)}">${expFinderCard(finderKey)}</div>`);
     const avatarRow = can("avatar")?`<div class="deptsec"><div class="depthead" onclick="location.hash='#/avatar'">
       <span class="dh-emoji">🎥</span><span class="dh-name">数字人视频</span><span class="dh-count">新</span>
       <span class="dh-tag">照片开口说话 · 出条口播视频</span><span class="dh-caret">→</span></div></div>`:"";
-    floorSection = `${sections.length||avatarRow?"":`<div class="card"><div class="empty">您的账号还没有开通任何行业专家,请联系企业主账号开通。</div></div>`}
+    floorSection = `${sections.length||avatarRow?"":`<div class="card"><div class="empty">您的账号还没有开通任何行业专家，请联系企业主账号开通。</div></div>`}
       ${sections.join("")}${avatarRow}
       ${can("content")?jobsCard:""}`;
   }
-  $("#main").innerHTML = `<div class="hubhead"><h2>🧑‍🔧 找行业专家 <span class="sub" style="font-weight:600;font-size:13px">行业市场 · 每个行业一支精品员工队伍,点行业标题展开/收起</span></h2>
-    <div class="sub">点任何一位专家看介绍、直接派活;不知道找谁,就在行业里的「找专家」框里说说您遇到的事。</div></div>`
+  $("#main").innerHTML = `<div class="hubhead"><h2>🧑‍🔧 找行业专家 <span class="sub" style="font-weight:600;font-size:13px">行业市场 · 每个行业一支精品员工队伍，点行业标题展开/收起</span></h2>
+    <div class="sub">点任何一位专家看介绍、直接派活；不知道找谁，就在下面「不知道找谁？」里说说您遇到的事。</div></div>`
     + howtoCard()
     + (await industryPickCard())
     + floorSection;
@@ -1722,7 +1751,7 @@ async function industryPickCard(){
   try{ list=(await fetch("/api/guest/industries").then(r=>r.ok?r.json():{})).industries||[]; }catch(_){}
   if(!list.length) return "";
   return `<div class="card" id="industry-pick" style="background:#fff1bd;border-width:3px">
-    <h2 style="margin:0">🏷️ 先选你的行业</h2>
+    <h2 style="margin:0">🏷️ 先选您的行业</h2>
     <div class="sub" style="margin-top:6px">选好后,您这一行的专属数字员工就会出现在「派活 → 找行业专家」里。这里只能选 1 个,之后想加行业请到套餐页或联系顾问。</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
       ${list.map(x=>`<button class="btn" onclick="industryPick(${cp(String(x.key))},${cp(String(x.name||x.key))},this)">${esc(x.name||x.key)}</button>`).join("")}
@@ -1756,8 +1785,15 @@ async function notificationReadAll(btn){
 let NOTIFY_UNREAD_ONLY=false;
 async function notificationsView(offset=0){
   const pageOffset=Math.max(0,Number(offset)||0);
-  const data=await api(`/notifications?limit=40&offset=${pageOffset}&unread=${NOTIFY_UNREAD_ONLY?"true":"false"}`);
+  const [data,digestConf]=await Promise.all([
+    api(`/notifications?limit=40&offset=${pageOffset}&unread=${NOTIFY_UNREAD_ONLY?"true":"false"}`),
+    isOwnerLike()?api("/notify/daily-digest").catch(optionalResult({enabled:true})):Promise.resolve(null)]);
   const rows=data.items||[];
+  // 通知设置:每日经营简报(原来夹在套餐页的点数明细里)
+  const digestCard=digestConf?`<div class="card" id="digest-settings"><h2>📮 通知设置</h2>
+    <label style="display:flex;gap:8px;align-items:flex-start;margin:6px 0 0;cursor:${isAdmin()?"pointer":"default"}">
+      <input type="checkbox" style="width:auto;margin-top:3px" ${digestConf.enabled!==false?"checked":""} ${isAdmin()?"":"disabled"} onchange="digestToggle(this)">
+      <span><b>每日经营简报</b><span class="sub" style="display:block">每天早上把昨天完成了什么、花了多少点、有哪些风险，推到站内通知和企业微信。${isAdmin()?"":"（仅企业主可改）"}</span></span></label></div>`:"";
   $("#main").innerHTML=`<div class="card" style="background:linear-gradient(120deg,#eef6ff,#fffaf0 70%)">
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <div style="flex:1;min-width:220px"><h2 style="margin:0">🔔 通知记录</h2>
@@ -1778,6 +1814,7 @@ async function notificationsView(offset=0){
       <button class="btn sm" ${pageOffset<=0?"disabled":""} onclick="notificationsView(${Math.max(0,pageOffset-40)})">← 上一页</button>
       <button class="btn sm" ${data.has_more?"":"disabled"} onclick="notificationsView(${data.next_offset??0})">下一页 →</button>
     </div>`:""}</div>`;
+  if(digestCard) $("#main").firstElementChild?.insertAdjacentHTML("afterend",digestCard);
 }
 async function notificationHistoryRead(id,offset,btn){
   if(btn) btn.disabled=true;
@@ -2303,7 +2340,7 @@ async function taskVerdictLoad(tid){
     return;
   }
   box.innerHTML = `<div class="notice" style="margin-top:10px"><b>🧠 验收这次交付</b>
-    <span class="sub">采纳/驳回和理由会被 AI 提炼成该员工的「实战心得」,员工越用越懂你</span>
+    <span class="sub">采纳/驳回和理由会被 AI 提炼成该员工的「实战心得」,员工越用越懂您</span>
     <div class="actions" style="margin-top:8px">
       <button class="btn sm ok" onclick="taskVerdictSubmit(${tid},'adopt',this,'')">✅ 采纳</button>
       <button class="btn sm bad" onclick="taskVerdictRejectForm(${tid})">❌ 驳回(写理由)</button>
@@ -3311,8 +3348,8 @@ function specResumeTab(e){
   const plainBox=pl?`<section class="rz-panel rz-plain"><h3 class="rz-sec">一眼看懂 TA</h3>
       <div class="rz-pg">
         <div class="rz-pb"><div class="rz-pt">📌 TA 是干啥的</div><p class="rz-p">${esc(pl.what)}</p></div>
-        ${(pl.when||[]).length?`<div class="rz-pb"><div class="rz-pt">🕐 什么时候找 TA</div>${pl.when.map(w=>`<div class="rz-scene"><b>${esc(w.when)}</b>${w.get?`<div class="sub">TA 交给你：${esc(w.get)}</div>`:""}</div>`).join("")}</div>`:""}
-        ${(pl.value||[]).length?`<div class="rz-pb"><div class="rz-pt">💡 能帮你什么</div>${rzList(pl.value,"win")}</div>`:""}
+        ${(pl.when||[]).length?`<div class="rz-pb"><div class="rz-pt">🕐 什么时候找 TA</div>${pl.when.map(w=>`<div class="rz-scene"><b>${esc(w.when)}</b>${w.get?`<div class="sub">TA 交给您：${esc(w.get)}</div>`:""}</div>`).join("")}</div>`:""}
+        ${(pl.value||[]).length?`<div class="rz-pb"><div class="rz-pt">💡 能帮您什么</div>${rzList(pl.value,"win")}</div>`:""}
         ${pl.how?`<div class="rz-pb"><div class="rz-pt">👉 怎么用</div><p class="rz-p">${esc(pl.how)}</p></div>`:""}
       </div></section>`:"";
   const q=r.quality||{};
@@ -3345,7 +3382,7 @@ function specResumeTab(e){
       ${(r.tags||[]).length?`<div class="rz-chips">${r.tags.map(t=>`<span class="chip rz-tagchip">${esc(t)}</span>`).join("")}</div>`:""}
       ${statsHtml}
       ${!tour&&canAssign?`<div class="rz-cta"><button class="btn pri" onclick="SPEC_TAB='task';drawSpec()">📋 聘用并派活</button>
-        <span class="sub">一句话说清要什么，TA 交回结论、依据和行动清单，拍板永远在你。</span></div>`:""}
+        <span class="sub">一句话说清要什么，TA 交回结论、依据和行动清单，拍板永远在您。</span></div>`:""}
     </div>
     ${bossBox("rz-boss-m")}
     <div class="rz-body">
@@ -3541,10 +3578,10 @@ async function voiceFinish(v){
 /* ---------- V27:智能派活路由(大白话找专家 + 派单预检引导) ---------- */
 function expFinderCard(deptKey){
   return `<div class="card" style="background:linear-gradient(120deg,#eef6ff,#fffaf0);margin-top:10px">
-    <b>🎯 不知道找谁?</b> <span class="sub">一句话说要办的活,AI 读花名册自动组建协同小队:队长拆解分工、依赖排序,支持自动派发全队或逐人派活。</span>
+    <b>🎯 不知道找谁？</b> <span class="sub">一句话说要办的活，AI 读花名册自动组建协同小队：队长拆解分工、依赖排序，支持自动派发全队或逐人派活。</span>
     <div style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;flex-wrap:wrap">
       <textarea id="ef-text-${deptKey}" style="flex:1;min-width:min(100%,240px);min-height:46px"
-        placeholder="例:我想给门店做一场周年庆活动,怎么策划引流"></textarea>
+        placeholder="例：我想给门店做一场周年庆活动，怎么策划引流"></textarea>
       <div style="display:flex;flex-direction:column;gap:6px">
         <button class="btn pri" onclick="expFind(${cp(deptKey)},this)">🎯 帮我选</button>
         ${voiceBtn(`ef-text-${deptKey}`)}
@@ -3559,20 +3596,20 @@ async function expFind(deptKey, btn){
   const text = $("#ef-text-"+deptKey).value.trim();
   if(!text) return toast("先用一句话说说要办什么活");
   EXP_LAST_QUERY = text;
-  btn.disabled=true; const old=btn.innerHTML; btn.innerHTML=`<span class="spin"></span> AI 读花名册挑人中,约十几秒…`;
+  btn.disabled=true; const old=btn.innerHTML; btn.innerHTML=`<span class="spin"></span> AI 读花名册挑人中，约十几秒…`;
   try{
     const r = await api("/experts/match",{method:"POST",body:{text, dept_key:deptKey}, timeout:35000});
     const box = $("#ef-result-"+deptKey);
     const team = r.team;
     const picks = r.picks||[];
     if(team && (team.members||[]).length){
-      agentTeamSave(team, text);   // 固化到常驻浮窗:换页、派活后仍可随时找回
+      agentTeamSave(team, text);   // 固化到常驻浮窗：换页、派活后仍可随时找回
       box.innerHTML = agentTeamsBoard(team, text);
     }else if(picks.length){
-      box.innerHTML = `<div class="sub" style="margin:10px 0 2px">AI 推荐这几位,点「派给TA」直接进 TA 的派活台(会带上你这句话):</div>`
+      box.innerHTML = `<div class="sub" style="margin:10px 0 2px">AI 推荐这几位，点「派给TA」直接进 TA 的派活台（会带上您这句话）：</div>`
         + picks.map(expCard).join("");
     }else{
-      box.innerHTML = `<div class="sub" style="margin-top:10px">${esc(r.msg||"没匹配到特别对口的,换个说法再试试,或直接点下面的专家卡片。")}</div>`;
+      box.innerHTML = `<div class="sub" style="margin-top:10px">${esc(r.msg||"没匹配到特别对口的，换个说法再试试，或直接点下面的专家卡片。")}</div>`;
     }
   }catch(e){ toast(e.message); }
   finally{ btn.disabled=false; btn.innerHTML=old; }
@@ -3945,7 +3982,7 @@ function agentTeamFocusCard(m, query){
       <div><b style="font-size:16px">${esc(m.name||"")}</b>
         <span class="sub">${esc(m.role||"")} · ${esc(m.dept||"")} · ${esc(m.roleInTeam||"")}</span></div>
       <div class="sub" style="margin-top:4px">💡 ${esc(m.why||m.task||"")}</div>
-      <div style="margin-top:6px;font-size:13px">将带上你的原话：${esc(query||EXP_LAST_QUERY||"")}</div>
+      <div style="margin-top:6px;font-size:13px">将带上您的原话：${esc(query||EXP_LAST_QUERY||"")}</div>
     </div>
     <button class="btn sm pri" onclick="pickExpert(${m.idx})">派给TA →</button>
   </div>`;
@@ -3973,7 +4010,7 @@ function specShowMismatch(idx, r){
       <button class="btn sm pri" onclick="reassignExpert(${s.idx})">改派给TA →</button></div>`).join("");
   box.innerHTML = `<div class="card" style="background:#fff6dc;margin-top:12px">
     <b>🤔 这个活可能不太对口</b>
-    <div class="sub" style="margin-top:4px">${esc(r.why||"这位专家的岗位和你要办的活不太搭,换个人可能更顺手。")}</div>
+    <div class="sub" style="margin-top:4px">${esc(r.why||"这位专家的岗位和您要办的活不太搭,换个人可能更顺手。")}</div>
     ${sugg?`<div class="sub" style="margin-top:8px"><b>同部门这几位更合适:</b></div>${sugg}`:""}
     <div class="actions" style="margin-top:8px">
       <button class="btn" onclick="specSubmit(${idx},this,true)">坚持派给TA(照派)</button>
@@ -4275,55 +4312,62 @@ async function newBrief(){
   XHS_ALL = [...((ps["小红书"]||{}).custom||[]), ...((ps["小红书"]||{}).presets||[])];
   DY_ALL = [...((ps["抖音"]||{}).custom||[]), ...((ps["抖音"]||{}).presets||[])];
   const indDefault = briefIndustryDefault();
+  // 企业行业不在常用行业里时(如茶咖现制),把它加成一个已选中的按钮,不再出现「通用」高亮、输入框又填着别的行业。
+  // 从「今日必发」带过来的行业不在按钮里时,只填输入框,按钮一个都不高亮。
+  const briefIndustryChips = indDefault.custom ? [indDefault.custom, ...META.industries] : [...META.industries];
+  const preIndustry = String(PRE?.industry||"").trim();
+  const briefIndustryCustom = preIndustry && !briefIndustryChips.includes(preIndustry) ? preIndustry : "";
+  const briefIndustryOn = preIndustry ? (briefIndustryCustom ? "" : preIndustry)
+    : (indDefault.chip || indDefault.custom || briefIndustryChips[0] || "");
   const jobPoints = META?.job_points??18;
   $("#main").innerHTML = `<div class="card" id="brief-form" style="max-width:820px;margin:0 auto">
     <h2>➕ 下达任务</h2>
     <div id="brief-draft-notice"></div>
-    <div class="notice" style="margin-top:8px">👔 <b>老板只需要三步</b>:①选行业 ②说方向 ③点提交。剩下的交给制作流程:找热点 → 查资料 → 写稿改稿配图 → 质检 → 各平台发布包。其余设置都有默认值,想细调再点「更多设置」。</div>
-    <label>① 行业/赛道(内容会贴着这个行业做:渠道、黑话、案例、对标)</label>
-    <div class="chips" id="b-ind">${META.industries.map((t,i)=>`<span class="chip${t===indDefault.chip||(!indDefault.chip&&i===0)?" on":""}" onclick="pick(this)">${t}</span>`).join("")}</div>
-    <input id="b-ind-c" value="${esc(PRE?.industry||indDefault.custom||"")}" placeholder="✏️ 或自己输入行业/赛道(如:宠物烘焙、二手奢侈品)——填了就用您输入的" style="margin-top:6px">
-    <label>② 内容方向 * <span class="sub">(一句话说清"聊什么",越具体越好;没灵感点下面的例子)</span></label>
-    <textarea id="b-dir" placeholder="例:${esc(BRIEF_EXAMPLES[0])}">${esc(PRE?.direction||"")}</textarea>
-    ${PRE?`<div class="notice green">🔥 来自「今日必发」:${esc(PRE.why||"")}</div>`:""}
+    <div class="notice" style="margin-top:8px">👔 <b>老板只需要三步</b>：①选行业 ②说方向 ③点提交。剩下的交给制作流程：找热点 → 查资料 → 写稿改稿配图 → 质检 → 各平台发布包。其余设置都有默认值，想细调再点「更多设置」。</div>
+    <label>① 行业/赛道（内容会贴着这个行业做：渠道、黑话、案例、对标）</label>
+    <div class="chips" id="b-ind">${briefIndustryChips.map(t=>`<span class="chip${t===briefIndustryOn?" on":""}" onclick="pick(this);$('#b-ind-c').value=''">${esc(t)}</span>`).join("")}</div>
+    <input id="b-ind-c" value="${esc(briefIndustryCustom)}" oninput="if(this.value.trim())document.querySelectorAll('#b-ind .chip.on').forEach(el=>el.classList.remove('on'))" placeholder="✏️ 或自己输入行业/赛道（如：宠物烘焙、二手奢侈品）——填了就用您输入的" style="margin-top:6px">
+    <label>② 内容方向 * <span class="sub">(一句话说清"聊什么",越具体越好；没灵感点下面的例子)</span></label>
+    <textarea id="b-dir" placeholder="例：${esc(BRIEF_EXAMPLES[0])}">${esc(PRE?.direction||"")}</textarea>
+    ${PRE?`<div class="notice green">🔥 来自「今日必发」：${esc(PRE.why||"")}</div>`:""}
     <div class="chips" style="margin-top:4px">${BRIEF_EXAMPLES.map(x=>`<span class="chip" style="font-size:11px" onclick="$('#b-dir').value=this.textContent;scheduleBriefDraftSave()">${esc(x)}</span>`).join("")}</div>
-    <details id="b-more" style="margin-top:12px"><summary style="cursor:pointer;font-weight:800">⚙️ 更多设置 <span class="sub">内容类型、配图、平台、风格、人设、管控程度(会记住您上次的选择)</span></summary>
-    <label>内容类型 <span class="sub">(决定整个制作流程的打法)</span></label>
-    <div class="chips" id="b-tpl">${META.brief_templates.map((t,i)=>`<span class="chip${i===1?" on":""}" onclick="pick(this)" title="${{蹭热点:"追当下热点,时效优先",日更选题:"从趋势里挑题,稳定日更",产品软文:"带货种草,卖点前置",观点输出:"独到观点,人设优先",教程干货:"手把手教程,信息密度高",二创改写:"对标内容二次创作"}[t]||t}">${t}</span>`).join("")}</div>
-    <input id="b-tpl-c" value="${esc(PRE?.template||"")}" placeholder="✏️ 或自己输入内容类型(如:门店探访日记、老板问答)——填了就用您输入的" style="margin-top:6px">
+    <details id="b-more" style="margin-top:12px"><summary style="cursor:pointer;font-weight:800">⚙️ 更多设置 <span class="sub">内容类型、配图、平台、风格、人设、管控程度（会记住您上次的选择）</span></summary>
+    <label>内容类型 <span class="sub">（决定整个制作流程的打法）</span></label>
+    <div class="chips" id="b-tpl">${META.brief_templates.map((t,i)=>`<span class="chip${i===1?" on":""}" onclick="pick(this)" title="${{蹭热点:"追当下热点，时效优先",日更选题:"从趋势里挑题，稳定日更",产品软文:"带货种草，卖点前置",观点输出:"独到观点，人设优先",教程干货:"手把手教程，信息密度高",二创改写:"对标内容二次创作"}[t]||t}">${t}</span>`).join("")}</div>
+    <input id="b-tpl-c" value="${esc(PRE?.template||"")}" placeholder="✏️ 或自己输入内容类型（如：门店探访日记、老板问答）——填了就用您输入的" style="margin-top:6px">
     <label>配图 · 张数</label>
     <div class="chips" id="b-imgn">${["自动","2","3","4","5","6"].map((n,i)=>`<span class="chip${i===0?" on":""}" onclick="pick(this)">${n}${i?"张":""}</span>`).join("")}</div>
-    <label>配图来源 <span class="sub">${(META.image_modes||[]).length>1?"(真实图=全网抓取真实照片,适合公众号/资讯类;AI=生成插画)":"(全网抓图已由平台关闭:用 AI 生图;自己拍的照片可在「营销工具箱→📸 产品图」上传)"}</span></label>
+    <label>配图来源 <span class="sub">${(META.image_modes||[]).length>1?"(真实图=全网抓取真实照片，适合公众号/资讯类；AI=生成插画)":"(全网抓图已由平台关闭：用 AI 生图；自己拍的照片可在「营销工具箱→📸 产品图」上传)"}</span></label>
     <div class="chips" id="b-imode">${(META.image_modes||[{key:"ai",label:"🎨 AI生成"}]).map((m,i)=>`<span class="chip${i===0?" on":""}" data-k="${m.key}" onclick="pick(this)">${m.label}</span>`).join("")}</div>
-    <label>发到哪些平台(多选,每个平台出专属版本+专属封面尺寸)</label>
+    <label>发到哪些平台（多选，每个平台出专属版本+专属封面尺寸）</label>
     <div class="chips" id="b-pf">${META.platforms.map((p,i)=>`<span class="chip${i===0?" on":""}" data-p="${p}" onclick="this.classList.toggle('on')">${META.platform_specs[p]?.emoji||""} ${p}</span>`).join("")}</div>
     <div class="row">
-      <div><label>小红书风格 <span class="sub">(选了小红书时生效)</span></label>
-      <select id="b-xhs"><option value="">跟随人设(不指定)</option>
+      <div><label>小红书风格 <span class="sub">（选了小红书时生效）</span></label>
+      <select id="b-xhs"><option value="">跟随人设（不指定）</option>
       ${XHS_ALL.map((s,i)=>`<option value="${i}">${esc(s.name)}${s.preset?" · 预设":" · 自定义"}</option>`).join("")}</select></div>
-      <div><label>抖音风格 <span class="sub">(选了抖音时生效;<a href="#/channels" style="text-decoration:underline">自定义 →</a>)</span></label>
-      <select id="b-dy"><option value="">跟随人设(不指定)</option>
+      <div><label>抖音风格 <span class="sub">(选了抖音时生效；<a href="#/channels" style="text-decoration:underline">自定义 →</a>)</span></label>
+      <select id="b-dy"><option value="">跟随人设（不指定）</option>
       ${DY_ALL.map((s,i)=>`<option value="${i}">${esc(s.name)}${s.preset?" · 预设":" · 自定义"}</option>`).join("")}</select></div>
     </div>
     <div class="row">
-      <div><label>用哪个账号人设 <span class="sub">(写出来像您本人)</span></label><select id="b-profile"><option value="">(不使用品牌人设)</option>
+      <div><label>用哪个账号人设 <span class="sub">（写出来像您本人）</span></label><select id="b-profile"><option value="">（不使用品牌人设）</option>
         ${profiles.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join("")}</select>
-        <div class="sub" style="margin-top:4px">还没档案?<a href="#/profiles" style="text-decoration:underline">30秒去建一个 →</a></div></div>
-      <div><label>您想管多少 <span class="sub">(随时可打断)</span></label><select id="b-mode">
+        <div class="sub" style="margin-top:4px">还没档案？<a href="#/profiles" style="text-decoration:underline">30秒去建一个 →</a></div></div>
+      <div><label>您想管多少 <span class="sub">（随时可打断）</span></label><select id="b-mode">
         ${jobModeOptions(DEFAULT_JOB_MODE)}</select></div>
     </div>
-    <details id="b-adv" style="margin-top:12px"><summary class="sub" style="cursor:pointer">📎 高级选项:参考链接 / 附加素材 / 演绎稿(选填)</summary>
-      <label>参考链接</label><input id="b-ref" placeholder="热点新闻/对标文章链接,情报员会精读" value="${esc(PRE?.ref_link||"")}">
-      <label>附加素材(可传文件:txt/pdf/图片自动读成文字)</label>
+    <details id="b-adv" style="margin-top:12px"><summary class="sub" style="cursor:pointer">📎 高级选项：参考链接 / 附加素材 / 演绎稿（选填）</summary>
+      <label>参考链接</label><input id="b-ref" placeholder="热点新闻/对标文章链接，情报员会精读" value="${esc(PRE?.ref_link||"")}">
+      <label>附加素材(可传文件：txt/pdf/图片自动读成文字)</label>
       <input type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.jpg,.jpeg,.png,.webp" onchange="parseFileInto(this,'#b-mat')" style="margin-bottom:6px">
-      <textarea id="b-mat" placeholder="产品资料、您的观点、必须包含的数据…都塞进来,员工会用上">${esc(PRE?.material||"")}</textarea>
-      <label style="display:flex;align-items:center"><input type="checkbox" id="b-deck" style="width:auto;margin-right:8px">启用「演绎师」:额外产出一页交互式 HTML 演绎稿(适合教程/知识类)</label>
+      <textarea id="b-mat" placeholder="产品资料、您的观点、必须包含的数据…都塞进来，员工会用上">${esc(PRE?.material||"")}</textarea>
+      <label style="display:flex;align-items:center"><input type="checkbox" id="b-deck" style="width:auto;margin-right:8px">启用「演绎师」：额外产出一页交互式 HTML 演绎稿(适合教程/知识类)</label>
     </details>
     </details>
-    ${pointsShort(jobPoints)?`<div class="notice" id="b-short" style="background:#fff3d6;margin-top:12px">⚠️ 余额不足本单所需 ${jobPoints} 点。${ME?.role==="member"?"充值请联系贵司主账号(企业主)。":`<a href="#/billing" style="font-weight:800;text-decoration:underline">先去充值 →</a>`}(余额不够时提交会直接提示,不会扣费)</div>`:""}
+    ${pointsShort(jobPoints)?`<div class="notice" id="b-short" style="background:#fff3d6;margin-top:12px">⚠️ 余额不足本单所需 ${jobPoints} 点。${ME?.role==="member"?"充值请联系贵司主账号（企业主）。":`<a href="#/billing" style="font-weight:800;text-decoration:underline">先去充值 →</a>`}（余额不够时提交会直接提示，不会扣费）</div>`:""}
     <label>③ 提交</label>
-    <div class="actions" style="margin-top:6px;align-items:flex-start">${pointsAction({label:"🚀 提交,让团队开工",onclick:"submitBrief(this)",cost:jobPoints,id:"b-submit",style:"font-size:15px"})}
-      <span class="sub" style="margin-top:10px">提交后可看全程直播,随时打断</span></div>
+    <div class="actions" style="margin-top:6px;align-items:flex-start">${pointsAction({label:"🚀 提交，让团队开工",onclick:"submitBrief(this)",cost:jobPoints,id:"b-submit",style:"font-size:15px"})}
+      <span class="sub" style="margin-top:10px">提交后可看全程直播，随时打断</span></div>
   </div>`;
   if(!PRE) applyBriefPrefs();
   const restored=!PRE&&restoreBriefDraft();
@@ -4777,10 +4821,10 @@ async function deliveryView(id){
 async function profilesView(){
   const ps = STATE.profiles;
   $("#main").innerHTML = `<div class="card"><h2>🎭 品牌人设</h2>
-    <div class="sub">定义"为谁生产"。人设会用在整个制作流程里:选题偏好、撰稿、文风固定、视觉规范。</div>
+    <div class="sub">定义"为谁生产"。人设会用在整个制作流程里：选题偏好、撰稿、文风固定、视觉规范。</div>
     <div class="actions"><button class="btn pri" onclick="newProfile()">➕ 新建档案</button>
-      ${isAdmin()?`<a class="btn" href="/api/records/export.xlsx?kind=profiles">⬇️ 导出全部档案(含语料)</a>`:""}</div></div>
-  <div id="plist">${ps.map(profileCard).join("")||`<div class="empty">还没有品牌人设</div>`}</div>`;
+      ${isAdmin()?`<a class="btn" href="/api/records/export.xlsx?kind=profiles">⬇️ 导出全部档案（含语料）</a>`:""}</div></div>
+  <div id="plist">${ps.map(profileCard).join("")||emptyState({icon:"🎭",text:"还没有品牌人设。建一个档案，写出来的内容才像您自己。",actionLabel:"➕ 新建档案",onAction:"newProfile()"})}</div>`;
 }
 function profileCard(p){
   const s = p.persona||{};
@@ -4808,7 +4852,7 @@ function profileForm(p){
     <label>历史作品喂养(粘贴 5–20 篇代表作,用于提炼文风)</label>
     <div class="notice" style="margin:4px 0 8px">📁 有文件包?直接选文件(支持多选,<b>Word / PDF / Excel / PPT / 图片 / txt</b> 都能自动提取文字;各种记录、往期文案、语录都行)</div>
     <input type="file" multiple accept=".txt,.md,.markdown,.csv,.json,.log,.pdf,.docx,.xlsx,.pptx,.jpg,.jpeg,.png,.webp" onchange="loadProfileFiles(this)" style="margin-bottom:8px">
-    <textarea id="p-corpus" style="min-height:160px" placeholder="把过去的爆款正文直接粘贴进来,多篇用 --- 分隔;或用上面的按钮选文件。注:提炼实际使用前 8000 字,日常写稿注入前 3000 字——放最能代表你风格的几篇即可,不必求多">${esc(s.corpus||"")}</textarea>
+    <textarea id="p-corpus" style="min-height:160px" placeholder="把过去的爆款正文直接粘贴进来,多篇用 --- 分隔;或用上面的按钮选文件。注:提炼实际使用前 8000 字,日常写稿注入前 3000 字——放最能代表您风格的几篇即可,不必求多">${esc(s.corpus||"")}</textarea>
     <div class="actions">
       <button class="btn pri" onclick="saveProfile(${p?p.id:"null"})">💾 保存</button>
       ${p?`<button class="btn" onclick="distill(${p.id},this)">🧬 提炼文风特征</button>`
@@ -4870,6 +4914,13 @@ async function distill(id, btn){
 /* ---------- 资产库(V5:多维表格 + 专家报告) ---------- */
 let ASSET_TAB = "topic", AFILTER = {platform:"", category:""}, ASSET_Q = "";
 function setAF(k,v){ AFILTER[k]=v; resetListPage("assets"); render(); }
+/* 资料库空了:说清这里会放什么,给一个去产出的按钮;筛选后为空时只提示换条件 */
+function assetsEmptyState(){
+  if(AFILTER.platform||AFILTER.category||ASSET_Q) return emptyState({icon:"🔎",text:"没有符合筛选条件的资料，换个条件试试。"});
+  if(ASSET_TAB==="report") return emptyState({icon:"📄",text:"还没有专家报告。行业专家交付的报告会存到这里。",actionLabel:"🧑‍🔧 去找行业专家",href:"#/experts"});
+  const text=ASSET_TAB==="topic"?"还没有选题。趋势官没被选中的选题会自动存到这里。":"还没有成品。下达一个内容任务，做好后会存到这里。";
+  return canWork("content")?emptyState({icon:"🗂️",text,actionLabel:"✍️ 下达任务",href:"#/new"}):emptyState({icon:"🗂️",text});
+}
 async function assetsView(){
   const assetContract=normalizeListContract(await api(listPath("/assets","assets",{
     type:ASSET_TAB,platform:AFILTER.platform,category:AFILTER.category,q:ASSET_Q})),LIST_PAGE_SIZE);
@@ -4909,7 +4960,7 @@ async function assetsView(){
           <button class="btn sm" onclick="reAnalyze('assets',${a.id},this)">🔁 重评</button>
           ${isAdmin()?`<button class="btn sm bad" onclick="assetDel(${a.id})" title="移入回收站">🗑</button>`:""}</div>
       </div>`).join("")}</div>`
-      :`<div class="empty">空的。汽车、美容、酒店等行业专家交付的报告会沉淀到这里;获客工具的报告在工具页里看,点「💾 存进经验库」的会进经验库。</div>`)
+      :assetsEmptyState())
     : shown.length?`<div class="dimwrap"><table class="dimtable"><thead><tr>
       <th>标题</th><th>类别</th><th>平台</th><th>行业</th><th>主题</th><th>关键词</th>
       <th>质量</th><th>匹配</th><th>复用</th><th>时效</th><th>情绪</th><th>摘要</th><th>操作</th>
@@ -4920,7 +4971,7 @@ async function assetsView(){
         <button class="btn sm" onclick="reAnalyze('assets',${a.id},this)" title="重新评估">🔁</button>
         ${isAdmin()?`<button class="btn sm bad" onclick="assetDel(${a.id})" title="移入回收站">🗑</button>`:""}</td>
     </tr>`).join("")}</tbody></table></div>`
-    :`<div class="empty">空的。${{topic:"趋势官没被选中的选题会自动沉淀到这里",final:"完成的内容任务会存到这里",report:"汽车、美容、酒店等行业专家交付的报告会沉淀到这里"}[ASSET_TAB]}</div>`}
+    :assetsEmptyState()}
     ${listPager(assetContract,"assets")}
   </div>`;
 }
@@ -6080,7 +6131,7 @@ function inspectionDraw(){
     <label>本次检查重点（选填）</label><textarea id="inspection-scope" style="min-height:58px" placeholder="例：重点检查前厅陈列、后厨清洁、消防通道和员工开店准备"></textarea>
     ${inspectionChecklistHtml()}
     <div class="sub">只上传您有权使用的现场照片；请避免拍到无关顾客、儿童、车牌、收据或个人联系方式。图片中的文字不会被当成系统指令。</div>
-    <div class="actions"><button class="btn pri" onclick="inspectionSubmit(this)" ${INSPECTION_CAPTURE_BRANCH_ID&&INSPECTION_CHECKLIST.status==="ready"?"":"disabled"}>📷 开始巡店（1点）</button></div></div>
+    <div class="actions">${costButton({label:"📷 开始巡店",onclick:"inspectionSubmit(this)",cost:1,disabled:!(INSPECTION_CAPTURE_BRANCH_ID&&INSPECTION_CHECKLIST.status==="ready")})}</div></div>
   <div class="card"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><h3 style="margin:0;flex:1">巡店记录${selectedBranch?` · ${esc(selectedBranch.name)}`:selectedRegion!==null?` · ${esc(selectedRegion||"未分区")}`:""}</h3>${selectedBranch?`<button class="btn sm" onclick="inspectionFilterBranch(0)">清除门店筛选</button>`:selectedRegion!==null?`<button class="btn sm" onclick="inspectionFilterRegion(null)">清除区域筛选</button>`:""}</div>${items.length?items.map(v=>`<div class="topic" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
     <div style="flex:1;min-width:200px"><b>#${v.id} · ${esc(v.branch?.name||"门店")}</b><div class="sub">${esc(v.branch?.region||"")} · ${new Date((v.visit_at||v.created_at)*1000).toLocaleDateString("zh-CN")} · ${inspectionStatusLabel(v.status)}</div></div>
     ${v.score!==null&&v.score!==undefined?`<span class="tag">得分 ${Math.round(v.score)}</span>`:""}<span class="tag">问题 ${v.issue_count||0}</span>${v.status==="needs_retake"?`<span class="tag">有照片要补拍</span>`:""}
@@ -6103,12 +6154,12 @@ async function inspectionSubmit(btn){
   const requestKey=persistentMutationRequestKey("inspection",`${industry_key}:${branchId}`,identity);
   btn.disabled=true;btn.innerHTML='<span class="spin"></span> 正在压缩照片…';
   const compressed=[];for(const item of ordered)compressed.push({slot:item.slot,file:await inspectionCompressPhoto(item.file)});
-  if(compressed.reduce((total,item)=>total+Number(item.file.size||0),0)>38*1024*1024){btn.disabled=false;btn.textContent="📷 开始巡店（1点）";return toast("现场照片总计不能超过 38MB");}
+  if(compressed.reduce((total,item)=>total+Number(item.file.size||0),0)>38*1024*1024){restoreActionButton(btn);return toast("现场照片总计不能超过 38MB");}
   const form=new FormData();form.append("branch_id",branchId);form.append("visit_at",visitAt);form.append("scope",scope);
   form.append("industry_key",industry_key);form.append("request_key",requestKey);form.append("template_version",String(templateVersion));form.append("observations_json",JSON.stringify(observations));
   compressed.forEach(({slot,file})=>{form.append("files",file,file.name||"photo.jpg");form.append("file_slots",slot);});btn.innerHTML='<span class="spin"></span> 正在安全上传…';
   try{const r=await apiUpload("/inspections",form,{timeout:120000});clearPersistentMutationRequestKey("inspection",`${industry_key}:${branchId}`,requestKey);toast("照片已交给巡店经理，分析完成后会形成整改清单");location.hash=inspectionRecordHash(r.inspection_id,industry_key);}
-  catch(e){toast(e.uncertain?"响应超时，本次巡店请求号已保留；直接重试不会重复扣点":e.message);btn.disabled=false;btn.textContent="📷 开始巡店（1点）";}
+  catch(e){toast(e.uncertain?"响应超时，本次巡店请求号已保留；直接重试不会重复扣点":e.message);restoreActionButton(btn);}
 }
 function inspectionEventLabel(kind){return ({visit_created:"建立巡店记录",issue_created:"生成问题与整改项",analysis_completed:"完成照片分析",action_assignment_updated:"人工确认/修改整改责任",action_transition:"更新整改进度",recheck_photos_added:"上传整改后复查照片",recheck_submitted:"提交复查",recheck_reviewed:"企业主完成人工复核",inspection_failed:"巡店分析未完成",retake_requested:"有照片看不清，等补拍",photo_retaken:"补拍了一张照片",action_assigned:"整改指派给具体的人",action_dismissed:"问题标记为误报",action_dismiss_reverted:"撤销误报"})[kind]||"更新巡店记录";}
 function inspectionHasRecordedValue(value){return value!==null&&value!==undefined&&value!=="";}
@@ -6232,7 +6283,8 @@ async function productionView(){
         <td class="sub">${fmtDate(e.last_at)}</td>
         <td><button class="btn sm" onclick="prodDetail(${e.idx},${cp(e.identity_ref||"")},this)">看产出</button></td>
       </tr><tr id="${esc(rowKey)}" style="display:none"><td colspan="${showCost?7:5}" style="background:#faf6ec"></td></tr>`}).join("")}</tbody>
-    </table></div>`:`<div class="empty">还没有产出记录。派活给员工、或跑一单内容,这里就会有数据。</div>`}
+    </table></div>`:emptyState({icon:"📊",text:"还没有产出记录。派活给员工或下达一个内容任务，这里就会有数据。",
+      actionLabel:canWork("content")?"✍️ 下达任务":"🧑‍🔧 去找行业专家",href:canWork("content")?"#/new":"#/experts"})}
   </div>`;
 }
 async function prodDetail(idx,identityRef,btn){
@@ -6432,7 +6484,7 @@ async function brandView(packageId){
     </div>`;
   }).join("");
   $("#main").innerHTML=`<div class="card"><h2>🏷️ 品牌知识包</h2>
-    <div class="sub">公开资料先供你逐项审阅。<b>只有点击“确认入库”后</b>，数字员工才会以该版门店名、口号、理念、招牌和品牌调性为准；检索结果不会自动生效。</div>
+    <div class="sub">公开资料先供您逐项审阅。<b>只有点击“确认入库”后</b>，数字员工才会以该版门店名、口号、理念、招牌和品牌调性为准；检索结果不会自动生效。</div>
     ${isAdmin()?`<div class="row" style="margin-top:16px"><div><label for="bp-name">输入品牌名，采集公开资料</label>
       <input id="bp-name" maxlength="120" placeholder="例：完整品牌名；同名品牌可加城市"></div>
       <div><label for="bp-store-hint">门店 / 城市（可选，帮助区分同名品牌）</label>
@@ -6448,7 +6500,7 @@ async function brandView(packageId){
       ${facts.length?factRows:p.status==="draft"?`<div class="empty">草稿没有有效事实，不能确认入库。</div>`:""}
       ${editing?`<div class="topic" style="margin-top:12px"><b>手工补一项</b>
         <div class="row"><div><label for="bp-add-key">资料类型</label><select id="bp-add-key">${Object.entries(BRAND_FACT_LABELS).map(([k,v])=>`<option value="${esc(k)}">${esc(v)}</option>`).join("")}</select></div>
-          <div><label for="bp-add-value">已确认的内容</label><input id="bp-add-value" maxlength="1200" placeholder="请填你确认准确的品牌资料"></div></div>
+          <div><label for="bp-add-value">已确认的内容</label><input id="bp-add-value" maxlength="1200" placeholder="请填您确认准确的品牌资料"></div></div>
         <div class="actions"><button class="btn" onclick="brandAddFact(${selectedId},this)">补充到待审阅草稿</button></div></div>
         <div class="topic" style="margin-top:12px"><b>上传本企业 Logo</b>
           <div class="sub">PNG、JPG、WebP，最大 8MB；上传后记为手工确认资料，仅本企业可用。确认入库后活动效果图才会读取它。</div>
@@ -6558,7 +6610,7 @@ async function companyView(){
     ${c.injected?(c.filled>=(c.total_fields||7)
       ?`<div class="notice" style="background:#e7f6ec;border-color:#8fd3a6">✅ 企业档案已生效(7/7 项齐全),正注入全部数字员工</div>`
       :`<div class="notice" style="background:#fff3d6">🟡 企业档案部分生效:已填 ${c.filled}/${c.total_fields||7} 项。员工只知道已填的部分——<b>空着的字段(如调性/禁忌)不会凭空生效</b>,建议补全后重新保存。</div>`)
-      :`<div class="notice">⚠️ 还没生成档案,员工暂时不了解你的企业。填资料 → 点提炼即可。</div>`}
+      :`<div class="notice">⚠️ 还没生成档案,员工暂时不了解您的企业。填资料 → 点提炼即可。</div>`}
     <label>企业资料(可直接粘贴,或上传文档;最多 2 万字)</label>
     <textarea id="cp-materials" style="min-height:150px" placeholder="例:我们是「品牌 / 企业名」,主营[产品或服务],服务[目标客户],核心场景是[…],品牌调性是[…],主要卖点是[…],表达禁忌是[…],常用口号是[…]。">${esc(c.materials||"")}</textarea>
     <div class="actions">
@@ -6777,10 +6829,10 @@ async function schedulesView(selectedId){
   const rows = await api("/schedules");
   SCHED_ROWS = rows;
   $("#main").innerHTML = `<div class="card"><h2>⏰ 定时发布</h2>
-    <div class="sub">设好节奏,内容部到点自动开工(北京时间)。比如「每天 09:00 来一单日更选题」。到点若 3 单并行已满会自动顺延,不硬塞。</div>
+    <div class="sub">设好节奏，内容部到点自动开工（北京时间）。比如「每天 09:00 来一单日更选题」。到点若 3 单并行已满会自动顺延，不硬塞。</div>
     <div class="actions"><button class="btn pri" onclick="schedForm()">➕ 新建定时任务</button></div>
     <div id="sform"></div>
-    ${rows.length?rows.map(s=>schedRow(s,+selectedId===s.id)).join(""):`<div class="empty">还没有定时任务</div>`}</div>`;
+    ${rows.length?rows.map(s=>schedRow(s,+selectedId===s.id)).join(""):emptyState({icon:"⏰",text:"还没有定时任务。设好时间，内容每天自动写好、按时送到。",actionLabel:"➕ 新建定时任务",onAction:"schedForm()"})}</div>`;
   if(selectedId) requestAnimationFrame(()=>document.getElementById("schedule-"+selectedId)?.scrollIntoView({block:"center",behavior:"smooth"}));
 }
 function schedRow(s,selected=false){
@@ -6931,11 +6983,11 @@ async function avatarView(){
   if(AV_PHOTO && !photos.some(p=>p.name===AV_PHOTO.name)) AV_PHOTO = null;
   if(!AV_PHOTO && photos.length) AV_PHOTO = photos[photos.length-1];
   const active = jobs.filter(j=>["queued","running"].includes(j.status));
-  const hgDown = !meta.heygen_ready || meta.heygen_exhausted;
+  const hgDown = isBoss() && (!meta.heygen_ready || meta.heygen_exhausted);
   const avBanner = hgDown ? `<div class="notice violet" style="margin-top:0">
-    🎬 <b>${meta.heygen_ready?"HeyGen 额度已用完,需要充值":"当前未接入 HeyGen「会动」引擎"}</b> ——
+    🎬 <b>${meta.heygen_ready?"HeyGen 额度已用完，需要充值":"当前未接入 HeyGen「会动」引擎"}</b> ——
     照片对口型的 <b>可灵 / 基础版</b> 照常出片,不影响您今天拍视频。${meta.heygen_ready?` 想继续用 HeyGen,请去 <a href="https://app.heygen.com/settings?nav=Subscriptions" target="_blank" style="text-decoration:underline;font-weight:800">充值</a>。`:``}
-    <div style="margin-top:5px">💡 想<b>不烧数字人额度</b>也能出视频?<a href="#/tools" onclick="TS.tab='vars'" style="text-decoration:underline;font-weight:900">试试 🎬 图文成片(3点/条,自动配音+字幕+抓真实图,不用照片)→</a></div></div>` : "";
+    <div style="margin-top:5px">💡 想<b>不烧数字人额度</b>也能出视频？<a href="#/tools" onclick="TS.tab='vars'" style="text-decoration:underline;font-weight:900">试试 🎬 图文成片(3点/条，自动配音+字幕+抓真实图，不用照片)→</a></div></div>` : "";
   $("#main").innerHTML = avBanner
     +listContractNotice(jobsContract,"数字人任务")
     +listContractNotice(photosContract,"人物照片")+`
@@ -6943,30 +6995,30 @@ async function avatarView(){
     <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
       ${charSVG("#8b5cf6","🎥", active.length?"work":"idle", 92)}
       <div style="flex:1;min-width:240px"><h2 style="margin:0">🎥 数字人摄影棚</h2>
-      <div class="sub" style="margin-top:5px">照片 + 口播稿 → 配音 → 驱动照片开口说话 → 成片。当前引擎:<b>${esc(meta.engine_note)}</b></div></div></div>
+      <div class="sub" style="margin-top:5px">照片 + 口播稿 → 配音 → 驱动照片开口说话 → 成片。${isBoss()?`当前引擎：<b>${esc(meta.engine_note)}</b>`:""}</div></div></div>
   </div>
-  <div class="card" style="background:#eef7ff"><h2>⚡ 偷懒入口:贴爆款链接,口播稿自动写</h2>
+  <div class="card" style="background:#eef7ff"><h2>⚡ 偷懒入口：贴爆款链接，口播稿自动写</h2>
     <div class="row" style="align-items:flex-end">
-      <div style="flex:2;min-width:260px"><label>抖音/公众号爆款链接 <span class="sub">(抖音/公众号成功率高;小红书防抓严,大概率提取不到——小红书内容建议直接复制正文粘到下方口播稿框改写)</span></label>
+      <div style="flex:2;min-width:260px"><label>抖音/公众号爆款链接 <span class="sub">(抖音/公众号成功率高；小红书防抓严，大概率提取不到——小红书内容建议直接复制正文粘到下方口播稿框改写)</span></label>
         <input id="av-link" placeholder="https://…(分享链接直接粘贴)"></div>
-      <div style="flex:1;min-width:150px"><label>改写风格(选填)</label>
-        <input id="av-style" placeholder="如:接地气、幽默"></div>
+      <div style="flex:1;min-width:150px"><label>改写风格（选填）</label>
+        <input id="av-style" placeholder="如：接地气、幽默"></div>
       <div style="flex:1;min-width:130px"><label>口播时长</label>
         <select id="av-link-dur">${meta.durations.map(d=>`<option value="${d.s}" ${d.s===30?"selected":""}>${d.label}</option>`).join("")}</select></div>
-      <div style="flex:1;min-width:150px"><label>贴合人设(选填)</label>
-        <select id="av-link-profile"><option value="">(不用人设)</option>${(STATE.profiles||[]).map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join("")}</select></div>
-      <div><button class="btn pri" onclick="avFromLink(this)">🪄 提取并改写(1点)</button></div>
+      <div style="flex:1;min-width:150px"><label>贴合人设（选填）</label>
+        <select id="av-link-profile"><option value="">（不用人设）</option>${(STATE.profiles||[]).map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join("")}</select></div>
+      <div>${costButton({label:"🪄 提取并改写",onclick:"avFromLink(this)",cost:1})}</div>
     </div>
-    <div class="sub" style="margin-top:6px">情报员会打开链接提取内容,自动改写成 30-60 秒口播稿并填到下面(约 1 分钟)。</div>
+    <div class="sub" style="margin-top:6px">情报员会打开链接提取内容，自动改写成 30-60 秒口播稿并填到下面（约 1 分钟）。</div>
     ${meta.link_video_enabled===false?`<div class="notice" style="font-size:12.5px;margin-top:6px">ℹ️ ${esc(meta.link_video_hint||"")}</div>`:""}</div>
   ${studioCard(meta, stores)}
   <div class="card"><h2>🎬 开拍</h2>
     ${meta.consent?`<label class="notice" style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;margin-top:0">
       <input type="checkbox" id="av-consent" style="width:auto;margin-top:3px" ${AV_CONSENT?"checked":""} onchange="AV_CONSENT=this.checked">
-      <span><b>授权声明(必勾)</b>:${esc(meta.consent.text)}。上传照片、录音和克隆声音前都需要勾选,系统会记录勾选人和时间。</span></label>`:""}
+      <span><b>授权声明（必勾）</b>：${esc(meta.consent.text)}。上传照片、录音和克隆声音前都需要勾选，系统会记录勾选人和时间。</span></label>`:""}
     <div class="row" style="align-items:flex-start">
       <div style="flex:1;min-width:260px">
-        <label>① 数字人照片 *(正脸清晰、光线好,单人)</label>
+        <label>① 数字人照片 *（正脸清晰、光线好，单人）</label>
         <input type="file" accept=".jpg,.jpeg,.png,.webp" onchange="avUpload(this)">
         <div id="av-photo-box" style="margin-top:8px">
           ${photos.length?`<div style="display:flex;gap:10px;flex-wrap:wrap">${photos.map(p=>`
@@ -6976,62 +7028,66 @@ async function avatarView(){
               ${AV_PHOTO&&AV_PHOTO.name===p.name?`<span style="position:absolute;left:6px;bottom:6px;background:var(--ink);color:#fff;font-size:11px;padding:1px 7px;border-radius:8px">已选</span>`:""}
               <button class="btn sm bad" style="position:absolute;top:-8px;right:-8px;padding:1px 7px;border-radius:50%" title="删除这张照片" onclick="avDelPhoto(${cp(p.name)},event)">✕</button>
             </div>`).join("")}</div>
-            <div class="sub" style="margin-top:5px">点选一张开拍;✕ 随时删,不占卡槽。</div>`
+            <div class="sub" style="margin-top:5px">点选一张开拍；✕ 随时删，不占卡槽。</div>`
           :`<div class="empty" style="padding:20px">还没上传照片</div>`}
         </div>
       </div>
       <div style="flex:1.4;min-width:300px">
-        <label>② 声音怎么来 <span class="sub" style="font-weight:400">(选错了没关系,开拍后能取消重来)</span></label>
+        <label>② 声音怎么来 <span class="sub" style="font-weight:400">（选错了没关系，开拍后能取消重来）</span></label>
         <div class="chips" style="gap:8px">
           <span class="chip ${AV_VOICE_MODE!=="own"?"on":""}" style="padding:9px 16px" id="av-vm-preset" onclick="avVoiceMode('preset')">🎙 系统音色配音</span>
           <span class="chip ${AV_VOICE_MODE==="own"?"on":""}" style="padding:9px 16px" id="av-vm-own" onclick="avVoiceMode('own')">🗣 用我自己的录音</span>
         </div>
         <div id="av-voice-preset" style="margin-top:6px;${AV_VOICE_MODE==="own"?"display:none":""}">
           <select id="av-voice">${meta.voices.map(v=>`<option value="${v.id}">${esc(v.label)}</option>`).join("")}</select>
-          <details style="margin-top:6px"><summary class="sub" style="cursor:pointer">🧬 克隆我的声音(录 30 秒,以后任何稿子都是您的原声)</summary>
-            <div class="notice" style="margin-top:6px">用手机随便录一段您说话的音频(<b>至少 10 秒</b>,建议 30-60 秒,内容随意),上传后点克隆。克隆好的声音会出现在上面的音色列表最顶部,永久可用。</div>
+          <details style="margin-top:6px"><summary class="sub" style="cursor:pointer">🧬 克隆我的声音（录 30 秒，以后任何稿子都是您的原声）</summary>
+            <div class="notice" style="margin-top:6px">用手机随便录一段您说话的音频(<b>至少 10 秒</b>，建议 30-60 秒，内容随意),上传后点克隆。克隆好的声音会出现在上面的音色列表最顶部，永久可用。</div>
             <input type="file" accept=".mp3,.m4a,.wav" onchange="avUploadCloneSample(this)">
             <div class="row" style="margin-top:6px;align-items:flex-end">
-              <div style="flex:1"><label>给这个声音起个名</label><input id="av-clone-label" placeholder="如:老板本尊" value="老板的声音"></div>
-              <div><button class="btn pri sm" id="av-clone-btn" disabled onclick="avClone(this)">🧬 开始克隆(${META?.voice_clone_points??9}点)</button></div>
+              <div style="flex:1"><label>给这个声音起个名</label><input id="av-clone-label" placeholder="如：老板本尊" value="老板的声音"></div>
+              <div>${costButton({label:"🧬 开始克隆",onclick:"avClone(this)",cost:META?.voice_clone_points??9,btnClass:"btn pri sm",id:"av-clone-btn",disabled:!AV_CLONE_SAMPLE})}</div>
             </div>
             <div class="sub" id="av-clone-status"></div>
           </details></div>
         <div id="av-voice-own" style="${AV_VOICE_MODE==="own"?"":"display:none;"}margin-top:6px">
-          ${(AV_VOICES||[]).length?`<div class="sub" style="margin-bottom:4px">用以前传过的声音(点选即可,不用重传):</div>
+          ${(AV_VOICES||[]).length?`<div class="sub" style="margin-bottom:4px">用以前传过的声音（点选即可，不用重传）：</div>
           <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px">${AV_VOICES.map((v,i)=>`<span class="chip ${AV_OWN_AUDIO&&AV_OWN_AUDIO.name===v.name?"on":""}" style="cursor:pointer" onclick="AV_OWN_AUDIO={name:${cp(v.name)},preview:${cp(v.preview)}};render()">🎙 声音${i+1}${v.ts?" · "+new Date(v.ts*1000).toLocaleDateString("zh-CN"):""}</span>`).join("")}</div>
           ${AV_OWN_AUDIO?`<audio controls src="${esc(safeAssetUrl(AV_OWN_AUDIO.preview))}" style="height:28px;margin-bottom:6px"></audio>`:""}
-          <div class="sub">或上传新的:</div>`:""}
+          <div class="sub">或上传新的：</div>`:""}
           <input type="file" accept=".mp3,.m4a,.wav" onchange="avUploadVoice(this)">
-          <div class="sub" id="av-own-status" style="margin-top:4px">上传一段您念这份口播稿的录音(手机录就行,成片就是您的原声)</div></div>
-        <label>③ 口播稿 *(建议 60-200 字,约 30-60 秒)</label>
-        <textarea id="av-script" style="min-height:120px" placeholder="自己写、从内容部交付里复制,或用上面的爆款链接自动生成。" oninput="AV_DRAFT=this.value">${esc(AV_DRAFT||"")}</textarea>
-        <label>④ 生成引擎 & 时长档位</label>
+          <div class="sub" id="av-own-status" style="margin-top:4px">上传一段您念这份口播稿的录音（手机录就行，成片就是您的原声）</div></div>
+        <label>③ 口播稿 *（建议 60-200 字，约 30-60 秒）</label>
+        <textarea id="av-script" style="min-height:120px" placeholder="自己写、从内容部交付里复制，或用上面的爆款链接自动生成。" oninput="AV_DRAFT=this.value">${esc(AV_DRAFT||"")}</textarea>
+        <label for="av-dur">④ 时长</label>
         <div class="row">
-          <div><select id="av-engine" onchange="avEngineSync();avPriceSync()">${meta.engines.map(e=>`<option value="${e.key}">${esc(e.label)}</option>`).join("")}</select></div>
           <div><select id="av-dur" onchange="avPriceSync()">${meta.durations.map(d=>`<option value="${d.s}" ${d.s===30?"selected":""}>${d.label}</option>`).join("")}</select></div>
         </div>
-        <label style="display:flex;gap:6px;align-items:flex-start;font-weight:400;cursor:pointer">
-          <input type="checkbox" id="av-overseas" style="width:auto;margin-top:3px" ${AV_OVERSEAS?"checked":""} onchange="AV_OVERSEAS=this.checked">
-          <span class="sub">同意使用境外服务商:${esc(meta.consent?.overseas_text||"HeyGen 为境外服务商,照片和声音将传输至境外服务商处理")}。<b>不勾选则只用国内服务商(可灵/基础版)</b>。</span></label>
-        ${meta.heygen_ready&&meta.heygen_exhausted?`<div class="notice" style="font-size:12px">⚠️ HeyGen 余额不足,选它会自动改用可灵。想继续用请去 <a href="https://app.heygen.com/settings?nav=Subscriptions" target="_blank" style="text-decoration:underline">HeyGen 充值</a>;日常口播用<b>基础版/可灵</b>即可。</div>`:""}
-        <label>⑤ 表演提示(选填)</label>
-        <input id="av-prompt" placeholder="如:微笑讲述,偶尔点头,手势自然">
+        <details class="av-adv" style="margin-top:8px"><summary class="sub" style="cursor:pointer;font-weight:800">⚙️ 高级：出片方式（当前：<span id="av-engine-cur">${esc(avEngineLabel(meta.engines.find(e=>e.key===avDefaultEngine(meta))||{}))}</span>）</summary>
+          <div class="row" style="margin-top:6px">
+            <div><select id="av-engine" aria-label="出片方式" onchange="avEngineSync();avPriceSync();$('#av-engine-cur').textContent=this.selectedOptions[0]?.textContent||''">${meta.engines.map(e=>`<option value="${e.key}" ${e.key===avDefaultEngine(meta)?"selected":""}>${esc(avEngineLabel(e))}</option>`).join("")}</select></div>
+          </div>
+          <label style="display:flex;gap:6px;align-items:flex-start;font-weight:400;cursor:pointer">
+            <input type="checkbox" id="av-overseas" style="width:auto;margin-top:3px" ${AV_OVERSEAS?"checked":""} onchange="AV_OVERSEAS=this.checked">
+            <span class="sub">同意使用境外服务商：${esc(meta.consent?.overseas_text||"照片和声音将传输至境外服务商处理")}。<b>不勾选则只用国内服务商</b>。</span></label>
+          ${isBoss()&&meta.heygen_ready&&meta.heygen_exhausted?`<div class="notice" style="font-size:12px">⚠️ HeyGen 余额不足,选它会自动改用可灵。想继续用请去 <a href="https://app.heygen.com/settings?nav=Subscriptions" target="_blank" style="text-decoration:underline">HeyGen 充值</a>;日常口播用<b>基础版/可灵</b>即可。</div>`:""}
+        </details>
+        <label>⑤ 表演提示（选填）</label>
+        <input id="av-prompt" placeholder="如：微笑讲述，偶尔点头，手势自然">
         <div class="actions" id="av-price">${pointsAction({label:"🎬 开拍",onclick:"avSubmit(this)",cost:12,id:"av-go"})}</div>
       </div>
     </div>
   </div>
-  <div class="card" style="background:#fff7ec"><h2>🛒 AI 带货视频(15 秒竖屏)</h2>
-    <div class="sub">一张<b>产品/菜品/门店照片</b> + 卖点 → 豆包 Seedance 2.5 直接生成带口播和环境音的 15 秒短片;照片里有真人时自动改走可灵 3.0。照片用上面 ① 的照片库(先上传产品照,再点选)。</div>
-    <div class="sub" style="margin-top:4px">当前选中照片:<b>${AV_PHOTO?"已选 1 张":"未选"}</b></div>
+  <div class="card" style="background:#fff7ec"><h2>🛒 AI 带货视频（15 秒竖屏）</h2>
+    <div class="sub">一张<b>产品/菜品/门店照片</b> + 卖点 → ${isBoss()?"豆包 Seedance 2.5 直接生成带口播和环境音的 15 秒短片；照片里有真人时自动改走可灵 3.0":"AI 直接生成带口播和环境音的 15 秒短片"}。照片用上面 ① 的照片库（先上传产品照，再点选）。</div>
+    <div class="sub" style="margin-top:4px">当前选中照片：<b>${AV_PHOTO?"已选 1 张":"未选"}</b></div>
     <div class="row" style="margin-top:8px">
-      <div style="flex:1;min-width:180px"><label>产品名 *</label><input id="sv-product" maxlength="40" placeholder="如:招牌水煮牛肉"></div>
-      <div style="flex:2;min-width:240px"><label>卖点(选填)</label><input id="sv-points" maxlength="160" placeholder="如:现切牛肉、红油现熬、两人份 68 元"></div></div>
+      <div style="flex:1;min-width:180px"><label>产品名 *</label><input id="sv-product" maxlength="40" placeholder="如：招牌水煮牛肉"></div>
+      <div style="flex:2;min-width:240px"><label>卖点（选填）</label><input id="sv-points" maxlength="160" placeholder="如：现切牛肉、红油现熬、两人份 68 元"></div></div>
     <div class="row">
-      <div style="flex:1;min-width:180px"><label>场景(选填)</label><input id="sv-scene" maxlength="80" placeholder="如:下班后朋友聚餐的餐桌"></div>
-      <div style="flex:2;min-width:240px"><label>口播台词(选填,≤60字;留空由 AI 写)</label><input id="sv-script" maxlength="60" placeholder="如:红油一浇,牛肉片滑得停不下来,下班约上朋友来尝尝"></div></div>
+      <div style="flex:1;min-width:180px"><label>场景（选填）</label><input id="sv-scene" maxlength="80" placeholder="如：下班后朋友聚餐的餐桌"></div>
+      <div style="flex:2;min-width:240px"><label>口播台词（选填，≤60字；留空由 AI 写）</label><input id="sv-script" maxlength="60" placeholder="如：红油一浇，牛肉片滑得停不下来，下班约上朋友来尝尝"></div></div>
     <div class="actions" style="align-items:flex-start">${pointsAction({label:"🛒 生成带货视频",onclick:"svSubmit(this)",cost:24,id:"sv-go"})}
-      <span class="sub" style="margin-top:10px">失败自动退点 · 不写价格/联系方式,画面不加字,发布时记得勾选「AI 生成」</span></div></div>
+      <span class="sub" style="margin-top:10px">失败自动退点 · 不写价格/联系方式，画面不加字，发布时记得勾选「AI 生成」</span></div></div>
   ${active.length?`<div class="card" style="background:#fffaf0"><h2>🎬 进行中(${active.length} 个并行)</h2>
     ${active.map(j=>`<div style="border:2px solid var(--ink);border-radius:14px;padding:12px;margin-bottom:10px;background:#fff">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -7050,7 +7106,7 @@ async function avatarView(){
       ${j.status==="done"&&safeAssetUrl(j.video_file)?`<video controls style="max-width:360px;width:100%;border:3px solid var(--ink);border-radius:14px;margin-top:8px" src="${esc(safeAssetUrl(j.video_file))}"></video>
         <div class="actions" style="margin-top:6px"><a class="btn sm pri" href="${esc(safeAssetUrl(j.video_file))}" download>⬇️ 下载成片</a>
         ${safeAssetUrl(j.audio_file)?`<a class="btn sm" href="${esc(safeAssetUrl(j.audio_file))}" target="_blank" rel="noopener noreferrer">🔊 只要配音</a>`:""}</div>
-        ${meta.ai_label?`<div class="sub" style="font-size:11px">🏷 ${esc(meta.ai_label)}(发布时请保留此标识)</div>`:""}`:""}
+        ${meta.ai_label?`<div class="sub" style="font-size:11px">🏷 ${esc(meta.ai_label)}（发布时请保留此标识）</div>`:""}`:""}
       ${j.status==="failed"?`<div class="notice red" style="margin-top:6px">${esc(j.error||"生成失败")}</div>`:""}
       ${j.studio?studioJobBlock(j):""}
       <div class="sub" style="margin-top:4px;font-size:11px">${new Date(j.created_at*1000).toLocaleString("zh-CN")}</div>
@@ -7121,19 +7177,19 @@ async function avUploadCloneSample(input){
 async function avClone(btn){
   if(!AV_CLONE_SAMPLE) return toast("先上传录音");
   if(!avConsentOk()) return;
-  btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 克隆中(约30秒)…`;
+  btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 克隆中（约30秒）…`;
   try{
     const v = await api("/avatar/clone",{method:"POST",body:{audio_name:AV_CLONE_SAMPLE.name,
       label:$("#av-clone-label").value.trim(), consent:AV_CONSENT}});
-    toast(`克隆成功!音色「${v.label}」已加入列表`); AV_CLONE_SAMPLE=null; render();
-  }catch(e){ toast(e.message); btn.disabled=false; btn.textContent=`🧬 开始克隆(${META?.voice_clone_points??9}点)`; }
+    toast(`克隆成功！音色「${v.label}」已加入列表`); AV_CLONE_SAMPLE=null; render();
+  }catch(e){ toast(e.message); restoreActionButton(btn); }
 }
 async function avFromLink(btn){
   const url = $("#av-link").value.trim();
   const errBox = ()=>{ let b=$("#av-link-err"); if(!b){ $("#av-link").insertAdjacentHTML("afterend",'<div id="av-link-err"></div>'); b=$("#av-link-err"); } return b; };
   errBox().innerHTML="";
   if(!url) return toast("先贴一个爆款链接");
-  btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 提取中(约1分钟)…`;
+  btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 提取中（约1分钟）…`;
   try{
     const r = await api("/avatar/script-from-link",{method:"POST",body:{url, style:$("#av-style").value.trim(),
       duration:+($("#av-link-dur")?.value||30), profile_id:$("#av-link-profile")?.value?+$("#av-link-profile").value:null}});
@@ -7141,17 +7197,17 @@ async function avFromLink(btn){
     if(r.source_text){
       let box = $("#av-source");
       if(!box){ $("#av-link").closest(".card").insertAdjacentHTML("beforeend",
-        `<details id="av-source" open style="margin-top:10px"><summary style="cursor:pointer;font-weight:800">📄 提取到的原文(比对用)</summary>
+        `<details id="av-source" open style="margin-top:10px"><summary style="cursor:pointer;font-weight:800">📄 提取到的原文（比对用）</summary>
          <div class="notice" style="white-space:pre-wrap;max-height:220px;overflow:auto;font-size:12.5px" id="av-source-txt"></div></details>`); }
       $("#av-source-txt").textContent = r.source_text;
     }
-    toast(r.source_text?"口播稿已生成,原文在下方可比对":"⚠️ 原文没抓到,这稿是按标题独立创作的——发布前请自己核对内容");
+    toast(r.source_text?"口播稿已生成，原文在下方可比对":"⚠️ 原文没抓到，这稿是按标题独立创作的——发布前请自己核对内容");
     $("#av-script").scrollIntoView({behavior:"smooth"});
   }catch(e){
     // 失败原因常驻红条:后端给的两条自救路径值得被读完,不能塞进转瞬即逝的 toast
-    errBox().innerHTML = `<div class="notice red" style="margin-top:6px">${esc(e.message)}(1 点已自动退回)</div>`;
+    errBox().innerHTML = `<div class="notice red" style="margin-top:6px">${esc(e.message)}（1 点已自动退回）</div>`;
   }
-  btn.disabled=false; btn.textContent="🪄 提取并改写(1点)";
+  restoreActionButton(btn);
 }
 async function avUpload(input){
   const f = input.files[0]; if(!f) return;
@@ -7181,6 +7237,17 @@ function avEngineSync(){
     ? "文本驱动:上传一段 10-30 秒您平时说话的录音(声音样本,不用念稿),成片就是您本人的声音念这份口播稿"
     : "上传一段您念这份口播稿的录音(手机录就行,成片就是您的原声)";
 }
+/* 出片方式收进「高级」后的默认值:有基础版就用基础版(不用先传声音样本),否则用列表第一个(自动) */
+function avDefaultEngine(meta){
+  const engines=meta?.engines||[];
+  return engines.some(e=>e.key==="basic")?"basic":(engines[0]?.key??"");
+}
+/* 出片方式的显示名:平台方看供应商名,老板只看能力说明(选项值和扣点规则不变) */
+function avEngineLabel(e){
+  if(isBoss()) return e.label;
+  return ({rh_text:"本人声音版（用您的声音样本，6 点/条）",basic:"基础版 · 省钱（6 点/条，不限时长）",
+    "":"自动选择（推荐）",heygen:"动作版（人物会动 · 境外服务商）",kling:"对口型版（国内）"})[e.key??""]||e.label;
+}
 function avPriceSync(){
   const el=$("#av-price"); if(!el) return;
   const eng=$("#av-engine")?.value||"", dur=+($("#av-dur")?.value||30);
@@ -7190,7 +7257,7 @@ function avPriceSync(){
 async function avSubmit(btn){
   if(!AV_PHOTO) return toast("先上传照片");
   if(!avConsentOk()) return;
-  if(($("#av-engine")?.value||"")==="heygen" && !AV_OVERSEAS) return toast("HeyGen 是境外服务商:请勾选同意传输至境外,或改选可灵/基础版(国内)");
+  if(($("#av-engine")?.value||"")==="heygen" && !AV_OVERSEAS) return toast("这种出片方式用的是境外服务商：请在「高级」里勾选同意传输至境外，或换一种国内的出片方式");
   const script = $("#av-script").value.trim();
   if(!script) return toast("口播稿必填");
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 开拍中…`;
@@ -7223,7 +7290,7 @@ function studioCard(meta, stores){
     ${stepHead("A","老板进店：上传门头/店内照片，AI 把您合成到店门口或店里")}
     <div class="row" style="align-items:flex-start">
       <div style="flex:1;min-width:240px">
-        <label>门店照片(门头/店内/收银台,清晰、少行人)</label>
+        <label>门店照片(门头/店内/收银台，清晰、少行人)</label>
         <input type="file" accept=".jpg,.jpeg,.png,.webp" onchange="stUploadStore(this)">
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">${stores.map(p=>`<img src="${esc(safeAssetUrl(p.preview))}" onclick="ST.store={name:${cp(p.name)},preview:${cp(p.preview)}};render()"
           style="width:84px;height:84px;object-fit:cover;cursor:pointer;border-radius:10px;border:3px solid ${ST.store&&ST.store.name===p.name?"var(--gold,#c9a227)":"var(--ink)"}">`).join("")||`<span class="sub">还没上传门店照片</span>`}</div>
@@ -7231,8 +7298,8 @@ function studioCard(meta, stores){
       <div style="flex:1.2;min-width:260px">
         <label>站在哪</label>
         <div class="chips" style="gap:6px">${(s.scenes||[]).map(x=>`<span class="chip ${ST.scene===x.key?"on":""}" onclick="ST.scene=${cp(x.key)};render()">${esc(x.label)}</span>`).join("")}</div>
-        <label>补充要求(选填)</label><input id="st-scene-note" maxlength="80" placeholder="如:穿厨师服、手里端着招牌菜" value="${esc(ST.sceneNote||"")}" oninput="ST.sceneNote=this.value">
-        <div class="actions"><button class="btn pri" onclick="stScene(this)">🪄 生成老板进店照(2张·${(pr.studio_scene||2)*2}点)</button></div>
+        <label>补充要求（选填）</label><input id="st-scene-note" maxlength="80" placeholder="如：穿厨师服、手里端着招牌菜" value="${esc(ST.sceneNote||"")}" oninput="ST.sceneNote=this.value">
+        <div class="actions">${costButton({label:"🪄 生成老板进店照（2 张）",onclick:"stScene(this)",cost:(pr.studio_scene||2)*2})}</div>
         <div class="sub">老板照片用下方「开拍 ①」里选中的那张（现在：<b>${AV_PHOTO?"已选":"未选"}</b>）。生成的照片自动进照片库并选中，直接用它开拍。</div>
       </div>
     </div>
@@ -7240,24 +7307,24 @@ function studioCard(meta, stores){
     <div class="row" style="align-items:flex-end">
       <div style="flex:1;min-width:150px"><label>行业</label><input id="st-industry" list="st-industries" value="${esc(ST.industry)}" oninput="ST.industry=this.value">
         <datalist id="st-industries">${(s.industries||[]).map(x=>`<option value="${esc(x)}">`).join("")}</datalist></div>
-      <div style="flex:2;min-width:240px"><label>门店情况(选填,写得越具体选题越贴)</label><input id="st-note" maxlength="120" placeholder="如:社区火锅店,人均80,主打鲜切牛肉,周边写字楼多" value="${esc(ST.note)}" oninput="ST.note=this.value"></div>
-      <div><button class="btn pri" onclick="stTopics(this)">📡 扫 72 小时热点(${pr.studio_topics||1}点)</button></div>
+      <div style="flex:2;min-width:240px"><label>门店情况（选填，写得越具体选题越贴）</label><input id="st-note" maxlength="120" placeholder="如：社区火锅店，人均80,主打鲜切牛肉，周边写字楼多" value="${esc(ST.note)}" oninput="ST.note=this.value"></div>
+      <div>${costButton({label:"📡 扫 72 小时热点",onclick:"stTopics(this)",cost:pr.studio_topics||1})}</div>
     </div>
     ${ST.scanNote?`<div class="sub" style="margin-top:6px">🔎 ${esc(ST.scanNote)}</div>`:""}
     ${topics.length?`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:10px;margin-top:10px">${topics.map((t,i)=>`
       <div onclick="stPickTopic(${i})" style="cursor:pointer;border:2.5px solid ${ST.topic&&ST.topic.title===t.title?"var(--gold,#c9a227)":"var(--ink)"};border-radius:12px;padding:10px 12px;background:${ST.topic&&ST.topic.title===t.title?"#fff6dc":"#fff"}">
         <div style="display:flex;gap:6px;align-items:center"><b style="flex:1">${esc(t.title)}</b>${t.evergreen?`<span class="pill">常青</span>`:`<span class="pill done">${Number(t.score)||0}分</span>`}</div>
         <div class="sub" style="margin-top:4px">🔥 ${esc(t.heat)}</div>
-        <div class="sub">${t.evergreen?"🌲 常青题(72 小时热点不够时补位,不是新闻,稿子里不会编出处)":`📰 ${esc(t.source)} · 约 ${Number(t.hours_ago)||0} 小时前`}</div>
+        <div class="sub">${t.evergreen?"🌲 常青题（72 小时热点不够时补位，不是新闻，稿子里不会编出处）":`📰 ${esc(t.source)} · 约 ${Number(t.hours_ago)||0} 小时前`}</div>
         ${t.angle?`<div style="font-size:13px;margin-top:4px">👉 ${esc(t.angle)}</div>`:""}
       </div>`).join("")}</div>`:""}
     ${stepHead("C","写稿：按选好的热点写口播稿（自动填进下方「开拍 ③」）")}
     <div class="row" style="align-items:flex-end">
       <div style="flex:1;min-width:120px"><label>时长</label><select id="st-dur">${(meta.durations||[]).map(d=>`<option value="${d.s}" ${d.s===30?"selected":""}>${esc(d.label)}</option>`).join("")}</select></div>
-      <div><button class="btn pri" onclick="stScript(this)" ${ST.topic?"":"disabled"}>✍️ 写口播稿(${pr.studio_script||1}点)</button></div>
+      <div>${costButton({label:"✍️ 写口播稿",onclick:"stScript(this)",cost:pr.studio_script||1,disabled:!ST.topic,disabledLabel:"先选一个选题"})}</div>
       <div style="flex:2;min-width:200px"><label>视频标题</label><input id="st-title" maxlength="30" value="${esc(ST.title)}" oninput="ST.title=this.value;avPriceSync()"></div>
-      <div style="flex:1;min-width:160px"><label>封面大字(｜分两行)</label><input id="st-cover" maxlength="20" value="${esc(ST.cover)}" oninput="ST.cover=this.value"></div>
-      <div style="flex:1;min-width:180px"><label>人名条(选填)</label><input id="st-name" maxlength="20" placeholder="如:王磊 · 老王火锅店主" value="${esc(ST.name||"")}" oninput="ST.name=this.value"></div>
+      <div style="flex:1;min-width:160px"><label>封面大字（｜分两行）</label><input id="st-cover" maxlength="20" value="${esc(ST.cover)}" oninput="ST.cover=this.value"></div>
+      <div style="flex:1;min-width:180px"><label>人名条（选填）</label><input id="st-name" maxlength="20" placeholder="如：王磊 · 老王火锅店主" value="${esc(ST.name||"")}" oninput="ST.name=this.value"></div>
     </div>
     <label style="display:flex;gap:6px;align-items:flex-start;font-weight:400;cursor:pointer;margin-top:8px">
       <input type="checkbox" id="st-pack" style="width:auto;margin-top:3px" ${ST.pack?"checked":""} onchange="ST.pack=this.checked;avPriceSync()">
@@ -7274,18 +7341,18 @@ async function stScene(btn){
   if(!AV_PHOTO) return toast("先在下方「开拍 ①」上传并选中老板本人照片");
   if(!ST.store) return toast("先上传一张门店照片");
   if(!avConsentOk()) return;
-  const label=btn.textContent; btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 合成中(约1-2分钟)…`;
+  const label=btn.textContent; btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 合成中（约1-2分钟）…`;
   try{
     const r=await api("/avatar/studio/scene",{method:"POST",timeout:420000,longRunning:true,body:{portrait_name:AV_PHOTO.name,store_name:ST.store.name,
       scene:ST.scene,note:(ST.sceneNote||"").trim(),industry:ST.industry,consent:AV_CONSENT}});
-    if(r.photos&&r.photos.length){ AV_PHOTO=r.photos[0]; toast(`已生成 ${r.photos.length} 张,已选中第 1 张;在「开拍 ①」可换另一张`); }
+    if(r.photos&&r.photos.length){ AV_PHOTO=r.photos[0]; toast(`已生成 ${r.photos.length} 张，已选中第 1 张；在「开拍 ①」可换另一张`); }
     render();
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent=label; }
 }
 async function stTopics(btn){
   const industry=($("#st-industry")?.value||"").trim(); if(!industry) return toast("先填行业");
   ST.industry=industry; ST.note=($("#st-note")?.value||"").trim();
-  const label=btn.textContent; btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 全网扫描中(约1-3分钟)…`;
+  const label=btn.textContent; btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 全网扫描中（约1-3分钟）…`;
   try{
     const r=await api("/avatar/studio/topics",{method:"POST",timeout:660000,longRunning:true,body:{industry,store_note:ST.note}});
     ST.topics=r.topics||[]; ST.scanNote=r.scan_note||""; ST.topic=null; render();
@@ -7302,7 +7369,7 @@ async function stScript(btn){
     await render();
     const box=$("#av-script"); if(box){ box.value=r.script; box.scrollIntoView({behavior:"smooth",block:"center"}); }
     const sel=$("#av-dur"); if(sel){ sel.value=String(dur); avPriceSync(); }
-    toast((r.issues||[]).length?`⚠️ 稿子有红线风险:${r.issues.join("、")},请改一下再开拍`:"口播稿已填进「开拍 ③」,可以再改");
+    toast((r.issues||[]).length?`⚠️ 稿子有红线风险：${r.issues.join("、")},请改一下再开拍`:"口播稿已填进「开拍 ③」，可以再改");
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent=label; }
 }
 function studioJobBlock(j){
@@ -8559,9 +8626,8 @@ async function billingView(){
       <div style="display:flex;align-items:center;gap:12px"><span class="spin"></span><b>正在读取点数账户…</b></div></div>`
       +billingPointsCardHtml(null)+billingPlansCardHtml();
   }
-  const [billingResult,digestResult,contextResult] = await Promise.allSettled([
+  const [billingResult,contextResult] = await Promise.allSettled([
     api("/billing"),
-    api("/notify/daily-digest").catch(()=>({enabled:true})),
     loadPurchaseContext(),
   ]);
   for(const result of [billingResult,contextResult]){
@@ -8580,7 +8646,6 @@ async function billingView(){
     return;
   }
   const b=billingResult.value||{};
-  const digestConf=digestResult.status==="fulfilled"?(digestResult.value||{enabled:true}):{enabled:true};
   b.log=Array.isArray(b.log)?b.log:[];
   b.prices=b.prices||{};
   const tourBanner = ME&&ME.role==="tour" ? `<div class="notice" style="background:#ece3ff;margin-top:0">👀 <b>参观模式</b>:点击员工卡片,了解每位数字员工可以为您的业务提供什么帮助。<a href="/promo#plans" style="text-decoration:underline;font-weight:900">查看套餐</a> 或联系开通企业账号后直接派活。</div>` : "";
@@ -8629,9 +8694,6 @@ async function billingView(){
   <div class="card"><h2 style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">🧾 点数明细(充值 & 消耗记录)
     ${isAdmin()&&!b.is_platform?`<a class="btn sm" style="margin-left:auto" href="/api/records/export.xlsx?kind=billing">⬇️ 导出全部流水</a>`:""}</h2>
     ${b.log_truncated?`<div class="notice" style="margin:8px 0">页面展示最近 ${b.log.length} 笔，共 ${b.txn_n} 笔；点击“导出全部流水”可核对完整账目。</div>`:""}
-    <label style="display:flex;gap:8px;align-items:flex-start;margin:6px 0 4px;cursor:${isAdmin()?"pointer":"default"}">
-      <input type="checkbox" style="margin-top:3px" ${digestConf.enabled?"checked":""} ${isAdmin()?"":"disabled"} onchange="digestToggle(this)">
-      <span class="sub">📮 每日经营简报(昨日完成/花销/风险,推到站内+企微)${isAdmin()?"":"(仅企业主可改)"}</span></label>
     <div class="tabs">
       <span class="tb ${BILL_TAB==="all"?"on":""}" onclick="BILL_TAB='all';render()">${billWindowLabel}</span>
       <span class="tb ${BILL_TAB==="in"?"on":""}" onclick="BILL_TAB='in';render()">💰 充值记录(${b.log.filter(l=>l.delta>0&&!isRefund(l)).length})</span>
@@ -8787,7 +8849,7 @@ async function wxpayConfigSave(){
 async function digestToggle(cb){
   try{
     await api("/notify/daily-digest",{method:"POST",body:{enabled:cb.checked}});
-    toast(cb.checked?"✅ 每日经营简报已开启,每天早上推昨日情况":"⏸ 每日经营简报已关闭,不再推送");
+    toast(cb.checked?"✅ 每日经营简报已开启，每天早上推昨日情况":"⏸ 每日经营简报已关闭，不再推送");
   }catch(e){ cb.checked=!cb.checked; toast(e.message); }
 }
 
@@ -8906,29 +8968,17 @@ async function meetingsView(mid){
   const list = meetingsContract.items;
   const cur = MT_CUR ? await api("/meetings/"+MT_CUR).catch(optionalResult(null)) : null;
   const pool = [
-    ...META.stations.filter(employeeCanAssignNew).map(s=>({idx:s.idx,label:s.name,color:s.color,emoji:s.emoji,group:"内容生产部",...employeeIdentityMutationFields(s)})),
-    ...DEPTS.filter(d=>can(d.key)).flatMap(d=>d.employees.filter(e=>employeeCanAssignNew(e)).map(e=>({idx:e.idx,label:`${e.person||""}${e.person?"·":""}${e.name}`,color:e.color,emoji:e.emoji,group:e.group,dept:d.key,...employeeIdentityMutationFields(e)})))];
+    ...META.stations.filter(employeeCanAssignNew).map(s=>({idx:s.idx,label:s.name,color:s.color,emoji:s.emoji,group:"内容生产部",dept:"",uses:0,...employeeIdentityMutationFields(s)})),
+    ...DEPTS.filter(d=>can(d.key)).flatMap(d=>d.employees.filter(e=>employeeCanAssignNew(e)).map(e=>({idx:e.idx,label:`${e.person||""}${e.person?"·":""}${e.name}`,color:e.color,emoji:e.emoji,group:e.group,dept:d.key,uses:Number(e.tasks_n)||0,...employeeIdentityMutationFields(e)})))];
   const availableMemberIds=new Set(pool.map(member=>Number(member.idx)));
   MT_SEL=new Set([...MT_SEL].filter(idx=>availableMemberIds.has(Number(idx))));
-  const groups = {};
-  pool.forEach(p=>(groups[p.group]=groups[p.group]||[]).push(p));
-  // 本企业自己的行业分组默认展开;别的行业统一收进一个「其他行业」,不用一路滚过去。
-  const ownInds = new Set(ME?.industries||[]);
-  const groupDept = g => (groups[g].find(p=>p.dept)||{}).dept||"";
-  const mtGroupHtml = ([g,ps],open)=>`<details ${open?"open":""} style="margin-top:6px"><summary style="cursor:pointer;font-weight:800;font-size:13px">${esc(g)}(${ps.length})</summary>
-      <div class="chips" style="margin-top:6px">${ps.map(p=>`<span class="chip mt-chip${MT_SEL.has(p.idx)?" on":""}" data-i="${p.idx}" onclick="mtToggle(this)">${p.emoji} ${esc(p.label)}</span>`).join("")}</div></details>`;
-  const groupEntries = Object.entries(groups);
-  const otherEntries = ownInds.size ? groupEntries.filter(([g])=>groupDept(g)&&!ownInds.has(groupDept(g))) : [];
-  const mainEntries = groupEntries.filter(entry=>!otherEntries.includes(entry));
-  const pickerHtml = mainEntries.map(entry=>mtGroupHtml(entry, ownInds.has(groupDept(entry[0])))).join("")
-    + (otherEntries.length?`<details class="mt-other" style="margin-top:8px"><summary style="cursor:pointer;font-weight:800">其他行业(${otherEntries.length} 组)</summary>
-      <div style="padding-left:10px">${otherEntries.map(entry=>mtGroupHtml(entry,false)).join("")}</div></details>`:"");
+  const pickerHtml = mtPickerHtml(pool);
   $("#main").innerHTML = `
   ${cur?`<div class="card" style="background:#fffaf0"><h2>会议 #${cur.id} ${{queued:"排队",running:"🗣 进行中…",done:"✅ 已收口",failed:"中断"}[cur.status]||cur.status}
     ${cur.team_execute?`<span class="tag" style="background:#e7d9ff;font-weight:900">🤝 专家接力</span>`:""}
     ${cur.status==="done"?`<span style="float:right"><a class="btn sm" href="/api/meetings/${cur.id}/export.pdf">⬇️ PDF</a>
     <a class="btn sm" href="/api/meetings/${cur.id}/export.docx">⬇️ Word</a></span>`:""}</h2>
-    <div class="sub" style="margin-bottom:6px">议题:${esc(cur.question)}</div>
+    <div class="sub" style="margin-bottom:6px">议题：${esc(cur.question)}</div>
     <div class="chips">${(cur.members||[]).map(b=>`<span class="tag">${b.emoji||"🧑‍💼"} ${esc(meetingMemberLabel(b))}</span>`).join("")}</div>
     ${mtVerdict(cur)}
     ${mtFlow(cur)}
@@ -8937,9 +8987,9 @@ async function meetingsView(mid){
       ${cur.team_execute?`<div class="sub" style="margin-bottom:6px">每一棒自动拿到前面队友的交付内容；最后一棒是队长整合，输出一份最终交付包。</div>`:""}
       ${cur.actions.map((a,i)=>`<div class="topic" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         ${cur.team_execute?`<span class="tag" style="background:${a.team_role==="integrate"?"#e7d9ff":"#ffe59a"};font-weight:900">${a.team_role==="integrate"?"🧩 队长整合":`第 ${i+1} 棒`}</span>`:""}
-        <div style="flex:1;min-width:220px"><b>${esc(a.who)}</b>:${esc(a.task)}${a.acceptance?`<div class="sub">验收:${esc(a.acceptance)}</div>`:""}</div>
+        <div style="flex:1;min-width:220px"><b>${esc(a.who)}</b>：${esc(a.task)}${a.acceptance?`<div class="sub">验收：${esc(a.acceptance)}</div>`:""}</div>
         ${a.task_id?mtTeamTaskPill(cur,a):
-          !cur.decision?`<button class="btn sm pri" onclick="mtAssign(${cur.id},${i},this)">🚀 派给TA(1点)</button>`:""}</div>`).join("")}
+          !cur.decision?costButton({label:"🚀 派给TA",onclick:`mtAssign(${cur.id},${i},this)`,cost:1,btnClass:"btn sm pri"}):""}</div>`).join("")}
       ${cur.phase==="awaiting_execution"?`<button class="btn pri" style="margin-top:8px" onclick="mtExecute(${cur.id},this)">${cur.team_execute?"🤝 组队执行会议决定":"🚀 执行会议决定"}</button>`:
         !cur.decision?`<button class="btn sm" style="margin-top:8px" onclick="mtAssignAll(${cur.id},this)">⚡ 全部派活</button>`:""}</div>`:""}
     ${(cur.execution_tasks||[]).length?`<div class="card" style="background:#e9f8ef;margin-top:12px"><h3 style="margin-top:0">🚀 已启动执行</h3>
@@ -8947,31 +8997,31 @@ async function meetingsView(mid){
         <div style="flex:1;min-width:220px"><b>#${t.id} · ${esc(t.name)}</b><div class="sub">${esc(employeeIdentityLabel(t))}${Number(t.config_revision)>0?` · 配置 r${Number(t.config_revision)}`:""}</div><div class="sub">${esc(t.task)}</div></div>
         <span class="pill ${t.status==="done"?"done":t.status==="failed"?"failed":"running"}">${{queued:"排队",running:"执行中",done:"已交付",failed:"失败"}[t.status]||t.status}</span>
         <button class="btn sm" onclick="mtOpenTask(${t.id})">查看任务</button></div>`).join("")}</div>`:""}
-    ${cur.status==="done"?`<div class="card" style="background:#e7f0ff;margin-top:12px"><b>👔 老板介入:补约束 / 挑战决定</b>
-      <div class="row" style="margin-top:6px"><div style="flex:3"><input id="mt-ask" placeholder="例:预算砍一半还能干吗?/ 这个 GO 的关键证据是什么?"></div>
-        <div><button class="btn pri" ${(cur.intervention_count||0)>=2?"disabled":""} onclick="mtAsk(${cur.id},this)">重新验证(${(cur.members||[]).length}点)</button></div></div>
-      <div class="sub" style="margin-top:4px">这不是继续闲聊：员工只补新证据，主持人立即重做决定并更新 Next Action。每场最多 2 次，已用 ${cur.intervention_count||0} 次。</div></div>`:""}
+    ${cur.status==="done"?`<div class="card" style="background:#e7f0ff;margin-top:12px"><b>👔 老板介入：补约束 / 挑战决定</b>
+      <div class="row" style="margin-top:6px"><div style="flex:3"><input id="mt-ask" placeholder="例：预算砍一半还能干吗？/ 这个结论的关键证据是什么？"></div>
+        <div>${costButton({label:"重新验证",onclick:`mtAsk(${cur.id},this)`,cost:(cur.members||[]).length,disabled:(cur.intervention_count||0)>=2,disabledLabel:"本场已追问 2 次"})}</div></div>
+      <div class="sub" style="margin-top:4px">这不是继续闲聊：员工只补新证据，主持人立即重做决定并更新下一步行动。每场最多 2 次，已用 ${cur.intervention_count||0} 次。</div></div>`:""}
   </div>`:""}
   <div class="notice"${cur?"":' style="margin-top:0"'}>🪑 <b>多位专家一起商量</b>：每位专家各出一个方案，互相挑毛病，最后给您一个做或不做的结论。每人 1 点。</div>
   <div class="card"><h2>🪑 多位专家一起商量</h2><div class="sub">发起一场结果型会议</div>
     <label>议题 *</label><textarea id="mt-q" placeholder="例：我们准备在新城市开第二家直营店，预算 40 万，请判断做不做、最大风险和本周先做什么"></textarea>
-    <div class="row"><div><label>已知约束(选填)</label><input id="mt-constraints" placeholder="例:预算40万；30天内开业；不能增加全职员工"></div>
-      <div><label>什么算有结果(选填)</label><input id="mt-acceptance" placeholder="例：必须给明确的做或不做、最大风险和本周能做的事"></div></div>
+    <div class="row"><div><label>已知约束（选填）</label><input id="mt-constraints" placeholder="例：预算40万；30天内开业；不能增加全职员工"></div>
+      <div><label>什么算有结果（选填）</label><input id="mt-acceptance" placeholder="例：必须给明确的做或不做、最大风险和本周能做的事"></div></div>
     <div class="actions" style="margin-top:8px"><button class="btn pri" id="mt-suggest" onclick="mtSuggest(this)">🤖 按议题自动选人</button>
       <span class="sub">写好议题点一下，系统帮您挑合适的专家</span></div>
-    <label>拉谁进群(2-6 人,已选 <b id="mt-n">0</b> 人)</label>
+    <label>拉谁进群（2–6 人，已选 <b id="mt-n">0</b> 人）</label>
     <div id="mt-picked" style="margin:6px 0">${mtPickedHtml(pool)}</div>
     <div class="sub" style="margin-top:6px">也可以自己挑人：</div>
     ${pickerHtml}
     <label style="display:flex;gap:8px;align-items:flex-start;margin-top:12px;cursor:pointer">
       <input id="mt-auto" type="checkbox" checked style="width:auto;margin-top:3px">
-      <span><b>决策后自动执行</b><span class="sub" style="display:block">GO 或 NEED INFO 后，自动启动最多 3 个真实员工任务；包含在本次会议中，不重复扣点。取消勾选则等您看完共识后再点执行。</span></span>
+      <span><b>决策后自动执行</b><span class="sub" style="display:block">得出结论（做 / 先补信息）后，自动启动最多 3 个真实员工任务；包含在本次会议中，不重复扣点。取消勾选则等您看完共识后再点执行。</span></span>
     </label>
     <label style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;cursor:pointer">
       <input id="mt-team" type="checkbox" style="width:auto;margin-top:3px">
       <span><b>🤝 多位专家接力完成</b><span class="sub" style="display:block">不再各干各的：成员按分工接力开工，每一棒自动拿到前面队友的交付内容，最后由队长把全部交付整合成一份最终交付包。适合需要多人共创一个成果的议题；包含在本次会议中，不重复扣点。</span></span>
     </label>
-    <div class="actions" style="align-items:flex-start">${pointsAction({label:"🎯 开会并收敛",onclick:"mtStart(this)",cost:MT_SEL.size,id:"mt-go"})}
+    <div class="actions" style="align-items:flex-start">${costButton({label:"🎯 开会并收敛",onclick:"mtStart(this)",cost:MT_SEL.size,id:"mt-go",disabled:MT_SEL.size<2,disabledLabel:mtNeedLabel(MT_SEL.size)})}
       <span class="sub" style="margin-top:10px">每位专家 1 点</span></div></div>
   ${list.length||meetingsContract.offset>0?`<div class="card"><h2>历史会议(${meetingsContract.total??list.length})</h2>
     ${listContractNotice(meetingsContract,"历史会议")}${list.length?list.map(x=>`
@@ -8984,14 +9034,62 @@ async function meetingsView(mid){
   const box=$("#mt-msgs"); if(box) box.scrollTop=box.scrollHeight;
 }
 let MT_POOL = [];
+/* 开会按钮在人没选够时的提示文字(最少 2 位) */
+function mtNeedLabel(n){ return n<=0?"先选 2 位专家":n<2?`再选 ${2-n} 位专家`:""; }
+/* 行业短名:优先用接口给的 short_label,没有就去掉「产业部 / 行业」这类后缀 */
+function deptShortName(d){
+  if(d?.short_label) return d.short_label;
+  const name=String(d?.name||d?.key||"");
+  const m=name.match(/^(.+?)(行业痛点数字员工|产业部|行业)$/);
+  return m?m[1]:name;
+}
+/* 自己挑人:一个行业一个总折叠(标上行业名)。本企业的行业展开,行业里只展开最常用的 2 个分组;
+   别的行业和内容生产部收起。企业还没有行业时展开第一个。 */
+function mtPickerHtml(pool){
+  const ownInds = new Set(ME?.industries||[]);
+  const blocks = [];
+  pool.forEach(p=>{
+    const key=p.dept||"";
+    let block=blocks.find(b=>b.key===key);
+    if(!block){ block={key,groups:new Map()}; blocks.push(block); }
+    if(!block.groups.has(p.group)) block.groups.set(p.group,[]);
+    block.groups.get(p.group).push(p);
+  });
+  // 本行业排前面,内容生产部排最后
+  blocks.sort((a,b)=>(ownInds.has(b.key)-ownInds.has(a.key))||((a.key==="")-(b.key==="")));
+  const anyOwn = blocks.some(b=>ownInds.has(b.key));
+  const chip = p=>`<span class="chip mt-chip${MT_SEL.has(p.idx)?" on":""}" data-i="${p.idx}" onclick="mtToggle(this)">${p.emoji} ${esc(p.label)}</span>`;
+  return blocks.map((block,bi)=>{
+    const dept = block.key ? (DEPTS||[]).find(d=>d.key===block.key) : null;
+    const label = dept ? `${dept.emoji||""} ${deptShortName(dept)}`.trim() : "🎬 内容生产部";
+    const entries = [...block.groups.entries()];
+    const open = anyOwn ? ownInds.has(block.key) : bi===0;
+    const uses = ps=>ps.reduce((sum,p)=>sum+(Number(p.uses)||0),0);
+    const top = new Set(entries.map((entry,i)=>({g:entry[0],n:uses(entry[1]),i}))
+      .sort((a,b)=>(b.n-a.n)||(a.i-b.i)).slice(0,2).map(x=>x.g));
+    const people = entries.reduce((sum,[,ps])=>sum+ps.length,0);
+    const inner = entries.map(([g,ps])=>{
+      const groupOpen = open && (top.has(g)||ps.some(p=>MT_SEL.has(p.idx)));
+      return `<details class="mt-group" ${groupOpen?"open":""} style="margin-top:6px"><summary style="cursor:pointer;font-weight:800;font-size:13px">${esc(g)}（${ps.length}）</summary>
+      <div class="chips" style="margin-top:6px">${ps.map(chip).join("")}</div></details>`;
+    }).join("");
+    return `<details class="mt-ind" data-ind="${esc(block.key||"content")}" ${open?"open":""} style="margin-top:8px"><summary style="cursor:pointer;font-weight:900">${esc(label)}（${entries.length} 组 · ${people} 人）</summary>
+      <div style="padding-left:10px">${inner}</div></details>`;
+  }).join("");
+}
 function mtPickedHtml(pool){
   MT_POOL = pool;
   const picked = pool.filter(p=>MT_SEL.has(p.idx));
-  if(!picked.length) return `<span class="sub">还没选人。点下面分组里的名字,或「🤖 自动选人」。</span>`;
+  if(!picked.length) return `<span class="sub">还没选人。点下面分组里的名字，或「🤖 自动选人」。</span>`;
   return picked.map(p=>`<span class="tag" style="font-size:13px;padding:3px 10px">${p.emoji} ${esc(p.label)}
     <span style="cursor:pointer;font-weight:900" onclick="mtToggleIdx(${p.idx})">✕</span></span>`).join("");
 }
-function mtRefreshPicked(){ const box=$("#mt-picked"); if(box) box.innerHTML=mtPickedHtml(MT_POOL); $("#mt-n").textContent=MT_SEL.size; syncPointsAction($("#mt-go"),MT_SEL.size); }
+function mtRefreshPicked(){
+  const box=$("#mt-picked"); if(box) box.innerHTML=mtPickedHtml(MT_POOL);
+  $("#mt-n").textContent=MT_SEL.size;
+  const go=$("#mt-go");
+  if(go){ go.disabled=false; syncPointsAction(go,MT_SEL.size); setCostButtonDisabled(go,MT_SEL.size<2,mtNeedLabel(MT_SEL.size)); }
+}
 function mtToggleIdx(i){
   MT_SEL.delete(i);
   document.querySelectorAll(`.mt-chip[data-i="${i}"]`).forEach(el=>el.classList.remove("on"));
@@ -8999,14 +9097,14 @@ function mtToggleIdx(i){
 }
 async function mtSuggest(btn){
   const q = $("#mt-q").value.trim();
-  if(!q) return toast("先写议题,我才知道该请谁");
+  if(!q) return toast("先写议题，我才知道该请谁");
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 选人中…`;
   try{
     const r = await api("/meetings/suggest",{method:"POST",body:{question:q}});
     MT_SEL = new Set(r.idxs);
     document.querySelectorAll(".mt-chip").forEach(el=>el.classList.toggle("on", MT_SEL.has(+el.dataset.i)));
     mtRefreshPicked();
-    toast(`已自动选好 ${r.idxs.length} 人:${r.members.map(m=>m.name).join("、")}`);
+    toast(`已自动选好 ${r.idxs.length} 人：${r.members.map(m=>m.name).join("、")}`);
   }catch(e){ toast(e.message); }
   btn.disabled=false; btn.textContent="🤖 按议题自动选人";
 }
@@ -9035,14 +9133,14 @@ async function mtAssign(mid, i, btn){
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span>`;
   try{ const r = await api("/tasks",{method:"POST",body:{emp_idx:a.idx, brief:{direction:a.task, industry:""},...employeeIdentityMutationFields(employee)}});
     const taskId=Number(r.task_id||0);
-    toast(`已派给 ${a.who}`); btn.outerHTML=Number.isInteger(taskId)&&taskId>0
+    toast(`已派给 ${a.who}`); (btn.closest(".cost-act")||btn).outerHTML=Number.isInteger(taskId)&&taskId>0
       ?`<a class="tag" style="background:#a7ecc9" href="#/tasks/${taskId}">✅ 已派 · 看任务 #${taskId}</a>`
       :`<span class="tag" style="background:#a7ecc9">✅ 已派，可到任务中心查看</span>`;
-  }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="🚀 派给TA(1点)"; }
+  }catch(e){ toast(e.message); restoreActionButton(btn); }
 }
 async function mtAssignAll(mid, btn){
   const cur = await api("/meetings/"+mid);
-  if(!await uiConfirm(`把 ${cur.actions.length} 条行动计划全部派活? 共 ${cur.actions.length} 点。`,{
+  if(!await uiConfirm(`把 ${cur.actions.length} 条行动计划全部派活？ 共 ${cur.actions.length} 点。`,{
     title:"批量派活",confirmText:"全部派出",danger:false
   })) return;
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 派活中…`;
@@ -9084,7 +9182,7 @@ async function mtAsk(mid, btn){
   const q = $("#mt-ask").value.trim(); if(!q) return toast("先写您要追问的话");
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 发问中…`;
   try{ await api(`/meetings/${mid}/ask`,{method:"POST",body:{question:q}}); $("#mt-ask").value=""; render(); }
-  catch(e){ toast(e.message); btn.disabled=false; btn.textContent="重新验证"; }
+  catch(e){ toast(e.message); restoreActionButton(btn); }
 }
 async function mtStart(btn){
   const q = $("#mt-q").value.trim();
@@ -9109,9 +9207,9 @@ function fbOpen(){
   document.body.insertAdjacentHTML("beforeend", `<div class="overlay" id="fb-ov" onclick="if(event.target===this)$('#fb-ov').remove()">
     <div class="panel" style="max-width:460px"><div class="phead"><b style="flex:1;font-size:17px">💬 意见反馈</b>
       <button class="btn sm" onclick="$('#fb-ov').remove()">✕</button></div>
-    <div class="pbody"><div class="sub">用得顺不顺、缺什么功能、哪儿有 bug——直接说,会发到我们邮箱,认真看。</div>
+    <div class="pbody"><div class="sub">用得顺不顺、缺什么功能、哪儿有 bug——直接说，会发到我们邮箱，认真看。</div>
       <textarea id="fb-text" style="min-height:120px;margin-top:8px" placeholder="您的建议或问题…"></textarea>
-      <label>联系方式(选填)</label><input id="fb-contact" placeholder="微信/手机/邮箱">
+      <label>联系方式（选填）</label><input id="fb-contact" placeholder="微信/手机/邮箱">
       <div class="actions"><button class="btn pri" onclick="fbSend(this)">📮 提交反馈</button></div>
     </div></div></div>`);
 }
@@ -9119,10 +9217,10 @@ async function fbSend(btn){
   const text = $("#fb-text").value.trim(); if(!text) return toast("写点内容再提交");
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 提交中…`;
   try{ await api("/feedback",{method:"POST",body:{text, contact:$("#fb-contact").value.trim()}});
-    toast("✅ 已收到,谢谢您的反馈!"); $("#fb-ov").remove();
+    toast("✅ 已收到，谢谢您的反馈!"); $("#fb-ov").remove();
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="📮 提交反馈"; }
 }
-if(!$("#fb-btn")) document.body.insertAdjacentHTML("beforeend", `<button id="fb-btn" onclick="fbOpen()" title="意见反馈">💬</button>`);
+if(!$("#fb-btn")) document.body.insertAdjacentHTML("beforeend", `<button id="fb-btn" type="button" onclick="fbOpen()" title="意见反馈" aria-label="意见反馈"><span class="fb-ic" aria-hidden="true">💬</span><span class="fb-tx">反馈</span></button>`);
 
 /* ================ V24:公众号排版 · 草稿箱 · 审查官 · 真实图库 · 发布渠道 ================ */
 
@@ -9333,22 +9431,22 @@ async function censorView(){
   const tabs = [["pre","🛡️ 发前审查"],["retro","📊 发后数据复盘"],["publog","📮 发布台账"],["logs","📜 审查记录"]];
   let body = "", listNotice="";
   if(CEN_TAB==="pre") body = `
-    <div class="sub">发布前把内容交给审查官:<b>极速扫描</b>免费查广告法极限词/导流违规/违禁内容;<b>深度审查</b>由 AI 逐条对照目标平台规范,给出改写建议。交付包里每个平台版本也有「🛡️ 审查」按钮。</div>
+    <div class="sub">发布前把内容交给审查官：<b>极速扫描</b>免费查广告法极限词/导流违规/违禁内容；<b>深度审查</b>由 AI 逐条对照目标平台规范，给出改写建议。交付包里每个平台版本也有「🛡️ 审查」按钮。</div>
     <label>目标平台</label><div class="chips" id="cen-pf">${CEN_PLATFORMS.map((p,i)=>`<span class="chip${i===0?" on":""}" onclick="pick(this)">${p}</span>`).join("")}</div>
     <label>标题</label><input id="cen-title" placeholder="要发布的标题">
     <label>正文</label><textarea id="cen-body" style="min-height:180px" placeholder="把要发布的正文粘贴进来"></textarea>
     <div class="actions">
-      <button class="btn" onclick="cenScan()">⚡ 极速扫描(免费)</button>
-      <button class="btn pri" onclick="cenDeep(this)">🛡️ 深度审查(1点)</button></div>
+      <button class="btn" onclick="cenScan()">⚡ 极速扫描（免费）</button>
+      ${costButton({label:"🛡️ 深度审查",onclick:"cenDeep(this)",cost:1})}</div>
     <div id="cen-out" style="margin-top:10px"></div>`;
   else if(CEN_TAB==="retro") body = `
-    <div class="sub">发布一段时间后,把平台数据丢给审查官:判读数据档次、体检疑似限流信号、回看内容合规、给下一步行动清单。数据截图可直接上传,自动识别成文字。</div>
+    <div class="sub">发布一段时间后，把平台数据丢给审查官：判读数据档次、体检疑似限流信号、回看内容合规、给下一步行动清单。数据截图可直接上传，自动识别成文字。</div>
     <label>平台</label><div class="chips" id="cen-pf">${CEN_PLATFORMS.map((p,i)=>`<span class="chip${i===0?" on":""}" onclick="pick(this)">${p}</span>`).join("")}</div>
     <label>内容标题</label><input id="cenr-title" placeholder="发布的是哪篇">
-    <label>发布后的数据(文字或截图)</label>
+    <label>发布后的数据（文字或截图）</label>
     <input type="file" multiple accept=".jpg,.jpeg,.png,.webp,.txt,.csv,.pdf" onchange="parseFileInto(this,'#cenr-data')" style="margin-bottom:6px">
-    <textarea id="cenr-data" style="min-height:140px" placeholder="例:发布3天,阅读1240,点赞18,在看3,转发7,涨粉12,完读率23%…(后台截图直接传上面)"></textarea>
-    <div class="actions"><button class="btn pri" onclick="cenRetro(this)">📊 让审查官复盘(1点)</button></div>
+    <textarea id="cenr-data" style="min-height:140px" placeholder="例：发布3天，阅读1240,点赞18,在看3,转发7,涨粉12,完读率23%…（后台截图直接传上面）"></textarea>
+    <div class="actions">${costButton({label:"📊 让审查官复盘",onclick:"cenRetro(this)",cost:1})}</div>
     <div id="cenr-out" style="margin-top:10px"></div>`;
   else if(CEN_TAB==="publog"){
     const publogContract=normalizeListContract(
@@ -9356,10 +9454,10 @@ async function censorView(){
     const rows=publogContract.items;
     const retroConf=await api("/publog/auto-retro").catch(()=>({enabled:true}));
     listNotice=listContractNotice(publogContract,"发布记录");
-    body = `<div class="sub">发布台账 = 自动复盘的钟表:发草稿箱会自动登记;其他平台发完花10秒登记一下,到 T+1/3/7 审查官自动来找您复盘(公众号配了API且已群发的,数据都自动拉)。<b>💎 每次自动复盘扣 1 点(每篇最多 T+1/3/7 三次共 3 点)</b>;不想复盘的记录点 🗑 删除即停止。</div>
+    body = `<div class="sub">发布台账 = 自动复盘的钟表：发草稿箱会自动登记；其他平台发完花10秒登记一下，到 T+1/3/7 审查官自动来找您复盘（公众号配了API且已群发的，数据都自动拉）。<b>💎 每次自动复盘扣 1 点(每篇最多 T+1/3/7 三次共 3 点)</b>;不想复盘的记录点 🗑 删除即停止。</div>
     <div class="notice" style="margin-top:8px"><label style="display:flex;gap:8px;align-items:flex-start;margin:0;cursor:${isAdmin()?"pointer":"default"}">
       <input type="checkbox" style="margin-top:3px" ${retroConf.enabled?"checked":""} ${isAdmin()?"":"disabled"} onchange="retroAutoToggle(this)">
-      <span><b>自动复盘总开关(全公司)</b>:开=到点自动跑、自动扣点;关=所有台账都不自动复盘、也不发到期提醒,想看数据时点各条的「📥 自动拉数据复盘」手动跑(同样 1 点/次)。${isAdmin()?"":"(仅企业主可改)"}</span></label></div>
+      <span><b>自动复盘总开关（全公司）</b>：开=到点自动跑、自动扣点；关=所有台账都不自动复盘、也不发到期提醒，想看数据时点各条的「📥 自动拉数据复盘」手动跑(同样 1 点/次)。${isAdmin()?"":"(仅企业主可改)"}</span></label></div>
     <div class="row" style="align-items:flex-end;margin-top:8px">
       <div style="flex:1;min-width:130px"><label>平台</label><select id="pl-pf">${CEN_PLATFORMS.map(p=>`<option>${p}</option>`).join("")}</select></div>
       <div style="flex:2;min-width:200px"><label>标题</label><input id="pl-title" placeholder="发布的内容标题"></div>
@@ -9370,11 +9468,11 @@ async function censorView(){
       const st = d=>({pending:"⏳",notified:"🔔",done:"✅"}[(r.retro[d]||{}).state]||"—");
       return `<div class="topic"><span class="tag">${esc(r.platform||"")}</span> <b>${esc(r.title||"")}</b>
         <span class="sub" style="float:right">${new Date((r.published_at||r.created_at)*1000).toLocaleDateString("zh-CN")} ${r.source==="draft"?"· 草稿箱推送":""}</span>
-        <div class="sub" style="margin-top:5px">复盘:T+1 ${st("1")} · T+3 ${st("3")} · T+7 ${st("7")}
+        <div class="sub" style="margin-top:5px">复盘：T+1 ${st("1")} · T+3 ${st("3")} · T+7 ${st("7")}
           <button class="btn sm" style="margin-left:8px" onclick="plPull(${r.id},this)">📥 自动拉数据复盘</button>
-          ${["抖音","视频号","小红书"].includes(r.platform)?`<button class="btn sm pri" onclick="plMetrics(${r.id})" title="按三平台及格线体检,免费">📏 填数据体检</button>`:""}
+          ${["抖音","视频号","小红书"].includes(r.platform)?`<button class="btn sm pri" onclick="plMetrics(${r.id})" title="按三平台及格线体检，免费">📏 填数据体检</button>`:""}
           <button class="btn sm" onclick="plMark(${r.id})" title="把复盘计时从现在重新起算">✔ 我刚群发</button>
-          <button class="btn sm bad" onclick="plDel(${r.id})" title="删除后不再自动复盘扣点">🗑</button></div></div>`;}).join(""):`<div class="empty">还没有登记,发草稿箱会自动记一笔</div>`}</div>
+          <button class="btn sm bad" onclick="plDel(${r.id})" title="删除后不再自动复盘扣点">🗑</button></div></div>`;}).join(""):`<div class="empty">还没有登记，发草稿箱会自动记一笔</div>`}</div>
     ${listPager(publogContract,"publog")}`;
   }
   else {
@@ -9395,9 +9493,9 @@ async function censorView(){
       <span class="tag">${l.kind==="pre"?"发前审查":"发后复盘"}</span> <span class="tag">${esc(l.platform||"")}</span>
       <b>${esc(l.title||"(无标题)")}</b>
       <span class="sub" style="float:right">${new Date(l.created_at*1000).toLocaleString("zh-CN")}</span>
-      <div class="sub" style="margin-top:4px">${l.kind==="pre"?`结论:${esc(l.verdict||"")} · 合规分 ${l.score??"—"} · 问题 ${(l.issues||[]).length} 条`:`评级:${esc(l.verdict||"—")}`}</div>
+      <div class="sub" style="margin-top:4px">${l.kind==="pre"?`结论：${esc(l.verdict||"")} · 合规分 ${l.score??"—"} · 问题 ${(l.issues||[]).length} 条`:`评级：${esc(l.verdict||"—")}`}</div>
       ${(l.issues||[]).length||l.report?`<details style="margin-top:6px"><summary class="sub" style="cursor:pointer;font-weight:800">📄 展开完整报告</summary>
-        ${(l.issues||[]).map(i=>`<div class="notice" style="margin-top:6px"><b>[${esc(i.severity||"")}] ${esc(i.type||"")}</b>:${esc(i.detail||"")}${i.suggest?`<div class="sub">改法:${esc(i.suggest)}</div>`:""}</div>`).join("")}
+        ${(l.issues||[]).map(i=>`<div class="notice" style="margin-top:6px"><b>[${esc(i.severity||"")}] ${esc(i.type||"")}</b>：${esc(i.detail||"")}${i.suggest?`<div class="sub">改法：${esc(i.suggest)}</div>`:""}</div>`).join("")}
         ${l.report?`<div class="md" style="margin-top:6px">${md(l.report)}</div>`:""}</details>`:""}
     </div>`).join("") : `<div class="empty">还没有审查记录</div>`)
       +listPager(logContract,"censor");
@@ -9406,9 +9504,9 @@ async function censorView(){
   <div class="card" style="background:linear-gradient(120deg,#fdecee,#fffaf0 65%)">
     <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
       ${charSVG("#e63946","🛡️","idle",92)}
-      <div style="flex:1;min-width:min(100%,240px)"><div class="sub" style="font-weight:800">🎬 内容生产部 · 合规审查部</div>
+      <div style="flex:1;min-width:min(100%,240px)"><div class="sub" style="font-weight:800">🎬 内容生产 · 合规审查</div>
       <h2 style="margin:2px 0 0">🛡️ 内容审查</h2><div class="sub">审查官的工作台</div>
-      <div class="sub" style="margin-top:5px">内容制作流程里的质检关就是他;发布前把关(广告法/平台规范/敏感违禁),发布后复盘(数据判读/限流体检)。公众号、小红书等平台规范逐条对照,发草稿箱前会自动终审。</div></div>
+      <div class="sub" style="margin-top:5px">内容制作流程里的质检关就是他；发布前把关(广告法/平台规范/敏感违禁),发布后复盘(数据判读/限流体检)。公众号、小红书等平台规范逐条对照，发草稿箱前会自动终审。</div></div>
       <a class="btn sm" href="#/growth">← 返回获客</a></div></div>
   <div class="card">
     <div class="tabs">${tabs.map(([k,l])=>`<span class="tb ${CEN_TAB===k?"on":""}" onclick="CEN_TAB=${cp(k)};resetListPage('censor');resetListPage('publog');render()">${l}</span>`).join("")}</div>
@@ -9418,38 +9516,38 @@ async function censorView(){
 async function retroAutoToggle(cb){
   try{
     await api("/publog/auto-retro",{method:"POST",body:{enabled:cb.checked}});
-    toast(cb.checked?"✅ 自动复盘已开启,到点自动跑":"⏸ 自动复盘已全部暂停,不再自动扣点(手动复盘不受影响)");
+    toast(cb.checked?"✅ 自动复盘已开启，到点自动跑":"⏸ 自动复盘已全部暂停，不再自动扣点（手动复盘不受影响）");
   }catch(e){ cb.checked=!cb.checked; toast(e.message); }
 }
 async function plDel(id){
-  if(!await uiConfirm("删除这条台账?删除后该篇不再自动复盘,也不再扣复盘点。",{okText:"删除",okClass:"bad"})) return;
-  try{ await api("/publog/"+id,{method:"DELETE"}); toast("已删除,该篇自动复盘停止"); render(); }
+  if(!await uiConfirm("删除这条台账？删除后该篇不再自动复盘，也不再扣复盘点。",{okText:"删除",okClass:"bad"})) return;
+  try{ await api("/publog/"+id,{method:"DELETE"}); toast("已删除，该篇自动复盘停止"); render(); }
   catch(e){ toast(e.message); }
 }
 async function cenScan(){
   const r = await api("/censor/scan",{method:"POST",body:{title:$("#cen-title").value,body:$("#cen-body").value,platform:cenPf()}}).catch(e=>({error:e.message}));
   $("#cen-out").innerHTML = r.error?`<div class="notice red">${esc(r.error)}</div>`
-    :censorReportHtml({...r, label:{pass:"✅ 词库未命中,可以发布",warn:"⚠️ 命中风险词,建议整改",block:"⛔ 命中违禁词,不能发布"}[r.verdict]});
+    :censorReportHtml({...r, label:{pass:"✅ 词库未命中，可以发布",warn:"⚠️ 命中风险词，建议整改",block:"⛔ 命中违禁词，不能发布"}[r.verdict]});
 }
 async function cenDeep(btn){
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 审查官工作中…`;
   try{
     const r = await api("/censor/check",{method:"POST",body:{title:$("#cen-title").value,body:$("#cen-body").value,platform:cenPf()},
       timeout:330000,longRunning:true});
-    $("#cen-out").innerHTML = (r.degraded?`<div class="notice red">⚠️ AI 深审临时没跑完,<b>1 点已自动退回</b>;下面是免费规则词库的扫描结果,可稍后再点深度审查。</div>`:"")
+    $("#cen-out").innerHTML = (r.degraded?`<div class="notice red">⚠️ AI 深审临时没跑完，<b>1 点已自动退回</b>;下面是免费规则词库的扫描结果，可稍后再点深度审查。</div>`:"")
       + censorReportHtml(r);
   }catch(e){ $("#cen-out").innerHTML = `<div class="notice red">${esc(e.message)}</div>`; }
-  btn.disabled=false; btn.textContent="🛡️ 深度审查(1点)";
+  restoreActionButton(btn);
 }
 async function cenRetro(btn){
-  btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 复盘中(约1分钟)…`;
+  btn.disabled=true; btn.innerHTML=`<span class="spin"></span> 复盘中（约1分钟）…`;
   try{
     const r = await api("/censor/retro",{method:"POST",body:{platform:cenPf(),title:$("#cenr-title").value,data_text:$("#cenr-data").value},
       timeout:330000,longRunning:true});
-    $("#cenr-out").innerHTML = `<div class="notice ${r.grade==="优秀"||r.grade==="良好"?"green":""}">评级:<b>${esc(r.grade||"—")}</b>${(r.signals||[]).length?` · ⚠️ 疑似信号 ${(r.signals||[]).length} 条`:" · 无明显限流信号"}</div>
+    $("#cenr-out").innerHTML = `<div class="notice ${r.grade==="优秀"||r.grade==="良好"?"green":""}">评级：<b>${esc(r.grade||"—")}</b>${(r.signals||[]).length?` · ⚠️ 疑似信号 ${(r.signals||[]).length} 条`:" · 无明显限流信号"}</div>
       <div class="md">${md(r.report||"")}</div>`;
   }catch(e){ $("#cenr-out").innerHTML = `<div class="notice red">${esc(e.message)}</div>`; }
-  btn.disabled=false; btn.textContent="📊 让审查官复盘(1点)";
+  restoreActionButton(btn);
 }
 
 /* ---------- 真实素材图库(交付页) ---------- */
@@ -9898,52 +9996,52 @@ async function toolsView(tab,preserveDraft=false){
   if(TS.tab==="hot"){
     const h = TS.hot;
     const savedCh = TS.hotCh || meta.hot_channels_saved || [];
-    body = `<div class="sub">每天点一下:趋势官只扫<b>您勾选的渠道</b>,挑 3 个「今天发正合适」的选题,看中直接一键开工。渠道选得准,又快又省。</div>
+    body = `<div class="sub">每天点一下：趋势官只扫<b>您勾选的渠道</b>，挑 3 个「今天发正合适」的选题，看中直接一键开工。渠道选得准，又快又省。</div>
     <label>行业</label>${indChips("hot-ind", TS.hotInd)}
-    <input id="hot-ind-c" placeholder="✏️ 或自己输入行业(填了就用这个)" value="${esc(TS.hotIndC||"")}" oninput="TS.hotIndC=this.value" style="margin-top:6px">
-    <label>扫描渠道(多选,按您账号所在的阵地勾)</label>
+    <input id="hot-ind-c" placeholder="✏️ 或自己输入行业（填了就用这个）" value="${esc(TS.hotIndC||"")}" oninput="TS.hotIndC=this.value" style="margin-top:6px">
+    <label>扫描渠道（多选，按您账号所在的阵地勾）</label>
     <div class="chips" id="hot-ch">${(meta.hot_channels||[]).map(c=>`<span class="chip${savedCh.includes(c)?" on":""}" onclick="this.classList.toggle('on')">${c}</span>`).join("")}</div>
-    <div class="actions" style="margin-top:8px"><button class="btn pri" ${TS.busy.hot||TS.running?.hot?"disabled":""} onclick="hotGo(this)">🔥 扫描今日热点(1点)</button>
-      <label style="display:inline-flex;align-items:center;font-weight:700;margin-left:8px"><input type="checkbox" id="hd-en" style="width:auto;margin-right:6px" ${(meta.hot_daily||{}).enabled?"checked":""} onchange="hdSave()">⏰ 每天早上自动扫描并推微信(1点/天)</label></div>
-    ${(meta.hot_daily||{}).enabled?`<div class="sub" style="margin-top:4px">已订阅:每天 7-9 点自动扫「${esc((meta.hot_daily||{}).industry||"通用")}」,3个选题直接推到您微信${(meta.hot_daily||{}).note?` · ⚠️ ${esc(meta.hot_daily.note)}`:""}</div>`:""}
+    <div class="actions" style="margin-top:8px">${costButton({label:"🔥 扫描今日热点",onclick:"hotGo(this)",cost:1,disabled:!!(TS.busy.hot||TS.running?.hot)})}
+      <label style="display:inline-flex;align-items:center;font-weight:700;margin-left:8px"><input type="checkbox" id="hd-en" style="width:auto;margin-right:6px" ${(meta.hot_daily||{}).enabled?"checked":""} onchange="hdSave()">⏰ 每天早上自动扫描并推微信（1 点/天）</label></div>
+    ${(meta.hot_daily||{}).enabled?`<div class="sub" style="margin-top:4px">已订阅：每天 7-9 点自动扫「${esc((meta.hot_daily||{}).industry||"通用")}」,3个选题直接推到您微信${(meta.hot_daily||{}).note?` · ⚠️ ${esc(meta.hot_daily.note)}`:""}</div>`:""}
     ${etaHint("hot","通常1-3分钟，最迟5分钟自动结束")}
     ${busyBar("hot","趋势官正在扫您勾选的渠道")}
-    ${(meta.festivals||[]).length?`<div class="notice" style="margin-top:10px">📅 未来节点:${meta.festivals.slice(0,6).map(f=>`<b>${f.name}</b>(${f.in_days===0?"今天":f.in_days+"天后"})`).join(" · ")}</div>`:""}
+    ${(meta.festivals||[]).length?`<div class="notice" style="margin-top:10px">📅 未来节点：${meta.festivals.slice(0,6).map(f=>`<b>${f.name}</b>(${f.in_days===0?"今天":f.in_days+"天后"})`).join(" · ")}</div>`:""}
     <div id="hot-out" style="margin-top:10px">${h?hotHtml(h):""}</div>`;
   } else if(TS.tab==="remix"){
     const clips = TS.clips||[];
-    body = `<div class="sub"><b>把您手机里的 vlog 片段变成成片</b>:传几段素材 → 给个主题(AI替您写口播稿)或直接贴文案 → AI 看懂每段画面、逐句配画面,自动配音+字幕+转场+BGM+调色,出竖版成片。<span class="sub">原来的「图文成片」(真实图/AI图配画面)还在:交付包🎬按钮和「📣口播矩阵」里照用。</span></div>
-    <label>① 素材片段(手机拍的就行,mp4/mov,可多选;点卡片勾选/取消,最多12段参与)</label>
+    body = `<div class="sub"><b>把您手机里的 vlog 片段变成成片</b>：传几段素材 → 给个主题（AI替您写口播稿）或直接贴文案 → AI 看懂每段画面、逐句配画面，自动配音+字幕+转场+BGM+调色，出竖版成片。<span class="sub">原来的「图文成片」(真实图/AI图配画面)还在：交付包🎬按钮和「📣口播矩阵」里照用。</span></div>
+    <label>① 素材片段(手机拍的就行，mp4/mov,可多选；点卡片勾选/取消，最多12段参与)</label>
     <input type="file" multiple accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.m4v" onchange="clipUpload(this)" style="margin:6px 0">
-    ${TS.busy.clipup?`<div class="notice"><span class="spin"></span> 素材上传中,别关页面…</div>`:""}
+    ${TS.busy.clipup?`<div class="notice"><span class="spin"></span> 素材上传中，别关页面…</div>`:""}
     <div class="grid3" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr))">
       ${clips.map(c=>`<div class="thumb clip-card${(TS.clipSel||[]).includes(c.name)?" sel on":""}" data-name="${esc(c.name)}" style="position:relative;aspect-ratio:16/10" onclick="clipToggle(${cp(c.name)})">
         ${safeAssetUrl(c.thumb)?`<img src="${esc(safeAssetUrl(c.thumb))}" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display='none'">`:""}
         <span class="tag" style="position:absolute;left:4px;bottom:4px">${c.dur}s</span>
         <span style="position:absolute;right:4px;top:4px;font-size:16px">${(TS.clipSel||[]).includes(c.name)?"✅":"⬜"}</span>
         <button class="btn sm bad" style="position:absolute;right:4px;bottom:4px;padding:0 6px" onclick="event.stopPropagation();clipDel(${cp(c.name)})">🗑</button>
-      </div>`).join("")||`<div class="empty" style="grid-column:1/-1">还没有素材,先传几段(拍店里/产品/街景都行)</div>`}</div>
-    <label style="margin-top:12px">② 主题 <span class="sub">(填主题 AI 替您写口播稿;想自己定文案就填下面的)</span></label>
-    <input id="rm-topic" placeholder="如:我们家小龙虾锅底新上市,欢迎来尝" value="${esc(TS.rmTopic||"")}" oninput="TS.rmTopic=this.value">
-    <label>或 直接贴口播文案 <span class="sub">(填了就按这个念,不再自动写)</span></label>
+      </div>`).join("")||`<div class="empty" style="grid-column:1/-1">还没有素材，先传几段(拍店里/产品/街景都行)</div>`}</div>
+    <label style="margin-top:12px">② 主题 <span class="sub">（填主题 AI 替您写口播稿；想自己定文案就填下面的）</span></label>
+    <input id="rm-topic" placeholder="如：我们家小龙虾锅底新上市，欢迎来尝" value="${esc(TS.rmTopic||"")}" oninput="TS.rmTopic=this.value">
+    <label>或 直接贴口播文案 <span class="sub">（填了就按这个念，不再自动写）</span></label>
     <textarea id="rm-script" style="min-height:80px" placeholder="(选填)想让视频念什么就写什么" oninput="TS.rmScript=this.value">${esc(TS.rmScript||"")}</textarea>
     <div class="row" style="align-items:flex-end">
-      <div style="flex:1;min-width:200px"><label>配音音色 ${(TOOLS_META.cloned||[]).length?`<span class="sub">(🧬开头是您的克隆声)</span>`:""}</label>
+      <div style="flex:1;min-width:200px"><label>配音音色 ${(TOOLS_META.cloned||[]).length?`<span class="sub">（🧬开头是您的克隆声）</span>`:""}</label>
         <div style="display:flex;gap:6px"><select id="rm-voice" style="flex:1">${(TOOLS_META.cloned||[]).concat(TOOLS_META.voices||[]).map(v=>`<option value="${v.id}">${esc(v.label)}</option>`).join("")}</select>
-        <button class="btn sm" style="flex:0 0 auto;width:auto" title="录10秒声音,以后视频都用您的原声" onclick="goClone()">🧬 克隆我的声音</button></div></div>
+        <button class="btn sm" style="flex:0 0 auto;width:auto" title="录10秒声音，以后视频都用您的原声" onclick="goClone()">🧬 克隆我的声音</button></div></div>
       <div style="flex:0 0 110px"><label>配乐</label><select id="rm-bgm">${(TOOLS_META.bgm_moods||[]).map(m=>`<option value="${m.key}">${m.label}</option>`).join("")}</select></div>
-      <button class="btn pri" onclick="remixGo(this)">🎞️ 开始混剪(3点)</button></div>
-    <div class="sub" style="margin-top:6px">画面会自动竖屏裁切+轻调色;素材原声会替换成配音+轻音乐。混剪约 3-6 分钟,完成会推微信通知。</div>
+      ${costButton({label:"🎞️ 开始混剪",onclick:"remixGo(this)",cost:3})}</div>
+    <div class="sub" style="margin-top:6px">画面会自动竖屏裁切+轻调色；素材原声会替换成配音+轻音乐。混剪约 3-6 分钟，完成会推微信通知。</div>
     <div id="vr-tvs" style="margin-top:10px"></div>`;
   } else if(TS.tab==="pcal"){
     const c = TS.pcal;
-    body = `<div class="sub">生成整月「朋友圈+社群」内容日历:每天1条朋友圈(干货/日常/见证/产品/互动穿插),每周一给社群主题,节日自动借势。发圈直接抄。</div>
+    body = `<div class="sub">生成整月「朋友圈+社群」内容日历：每天1条朋友圈(干货/日常/见证/产品/互动穿插),每周一给社群主题，节日自动借势。发圈直接抄。</div>
     <div class="row" style="align-items:flex-end">
       <div style="flex:0 0 140px"><label>月份</label><input id="pc-ym" type="month" value="${TS.pcalYm}" onchange="TS.pcalYm=this.value"></div>
       <div style="flex:2;min-width:200px"><label>行业</label>${indChips("pc-ind", TS.pcInd)}</div></div>
-    <input id="pc-ind-c" placeholder="✏️ 或自己输入行业(填了就用这个)" value="${esc(TS.pcIndC||"")}" oninput="TS.pcIndC=this.value" style="margin-top:6px">
-    <label>补充要求(选填)</label><input id="pc-focus" placeholder="如:本月主推新品XX;周末店里有活动" value="${esc(TS.pcFocus||"")}" oninput="TS.pcFocus=this.value">
-    <div class="actions"><button class="btn pri" ${TS.busy.pcal||TS.running?.pcal?"disabled":""} onclick="pcalGo(this)">📅 生成本月日历(2点)</button>
+    <input id="pc-ind-c" placeholder="✏️ 或自己输入行业（填了就用这个）" value="${esc(TS.pcIndC||"")}" oninput="TS.pcIndC=this.value" style="margin-top:6px">
+    <label>补充要求（选填）</label><input id="pc-focus" placeholder="如：本月主推新品XX;周末店里有活动" value="${esc(TS.pcFocus||"")}" oninput="TS.pcFocus=this.value">
+    <div class="actions">${costButton({label:"📅 生成本月日历",onclick:"pcalGo(this)",cost:2,disabled:!!(TS.busy.pcal||TS.running?.pcal)})}
       <button class="btn" onclick="pcalLoad()">📂 看已生成</button>
       ${TS.pcal?`<button class="btn" onclick="TS.pcalEdit=!TS.pcalEdit;render()">${TS.pcalEdit?"👁 退出编辑":"✏️ 编辑文案"}</button>
       ${TS.pcalEdit?`<button class="btn pri" onclick="pcalSave(this)">💾 保存修改</button>`:""}
@@ -9953,65 +10051,65 @@ async function toolsView(tab,preserveDraft=false){
     <div id="pc-out" style="margin-top:10px">${c?pcalHtml(c):""}</div>`;
   } else if(TS.tab==="bench"){
     const b = TOOLS_META.bench||{targets:[]};
-    body = `<div class="sub">把要盯的对标账号加进来,<b>每周一上午</b>自动出《竞品盯梢周报》(3点/期,自动扣):对手做了什么+值得抄的作业,存进经验库并推微信。也可随时手动出一期。</div>
+    body = `<div class="sub">把要盯的对标账号加进来，<b>每周一上午</b>自动出《竞品盯梢周报》(3点/期，自动扣):对手做了什么+值得抄的作业，存进经验库并推微信。也可随时手动出一期。</div>
     <div id="bw-list">${(b.targets||[]).map(t=>bwRow(t)).join("")||bwRow()}</div>
     <div class="actions" style="margin-top:8px"><button class="btn" onclick="bwAdd()">➕ 加对标</button>
       <label style="display:inline-flex;align-items:center;font-weight:700;margin:0 8px"><input type="checkbox" id="bw-en" style="width:auto;margin-right:6px" ${b.enabled?"checked":""}>每周自动</label>
       <button class="btn pri" onclick="bwSave()">💾 保存</button>
-      <button class="btn pri" ${TS.busy.bench||TS.running?.bench?"disabled":""} onclick="bwRun(this)">📰 立即出一期(3点)</button></div>
+      ${costButton({label:"📰 立即出一期",onclick:"bwRun(this)",cost:3,disabled:!!(TS.busy.bench||TS.running?.bench)})}</div>
     ${etaHint("bench","通常2-5分钟，最迟6分钟自动结束")}
     ${busyBar("bench","情报官正在逐个盯对标的近7天动态")}
-    <div class="sub" style="margin-top:6px">${b.last_run?`上次出报:${new Date(b.last_run*1000).toLocaleString("zh-CN")}(每周一自动出的那期在<a href="#/knowledge" style="text-decoration:underline">经验库</a>)`:""}</div>
+    <div class="sub" style="margin-top:6px">${b.last_run?`上次出报：${new Date(b.last_run*1000).toLocaleString("zh-CN")}(每周一自动出的那期在<a href="#/knowledge" style="text-decoration:underline">经验库</a>)`:""}</div>
     <div id="bw-out" style="margin-top:8px">${TS.bench?benchResHtml(TS.bench):""}</div>`;
   } else if(TS.tab==="warm"){
-    body = `<div class="sub">新账号从 0 起:军师先联网调研您行业在该平台的头部打法,再给《30天冷启动作战计划》——定位诊断/账号名/简介/对标账号/分周打法/30天逐日选题。</div>
+    body = `<div class="sub">新账号从 0 起：军师先联网调研您行业在该平台的头部打法，再给《30天冷启动作战计划》——定位诊断/账号名/简介/对标账号/分周打法/30天逐日选题。</div>
     <div class="row">
       <div style="flex:0 0 150px"><label>平台</label><select id="wm-pf" onchange="TS.wmPf=this.value">${["小红书","抖音","公众号","视频号"].map(x=>`<option ${TS.wmPf===x?"selected":""}>${x}</option>`).join("")}</select></div>
       <div style="flex:1;min-width:200px"><label>行业</label>${indChips("wm-ind", TS.wmInd)}</div></div>
-    <input id="wm-ind-c" placeholder="✏️ 或自己输入行业(填了就用这个)" value="${esc(TS.wmIndC||"")}" oninput="TS.wmIndC=this.value" style="margin-top:6px">
-    <label>挂哪个品牌人设 <span class="sub">(强烈建议选:账号名/简介/选题全按这个人设来;<a href="#/profiles" style="text-decoration:underline">没有就先建 →</a>)</span></label>
-    <select id="wm-profile" onchange="TS.wmProfile=this.value"><option value="">(不用品牌人设)</option>
+    <input id="wm-ind-c" placeholder="✏️ 或自己输入行业（填了就用这个）" value="${esc(TS.wmIndC||"")}" oninput="TS.wmIndC=this.value" style="margin-top:6px">
+    <label>挂哪个品牌人设 <span class="sub">(强烈建议选：账号名/简介/选题全按这个人设来；<a href="#/profiles" style="text-decoration:underline">没有就先建 →</a>)</span></label>
+    <select id="wm-profile" onchange="TS.wmProfile=this.value"><option value="">（不用品牌人设）</option>
       ${(STATE.profiles||[]).map(p=>`<option value="${p.id}" ${String(TS.wmProfile||"")===String(p.id)?"selected":""}>${esc(p.name)}</option>`).join("")}</select>
-    <label>您的定位想法(选填)</label><input id="wm-pos" placeholder="如:社区宝妈客群的轻食店,想走老板娘人设" value="${esc(TS.wmPos||"")}" oninput="TS.wmPos=this.value">
-    <div class="actions"><button class="btn pri" ${TS.busy.warm||TS.running?.warm?"disabled":""} onclick="warmGo(this)">🚀 出30天起号计划(3点)</button></div>
+    <label>您的定位想法（选填）</label><input id="wm-pos" placeholder="如：社区宝妈客群的轻食店，想走老板娘人设" value="${esc(TS.wmPos||"")}" oninput="TS.wmPos=this.value">
+    <div class="actions">${costButton({label:"🚀 出30天起号计划",onclick:"warmGo(this)",cost:3,disabled:!!(TS.busy.warm||TS.running?.warm)})}</div>
     ${etaHint("warm","通常2-5分钟，最迟6分钟自动结束")}
     ${busyBar("warm","军师正在联网调研头部打法+写30天计划")}
     <div id="wm-out" style="margin-top:10px">${TS.warm?warmHtml(TS.warm):""}</div>`;
   } else if(TS.tab==="leads"){
-    body = `<div class="sub">侦察兵联网扫知乎/微博/小红书等公开帖子:谁在求推荐、吐槽同行、找攻略——这些就是您能去承接的线索,附承接话术。<b>合规提示:话术生成后人工去回复,别用软件群发。</b></div>
+    body = `<div class="sub">侦察兵联网扫知乎/微博/小红书等公开帖子：谁在求推荐、吐槽同行、找攻略——这些就是您能去承接的线索，附承接话术。<b>合规提示：话术生成后人工去回复，别用软件群发。</b></div>
     ${featOn("lead_search_scrape")?"":`<div class="notice" style="font-size:12.5px">ℹ️ ${esc(featHint("lead_search_scrape"))}</div>`}
     <div class="row">
       <div style="flex:1;min-width:160px"><label>行业</label>${indChips("ld-ind", TS.ldInd)}
         <input id="ld-ind-c" placeholder="✏️ 或自己输入" value="${esc(TS.ldIndC||"")}" oninput="TS.ldIndC=this.value" style="margin-top:6px"></div>
-      <div style="flex:0 0 150px"><label>城市(选填)</label><input id="ld-city" placeholder="如:杭州" value="${esc(TS.ldCity||"")}" oninput="TS.ldCity=this.value"></div>
-      <div style="flex:1;min-width:160px"><label>产品/服务</label><input id="ld-prod" placeholder="如:轻食沙拉外卖" value="${esc(TS.ldProd||"")}" oninput="TS.ldProd=this.value"></div></div>
-    <div class="actions"><button class="btn pri" ${TS.busy.leads||TS.running?.leads?"disabled":""} onclick="leadsGo(this)">🎯 开始侦察(3点)</button></div>
+      <div style="flex:0 0 150px"><label>城市（选填）</label><input id="ld-city" placeholder="如：杭州" value="${esc(TS.ldCity||"")}" oninput="TS.ldCity=this.value"></div>
+      <div style="flex:1;min-width:160px"><label>产品/服务</label><input id="ld-prod" placeholder="如：轻食沙拉外卖" value="${esc(TS.ldProd||"")}" oninput="TS.ldProd=this.value"></div></div>
+    <div class="actions">${costButton({label:"🎯 开始侦察",onclick:"leadsGo(this)",cost:3,disabled:!!(TS.busy.leads||TS.running?.leads)})}</div>
     ${etaHint("leads","通常2-5分钟，最迟6分钟自动结束并退点")}
     ${busyBar("leads","侦察兵正在按四类信号全网检索")}
     <div id="ld-out" style="margin-top:10px">${TS.leads?leadsHtml(TS.leads):""}</div>`;
   } else if(TS.tab==="shot"){
-    body = `<div class="sub"><b>随手拍变素材</b>:上传一张产品/菜品随手拍 → 一次拿走「商业海报级美图 + 全套文案」(卖点/外卖描述/小红书文案/价格话术)。拍一张,朋友圈、外卖店、小红书三处的素材全有了。</div>
+    body = `<div class="sub"><b>随手拍变素材</b>：上传一张产品/菜品随手拍 → 一次拿走「商业海报级美图 + 全套文案」(卖点/外卖描述/小红书文案/价格话术)。拍一张，朋友圈、外卖店、小红书三处的素材全有了。</div>
     <input type="file" id="ps-file" accept="image/*" style="margin:8px 0">
     <div class="row">
-      <div><label>画面场景(选填)</label><input id="ps-scene" placeholder="如:大理石桌面+咖啡店氛围/深色木桌暖光" value="${esc(TS.psScene||"")}" oninput="TS.psScene=this.value"></div>
-      <div><label>文案需求(选填)</label><input id="mc-want" placeholder="如:写美团外卖菜品描述" value="${esc(TS.mcWant||"")}" oninput="TS.mcWant=this.value"></div></div>
-    <div class="actions"><button class="btn pri" ${TS.busy.shot?"disabled":""} onclick="factoryGo(this)">✨ 一键出海报+文案(3点)</button></div>
-    ${busyBar("shot","正在出海报+写文案(约1分钟)")}
+      <div><label>画面场景（选填）</label><input id="ps-scene" placeholder="如：大理石桌面+咖啡店氛围/深色木桌暖光" value="${esc(TS.psScene||"")}" oninput="TS.psScene=this.value"></div>
+      <div><label>文案需求（选填）</label><input id="mc-want" placeholder="如：写美团外卖菜品描述" value="${esc(TS.mcWant||"")}" oninput="TS.mcWant=this.value"></div></div>
+    <div class="actions">${costButton({label:"✨ 一键出海报+文案",onclick:"factoryGo(this)",cost:3,disabled:!!TS.busy.shot})}</div>
+    ${busyBar("shot","正在出海报+写文案（约1分钟）")}
     <div class="row" style="align-items:flex-start;margin-top:10px">
       <div style="flex:1;min-width:260px" id="ps-out">${safeAssetUrl(TS.shot)?`<a class="thumb" href="${esc(safeAssetUrl(TS.shot))}" target="_blank" rel="noopener noreferrer" style="display:block;max-width:300px"><img src="${esc(safeAssetUrl(TS.shot))}" style="width:100%"></a>`:""}</div>
       <div style="flex:1;min-width:260px" id="mc-out">${TS.menu?menuHtml(TS.menu):""}</div></div>`;
   } else if(TS.tab==="vars"){
-    body = `<div class="sub">矩阵打法:一篇口播稿 → 裂变 N 个不撞车的版本(换钩子/换叙事/换例子)→ 每版一键「图文成片」出视频(3点/条,自动配音+字幕+抓图)。多账号发布不查重。</div>
-    <label>原始口播稿(从交付包复制,或自己写)</label>
+    body = `<div class="sub">矩阵打法：一篇口播稿 → 裂变 N 个不撞车的版本(换钩子/换叙事/换例子)→ 每版一键「图文成片」出视频(3点/条，自动配音+字幕+抓图)。多账号发布不查重。</div>
+    <label>原始口播稿（从交付包复制，或自己写）</label>
     <textarea id="vr-script" style="min-height:120px" placeholder="粘贴口播稿…" oninput="TS.vrScript=this.value">${esc(TS.vrScript||"")}</textarea>
     <div class="row" style="align-items:flex-end">
       <div style="flex:0 0 110px"><label>裂变数量</label><select id="vr-n">${[2,3,4,5,6].map(n=>`<option ${n===3?"selected":""}>${n}</option>`).join("")}</select></div>
-      <div style="flex:1;min-width:200px"><label>配音音色 ${(TOOLS_META.cloned||[]).length?`<span class="sub">(🧬开头是您的克隆声)</span>`:""}</label>
+      <div style="flex:1;min-width:200px"><label>配音音色 ${(TOOLS_META.cloned||[]).length?`<span class="sub">（🧬开头是您的克隆声）</span>`:""}</label>
         <div style="display:flex;gap:6px"><select id="vr-voice" style="flex:1">${(TOOLS_META.cloned||[]).concat(TOOLS_META.voices||[]).map(v=>`<option value="${v.id}">${esc(v.label)}</option>`).join("")}</select>
-        <button class="btn sm" style="flex:0 0 auto;width:auto" title="录10秒声音,以后视频都用您的原声" onclick="goClone()">🧬 克隆我的声音</button></div></div>
-      <div style="flex:1;min-width:180px"><label>配图关键词</label><input id="vr-imgq" placeholder="成片抓真实图用,如:火锅 实拍" value="${esc(TS.vrImgq||"")}" oninput="TS.vrImgq=this.value"></div>
+        <button class="btn sm" style="flex:0 0 auto;width:auto" title="录10秒声音，以后视频都用您的原声" onclick="goClone()">🧬 克隆我的声音</button></div></div>
+      <div style="flex:1;min-width:180px"><label>配图关键词</label><input id="vr-imgq" placeholder="成片抓真实图用，如：火锅 实拍" value="${esc(TS.vrImgq||"")}" oninput="TS.vrImgq=this.value"></div>
       <div style="flex:0 0 110px"><label>配乐</label><select id="vr-bgm">${(TOOLS_META.bgm_moods||[]).map(m=>`<option value="${m.key}">${m.label}</option>`).join("")}</select></div>
-      <button class="btn pri" ${TS.busy.vars?"disabled":""} onclick="varsGo(this)">📣 开始裂变(1点)</button></div>
+      ${costButton({label:"📣 开始裂变",onclick:"varsGo(this)",cost:1,disabled:!!TS.busy.vars})}</div>
     ${busyBar("vars","正在裂变多版本口播稿…")}
     <div id="vr-out" style="margin-top:10px">${TS.vars?varsHtml(TS.vars):""}</div>
     <div id="vr-tvs" style="margin-top:10px"></div>`;
@@ -10025,7 +10123,7 @@ async function toolsView(tab,preserveDraft=false){
   const snapshot=preserveDraft?captureFormState():null;
   $("#main").innerHTML = `<div class="card" style="background:linear-gradient(120deg,#fff6dc,#f4f9f4 65%)">
     <h2 style="margin:0">🧰 获客工具</h2>
-    <div class="sub" style="margin-top:5px">老板的日常武器库:每个工具都是「填两个空 → 点一下 → 拿走就能用」。</div>
+    <div class="sub" style="margin-top:5px">老板的日常武器库：每个工具都是「填两个空 → 点一下 → 拿走就能用」。</div>
     <div class="actions"><button class="btn sm" onclick="toolHistory(0)">🧾 查看全部工具任务</button></div></div>
   <div class="card"><div class="tabs" style="flex-wrap:wrap">${TOOL_TABS.map(([k,l])=>`<a class="tb ${TS.tab===k?"on":""}" href="#/tools/${k}">${l}</a>`).join("")}</div>
   <div style="margin-top:12px">${body}</div></div>`;
@@ -10065,16 +10163,16 @@ async function remixGo(btn){
   try{
     const result=await api("/text-video",{method:"POST",body:{mode:"clips", clips:sel, topic, script,
       title:(topic||script).slice(0,20), voice_id:$("#rm-voice").value, bgm:$("#rm-bgm")?.value||"warm"}});
-    toast("🎞️ 已开工:看画面→写稿→配音→混剪,约3-6分钟,完成推微信"); varsTvs();
+    toast("🎞️ 已开工：看画面→写稿→配音→混剪，约3-6分钟，完成推微信"); varsTvs();
     (result.brand_warnings||[]).forEach(toast);
   }catch(e){ toast(e.message); }
-  btn.disabled=false; btn.textContent="🎞️ 开始混剪(3点)";
+  restoreActionButton(btn);
 }
 function hotHtml(h){
   const today=new Date().toLocaleDateString("sv-SE");
   const stale=h.date&&h.date!==today?`<div class="notice" style="margin-top:6px">🕐 这是 <b>${esc(h.date)}</b> 的扫描结果，热点讲究当天发——建议重新扫一次。</div>`:"";
   return stale+`<div class="notice green">📡 ${esc(h.scan_note||"")}</div>` + (h.picks||[]).map(p=>`<div class="topic">
-    <b>${esc(p.title)}</b>${p.channel?` <span class="tag">📡 ${esc(p.channel)}</span>`:""}<div class="sub" style="margin:4px 0">🔥 ${esc(p.why||"")} · 角度:${esc(p.angle||"")}</div>
+    <b>${esc(p.title)}</b>${p.channel?` <span class="tag">📡 ${esc(p.channel)}</span>`:""}<div class="sub" style="margin:4px 0">🔥 ${esc(p.why||"")} · 角度：${esc(p.angle||"")}</div>
     <button class="btn sm pri" onclick="hotStart(${cp(JSON.stringify({direction:(p.direction||p.title)+(p.angle?`（切入角度：${p.angle}）`:""), why:p.why||"", industry:h.industry||""}))})">⚡ 一键开工</button></div>`).join("");
 }
 function hotStart(payloadStr){ localStorage.setItem("prefill_brief", payloadStr); location.hash="#/new"; }
@@ -10083,7 +10181,7 @@ async function hdSave(){
   const ch = [...document.querySelectorAll("#hot-ch .on")].map(e=>e.textContent.trim());
   try{
     const r = await api("/tools/hot-daily",{method:"PUT",body:{enabled:$("#hd-en").checked, industry:ind, channels:ch}});
-    toast(r.enabled?`⏰ 已订阅:每天早上自动扫「${ind}」推微信(记得配好企微通知)`:"已取消每日自动扫描");
+    toast(r.enabled?`⏰ 已订阅：每天早上自动扫「${ind}」推微信（记得配好企微通知）`:"已取消每日自动扫描");
     render();
   }catch(e){ toast(e.message); }
 }
@@ -10098,13 +10196,13 @@ async function hotGo(btn){
 }
 function pcalHtml(c){
   const edit = TS.pcalEdit;
-  return `<div class="notice">${esc(c.tips||"")}</div>${edit?`<div class="notice green">✏️ 编辑模式:直接改下面的文案,改完点上面「💾 保存修改」;保存后再「📤 同步到飞书」</div>`:""}<div style="max-height:60vh;overflow:auto">` +
+  return `<div class="notice">${esc(c.tips||"")}</div>${edit?`<div class="notice green">✏️ 编辑模式：直接改下面的文案，改完点上面「💾 保存修改」；保存后再「📤 同步到飞书」</div>`:""}<div style="max-height:60vh;overflow:auto">` +
     (c.days||[]).map(d=>`<div class="topic pcal-day" data-d="${esc(String(d.d??""))}" style="margin:6px 0">
       <b>${esc(String(d.d??""))}日 ${esc(d.weekday||"")}</b>${d.festival?` <span class="tag">🎉 ${esc(d.festival)}</span>`:""}
       ${edit?`<textarea class="pc-m" style="min-height:56px;margin-top:4px">${esc(d.moment||"")}</textarea>
-        <textarea class="pc-g" style="min-height:34px;margin-top:4px" placeholder="社群话术(可空)">${esc(d.group||"")}</textarea>`
+        <textarea class="pc-g" style="min-height:34px;margin-top:4px" placeholder="社群话术（可空）">${esc(d.group||"")}</textarea>`
       :`<div class="sub" style="margin-top:4px">${esc(d.moment||"")}</div>
-      ${d.group?`<div class="sub" style="margin-top:4px">👥 社群:${esc(d.group)}</div>`:""}
+      ${d.group?`<div class="sub" style="margin-top:4px">👥 社群：${esc(d.group)}</div>`:""}
       <button class="btn sm" style="margin-top:4px" onclick="copyText(${cp(d.moment||"")})">📋 复制</button>`}</div>`).join("")+`</div>`;
 }
 async function pcalSave(btn){
@@ -10323,11 +10421,11 @@ function varsHtml(V){
     <div class="sub" style="margin-top:4px;white-space:pre-wrap">${esc(v.script||"")}</div>
     <div class="actions" style="margin-top:6px">
       <button class="btn sm" onclick="copyText(${cp(v.script||"")})">📋 复制</button>
-      <button class="btn sm pri" onclick="varTv(${i},this)">🎬 图文成片(3点)</button></div></div>`).join("");
+      ${costButton({label:"🎬 图文成片",onclick:`varTv(${i},this)`,cost:3,btnClass:"btn sm pri"})}</div></div>`).join("");
 }
 async function varsGo(btn){
   TS.vrScript = $("#vr-script").value.trim();
-  if(TS.vrScript.length<30) return toast("先贴一篇口播稿(至少30字)");
+  if(TS.vrScript.length<30) return toast("先贴一篇口播稿（至少30字）");
   const n = +$("#vr-n").value;
   await toolRun("vars", btn, async ()=>{ TS.vars = await api("/tools/variants",{method:"POST",body:{script:TS.vrScript, n, styles:""}}); });
 }
@@ -10338,10 +10436,10 @@ async function varTv(i, btn){
     const result=await api("/text-video",{method:"POST",body:{title:(v.hook||v.style||"").slice(0,20), script:v.script,
       voice_id:$("#vr-voice")?.value||"", image_query:$("#vr-imgq")?.value||v.style||"",
       bgm:$("#vr-bgm")?.value||"warm"}});
-    toast("🎬 已开工,约2-4分钟,下方可看进度"); varsTvs();
+    toast("🎬 已开工，约2-4分钟，下方可看进度"); varsTvs();
     (result.brand_warnings||[]).forEach(toast);
   }catch(e){ toast(e.message); }
-  btn.disabled=false; btn.textContent="🎬 图文成片(3点)";
+  restoreActionButton(btn);
 }
 async function varsTvs(){
   const box = $("#vr-tvs"); if(!box) return;

@@ -85,7 +85,7 @@ class FrontendFlowsFeedbackTests(unittest.IsolatedAsyncioTestCase):
     _capture_unexpected_browser_errors = _browser.FrontendBrowserBehaviorTests._capture_unexpected_browser_errors
     _assert_no_browser_errors = _browser.FrontendBrowserBehaviorTests._assert_no_browser_errors
 
-    async def _open(self, playwright, *, balance=100, init_script="", width=1280, hash_="#/", me=None):
+    async def _open(self, playwright, *, balance=100, init_script="", width=1280, hash_="#/", me=None, extra=None):
         browser = await _launch_chromium(playwright, self.executable)
         page = await browser.new_page(viewport={"width": width, "height": 900})
         errors = self._capture_unexpected_browser_errors(page)
@@ -94,6 +94,7 @@ class FrontendFlowsFeedbackTests(unittest.IsolatedAsyncioTestCase):
         payloads = _api(balance)
         if me is not None:
             payloads["/api/auth/me"] = me
+        payloads.update(extra or {})
         self.api_hits = []
 
         async def api_route(route):
@@ -196,21 +197,156 @@ class FrontendFlowsFeedbackTests(unittest.IsolatedAsyncioTestCase):
             info = await page.evaluate(
                 """() => ({
                   suggestPrimary: document.querySelector('#mt-suggest').classList.contains('pri'),
-                  open: [...document.querySelectorAll('#main details[open] > summary')].map(x => x.textContent.trim()),
-                  other: document.querySelector('details.mt-other > summary')?.textContent.trim(),
-                  otherOpen: document.querySelector('details.mt-other')?.open,
-                  otherHas: document.querySelector('details.mt-other')?.textContent.includes('宠物店顾问'),
+                  industries: [...document.querySelectorAll('#main details.mt-ind > summary')].map(x => x.textContent.trim()),
+                  openIndustries: [...document.querySelectorAll('#main details.mt-ind[open]')].map(x => x.dataset.ind),
+                  openGroups: [...document.querySelectorAll('#main details.mt-ind[open] details.mt-group[open] > summary')].map(x => x.textContent.trim()),
+                  petHas: document.querySelector('details.mt-ind[data-ind="pet"]')?.textContent.includes('宠物店顾问'),
                   intro: document.querySelector('#main .notice')?.textContent,
+                  auto: document.querySelector('#mt-auto')?.closest('label')?.textContent,
                 })"""
             )
             self.assertTrue(info["suggestPrimary"])
-            self.assertEqual(["餐饮·经营(1)", "餐饮·后厨(1)"], info["open"])
-            self.assertEqual("其他行业(1 组)", info["other"])
-            self.assertFalse(info["otherOpen"])
-            self.assertTrue(info["otherHas"])
+            # 每个行业一个总折叠并标上行业名;本行业展开,别的行业收起
+            self.assertEqual(["🍜 餐饮（2 组 · 2 人）", "🐶 宠物（1 组 · 1 人）"], info["industries"])
+            self.assertEqual(["restaurant"], info["openIndustries"])
+            self.assertEqual(["餐饮·经营（1）", "餐饮·后厨（1）"], info["openGroups"])
+            self.assertTrue(info["petHas"])
+            self.assertIn("得出结论（做 / 先补信息）后", info["auto"])
+            self.assertNotIn("GO 或 NEED INFO", info["auto"])
             self.assertIn("每位专家各出一个方案，互相挑毛病，最后给您一个做或不做的结论", info["intro"])
             for jargon in ("Top N", "GO / NO-GO", "单位经济反向验证"):
                 self.assertNotIn(jargon, info["intro"])
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_meetings_only_open_two_most_used_groups(self):
+        busy = [
+            {"key": "restaurant", "name": "餐饮产业部", "short_label": "餐饮", "emoji": "🍜",
+             "employees": [
+                 {**_employee(2101, "选址顾问", "餐饮·选址"), "tasks_n": 0},
+                 {**_employee(2102, "后厨顾问", "餐饮·后厨"), "tasks_n": 9},
+                 {**_employee(2103, "会员顾问", "餐饮·会员"), "tasks_n": 4},
+             ]},
+        ]
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(
+                playwright, hash_="#/meetings", extra={"/api/depts": busy})
+            await page.wait_for_selector("#mt-suggest")
+            info = await page.evaluate(
+                """() => ({
+                  label: document.querySelector('details.mt-ind > summary').textContent.trim(),
+                  open: [...document.querySelectorAll('details.mt-group[open] > summary')].map(x => x.textContent.trim()),
+                })"""
+            )
+            self.assertEqual("🍜 餐饮（3 组 · 3 人）", info["label"])  # 用短名,不用「餐饮产业部」
+            self.assertEqual(["餐饮·后厨（1）", "餐饮·会员（1）"], info["open"])
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_meetings_start_button_waits_for_two_experts(self):
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(playwright, hash_="#/meetings")
+            await page.wait_for_selector("#mt-go")
+            state = lambda: page.evaluate(
+                """() => ({disabled: document.querySelector('#mt-go').disabled,
+                           text: document.querySelector('#mt-go').textContent.trim(),
+                           note: document.querySelector('#mt-go-cost').textContent.trim()})""")
+            self.assertEqual({"disabled": True, "text": "先选 2 位专家", "note": "本次 0 点 · 余额 100 点"},
+                             await state())
+            await page.locator('.mt-chip[data-i="2001"]').click()
+            self.assertEqual({"disabled": True, "text": "再选 1 位专家", "note": "本次 1 点 · 余额 100 点"},
+                             await state())
+            await page.locator('.mt-chip[data-i="2002"]').click()
+            self.assertEqual({"disabled": False, "text": "🎯 开会并收敛", "note": "本次 2 点 · 余额 100 点"},
+                             await state())
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_cost_button_disabled_label_and_recharge(self):
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(playwright, balance=1)
+            result = await page.evaluate(
+                """() => {
+                  const box = document.createElement('div');
+                  box.innerHTML = costButton({label:'🔥 扫描', onclick:'', cost:1, id:'c1'})
+                    + costButton({label:'🎯 开会', onclick:'', cost:0, id:'c2', disabled:true, disabledLabel:'先选 2 位专家'})
+                    + costButton({label:'🎯 开会', onclick:'', cost:3, id:'c3', btnClass:'btn sm pri'});
+                  document.querySelector('#main').appendChild(box);
+                  const c2 = document.querySelector('#c2');
+                  const before = c2.textContent;
+                  setCostButtonDisabled(c2, false);
+                  return {
+                    c1: [document.querySelector('#c1').textContent, document.querySelector('#c1-cost').textContent],
+                    c2: [before, c2.textContent, c2.disabled],
+                    c3: [document.querySelector('#c3').textContent, document.querySelector('#c3').className,
+                         document.querySelector('#c3').dataset.recharge || ''],
+                  };
+                }"""
+            )
+            self.assertEqual(["🔥 扫描", "本次 1 点 · 余额 1 点"], result["c1"])
+            self.assertEqual(["先选 2 位专家", "🎯 开会", False], result["c2"])
+            self.assertEqual(["点数不够，去充值", "btn sm pri", "1"], result["c3"])
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_tools_buttons_keep_points_out_of_label(self):
+        tools_meta = {"industries": ["餐饮"], "hot_channels": ["抖音"], "hot_channels_saved": ["抖音"],
+                      "hot_daily": {}, "festivals": []}
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(
+                playwright, balance=0, hash_="#/tools/hot",
+                extra={"/api/tools/meta": tools_meta, "/api/tools/jobs": {"items": [], "total": 0}})
+            await page.wait_for_selector("#hot-ch")
+            info = await page.evaluate(
+                """() => { const b = document.querySelector('[data-label="🔥 扫描今日热点"]');
+                  return {text: b.textContent, note: b.parentElement.querySelector('.cost-note').textContent}; }""")
+            self.assertEqual("点数不够，去充值", info["text"])
+            self.assertEqual("本次 1 点 · 余额 0 点", info["note"])
+            self.assertNotIn("(1点)", await page.locator("#main").inner_text())
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_pay_bar_is_removed_when_page_changes(self):
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(playwright)
+            await page.evaluate("pay402('点数不足')")
+            self.assertEqual(1, await page.locator("#paybar").count())
+            await page.evaluate("location.hash = '#/meetings'")
+            await page.wait_for_function("!document.querySelector('#paybar')")
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_experts_open_own_industry_first_with_finder_on_top(self):
+        def emp(idx, name, group):
+            return {**_employee(idx, name, group), "role": name, "resume_card": {}, "enabled": True}
+        depts = [
+            {"key": "pet", "name": "宠物行业", "emoji": "🐶", "tagline": "宠物", "groups": [{"name": "宠物·门店"}],
+             "employees": [emp(3001, "宠物店顾问", "宠物·门店")]},
+            {"key": "restaurant", "name": "餐饮产业部", "emoji": "🍜", "tagline": "餐饮",
+             "groups": [{"name": "餐饮·经营"}], "employees": [emp(2001, "店长参谋", "餐饮·经营")]},
+        ]
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(
+                playwright, hash_="#/experts", extra={"/api/depts": depts})
+            await page.wait_for_selector(".deptsec")
+            info = await page.evaluate(
+                """() => ({
+                  floors: [...document.querySelectorAll('.deptsec[data-deptsec]')].map(x => [x.dataset.deptsec, !!x.querySelector('.deptbody')]),
+                  finderDept: document.querySelector('.exp-finder-top')?.dataset.finderDept,
+                  finderFirst: !!(document.querySelector('.exp-finder-top')?.compareDocumentPosition(
+                    document.querySelector('.deptsec')) & Node.DOCUMENT_POSITION_FOLLOWING),
+                  finders: document.querySelectorAll('#ef-text-restaurant').length,
+                  contentOpen: deptIsOpen('content'),
+                })"""
+            )
+            self.assertEqual([["restaurant", True], ["pet", False], ["content", False]], info["floors"])
+            self.assertEqual("restaurant", info["finderDept"])
+            self.assertTrue(info["finderFirst"])
+            self.assertEqual(1, info["finders"])
+            self.assertFalse(info["contentOpen"])
+            # 用户自己展开/收起过的,以用户的选择为准
+            await page.evaluate("toggleDept('content')")
+            await page.wait_for_function("!!document.querySelector('.deptsec[data-deptsec=\"content\"] .deptbody')")
             self._assert_no_browser_errors(errors)
             await browser.close()
 
