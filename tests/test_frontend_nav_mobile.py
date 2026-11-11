@@ -260,6 +260,52 @@ class FrontendNavMobileTests(unittest.IsolatedAsyncioTestCase):
             self._assert_no_browser_errors(errors)
             await browser.close()
 
+    async def test_today_page_lists_staff_submissions_waiting_for_review(self):
+        task = {"id": 41, "title": "把冷柜清洗一遍", "status": "submitted", "photos": [],
+                "branch_id": 3, "branch_name": "人民路店", "assignee_user_id": 23,
+                "assignee_name": "xiaowang", "created_by_name": "tea-owner"}
+        state = {**STATE, "inbox": [], "staff_review_count": 2, "notifications": [
+            {"id": 9, "kind": "staff_task_submitted", "title": "店员交差了，等您审核",
+             "body": "xiaowang 交了「把冷柜清洗一遍」", "link": "#/staff-tasks/41",
+             "created_at": 1700000000}]}
+        tasks = {"items": [task], "next_before_id": None}
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(
+                playwright, width=1280, height=900,
+                api_overrides={"/api/state": state, "/api/staff/tasks": tasks,
+                               "/api/staff/meta": {"branches": [{"id": 3, "name": "人民路店", "members": []}]},
+                               "/api/inspections": {"items": [], "summary": {}}})
+            requests = []
+            page.on("request", lambda r: requests.append((r.method, r.url)))
+            await page.wait_for_function(
+                "document.querySelector('.today-todo')?.textContent.includes('等我处理的')")
+            todo = await page.locator(".today-todo").inner_text()
+            self.assertIn("等我处理的(1)", todo)
+            self.assertIn("2 件店员交差等您审核", todo)
+            self.assertNotIn("眼下没有要您拍板的事", todo)
+            # 去审核 → 派给店员页,状态筛选一次性预设为「等审核」
+            await page.locator(".today-todo .todo-row", has_text="店员交差等您审核").locator("button").click()
+            await page.wait_for_selector("#sa-task-41")
+            self.assertEqual("#/staff-tasks", await page.evaluate("location.hash"))
+            self.assertTrue(any("/api/staff/tasks?status=submitted" in url for _m, url in requests), requests)
+            self.assertEqual("submitted", await page.locator("select[aria-label=按状态看]").input_value())
+            # 审核完回到今天页:重新取数,待办行和那条通知都不在了
+            state["staff_review_count"] = 0
+            state["notifications"] = []
+            tasks["items"] = [{**task, "status": "approved"}]
+            await page.locator("#sa-task-41 button", has_text="通过").click()
+            await page.wait_for_function("!document.querySelector('#sa-task-41 .btn.pri')")
+            self.assertTrue(any(m == "POST" and url.endswith("/api/staff/tasks/41/review")
+                                for m, url in requests), requests)
+            await page.evaluate("location.hash='#/'")
+            await page.wait_for_function(
+                "document.querySelector('.today-todo')?.textContent.includes('眼下没有要您拍板的事')")
+            todo = await page.locator(".today-todo").inner_text()
+            self.assertNotIn("店员交差", todo)
+            self.assertNotIn("新进展", todo)
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
     async def test_phone_inputs_are_16px_and_dialog_locks_background_scroll(self):
         async with async_playwright() as playwright:
             browser, page, errors = await self._open(playwright)

@@ -759,6 +759,49 @@ def list_tasks(
     }
 
 
+
+def review_pending_count(tid: int, actor_user: Mapping[str, Any] | None) -> int:
+    """「今天」页用：当前账号现在能审核的交差有几件(口径与 review_task 一致)。
+
+    不能审核的账号(店员、参观账号等)一律是 0；任何异常都按 0 处理，不影响首页。
+    """
+    try:
+        tid = int(tid)
+        actor = _actor(tid, actor_user)
+        if not can_dispatch(actor):
+            return 0
+        rows = db.q(
+            "SELECT id,tenant_id,branch_id,assignee_user_id,created_by,status "
+            "FROM staff_task WHERE tenant_id=? AND status='submitted' "
+            "AND deleted_at IS NULL ORDER BY id DESC LIMIT 500",
+            (tid,),
+        )
+        uid = int(actor["id"])
+        all_branches = sees_all_branches(actor)
+        allowed: dict[Any, bool] = {}   # 同一家店只查一次权限
+        count = 0
+        for row in rows:
+            if int(row.get("assignee_user_id") or 0) == uid and not all_branches:
+                continue   # 自己交的活不能自己审
+            key = row.get("branch_id")
+            if key not in allowed:
+                allowed[key] = _can_view(actor, row) and _can_manage(actor, row)
+            if allowed[key]:
+                count += 1
+        return count
+    except Exception:
+        return 0
+
+
+def _clear_submitted_notice(tid: int, task_id: int) -> None:
+    """这件交差已经处理(通过/打回/取消)：把「等您审核」的通知收掉。失败不影响主流程。"""
+    try:
+        from . import notify
+        notify.resolve_staff_task_submitted(int(tid), int(task_id))
+    except Exception:
+        pass
+
+
 # ---------------- 写 ----------------
 def _event(connection, tid: int, task_id: int, actor_id: int | None,
            kind: str, note: str = "", now: float | None = None) -> None:
@@ -1125,6 +1168,7 @@ def review_task(
         _event(connection, tid, int(row["id"]), int(actor["id"]),
                "approved" if approve else "rejected",
                note_text or ("通过" if approve else ""), ts)
+    _clear_submitted_notice(tid, int(row["id"]))
     if row.get("assignee_user_id") and int(row["assignee_user_id"]) != int(actor["id"]):
         _notify(tid, "staff_task_reviewed", {
             "task_id": int(row["id"]), "title": row["title"], "approved": bool(approve),
@@ -1160,6 +1204,8 @@ def cancel_task(
         if changed != 1:
             raise StaffTaskConflict("任务状态刚变了，请刷新后再试")
         _event(connection, tid, int(row["id"]), int(actor["id"]), "cancelled", note_text, ts)
+    if row["status"] == "submitted":
+        _clear_submitted_notice(tid, int(row["id"]))
     return _public(tid, [_task_row(tid, row["id"])], now=ts)[0]
 
 

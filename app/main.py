@@ -2375,6 +2375,8 @@ def state(limit: int | None = None, offset: int = 0):
             "publish": bool(db.one("SELECT id FROM publish_log WHERE tenant_id=? LIMIT 1", (TEN(),)))}
     result = {"jobs": jobs, "profiles": profiles, "inbox": inbox,
               "notifications": notifications,
+              # 「今天」页待办：当前账号能审核的店员交差件数(不能审核的账号恒为 0)
+              "staff_review_count": stafftask.review_pending_count(TEN(), auth.current()),
               "balance": ten_row.get("balance") or 0,
               "plan": ten_row.get("plan") or "",
               "setup": setup, "trio": trio}

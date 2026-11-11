@@ -1596,6 +1596,11 @@ function todayTodoRow(icon, title, sub, btnText, onclick, cls="pri"){
     <div class="todo-tx"><b>${title}</b>${sub?`<div class="sub">${sub}</div>`:""}</div>
     <button type="button" class="btn sm ${cls}" onclick="${onclick}">${btnText}</button></div>`;
 }
+/* 今天页「去审核」:进派给店员页并只看「等审核」(一次性预设,没加载到该模块就直接进页面) */
+function staffReviewOpen(){
+  if(typeof window.PH_STAFF_ADMIN?.openReview==="function") window.PH_STAFF_ADMIN.openReview();
+  else location.hash = "#/staff-tasks";
+}
 async function dashboard(){
   const inbox = STATE.inbox||[];
   const notifications = STATE.notifications||[];
@@ -1624,6 +1629,8 @@ async function dashboard(){
     else rows.push(todayTodoRow("👔",`等您拍板:${name}`,"数字员工做到一半，等您点头再往下做","去拍板",`location.hash='#/job/${Number(j.id)}'`));
   });
   if(store?.rechecks) rows.push(todayTodoRow("🧾",`${store.rechecks} 条门店整改等您审核`,"店长已经整改完，要您确认是否合格","去审核","location.hash='#/inspections'"));
+  const staffReviews = Number(STATE.staff_review_count)||0;
+  if(staffReviews>0) rows.push(todayTodoRow("📷",`${staffReviews} 件店员交差等您审核`,"店员已经拍照交上来了，要您看一眼是否合格","去审核","staffReviewOpen()"));
   const noteRows = notifications.slice(0,5).map(n=>todayTodoRow("🔔",esc(n.title),n.body?esc(n.body):tcFmt(n.created_at),"查看",
     `notificationOpen(${Number(n.id)},${cp(safeRouteUrl(n.link)||"#/")})`,""));
   const todoCard = `<div class="card today-todo">

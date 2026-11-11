@@ -576,6 +576,76 @@ class NotificationTests(StaffTaskBase):
         self.assertEqual(["staff_task_submitted"], [n["kind"] for n in self.unread(20)])
 
 
+class TodayReviewTests(NotificationTests):
+    """「今天」页：等我审核的交差件数 + 审核后通知自动收掉。"""
+
+    test_personal_notifications_reach_only_their_targets = None
+    test_system_task_submission_notifies_bosses = None
+
+    def count(self, uid, tid=2):
+        return stafftask.review_pending_count(tid, self.u(uid))
+
+    def test_review_count_follows_submission_and_review_and_respects_scope(self):
+        task = self.create(20, assignee_user_id=23)                 # 人民路店
+        for uid in (20, 21, 22, 23, 25):
+            self.assertEqual(0, self.count(uid))
+        self.submit(23, task["id"])
+        self.assertEqual(1, self.count(20))    # 老板
+        self.assertEqual(1, self.count(21))    # 总监
+        self.assertEqual(1, self.count(22))    # 这家店的店长
+        self.assertEqual(0, self.count(25))    # 别家店的店长
+        self.assertEqual(0, self.count(23))    # 店员不能审
+        self.assertEqual(0, self.count(24))
+        self.assertEqual(0, self.count(27))    # 没开这个行业板块的成员
+        self.assertEqual(0, self.count(30, tid=3))   # 别的企业
+        self.assertEqual(0, self.count(30))          # 跨企业的账号
+        self.assertEqual(0, stafftask.review_pending_count(2, None))
+        # 店长自己交的活不算进自己的待审核，老板那里要算
+        own = self.create(20, assignee_user_id=22)
+        self.submit(22, own["id"])
+        self.assertEqual(1, self.count(22))
+        self.assertEqual(2, self.count(20))
+        stafftask.review_task(2, self.u(20), task["id"], approve=True)
+        self.assertEqual(1, self.count(20))
+        self.assertEqual(0, self.count(22))
+        stafftask.review_task(2, self.u(20), own["id"], approve=False, note="重拍")
+        self.assertEqual(0, self.count(20))
+        # 取消一件等审核的活，数量也跟着走
+        third = self.create(20, assignee_user_id=23)
+        self.submit(23, third["id"])
+        self.assertEqual(1, self.count(20))
+        stafftask.cancel_task(2, self.u(20), third["id"])
+        self.assertEqual(0, self.count(20))
+
+    def test_review_clears_only_that_tasks_submitted_notice(self):
+        kinds = lambda uid: [n["kind"] for n in self.unread(uid)]
+        first = self.create(20, assignee_user_id=23)
+        second = self.create(20, assignee_user_id=23)
+        third = self.create(20, assignee_user_id=23)
+        for task in (first, second, third):
+            self.submit(23, task["id"])
+        self.assertEqual(["staff_task_submitted"] * 3, kinds(20))
+        # 别的企业里同编号链接的通知不能被顺手标掉
+        db.insert("notification", {"tenant_id": 3, "kind": "staff_task_submitted",
+                                   "title": "店员交差了，等您审核", "body": "",
+                                   "link": f"#/staff-tasks/{first['id']}", "user_id": 30})
+        stafftask.review_task(2, self.u(20), first["id"], approve=True)
+        left = self.unread(20)
+        self.assertEqual([f"#/staff-tasks/{third['id']}", f"#/staff-tasks/{second['id']}"],
+                         [n["link"] for n in left])
+        stafftask.review_task(2, self.u(20), second["id"], approve=False, note="没擦干净")
+        self.assertEqual([f"#/staff-tasks/{third['id']}"], [n["link"] for n in self.unread(20)])
+        stafftask.cancel_task(2, self.u(20), third["id"])
+        self.assertEqual([], kinds(20))
+        # 店员收到的「通过/打回」通知不受影响；别的企业那条还在
+        self.assertEqual(2, kinds(23).count("staff_task_reviewed"))
+        self.assertEqual(1, db.one(
+            "SELECT COUNT(*) n FROM notification WHERE tenant_id=3 AND read_at IS NULL")["n"])
+        # 打回后重交，会有一条新的「等您审核」
+        self.submit(23, second["id"], now=NOW + 600)
+        self.assertEqual([f"#/staff-tasks/{second['id']}"], [n["link"] for n in self.unread(20)])
+
+
 class MiscTests(StaffTaskBase):
     def test_prefers_staff_home_only_for_store_bound_staff(self):
         load = lambda uid: db.one("SELECT * FROM users WHERE id=?", (uid,))

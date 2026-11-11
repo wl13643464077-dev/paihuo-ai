@@ -270,6 +270,19 @@
     if(SA.prefill){ SA.drafts = SA.drafts.filter(d=>!d.sent).concat([blankDraft(SA.prefill)]); SA.prefill = null; }
     draw();
   }
+  /* 审核/取消之后:让「今天」页下次打开时重新取待办数,并先把这件活的「等您审核」通知从本地拿掉 */
+  function reviewSettled(id){
+    try{
+      SHELL_DIRTY = true;
+      if(STATE?.notifications) STATE.notifications = STATE.notifications.filter(n=>!(n.kind==="staff_task_submitted" && n.link===`#/staff-tasks/${id}`));
+    }catch(_){}
+  }
+  /* 今天页「N 件店员交差等您审核 → 去审核」:一次性把状态筛选预设成「等审核」 */
+  async function openReview(){
+    SA.filter.status = "submitted";
+    if(location.hash.startsWith("#/staff-tasks")){ try{ await loadList(); draw(); }catch(e){ toast(e.message); } }
+    else location.hash = "#/staff-tasks";
+  }
   async function review(id, approve){
     let note = "";
     if(!approve){
@@ -281,12 +294,13 @@
     try{
       await api(`/staff/tasks/${id}/review`, {method:"POST", body:{action:approve?"approve":"reject", note}});
       toast(approve?"👍 已通过":"↩️ 已打回,店员会收到通知");
+      reviewSettled(id);
       await loadList(); draw();
     }catch(e){ toast(e.message); }
   }
   async function cancel(id){
     if(!await uiConfirm("取消后店员手机上就看不到这件活了。", {title:"取消这件活", confirmText:"取消这件"})) return;
-    try{ await api(`/staff/tasks/${id}/cancel`, {method:"POST", body:{}}); toast("已取消"); await loadList(); draw(); }
+    try{ await api(`/staff/tasks/${id}/cancel`, {method:"POST", body:{}}); toast("已取消"); reviewSettled(id); await loadList(); draw(); }
     catch(e){ toast(e.message); }
   }
   async function assign(id, uid){
@@ -326,7 +340,7 @@
   }
 
   window.PH_STAFF_ADMIN = {
-    canDispatch, openDispatch,
+    canDispatch, openDispatch, openReview,
     _set:setField, _parse:parse, _sendAll:sendAll, _review:review, _cancel:cancel, _assign:assign,
     _events:events, _aiToggle:aiToggle,
     _add(){ SA.drafts.push(blankDraft()); drawDrafts(); },
