@@ -290,6 +290,20 @@ def job_title() -> str:
     return title if title in JOB_TITLES else "staff"
 
 
+def can_see_balance() -> bool:
+    """企业点数余额(具体数字)只给老板 owner、平台 root、总监 director 和参观模式。
+
+    店长、店员、办公室同事只拿到「点数够不够」的布尔值(billing.points_flags),
+    任何接口都不下发具体余额。按白名单放行,新增角色默认看不到。
+    """
+    u = current()
+    if not u:
+        return False
+    if u.get("role") in ("root", "owner", "tour"):
+        return True
+    return job_title() == "director"
+
+
 def can_allocate_members() -> bool:
     """能否给团队成员分配数字员工：老板/root，或总监/经理。"""
     u = current()

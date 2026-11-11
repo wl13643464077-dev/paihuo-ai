@@ -54,14 +54,18 @@ class StaffBillingScopeTests(StaffTaskBase):
                 self.assertTrue(data["periods"])
                 self.assertNotIn("restricted", data)
 
-    def test_members_get_balance_and_action_cost_only(self):
+    def test_members_get_points_ok_and_action_cost_only(self):
         from app import main
 
+        # 第四轮 N-01:店长/店员/办公室同事连余额数字也不给,只给「点数够不够」
         for uid in (22, 23, 27):   # 店长 / 店员 / 内容运营副账号
             with self.subTest(uid=uid):
                 self._as(uid)
                 data = main.billing_get()
-                self.assertEqual(482, data["balance"])
+                self.assertNotIn("balance", data)
+                self.assertNotIn("482", repr(data))
+                self.assertIs(True, data["points_ok"])
+                self.assertTrue(data["points_ok_by_cost"])
                 self.assertTrue(data["restricted"])
                 for key in FULL_ONLY_KEYS:
                     self.assertNotIn(key, data)

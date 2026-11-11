@@ -24,19 +24,16 @@ def _can_see_ledger() -> bool:
     按白名单放行,新增角色默认看不到。参观模式(tour)的租户是 -1,
     没有任何真实数据,保持原样返回完整结构,演示页照常能画。
     """
-    role = (auth.current() or {}).get("role")
-    if role in ("root", "owner", "tour"):
-        return True
-    return auth.job_title() == "director"
+    return auth.can_see_balance()
 
 
 @router.get("/api/billing")
 def billing_get():
     t = db.one("SELECT * FROM tenants WHERE id=?", (TEN(),))
     if not _can_see_ledger():
-        # 店员/店长不看企业的账:只给「点数够不够」
-        # 要用到的余额和每个动作花几点;流水、对账、累计、套餐价目一律不回。
-        return {"balance": (t or {}).get("balance") or 0,
+        # 店员/店长不看企业的账:只给「点数够不够」(布尔值,不带余额数字)
+        # 和每个动作花几点;余额、流水、对账、累计、套餐价目一律不回。
+        return {**billing.points_flags(TEN(), (t or {}).get("balance")),
                 "is_platform": TEN() == 1,
                 "restricted": True,
                 "prices": {

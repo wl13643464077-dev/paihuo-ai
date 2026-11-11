@@ -36,23 +36,37 @@ function fmtPoints(value){
   return Number.isInteger(n)?String(n):String(+n.toFixed(2));
 }
 function knownBalance(){
-  // 平台方/参观模式不按余额拦;状态还没取到时也当作未知,不误拦
+  // 平台方/参观模式不按余额拦;状态还没取到时也当作未知,不误拦。
+  // 店长、店员、办公室同事看不到企业余额(服务端也不下发数字),这里恒为未知。
   if(!ME||ME.role==="root"||ME.role==="tour"||!STATE||STATE.balance==null) return null;
+  if(!seesCompanyMoney()) return null;
   const n=Number(STATE.balance);
   return Number.isFinite(n)?n:null;
 }
+/* 看不到余额的成员:服务端只给「点数够不够」。按按钮的点数查表,查不到就看够不够最便宜的动作。 */
+function memberPointsShort(cost){
+  if(!ME||ME.role!=="member"||seesCompanyMoney()||!STATE||!(Number(cost)>0)) return false;
+  const table=STATE.points_ok_by_cost||{};
+  const key=fmtPoints(cost);
+  if(Object.prototype.hasOwnProperty.call(table,key)) return table[key]===false;
+  return STATE.points_ok===false;
+}
 function pointsShort(cost,balance=knownBalance()){
-  return balance!=null&&Number(cost)>0&&balance<Number(cost);
+  if(balance==null) return memberPointsShort(cost);
+  return Number(cost)>0&&balance<Number(cost);
 }
 function costNoteText(cost,balance=knownBalance()){
   return `本次 ${fmtPoints(cost)} 点${balance!=null?` · 余额 ${fmtPoints(Math.floor(balance*100)/100)} 点`:""}`;
 }
-const RECHARGE_LABEL="点数不够，去充值";
+const RECHARGE_LABEL_OWNER="点数不够，去充值";
+const RECHARGE_LABEL_MEMBER="点数不够，请找老板";
+/* 成员不管钱:按钮写「点数不够，请找老板」,点了只提示,不去套餐页 */
+function rechargeLabel(){ return ME&&ME.role==="member"&&!seesCompanyMoney()?RECHARGE_LABEL_MEMBER:RECHARGE_LABEL_OWNER; }
 /* 所有花点数的按钮都用它:按钮里只写动作,点数写在按钮下面。
    btnClass 是按钮完整的 class(默认 "btn pri");disabled 时按钮置灰,可用 disabledLabel 说明还差什么(例:「先选 2 位专家」)。 */
 function costButton({label,onclick,cost,balance=knownBalance(),btnClass="btn pri",id="",attrs="",style="",disabled=false,disabledLabel="",noteCls="cost-note"}){
   const short=pointsShort(cost,balance);
-  const text=disabled&&disabledLabel?disabledLabel:short?RECHARGE_LABEL:label;
+  const text=disabled&&disabledLabel?disabledLabel:short?rechargeLabel():label;
   return `<div class="cost-act">
     <button type="button" class="${btnClass}"${id?` id="${id}"`:""}${style?` style="${style}"`:""} data-label="${esc(label)}" onclick="${onclick}" ${short?'data-recharge="1"':""} ${disabled?"disabled":""} ${attrs}>${text}</button>
     <div class="${noteCls}"${id?` id="${id}-cost"`:""}>${costNoteText(cost,balance)}</div></div>`;
@@ -64,14 +78,14 @@ function pointsAction({cls="pri",...options}){
 function setCostButtonDisabled(btn,disabled,disabledLabel=""){
   if(!btn) return;
   btn.disabled=!!disabled;
-  btn.textContent=disabled&&disabledLabel?disabledLabel:btn.dataset.recharge?RECHARGE_LABEL:(btn.dataset.label||btn.textContent);
+  btn.textContent=disabled&&disabledLabel?disabledLabel:btn.dataset.recharge?rechargeLabel():(btn.dataset.label||btn.textContent);
 }
 /* 价格会随选项变化的按钮(数字人等):重新算一次按钮文字和小字 */
 function syncPointsAction(btn,cost,balance=knownBalance()){
   if(!btn) return;
   const short=pointsShort(cost,balance);
   if(short) btn.dataset.recharge="1"; else delete btn.dataset.recharge;
-  if(!btn.disabled) btn.textContent=short?RECHARGE_LABEL:(btn.dataset.label||btn.textContent);
+  if(!btn.disabled) btn.textContent=short?rechargeLabel():(btn.dataset.label||btn.textContent);
   const note=btn.id?document.getElementById(btn.id+"-cost"):btn.parentElement?.querySelector(".cost-note");
   if(note) note.textContent=costNoteText(cost,balance);
 }
@@ -79,12 +93,16 @@ function syncPointsAction(btn,cost,balance=knownBalance()){
 function restoreActionButton(btn){
   if(!btn) return;
   btn.disabled=false;
-  btn.textContent=btn.dataset.recharge?RECHARGE_LABEL:(btn.dataset.label||btn.textContent);
+  btn.textContent=btn.dataset.recharge?rechargeLabel():(btn.dataset.label||btn.textContent);
 }
 document.addEventListener("click",event=>{
   const btn=event.target?.closest?.('[data-recharge="1"]');
   if(!btn) return;
   event.preventDefault(); event.stopPropagation();
+  if(ME&&ME.role==="member"&&!seesCompanyMoney()){
+    toast("点数由老板管理，请联系老板充值");
+    return;
+  }
   location.hash="#/billing";
 },true);
 function safeExternalUrl(value){
@@ -524,6 +542,15 @@ function emptyState({icon="",text="",actionLabel="",onAction="",href=""}={}){
   return `<div class="empty-state" data-empty-state>${icon?`<div class="es-ic" aria-hidden="true">${icon}</div>`:""}
     <p class="es-tx">${esc(text)}</p>${btn}</div>`;
 }
+/* ---------- 成员没开通 AI 专家时的统一空状态 ----------
+   人数由服务端 /auth/me 按「板块授权 + 员工白名单 + 已启用」算好;老板/root 为 null=不限。
+   字段缺失(旧接口)时当作不限,只藏入口不误伤;页面打开时再按实际拿到的专家判断。 */
+const NO_EXPERT_TEXT="老板还没给您开通 AI 专家，需要的话请找老板。";
+const hasExperts = () => !!ME && (ME.role!=="member" || ME.expert_count==null || Number(ME.expert_count)>0);
+const canMeet = () => !!ME && (ME.role!=="member" || ME.meeting_expert_count==null || Number(ME.meeting_expert_count)>=2);
+function noExpertCard(title,text=NO_EXPERT_TEXT){
+  return `<div class="card" data-no-expert><h2>${esc(title)}</h2>${emptyState({icon:"🧑‍🔧",text,actionLabel:"回到今天",href:"#/"})}</div>`;
+}
 /* 能不能新建门店:和后端 can_manage_branches 一致(老板/平台/总监)。 */
 const canCreateStore = () => !!ME && (ME.role==="owner"||ME.role==="root"||(ME.role==="member"&&ME.job_title==="director"));
 /* 「还没有门店」的统一空状态:能建门店的人给一个「新建门店」按钮,直接弹出建店表单 */
@@ -729,10 +756,10 @@ const NAV_GROUPS = [
     title:"派活", intro:"把活交给数字员工，它们干完会通知您。",
     cards:[
       {route:"new", icon:"✍️", title:"下达任务(内容)", desc:"说一句想发什么，图文或短视频脚本从选题到成稿自动写好", show:()=>canWork("content")},
-      {route:"experts", icon:"🧑‍🔧", title:"找行业专家", desc:"您这一行的专家一人一岗，店里遇到的事直接问、直接派", show:()=>!!ME},
-      {route:"meetings", icon:"🪑", title:"多位专家一起商量", desc:"大事拿不准，拉几位专家各出方案、互相挑错，最后给您结论", show:()=>!!ME},
-      {route:"tasks", icon:"📦", title:"派出去的活", desc:"所有派出去的活都在这：谁在干、卡在哪、哪些等您看", show:()=>!!ME&&ME.role!=="tour"},
-      {route:"teamruns", icon:"🤝", title:"协同小队", desc:"一句话拉起专业团队，可逐个确认或同时开工，队长拆解并汇总结果", show:()=>!!ME&&ME.role!=="tour"},
+      {route:"experts", icon:"🧑‍🔧", title:"找行业专家", desc:"您这一行的专家一人一岗，店里遇到的事直接问、直接派", show:hasExperts},
+      {route:"meetings", icon:"🪑", title:"多位专家一起商量", desc:"大事拿不准，拉几位专家各出方案、互相挑错，最后给您结论", show:canMeet},
+      {route:"tasks", icon:"📦", title:"派出去的活", desc:"所有派出去的活都在这：谁在干、卡在哪、哪些等您看", show:()=>!!ME&&ME.role!=="tour"&&hasExperts()},
+      {route:"teamruns", icon:"🤝", title:"协同小队", desc:"一句话拉起专业团队，可逐个确认或同时开工，队长拆解并汇总结果", show:()=>!!ME&&ME.role!=="tour"&&hasExperts()},
       {route:"staff-tasks", icon:"🧑‍🍳", title:"派给店员", desc:"把活派给店里的人，店员拍照交差，AI 先帮您看照片", show:()=>!!window.PH_STAFF_ADMIN?.canDispatch()},
     ]},
   {key:"store", label:"门店", icon:"🏪", hub:"store", extra:[],
@@ -979,6 +1006,12 @@ async function logout(){
   location.href="/login"; }
 /* 首登改密页:服务端在改密前拒绝实时推送(428),不连 SSE,也藏掉「重连中」和反馈气泡,免得像出了故障。 */
 let FORCED_PW_MODE=false;
+/* 首登改密的说明按角色说:店员/店长说手机上要做的事,没开通 AI 专家的人不提专家 */
+function forcedPasswordNextText(){
+  if(ME?.role!=="member") return "之后就能正常使用派活。";
+  if(ME.prefers_staff_home) return ME.job_title==="manager"?"之后就能给店员派活、审核交差。":"之后就能看今天的活、拍照交差。";
+  return hasExperts()?"之后就能正常查看任务、使用 AI 专家。":"之后就能正常查看任务。";
+}
 function forcedPasswordView(){
   FORCED_PW_MODE=true;
   stopSse();
@@ -992,7 +1025,7 @@ function forcedPasswordView(){
   const needsOld=ME?.password_change_needs_old!==false;
   $("#main").innerHTML=`<form class="card" id="forced-pw-form" style="max-width:620px;margin:42px auto" onsubmit="event.preventDefault();forcedPasswordChange()">
     <h2>请先设置您自己的密码</h2>
-    <div class="notice">为了账号安全，初始密码需要换成您自己的新密码（只需一次），之后就能正常查看任务和使用数字员工。</div>
+    <div class="notice" id="forced-pw-why">为了账号安全，初始密码需要换成您自己的新密码（只需一次），${forcedPasswordNextText()}</div>
     ${needsOld?`<div style="margin-top:14px"><label>当前密码</label>
       <input id="forced-pw-old" type="password" autocomplete="current-password" aria-describedby="forced-pw-err"></div>`:""}
     <div class="row" style="margin-top:10px">
@@ -1125,7 +1158,7 @@ async function render(reuseShell=false){
     if(e?.status===403){
       // 权限不足是确定性的,不是网络故障:说清原因给出路,不再提供无效的「重新加载」
       if(box) box.innerHTML=`<div class="card"><h2>这个页面需要更高权限</h2>
-        <div class="sub">${esc(e?.message||"需要主账号权限")}${ME?.role==="member"?"。请联系贵司主账号(企业主)开通对应板块或代为操作":""}</div>
+        <div class="sub">${esc(e?.message||"需要主账号权限")}${ME?.role==="member"?"。请找老板开通对应板块，或请老板代为操作":""}</div>
         <div class="actions"><a class="btn pri" href="#/">← 回今天</a></div></div>`;
       return;
     }
@@ -1786,8 +1819,15 @@ async function expertsView(){
   const jobsContract=normalizeListContract(
     await api(listPath("/state","jobs")),LIST_PAGE_SIZE);
   const jobs = jobsContract.items;
-  const allowedDepts = DEPTS.filter(d=>can(d.key));
+  // 成员只算这个账号真能派的专家:没人可用的行业楼层不列,人数跟着实际可用的人走
+  const allowedDepts = DEPTS.filter(d=>can(d.key)&&(ME?.role!=="member"||(d.employees||[]).length>0));
   const isRoot = isBoss();
+  if(ME?.role==="member"&&(!hasExperts()||(!allowedDepts.length&&!can("content")))){
+    $("#main").innerHTML=noExpertCard("🧑‍🔧 找行业专家",can("avatar")
+      ?"老板还没给您开通行业专家。需要的话请找老板在「团队与权限」里打开；数字人视频可以在「获客」里用。"
+      :"老板还没给您开通行业专家。需要的话请找老板在「团队与权限」里打开。");
+    return;
+  }
   if(CUR_DEPT==="content"&&!can("content")) CUR_DEPT = allowedDepts[0]?.key||(can("avatar")?"__avatar":"content");
   const jobsCard = `<div class="card" style="margin-top:22px"><h2>📋 内容任务(${jobsContract.total??jobs.length})</h2>
     ${listContractNotice(jobsContract,"内容任务")}
@@ -3794,6 +3834,7 @@ async function teamRunsView(rawId){
   if(TEAM_RUN_REFRESH_TIMER){clearTimeout(TEAM_RUN_REFRESH_TIMER);TEAM_RUN_REFRESH_TIMER=null;}
   const id=Number(rawId);
   if(!Number.isInteger(id)||id<1){
+    if(ME?.role==="member"&&!hasExperts()){ $("#main").innerHTML=noExpertCard("🤝 协同小队"); return; }
     const r=await api("/team-runs");const items=r.items||[];
     $("#main").innerHTML=`<div class="card"><h2>🤝 协同小队</h2>
       <div class="sub">一句话选队，队长先拆解，成员按依赖协作，最后由队长汇总。重新打开页面也能从服务器恢复进度。</div>
@@ -4397,6 +4438,8 @@ function applyBriefPrefs(){
   return true;
 }
 async function newBrief(){
+  // 没开通内容生产的成员:打开就说清楚,不让他把整张表填完才被拒
+  if(ME?.role==="member"&&!can("content")){ $("#main").innerHTML=noExpertCard("➕ 下达任务"); return; }
   const profiles = STATE.profiles;
   const PRE = (()=>{ try{ const v=JSON.parse(localStorage.getItem("prefill_brief")||"null"); localStorage.removeItem("prefill_brief"); return v; }catch(e){ return null; } })();
   if(PRE) clearBriefDraft();
@@ -4456,7 +4499,7 @@ async function newBrief(){
       <label style="display:flex;align-items:center"><input type="checkbox" id="b-deck" style="width:auto;margin-right:8px">启用「演绎师」：额外产出一页交互式 HTML 演绎稿(适合教程/知识类)</label>
     </details>
     </details>
-    ${pointsShort(jobPoints)?`<div class="notice" id="b-short" style="background:#fff3d6;margin-top:12px">⚠️ 余额不足本单所需 ${jobPoints} 点。${ME?.role==="member"?"充值请联系贵司主账号（企业主）。":`<a href="#/billing" style="font-weight:800;text-decoration:underline">先去充值 →</a>`}（余额不够时提交会直接提示，不会扣费）</div>`:""}
+    ${pointsShort(jobPoints)?`<div class="notice" id="b-short" style="background:#fff3d6;margin-top:12px">⚠️ 点数不够本单所需 ${jobPoints} 点。${ME?.role==="member"?"点数由老板管理，请联系老板充值。":`<a href="#/billing" style="font-weight:800;text-decoration:underline">先去充值 →</a>`}（点数不够时提交会直接提示，不会扣费）</div>`:""}
     <label>③ 提交</label>
     <div class="actions" style="margin-top:6px;align-items:flex-start">${pointsAction({label:"🚀 提交，让团队开工",onclick:"submitBrief(this)",cost:jobPoints,id:"b-submit",style:"font-size:15px"})}
       <span class="sub" style="margin-top:10px">提交后可看全程直播，随时打断</span></div>
@@ -7013,7 +7056,7 @@ function schedCost(){
   const heavy = daily > pts;   // 高于一天一单就标黄提醒
   el.innerHTML = `💎 该节奏 ≈ <b>${k==="weekly"?`每周 1 单 · ${pts} 点/周`
     :`${perDay===1?"1":(Math.round(perDay*10)/10)} 单/天 · ${Math.round(daily*10)/10} 点/天`}</b>
-    (每单 ${pts} 点) · 当前余额 ${bal} 点约可自动跑 <b>${k==="weekly"?`${Math.floor(bal/pts)} 周`:`${runway} 天`}</b>${
+    (每单 ${pts} 点)${!(ME?.role==="member"&&!seesCompanyMoney())?` · 当前余额 ${bal} 点约可自动跑 <b>${k==="weekly"?`${Math.floor(bal/pts)} 周`:`${runway} 天`}</b>`:""}${
     heavy?` <span style="color:#b45309;font-weight:800">⚠️ 高频节奏烧点快,点数不足会自动暂停并通知您</span>`:""}`;
 }
 async function schedSave(id){
@@ -8034,19 +8077,43 @@ async function teamView(){
   window.__modChips = modChips;
   window.__TEAM = t;
   if(!t.is_admin){
-    // 总监/经理受限视图:只做一件事——给自己团队里职级更低的成员分配数字员工
+    // 总监/经理受限视图:负责门店的经理叫「店长」、负责门店的员工叫「店员」,和手机版一个叫法。
+    // 有可分配的 AI 专家时,给职级更低的成员分配;一个都没有时,只读列出「您负责的店员」。
     const mine = t.users.filter(u=>ME&&Number(u.id)===Number(ME.id));
     const managed = t.users.filter(u=>!(ME&&Number(u.id)===Number(ME.id)));
-    $("#main").innerHTML = `
-    <div class="notice" style="margin-top:0">👥 <b>团队分配</b>:您是${esc({director:"总监",manager:"经理"}[t.my_job_title]||"管理者")},可以把<b>您自己行业里、您可用的数字员工</b>分配给职级低于您的成员。开通行业、调整职级、建号改密停用都归老板(主账号)管。</div>
-    ${mine.length?`<div class="card"><h2>🪪 我的权限</h2>${mine.map(u=>tmMemberRow(u,t)).join("")}</div>`:""}
-    <div class="card"><h2>🤝 我管理的成员(${managed.length}人)</h2>
-      ${managed.length?managed.map(u=>tmMemberRow(u,t)).join(""):`<div class="empty">暂时没有职级低于您的成员;请老板先创建员工级副账号。</div>`}
-      <div id="tm-allocbox"></div></div>
-    <div class="card"><h2>🔑 修改密码</h2>
+    const stores = u=>Array.isArray(u?.branch_names)?u.branch_names:[];
+    const roleName = u=>u?.job_title==="director"?"总监":u?.job_title==="manager"?(stores(u).length?"店长":"经理"):(stores(u).length?"店员":"员工");
+    const me = mine[0]||{job_title:t.my_job_title};
+    const meRole = roleName(me);
+    const myStores = stores(me);
+    const canAssign = (t.industry_employees||[]).some(d=>(d.employees||[]).length);
+    // 店长只看跟自己同一家店的人;没分门店的总监/经理看全部下级
+    const crew = myStores.length ? managed.filter(u=>stores(u).some(n=>myStores.includes(n))) : managed;
+    const crewWord = meRole==="店长" ? "店员" : "成员";
+    const storeText = list=>list.length>2?`${list.slice(0,2).join("、")} 等 ${list.length} 家`:list.join("、");
+    const pwCard = `<div class="card"><h2>🔑 修改密码</h2>
       <div class="row"><div><label>当前密码</label><input id="tm-old" type="password" autocomplete="current-password" ${enterSubmit("tmMyPw()")}></div>
         <div><label>新密码（至少 12 位，至少两类字符）</label><input id="tm-new" type="password" autocomplete="new-password" ${enterSubmit("tmMyPw()")}></div></div>
       <div class="actions"><button class="btn pri" onclick="tmMyPw()">💾 保存新密码</button></div></div>`;
+    if(!canAssign){
+      $("#main").innerHTML = `
+      <div class="notice" style="margin-top:0" data-team-role="${esc(meRole)}">👥 <b>我的团队</b>：您是${esc(meRole)}${myStores.length?`，负责 ${esc(storeText(myStores))}`:""}。给${crewWord}派活、审核交差在「派活 → 派给店员」里；开账号、重置密码、换门店都请找老板。</div>
+      <div class="card" id="tm-crew"><h2>🧑‍🍳 您负责的${crewWord}（${crew.length} 人）</h2>
+        ${crew.length?crew.map(u=>`<div class="topic" data-crew-row style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <b>${esc(u.username)}</b><span class="tag">${roleName(u)==="店员"?"🧑‍🍳":"👤"} ${esc(roleName(u))}</span>
+          <span class="sub">${stores(u).length?`🏪 ${esc(storeText(stores(u)))}`:"还没分门店"}</span>
+          ${u.enabled?"":`<span class="tag" style="background:#ffb3b5">已停用</span>`}</div>`).join("")
+          :emptyState({icon:"🧑‍🍳",text:`您${myStores.length?"店里":"下面"}还没有${crewWord}账号，请老板在「团队与权限」里开一个。`})}</div>
+      ${pwCard}`;
+      return;
+    }
+    $("#main").innerHTML = `
+    <div class="notice" style="margin-top:0" data-team-role="${esc(meRole)}">👥 <b>团队分配</b>:您是${esc(meRole)},可以把<b>您可用的 AI 专家</b>分配给职级低于您的成员。开通行业、调整职级、开账号、改密码、停用都归老板管。</div>
+    ${mine.length?`<div class="card"><h2>🪪 我的权限</h2>${mine.map(u=>tmMemberRow(u,t)).join("")}</div>`:""}
+    <div class="card"><h2>🤝 我管理的成员(${managed.length}人)</h2>
+      ${managed.length?managed.map(u=>tmMemberRow(u,t)).join(""):`<div class="empty">暂时没有职级低于您的成员;请老板先开一个员工账号。</div>`}
+      <div id="tm-allocbox"></div></div>
+    ${pwCard}`;
     return;
   }
   $("#main").innerHTML = `
@@ -8662,7 +8729,7 @@ function purchasePlanHtml(plan){
     ?`<button class="btn sm" disabled>申请处理中 · ${esc(PURCHASE_STATUS_LABELS[active.status])}</button>`
     :`<button class="btn ${payButton?"":"pri "}sm" onclick="purchaseOpen(${cp(plan.key)})">提交购买申请</button>`;
   const action=ME?.role==="member"
-    ?`<div class="notice" style="margin:10px 0 0">请联系贵司企业主提交购买申请。</div>`
+    ?`<div class="notice" style="margin:10px 0 0">想买这个套餐，请找老板提交购买申请。</div>`
     :ME?.role==="root"
       ?`<a class="btn sm" href="#purchase-admin">查看平台购买线索</a>`
       :ME?.role==="tour"
@@ -8674,7 +8741,7 @@ function purchasePlanHtml(plan){
     <div class="sub" style="text-decoration:line-through">原价 ¥${Number(plan.price)}/月</div>
     <div style="font-size:30px;font-weight:900">¥${Number(plan.sale)}<span style="font-size:13px;font-weight:400">/月</span></div>
     <div class="tag" style="margin:6px 0">${Number(plan.points)} 点/月</div>
-    <select aria-label="${esc(plan.name)}购买周期" onchange="purchasePlanPeriodChanged(${cp(plan.key)},this.value)" ${ME?.role==="owner"?"":"disabled"}>${periods}</select>
+    ${ME?.role==="owner"?`<select aria-label="${esc(plan.name)}购买周期" onchange="purchasePlanPeriodChanged(${cp(plan.key)},this.value)">${periods}</select>`:""}
     <div class="sub purchase-quote" style="margin:8px 0">${quote?`${esc(quote.period_label)}合计 <b>¥${Number(quote.price)}</b> · ${Number(quote.points)} 点`:"以服务端报价为准"}</div>
     ${reference?`<div class="sub" style="color:#b45309;font-weight:700">参考价，以实际报价为准</div>`:""}
     <div class="sub">${esc(plan.desc||"")}</div><div class="actions" style="justify-content:center">${action}</div>
@@ -8856,7 +8923,7 @@ function billingPointsCardHtml(b){
 }
 function billingPlansCardHtml(){
   const plans=PURCHASE_CONTEXT.catalog?.plans||PLAN_REFERENCE.plans||[];
-  const payLine=ME?.role==="member"?"充值/续费请联系<b>贵司主账号(企业主)</b>操作。"
+  const payLine=ME?.role==="member"?"充值、续费请找<b>老板</b>操作。"
     :ME?.role==="root"?"在上方购买线索中核对客户申请和线下到账；也可在「权限管理→租户管理」人工开通。"
     :wxpayOnline()?"选好套餐后可以直接微信扫码付款，付完自动开通；也可以提交购买申请，由平台联系。"
     :"选择套餐后提交购买申请，平台联系并确认线下到账后才会开通，不会在页面内自动扣款。";
@@ -8915,7 +8982,7 @@ async function billingView(){
   const expBanner = (expDays!==null&&expDays<=7&&!b.is_platform)?`<div class="notice red" style="margin-top:0">${
     expDays>0?`⏰ 当前套餐 <b>${esc(b.plan||"")}</b> 还有 <b>${expDays} 天</b>到期`
     :`⛔ 套餐 <b>${esc(b.plan||"")}</b> 已到期`},到期后不再按月发点。续费请${
-    ME.role==="member"?"联系<b>贵司主账号(企业主)</b>"
+    ME.role==="member"?"找<b>老板</b>"
     :`联系平台顾问${META?.support_contact?`:<b>${esc(META.support_contact)}</b>`:"(点右下角 💬 留言)"}`}。</div>`:"";
   $("#main").innerHTML = tourBanner + expBanner + `
   <div class="card" style="background:linear-gradient(120deg,#fff6dc,#fffaf0 60%)">
@@ -9224,11 +9291,19 @@ async function meetingsView(mid){
     await api(listPath("/meetings","meetings")),LIST_PAGE_SIZE);
   const list = meetingsContract.items;
   const cur = MT_CUR ? await api("/meetings/"+MT_CUR).catch(optionalResult(null)) : null;
+  // 只列这个账号真能拉进会的人:内容生产部要有内容权限;巡店经理只看照片巡店,不参加商量(后端同样拒绝)。
   const pool = [
-    ...META.stations.filter(employeeCanAssignNew).map(s=>({idx:s.idx,label:s.name,color:s.color,emoji:s.emoji,group:"内容生产部",dept:"",uses:0,...employeeIdentityMutationFields(s)})),
-    ...DEPTS.filter(d=>can(d.key)).flatMap(d=>d.employees.filter(e=>employeeCanAssignNew(e)).map(e=>({idx:e.idx,label:`${e.person||""}${e.person?"·":""}${e.name}`,color:e.color,emoji:e.emoji,group:e.group,dept:d.key,uses:Number(e.tasks_n)||0,...employeeIdentityMutationFields(e)})))];
+    ...(canWork("content")||ME?.role==="tour"?META.stations:[]).filter(s=>employeeCanAssignNew(s)&&Number(s.idx)!==INSPECTION_EMP_IDX).map(s=>({idx:s.idx,label:s.name,color:s.color,emoji:s.emoji,group:"内容生产部",dept:"",uses:0,...employeeIdentityMutationFields(s)})),
+    ...DEPTS.filter(d=>can(d.key)).flatMap(d=>d.employees.filter(e=>employeeCanAssignNew(e)&&Number(e.idx)!==INSPECTION_EMP_IDX).map(e=>({idx:e.idx,label:`${e.person||""}${e.person?"·":""}${e.name}`,color:e.color,emoji:e.emoji,group:e.group,dept:d.key,uses:Number(e.tasks_n)||0,...employeeIdentityMutationFields(e)})))];
   const availableMemberIds=new Set(pool.map(member=>Number(member.idx)));
   MT_SEL=new Set([...MT_SEL].filter(idx=>availableMemberIds.has(Number(idx))));
+  // 成员能用的专家不够 2 位:商量开不起来,直接说清楚(看自己的历史会议除外)
+  if(ME?.role==="member"&&(pool.length<2||!canMeet())&&!cur){
+    const usable=Math.min(pool.length,ME.meeting_expert_count??pool.length);
+    $("#main").innerHTML=noExpertCard("🪑 多位专家一起商量",usable>0
+      ?`商量至少要 2 位 AI 专家，老板目前只给您开通了 ${usable} 位。需要的话请找老板。`:NO_EXPERT_TEXT);
+    return;
+  }
   const pickerHtml = mtPickerHtml(pool);
   $("#main").innerHTML = `
   ${cur?`<div class="card" style="background:#fffaf0"><h2>会议 #${cur.id} ${{queued:"排队",running:"🗣 进行中…",done:"✅ 已收口",failed:"中断"}[cur.status]||cur.status}
@@ -9291,6 +9366,7 @@ async function meetingsView(mid){
   const box=$("#mt-msgs"); if(box) box.scrollTop=box.scrollHeight;
 }
 let MT_POOL = [];
+const INSPECTION_EMP_IDX = 10;   // 巡店经理(app/inspection.py EMPLOYEE_IDX),只做照片巡店,不进商量室
 /* 开会按钮在人没选够时的提示文字(最少 2 位) */
 function mtNeedLabel(n){ return n<=0?"先选 2 位专家":n<2?`再选 ${2-n} 位专家`:""; }
 /* 行业短名:优先用接口给的 short_label,没有就去掉「产业部 / 行业」这类后缀 */
@@ -10210,6 +10286,10 @@ async function toolHistory(offset=0){
       </div>`:""}</div></div>`);
 }
 async function toolsView(tab,preserveDraft=false){
+  if(ME?.role==="member"&&!can("content")){
+    $("#main").innerHTML=noExpertCard("🧰 获客工具","老板还没给您开通获客工具，需要的话请找老板。");
+    return;
+  }
   if(ME?.role==="tour"||!can("content")){
     $("#main").innerHTML=`<div class="card"><h2>该页面需要内容生产权限</h2><div class="sub">当前账号不能使用获客工具。</div><div class="actions"><a class="btn" href="#/">返回首页</a></div></div>`;
     return;
