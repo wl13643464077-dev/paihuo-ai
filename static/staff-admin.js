@@ -238,6 +238,22 @@
     return `<select onchange="PH_STAFF_ADMIN._assign(${t.id},this.value)" aria-label="改派" style="min-height:36px;font-size:14px;max-width:190px">
       <option value="">${t.assignee_name?"改派给…":"指派给…"}</option>${b.members.filter(u=>u.id!==t.assignee_user_id).map(u=>`<option value="${u.id}">${h(u.name)}（${h(u.title_label)}）</option>`).join("")}</select>`;
   }
+  /* 打回原因前写上是谁打回的(reviewer_label 由后端按身份算好)；老数据没有审核人时不写名字 */
+  function rejectLine(t, fallback){
+    return t.reviewer_label ? `${t.reviewer_label} 打回：${t.review_note}` : `${fallback}：${t.review_note}`;
+  }
+  /* 催一下：还没交、已指定别人的活；30 分钟内只能催一次(服务端把关，这里只是显示) */
+  const NUDGE_GAP = 30*60;
+  function hhmm(ts){
+    return new Date(Number(ts)*1000).toLocaleTimeString("zh-CN", {timeZone:"Asia/Shanghai", hour:"2-digit", minute:"2-digit", hour12:false});
+  }
+  function nudgeHtml(t){
+    const u = me();
+    if(!["todo","rejected"].includes(t.status) || !t.assignee_user_id || (u && String(u.id)===String(t.assignee_user_id))) return "";
+    const last = Number(t.last_nudged_at)||0;
+    if(last && Date.now()/1000-last < NUDGE_GAP) return `<span class="sub" title="30 分钟后可以再催">🔔 已催 · ${h(hhmm(last))}</span>`;
+    return `<button type="button" class="btn sm" onclick="PH_STAFF_ADMIN._nudge(${t.id})" title="给 ${h(t.assignee_name||"店员")} 发一条通知">🔔 催一下</button>`;
+  }
   function taskHtml(t){
     const rejected = t.status==="todo" && t.review_note && t.reviewed_at;
     const meta = [t.branch_name, t.assignee_name?`👤 ${t.assignee_name}`:"👤 还没指定人", t.due_text?`截止 ${t.due_text}`:"",
@@ -249,14 +265,15 @@
         ${t.require_photo?`<span class="sub">📷 要照片</span>`:""}</div>
       <div class="sub" style="margin-top:4px">${meta.map(h).join(" · ")}</div>
       ${t.detail?`<div style="margin-top:4px">${h(t.detail)}</div>`:""}
-      ${rejected?`<div class="sa-hint">↩️ 打回过：${h(t.review_note)}</div>`:""}
-      ${t.status==="submitted"&&t.review_note&&t.reviewed_at?`<div class="sa-hint">↩️ 上次打回：${h(t.review_note)}${t.submit_count>1?`（第 ${t.submit_count} 次交）`:"（重交）"}</div>`:""}
+      ${rejected?`<div class="sa-hint">↩️ ${h(rejectLine(t, "打回过"))}</div>`:""}
+      ${t.status==="submitted"&&t.review_note&&t.reviewed_at?`<div class="sa-hint">↩️ ${h(rejectLine(t, "上次打回"))}${t.submit_count>1?`（第 ${t.submit_count} 次交）`:"（重交）"}</div>`:""}
       ${t.status==="submitted"?`${t.submit_note?`<div style="margin-top:6px">📝 ${h(t.submit_note)}</div>`:""}${photosHtml(t.photos)}${aiHtml(t)}`:""}
       ${t.status==="approved"&&(t.photos||[]).length?`<details style="margin-top:6px"><summary class="sub">看交差照片(${t.photos.length})</summary>${photosHtml(t.photos)}</details>`:""}
       <div class="actions" style="margin-top:8px">
         ${t.status==="submitted"?`<button type="button" class="btn sm pri" onclick="PH_STAFF_ADMIN._review(${t.id},true)">👍 通过</button>
           <button type="button" class="btn sm bad" onclick="PH_STAFF_ADMIN._review(${t.id},false)">↩️ 打回重做</button>`:""}
         ${t.status==="todo"?reassignHtml(t):""}
+        ${nudgeHtml(t)}
         ${["todo","submitted"].includes(t.status)?`<button type="button" class="btn sm" onclick="PH_STAFF_ADMIN._cancel(${t.id})">取消这件</button>`:""}
         <button type="button" class="btn sm" onclick="PH_STAFF_ADMIN._events(${t.id})">🕘 经过</button>
       </div>
@@ -422,6 +439,15 @@
     try{ await api(`/staff/tasks/${id}/cancel`, {method:"POST", body:{}}); toast("已取消"); reviewSettled(id); await loadList(); draw(); }
     catch(e){ toast(e.message); }
   }
+  async function nudge(id){
+    try{
+      const r = await api(`/staff/tasks/${id}/nudge`, {method:"POST", body:{}});
+      const t = ((SA.list&&SA.list.items)||[]).find(x=>String(x.id)===String(id));
+      if(t) t.last_nudged_at = r.nudged_at;
+      toast(`🔔 已催 · ${r.nudged_text||hhmm(r.nudged_at)}，${t&&t.assignee_name?t.assignee_name:"店员"}会收到通知`);
+      draw();
+    }catch(e){ toast(e.message); }
+  }
   async function assign(id, uid){
     if(!uid) return;
     try{ await api(`/staff/tasks/${id}/assign`, {method:"POST", body:{assignee_user_id:+uid}}); toast("已改派"); await loadList(); draw(); }
@@ -433,7 +459,7 @@
     try{
       const t = await api(`/staff/tasks/${id}`);
       const label = {created:"派出", assigned:"指派", submitted:"交差", approved:"通过", rejected:"打回",
-        cancelled:"取消", reminded:"提醒", escalated:"升级提醒", ai_checked:"AI 看照片", commented:"留言"};
+        cancelled:"取消", reminded:"提醒", nudged:"催办", escalated:"升级提醒", ai_checked:"AI 看照片", commented:"留言"};
       box.innerHTML = `<ol class="sa-events">${(t.events||[]).map(e=>`<li>${h(new Date((e.created_at||0)*1000).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai",hour12:false}))}
         · <b>${h(e.actor_name||"系统")}</b> ${h(label[e.kind]||e.kind)}${e.note?`:${h(e.note)}`:""}</li>`).join("")}</ol>`
         + ((t.earlier_photos||[]).length?`<details><summary class="sub">打回前交的照片(${t.earlier_photos.length})</summary>${photosHtml(t.earlier_photos)}</details>`:"");
@@ -466,7 +492,7 @@
 
   window.PH_STAFF_ADMIN = {
     canDispatch, openDispatch, openReview,
-    _set:setField, _parse:parse, _sendAll:sendAll, _review:review, _cancel:cancel, _assign:assign,
+    _set:setField, _parse:parse, _sendAll:sendAll, _review:review, _cancel:cancel, _assign:assign, _nudge:nudge,
     _events:events, _aiToggle:aiToggle, _view:openViewer,
     _openDispatchBox(){ SA.dispatchOpen = true; draw(); document.getElementById("sa-one")?.focus(); },
     _add(){ SA.drafts.push(blankDraft()); drawDrafts(); },

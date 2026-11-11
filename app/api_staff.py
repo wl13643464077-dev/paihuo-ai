@@ -260,3 +260,13 @@ def staff_task_cancel(task_id: int, body: dict | None = None):
         return stafftask.cancel_task(tid, user, task_id, note=body.get("note") or "")
     except stafftask.StaffTaskError as exc:
         _raise(exc)
+
+
+@router.post("/api/staff/tasks/{task_id}/nudge")
+def staff_task_nudge(task_id: int):
+    """「催一下」：给负责的店员发通知；权限、状态、30 分钟一次都在 stafftask 里判。"""
+    tid, user = _me()
+    try:
+        return stafftask.nudge_task(tid, user, task_id)
+    except stafftask.StaffTaskError as exc:
+        _raise(exc)

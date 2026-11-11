@@ -127,3 +127,19 @@ class StaffPermissionRevocationTests(StaffTaskBase):
         self.assertEqual("todo", db.one("SELECT status FROM staff_task WHERE id=?", (task_id,))["status"])
         self.assertEqual(0, db.one("SELECT COUNT(*) n FROM staff_task_photo WHERE task_id=?", (task_id,))["n"])
         self.assertEqual([], [name for _root, _dirs, names in os.walk(self.root) for name in names])
+
+    def test_nudge_endpoint_maps_permission_state_and_rate_limit(self):
+        task_id = self.create(assignee_user_id=23)["id"]
+        self._as(23)                                   # 店员不能催
+        self.assertEqual(403, self.client.post(f"/api/staff/tasks/{task_id}/nudge").status_code)
+        self._as(25)                                   # 别家店的店长看不到这件活
+        self.assertEqual(404, self.client.post(f"/api/staff/tasks/{task_id}/nudge").status_code)
+        self._as(30)                                   # 别家企业
+        self.assertEqual(404, self.client.post(f"/api/staff/tasks/{task_id}/nudge").status_code)
+        self._as(22)
+        ok = self.client.post(f"/api/staff/tasks/{task_id}/nudge")
+        self.assertEqual(200, ok.status_code)
+        self.assertTrue(ok.json()["message"].startswith("店长 renmin-dz 催您："))
+        again = self.client.post(f"/api/staff/tasks/{task_id}/nudge")
+        self.assertEqual(429, again.status_code)
+        self.assertIn("刚催过", again.json()["detail"])

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import re
 import sqlite3
@@ -549,6 +550,35 @@ def _submit_counts(tid: int, ids: Sequence[int]) -> dict[int, int]:
     return counts
 
 
+def _person_label(roles: Mapping[int, str], names: Mapping[int, str], uid: Any) -> str:
+    """「店长 laowang」：身份 + 账号名；账号查不到时返回空串。"""
+    try:
+        key = int(uid or 0)
+    except (TypeError, ValueError):
+        return ""
+    name = names.get(key)
+    if not key or not name:
+        return ""
+    return " ".join(x for x in (roles.get(key, ""), name) if x)
+
+
+def _last_nudges(tid: int, ids: Sequence[int]) -> dict[int, float]:
+    """每件活最近一次「催一下」的时间(催办记在轨迹 staff_task_event 里)。"""
+    result: dict[int, float] = {}
+    ids = [int(i) for i in ids]
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        marks = ",".join("?" for _ in chunk)
+        for row in db.q(
+            "SELECT task_id,MAX(created_at) AS at FROM staff_task_event WHERE tenant_id=? "
+            f"AND kind='nudged' AND task_id IN ({marks}) GROUP BY task_id",
+            (int(tid), *chunk),
+        ):
+            if row.get("at") is not None:
+                result[int(row["task_id"])] = float(row["at"])
+    return result
+
+
 def _public(
     tid: int,
     rows: Sequence[Mapping[str, Any]],
@@ -563,7 +593,10 @@ def _public(
     for r in rows:
         user_ids += [r.get("assignee_user_id"), r.get("created_by"), r.get("reviewed_by")]
     user_names = _names(tid, "users", user_ids, "username")
-    dispatcher_roles = _role_labels(tid, (r.get("created_by") for r in rows))
+    # 派活人、审核人的身份(老板/总监/店长)：同一条规则，后端算好，前端不猜
+    dispatcher_roles = _role_labels(
+        tid, [x for r in rows for x in (r.get("created_by"), r.get("reviewed_by"))])
+    last_nudges = _last_nudges(tid, [int(r["id"]) for r in rows])
     submit_counts = _submit_counts(tid, [
         int(r["id"]) for r in rows
         if r.get("review_note") and r.get("reviewed_at") and r.get("submitted_at")
@@ -618,6 +651,11 @@ def _public(
             "reviewed_by": r.get("reviewed_by"),
             "reviewed_by_name": user_names.get(int(r.get("reviewed_by") or 0), ""),
             "review_note": r.get("review_note") or "",
+            # 「店长 laowang」：打回原因前写上是谁打回的；审核人账号查不到(老数据)时为空
+            "reviewer_label": _person_label(
+                dispatcher_roles, user_names, r.get("reviewed_by")),
+            # 上次「催一下」的时间(没催过是 None)
+            "last_nudged_at": last_nudges.get(int(r["id"])),
             # 第几次交(被打回后重交时审核人要知道)；从没交过是 0
             "submit_count": submit_counts.get(int(r["id"]), 1 if r.get("submitted_at") else 0),
             "ai_check": _json_or_none(r.get("ai_check_json")),
@@ -1269,6 +1307,75 @@ def cancel_task(
     return _public(tid, [_task_row(tid, row["id"])], now=ts)[0]
 
 
+NUDGE_INTERVAL = 30 * 60   # 同一件活 30 分钟内只能催一次
+
+
+def nudge_task(
+    tid: int,
+    actor_user: Mapping[str, Any],
+    task_id: Any,
+    *,
+    now: float | None = None,
+) -> dict:
+    """「催一下」：能管这件活的人(老板/总监/这家店的店长)给负责的店员发一条通知。
+
+    只催还没交的活(待做/被打回)；同一件活 30 分钟内只能催一次，
+    催办时间记在轨迹 staff_task_event(kind='nudged') 里，重启也不会丢。
+    """
+    tid = int(tid)
+    actor = _actor(tid, actor_user)
+    row = _visible_task(tid, actor, task_id)
+    if not _can_manage(actor, row):
+        raise StaffTaskForbidden("只有老板或这家店的店长能催")
+    if row["status"] not in ("todo", "rejected"):
+        raise StaffTaskConflict("这件活已经交了或结束了，不用再催")
+    assignee = _load_user(tid, row.get("assignee_user_id")) \
+        if row.get("assignee_user_id") else None
+    if not row.get("assignee_user_id"):
+        raise StaffTaskError("这件活还没指定人，先指派给店员再催")
+    if not assignee:
+        raise StaffTaskError("负责这件活的账号已停用，请先改派给别人")
+    if int(assignee["id"]) == int(actor["id"]):
+        raise StaffTaskError("这件活在您自己手上，不用催")
+    ts = time.time() if now is None else float(now)
+    who = " ".join(x for x in (role_label(actor), str(actor.get("username") or "")) if x)
+    due = (f"（截止 {timeutil.format_cn(row['due_at'], '%m-%d %H:%M')}）"
+           if row.get("due_at") is not None else "")
+    text = f"{who} 催您：{row['title']}{due}"
+    with db.atomic() as connection:
+        last = connection.execute(
+            "SELECT MAX(created_at) FROM staff_task_event WHERE tenant_id=? "
+            "AND task_id=? AND kind='nudged'",
+            (tid, int(row["id"])),
+        ).fetchone()[0]
+        if last is not None and ts - float(last) < NUDGE_INTERVAL:
+            left = max(1, math.ceil((NUDGE_INTERVAL - (ts - float(last))) / 60))
+            raise StaffTaskError(f"刚催过，{left} 分钟后再催", status=429)
+        still_open = connection.execute(
+            "SELECT 1 FROM staff_task WHERE id=? AND tenant_id=? "
+            "AND status IN ('todo','rejected') AND deleted_at IS NULL",
+            (int(row["id"]), tid),
+        ).fetchone()
+        if not still_open:
+            raise StaffTaskConflict("任务状态刚变了，请刷新后再试")
+        _event(connection, tid, int(row["id"]), int(actor["id"]), "nudged", text, ts)
+    _notify(tid, "staff_remind", {
+        "task_id": int(row["id"]),
+        "headline": text[:80],
+        "text": text,
+        "summary": text,
+        "link": f"#/staff-tasks/{int(row['id'])}",
+    }, [assignee["id"]])
+    return {
+        "ok": True,
+        "task_id": int(row["id"]),
+        "nudged_at": ts,
+        "nudged_text": timeutil.format_cn(ts, "%H:%M"),
+        "next_nudge_at": ts + NUDGE_INTERVAL,
+        "message": text,
+    }
+
+
 # ---------------- 店员「我的待办」 ----------------
 def _optional_module(name: str):
     try:
@@ -1344,8 +1451,17 @@ def _action_items(tid: int, uid: int, now: float) -> list[dict]:
 _URGENCY_RANK = {"overdue": 0, "today": 1, "later": 2}
 
 
+def _is_rejected(item: Mapping[str, Any]) -> bool:
+    """被打回、要重做的活：打回后回到「待做」，review_note/reviewed_at 留着。"""
+    return (item.get("kind") == "task" and item.get("status") == "todo"
+            and bool(item.get("review_note")) and bool(item.get("reviewed_at")))
+
+
 def _sort_key(item: Mapping[str, Any]) -> tuple:
+    """我的待办：被打回要重做 → 逾期 → 今天到期 → 其他 → 已交/已完成。"""
     rank = _URGENCY_RANK.get(str(item.get("urgency") or ""), 3)
+    if rank < 3 and _is_rejected(item):
+        rank = -1
     due = item.get("due_at")
     try:
         due_value = float(due) if due is not None else float("inf")
@@ -1432,7 +1548,7 @@ def todo_for_user(tid: int, uid: int, *, now: float | None = None) -> dict:
     """店员「我的待办」：派给我的活 + 今天的清单 + 派给我的巡店整改。
 
     tasks/checklists/actions 三类分开返回；items 是合并后按
-    「逾期 → 今天到期 → 其他 → 已交/已完成」排好序的列表，前端直接渲染。
+    「被打回 → 逾期 → 今天到期 → 其他 → 已交/已完成」排好序的列表，前端直接渲染。
     店长/老板还会拿到 reviews：自己能审核、等审核的活。
     """
     tid, uid = int(tid), int(uid)
