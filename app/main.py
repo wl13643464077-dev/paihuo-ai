@@ -1125,9 +1125,9 @@ def records_export(kind: str = "billing"):
                                     .startswith("退回"))
                          else "充值" if r["delta"] > 0 else "消耗"),
                 "项目": r.get("reason") or "",
-                "积分变动": r["delta"],
+                "点数变动": r["delta"],
                 "余额": r["balance"]} for r in rows]
-        headers, name = ["时间", "类型", "项目", "积分变动", "余额"], "积分流水"
+        headers, name = ["时间", "类型", "项目", "点数变动", "余额"], "点数流水"
     elif kind == "publog":
         _need_module("content")
         state_cn = {"pending": "待复盘", "notified": "已提醒",
@@ -15363,6 +15363,13 @@ _HTML_ENTRY_NO_CACHE_HEADERS = {
     "Pragma": "no-cache",
     "Expires": "0",
 }
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return FileResponse(os.path.join(ROOT, "static", "favicon.svg"),
+                        media_type="image/svg+xml",
+                        headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/login")

@@ -3151,6 +3151,35 @@ def list_depts():
     return _load()
 
 
+# 下拉框里给老板看的短行业名；部门全称（如「餐饮产业部」「便利店行业痛点数字员工」）保持不变。
+INDUSTRY_SHORT_LABELS = {
+    "restaurant": "餐饮",
+    "tea_coffee": "茶咖现制",
+    "convenience": "便利店",
+    "snack": "量贩零食",
+    "grocery": "商超",
+    "pharmacy": "零售药房",
+    "hotel": "酒店住宿",
+    "auto": "汽车后市场",
+    "fitness": "健身瑜伽",
+    "beauty": "美容美业",
+    "pet": "宠物",
+}
+_SHORT_LABEL_SUFFIXES = ("行业痛点数字员工", "产业部", "行业")
+
+
+def short_label(key: str, name: str = "") -> str:
+    """行业短名：优先用固定映射，否则去掉部门名后缀。"""
+    mapped = INDUSTRY_SHORT_LABELS.get(str(key or "").strip())
+    if mapped:
+        return mapped
+    text = str(name or key or "").strip()
+    for suffix in _SHORT_LABEL_SUFFIXES:
+        if text.endswith(suffix) and len(text) > len(suffix):
+            return text[: -len(suffix)]
+    return text
+
+
 def specialists() -> dict:
     """idx -> 当前可派活的行业员工定义。"""
     out = {}

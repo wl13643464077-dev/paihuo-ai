@@ -200,7 +200,7 @@
       </div>
 
       <div class="cp-grid">
-        <section class="cp-panel"><h3>等你拍板 <span>${d.todo_counts.high?`<span class="cp-tag high">逾期 ${d.todo_counts.high}</span>`:""}<span class="cp-tag">${d.todo_counts.total} 件</span></span></h3>
+        <section class="cp-panel"><h3>等您拍板 <span>${d.todo_counts.high?`<span class="cp-tag high">逾期 ${d.todo_counts.high}</span>`:""}<span class="cp-tag">${d.todo_counts.total} 件</span></span></h3>
           <div class="cp-sub">逾期的排在最前；逾期和高风险的事可以直接下发给门店或负责人</div>
           <div class="cp-list">${todoList(d.todo)}</div></section>
         ${aiPanel(d.ai_analysis)}
@@ -229,7 +229,7 @@
   function fmtRange(p){ return `${day(p.start)} – ${day(p.end)}`; }
 
   function todoList(items){
-    if(!items.length) return `<div class="cp-empty">🎉 没有等你处理的事</div>`;
+    if(!items.length) return `<div class="cp-empty">🎉 没有等您处理的事</div>`;
     const col={high:"#d64545",mid:"#e0a019",normal:"#3d6fd9"};
     CP.pick.todo=items;
     return items.map((t,i)=>`<div class="cp-item"><span class="dot" style="background:${col[t.level]||"#3d6fd9"}"></span>
@@ -240,7 +240,7 @@
 
   function aiPanel(a){
     if(!a) return `<section class="cp-panel cp-ai"><h3>✨ AI 经营分析</h3>
-      <div class="cp-sub">AI 只读上面这些派活里的统计，帮你找出做得好的、要警惕的，并给出可以直接下发的动作。每次 1 点，失败自动退。</div>
+      <div class="cp-sub">AI 只读上面这些派活里的统计，帮您找出做得好的、要警惕的，并给出可以直接下发的动作。每次 1 点，失败自动退。</div>
       <div class="cp-empty"><button type="button" class="cp-mini pri" onclick="cpAi()" ${CP.aiBusy?"disabled":""}>${CP.aiBusy?"分析中…":"开始分析"}</button></div></section>`;
     CP.pick.actions=a.actions||[];
     const acts=(a.actions||[]).map((x,i)=>`<div class="cp-item" style="grid-template-columns:1fr auto"><div><div class="t">${esc(x.title)}</div>

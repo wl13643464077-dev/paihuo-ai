@@ -57,6 +57,20 @@ class HtmlEntryCachePolicyTests(unittest.TestCase):
                 self.assertEqual("no-cache", response.headers.get("pragma"))
                 self.assertEqual("0", response.headers.get("expires"))
 
+    def test_favicon_is_served_without_login_and_linked_from_entries(self):
+        anonymous = TestClient(main.app)
+        try:
+            response = anonymous.get("/favicon.ico")
+        finally:
+            anonymous.close()
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(response.headers["content-type"].startswith("image/svg+xml"))
+        self.assertIn(b"<svg", response.content)
+        root = os.path.join(os.path.dirname(__file__), "..", "static")
+        for name in ("index.html", "login.html", "staff.html"):
+            with open(os.path.join(root, name), encoding="utf-8") as fh:
+                self.assertIn('rel="icon"', fh.read(), name)
+
     def test_static_assets_do_not_inherit_html_no_store_policy(self):
         response = self.client.get("/static/app.js")
 

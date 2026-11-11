@@ -263,6 +263,28 @@ class BossDashboardServiceCase(unittest.TestCase):
                 now=NOW,
             )
 
+    def test_scope_industries_carry_short_label_for_dropdowns(self):
+        result = bossdashboard.scopes(self.owner)
+        industry = result["tenants"][0]["industries"][0]
+        self.assertEqual("restaurant", industry["key"])
+        self.assertEqual("餐饮", industry["short_label"])
+        # 部门全称仍然保留，供标题等需要全称的地方使用。
+        self.assertTrue(industry["name"])
+
+    def test_short_label_mapping_covers_industries_and_strips_suffixes(self):
+        from app import departments
+        expected = {
+            "restaurant": "餐饮", "tea_coffee": "茶咖现制",
+            "convenience": "便利店", "snack": "量贩零食", "grocery": "商超",
+            "pharmacy": "零售药房", "hotel": "酒店住宿", "auto": "汽车后市场",
+            "fitness": "健身瑜伽", "beauty": "美容美业", "pet": "宠物",
+        }
+        for key, label in expected.items():
+            self.assertEqual(label, departments.short_label(key, "随便什么全称"))
+        self.assertEqual("零售", departments.short_label("retail", "零售产业部"))
+        self.assertEqual("洗衣", departments.short_label("x", "洗衣行业痛点数字员工"))
+        self.assertEqual("花店", departments.short_label("y", "花店行业"))
+
     def test_only_named_root_boss_can_cross_tenants_and_industries(self):
         local_root = bossdashboard.scopes(self.root, is_boss=False)
         self.assertFalse(local_root["can_cross_tenant"])
