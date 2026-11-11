@@ -221,7 +221,7 @@ class FrontendNavMobileTests(unittest.IsolatedAsyncioTestCase):
             self._assert_no_browser_errors(errors)
             await browser.close()
 
-    async def test_today_page_puts_daily_items_first_and_folds_the_guides(self):
+    async def test_today_page_puts_daily_items_first_and_drops_extra_guides(self):
         async with async_playwright() as playwright:
             browser, page, errors = await self._open(
                 playwright,
@@ -238,7 +238,6 @@ class FrontendNavMobileTests(unittest.IsolatedAsyncioTestCase):
                   stats: [...document.querySelectorAll('.today-stats b')].map(x=>x.textContent),
                   post: document.querySelector('.today-growth a.today-post')?.getAttribute('href'),
                   fold: !!document.querySelector('details.guide-fold'),
-                  foldOpen: document.querySelector('details.guide-fold')?.open,
                   floors: document.querySelectorAll('#main .deptsec,#main .room').length,
                   money: document.querySelector('.today-money')?.textContent,
                   topNav: [...document.querySelectorAll('#nav a.nav-top')].filter(a=>a.offsetParent!==null).length,
@@ -253,8 +252,8 @@ class FrontendNavMobileTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(["0", "4", "1"], info["stats"])
             self.assertEqual("#/tools/hot", info["post"])
-            self.assertTrue(info["fold"])
-            self.assertFalse(info["foldOpen"])
+            # 只留上手卡一套引导;原「新手上路」折叠区已撤掉
+            self.assertFalse(info["fold"])
             self.assertEqual(0, info["floors"])  # 行业专家楼层已挪去「派活 → 找行业专家」
             self.assertIn("余额 120 点", info["money"])
             self.assertEqual(5, info["topNav"])  # 桌面仍是顶部导航
@@ -286,10 +285,11 @@ class FrontendNavMobileTests(unittest.IsolatedAsyncioTestCase):
             await page.wait_for_function("!document.querySelector('#ui-dialog')")
             after = await page.evaluate("getComputedStyle(document.documentElement).overflowY")
             self.assertNotEqual("hidden", after)
-            # 「新手上路」里的「不再提示」点击区至少 44px
-            await page.evaluate("document.querySelector('details.guide-fold').open=true")
+            # 「找专家」页用法提示里的「不再提示」点击区至少 44px
+            await page.evaluate(
+                "document.querySelector('#main').insertAdjacentHTML('beforeend', howtoCard())")
             dismiss = await page.evaluate(
-                """() => [...document.querySelectorAll('details.guide-fold .dismiss')]
+                """() => [...document.querySelectorAll('.howto-hint .dismiss')]
                     .map(b => { const r = b.getBoundingClientRect(); return Math.min(r.width, r.height); })"""
             )
             self.assertTrue(dismiss)

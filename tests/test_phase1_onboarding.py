@@ -449,8 +449,9 @@ class OnboardingCardBrowserCase(unittest.IsolatedAsyncioTestCase):
             await page.wait_for_function(
                 "document.querySelector('#main')?.textContent.includes('套餐与点数')")
             self.assertTrue(await page.evaluate("typeof window.PH_ONBOARDING.card==='function'"))
+            # 第一次没有缓存时 card() 返回 Promise:数据到了再整体插入,首页不会晚一拍跳动
             await page.evaluate(
-                "document.querySelector('#main').insertAdjacentHTML('afterbegin', PH_ONBOARDING.card())")
+                "Promise.resolve(PH_ONBOARDING.card()).then(html => document.querySelector('#main').insertAdjacentHTML('afterbegin', html))")
             await page.wait_for_selector("#ph-s-name")
             text = await page.locator("#ph-onb").inner_text()
             self.assertIn("您的行业:餐饮", text.replace(" ", ""))
@@ -485,7 +486,15 @@ class OnboardingCardBrowserCase(unittest.IsolatedAsyncioTestCase):
 
             await page.click("button[aria-label='收起']")
             await page.wait_for_selector(".ph-onb-done")
-            self.assertIn("已完成上手", await page.locator("#ph-onb").inner_text())
+            done_text = await page.locator("#ph-onb").inner_text()
+            self.assertIn("接下来 3 件事", done_text)
+            for item in ("建门店", "派第一个活", "绑定微信"):
+                self.assertIn(item, done_text)
+            self.assertEqual(
+                ["#/store", "#/new", "#/channels"],
+                await page.evaluate(
+                    "[...document.querySelectorAll('#ph-onb .ph-next-i')].map(a => a.getAttribute('href'))"),
+            )
             await page.click("button[aria-label='关闭上手提示']")
             await page.wait_for_function("document.querySelector('#ph-onb').innerHTML.trim()===''")
             self.assertIn(("POST", "/api/onboarding/dismiss", {}), calls)

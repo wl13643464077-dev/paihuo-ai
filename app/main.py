@@ -1664,6 +1664,15 @@ def auth_login(body: dict, request: Request):
     return _login_success_response(u, request, "password")
 
 
+def _set_session_cookie(resp, uid: int, request: Request) -> str:
+    token = auth.make_session(uid)
+    resp.set_cookie("cc_sess", token,
+                    max_age=auth.SESSION_DAYS * 86400, path="/",
+                    httponly=True, samesite="lax",
+                    secure=_request_is_https(request))
+    return token
+
+
 def _login_success_response(u: dict, request: Request, method: str):
     """密码登录与短信验证码登录共用:签发会话 Cookie + 记漏斗。"""
     resp = JSONResponse({
@@ -1672,10 +1681,10 @@ def _login_success_response(u: dict, request: Request, method: str):
         "role": u["role"],
         "must_change_password": bool(u.get("must_change_password")),
     })
-    secure = _request_is_https(request)
-    resp.set_cookie("cc_sess", auth.make_session(u["id"]),
-                    max_age=auth.SESSION_DAYS * 86400, path="/",
-                    httponly=True, samesite="lax", secure=secure)
+    token = _set_session_cookie(resp, u["id"], request)
+    if method == "password" and u.get("must_change_password"):
+        # 刚用密码登录进来的首登改密，不必再输一遍当前密码(15 分钟内有效)。
+        auth.mark_fresh_password_login(u["id"], token)
     # 发布器的一次性只读账号只验证服务，不应污染真实产品漏斗。
     if not str(u["username"]).startswith("__release_smoke_"):
         funnel.record_safe(
@@ -1772,8 +1781,16 @@ def auth_logout():
     return resp
 
 
+def _forced_change_without_old(u: dict, request: Request | None) -> bool:
+    """仅「被强制改密 + 这张会话刚用密码登录」时免输当前密码；两者都以服务端状态为准。"""
+    if not u or not u.get("must_change_password") or request is None:
+        return False
+    return auth.is_fresh_password_login(
+        u.get("id"), request.cookies.get("cc_sess") or "")
+
+
 @app.get("/api/auth/me")
-def auth_me():
+def auth_me(request: Request = None):
     u = auth.current()
     if u and u.get("role") == "tour":
         return {"id": 0, "username": "访客", "role": "tour", "tenant": "参观模式",
@@ -1791,7 +1808,11 @@ def auth_me():
             "needs_industry": (
                 u["role"] == "owner" and signup.tenant_needs_industry(u["tenant_id"])
             ),
-            "must_change_password": bool(u.get("must_change_password"))}
+            # 本企业授权的行业 key(平台租户/root 为空=不限);前端据此把自己行业排在前面。
+            "industries": auth.tenant_industries(),
+            "must_change_password": bool(u.get("must_change_password")),
+            # 首登改密是否还要再输当前密码:由服务端按会话判断,前端只据此决定显示。
+            "password_change_needs_old": not _forced_change_without_old(u, request)}
 
 
 @app.get("/api/guest/industries")
@@ -1863,17 +1884,20 @@ def onboarding_dismiss():
 
 
 @app.put("/api/auth/password")
-def auth_password(body: dict):
+def auth_password(body: dict, request: Request = None):
     u = auth.current()
     row = db.one("SELECT username,password_hash FROM users WHERE id=?", (u["id"],))
-    # 与登录共用按账号的全局失败计数:拿到会话也不能无限次猜旧密码。
-    throttle_name = (row or {}).get("username") or u.get("username") or ""
-    _login_guard_check(throttle_name)
-    if not auth.verify_login_password(
-            body.get("old") or "", (row or {}).get("password_hash")):
-        _login_guard_fail(throttle_name)
-        raise HTTPException(400, "旧密码不对")
-    _login_guard_ok(throttle_name)
+    # 首登强制改密且这张会话刚用密码登录过:不再重复验证当前密码。
+    # 主动改密、短信登录、升级前留下的老会话一律照旧要验旧密码。
+    if not _forced_change_without_old(u, request):
+        # 与登录共用按账号的全局失败计数:拿到会话也不能无限次猜旧密码。
+        throttle_name = (row or {}).get("username") or u.get("username") or ""
+        _login_guard_check(throttle_name)
+        if not auth.verify_login_password(
+                body.get("old") or "", (row or {}).get("password_hash")):
+            _login_guard_fail(throttle_name)
+            raise HTTPException(400, "旧密码不对")
+        _login_guard_ok(throttle_name)
     new_password = body.get("new") or ""
     policy_error = auth.password_policy_error(new_password)
     if policy_error:
@@ -1884,7 +1908,14 @@ def auth_password(body: dict):
     })
     db.set_setting("bootstrap_pw", None)
     auth.clear_password_hint(u["id"])   # 改过密码就不再提示「建议改成好记的密码」
-    return {"ok": True}
+    auth.clear_fresh_password_login(u["id"])
+    if request is None:
+        return {"ok": True}
+    # 会话签名里带密码哈希，改密后旧 Cookie 全部失效(其他设备被踢下线)；
+    # 给当前这台设备补发新 Cookie，用户不用再登录一遍。
+    resp = JSONResponse({"ok": True})
+    _set_session_cookie(resp, u["id"], request)
+    return resp
 
 
 # ---------------- V8:权限管理(成员/企业/租户) ----------------

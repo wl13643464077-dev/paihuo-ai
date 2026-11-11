@@ -1126,7 +1126,7 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
             self._assert_no_browser_errors(browser_errors)
             await browser.close()
 
-    async def test_must_change_password_blocks_shell_data_and_returns_to_login(self):
+    async def test_must_change_password_blocks_shell_data_and_enters_app(self):
         requested_api_paths: list[str] = []
         password_payloads: list[dict] = []
         auth_payload = {
@@ -1162,7 +1162,15 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
                     password_payloads.append(
                         json.loads(route.request.post_data or "{}")
                     )
+                    auth_payload["must_change_password"] = False
+                    auth_payload["password_change_needs_old"] = True
                     payload = {"ok": True}
+                elif path == "/api/state":
+                    payload = {"jobs": [], "inbox": [], "notifications": []}
+                elif path == "/api/employees":
+                    payload = []
+                elif path == "/api/task-center":
+                    payload = {"items": [], "total": 0, "counts": {}}
                 else:
                     payload = {}
                 await route.fulfill(
@@ -1198,15 +1206,85 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
             await page.locator("#forced-pw-old").fill("LegacyPass123!")
             await page.locator("#forced-pw-new").fill("FreshPassword456!")
             await page.locator("#forced-pw-confirm").fill("FreshPassword456!")
-            await page.get_by_role("button", name="保存新密码").click()
-            await page.wait_for_url("**/login", timeout=3000)
+            # 在最后一个输入框按回车即可提交。
+            await page.locator("#forced-pw-confirm").press("Enter")
+            await page.wait_for_function(
+                "!document.querySelector('#main')?.textContent.includes('请先设置您自己的密码')",
+                timeout=5000,
+            )
 
             self.assertEqual(
                 [{"old": "LegacyPass123!", "new": "FreshPassword456!"}],
                 password_payloads,
             )
-            self.assertNotIn("/api/meta", requested_api_paths)
-            self.assertEqual("/login", urlparse(page.url).path)
+            # 改密成功后直接进入工作台，不再跳回登录页。
+            self.assertIn("/api/meta", requested_api_paths)
+            self.assertNotEqual("/login", urlparse(page.url).path)
+            self.assertNotIn("账号安全升级", await page.locator("#nav").inner_text())
+            self._assert_no_browser_errors(browser_errors)
+            await browser.close()
+
+    async def test_fresh_forced_password_change_hides_current_password(self):
+        password_payloads: list[dict] = []
+        auth_payload = {
+            "id": 10,
+            "username": "first-login-test",
+            "role": "owner",
+            "tenant": "浏览器测试企业",
+            "modules": ["content"],
+            "all_modules": [],
+            "must_change_password": True,
+            "password_change_needs_old": False,
+        }
+
+        async with async_playwright() as playwright:
+            browser = await _launch_chromium(playwright, self.executable)
+            page = await browser.new_page()
+            browser_errors = self._capture_unexpected_browser_errors(page)
+            await page.add_init_script(
+                "window.EventSource = class { constructor(){} close(){} };"
+            )
+
+            async def api_route(route):
+                path = urlparse(route.request.url).path
+                if path == "/api/auth/me":
+                    payload = auth_payload
+                elif path == "/api/auth/password":
+                    password_payloads.append(
+                        json.loads(route.request.post_data or "{}")
+                    )
+                    auth_payload["must_change_password"] = False
+                    auth_payload["password_change_needs_old"] = True
+                    payload = {"ok": True}
+                elif path == "/api/state":
+                    payload = {"jobs": [], "inbox": [], "notifications": []}
+                elif path == "/api/employees":
+                    payload = []
+                elif path == "/api/task-center":
+                    payload = {"items": [], "total": 0, "counts": {}}
+                else:
+                    payload = {}
+                await route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(payload, ensure_ascii=False),
+                )
+
+            await page.route("**/api/**", api_route)
+            await page.goto(f"{self.base}/static/index.html#/tasks")
+            await page.wait_for_function(
+                "document.querySelector('#main')?.textContent.includes('请先设置您自己的密码')"
+            )
+            self.assertEqual(0, await page.locator("#forced-pw-old").count())
+            await page.locator("#forced-pw-new").fill("FreshPassword456!")
+            await page.locator("#forced-pw-confirm").fill("FreshPassword456!")
+            await page.locator("#forced-pw-confirm").press("Enter")
+            await page.wait_for_function(
+                "!document.querySelector('#main')?.textContent.includes('请先设置您自己的密码')",
+                timeout=5000,
+            )
+            self.assertEqual([{"new": "FreshPassword456!"}], password_payloads)
+            self.assertNotEqual("/login", urlparse(page.url).path)
             self._assert_no_browser_errors(browser_errors)
             await browser.close()
 

@@ -1,11 +1,11 @@
 /* 第 1 期:新老板首次上手卡片(首页顶部)+ 平台后台「短信验证码登录」配置卡片。
    对外只暴露 window.PH_ONBOARDING:
-   - card()          → 首页顶部插入的 HTML 字符串(同步返回;数据没到时先给占位,到了自动填充)
+   - card()          → 首页顶部插入的 HTML 字符串(有缓存时同步返回;第一次返回 Promise,数据到了首页再一起渲染)
    - smsAdminCard()  → 平台后台的短信登录配置卡片(同样先占位后填充)
    依赖 app.js 的全局工具:api / esc / toast / copyText / render / uiConfirm / passwordPolicyError / ME。 */
 (function(){
   "use strict";
-  const S = {state:null, loading:null, editing:false, generating:false, industries:null, expand:false, sms:null};
+  const S = {state:null, loading:null, editing:false, generating:false, industries:null, expand:false, reopened:false, sms:null};
   const me = ()=>{ try{ return typeof ME!=="undefined" ? ME : null; }catch(_){ return null; } };
   const h = s=>{ try{ return esc(s); }catch(_){ return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); } };
   const say = msg=>{ try{ toast(msg); }catch(_){ alert(msg); } };
@@ -41,6 +41,9 @@
 .ph-onb .ph-pw summary{cursor:pointer;font-weight:800}
 .ph-onb-done{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px}
 .ph-onb-done .ph-grow{flex:1;min-width:180px;font-weight:800}
+.ph-onb .ph-next{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}
+.ph-onb .ph-next-i{display:flex;flex-direction:column;gap:2px;min-height:44px;padding:10px 12px;border:2px solid rgba(51,41,31,.18);border-radius:12px;background:#fffdf7;color:inherit;text-decoration:none}
+.ph-onb .ph-next-i.ph-ok{opacity:.65}
 .ph-x{background:none;border:none;font-size:20px;line-height:1;cursor:pointer;padding:6px 8px;color:#8b7355}
 @media (max-width:640px){
   .ph-onb .ph-fields>div{flex-basis:100%}
@@ -135,21 +138,34 @@
     return `<details class="ph-pw"><summary>🔑 建议把密码改成您好记的</summary>
       <div>现在的密码是系统随机生成的,不好记。改一个自己记得住的(12 位以上,字母+数字)。</div>
       <div class="ph-fields">
-        <div><label for="ph-pw-old">现在的密码</label><input id="ph-pw-old" type="password" autocomplete="current-password"></div>
-        <div><label for="ph-pw-new">新密码</label><input id="ph-pw-new" type="password" autocomplete="new-password"></div>
-        <div><label for="ph-pw-new2">再输一遍新密码</label><input id="ph-pw-new2" type="password" autocomplete="new-password"></div>
+        <div><label for="ph-pw-old">现在的密码</label><input id="ph-pw-old" type="password" onkeydown="if(event.key==='Enter'&&!event.isComposing){event.preventDefault();PH_ONBOARDING.changePassword(this.closest('.ph-pw').querySelector('.actions .btn'))}" autocomplete="current-password"></div>
+        <div><label for="ph-pw-new">新密码</label><input id="ph-pw-new" type="password" onkeydown="if(event.key==='Enter'&&!event.isComposing){event.preventDefault();PH_ONBOARDING.changePassword(this.closest('.ph-pw').querySelector('.actions .btn'))}" autocomplete="new-password"></div>
+        <div><label for="ph-pw-new2">再输一遍新密码</label><input id="ph-pw-new2" type="password" onkeydown="if(event.key==='Enter'&&!event.isComposing){event.preventDefault();PH_ONBOARDING.changePassword(this.closest('.ph-pw').querySelector('.actions .btn'))}" autocomplete="new-password"></div>
       </div>
       <div class="actions" style="margin-top:8px"><button type="button" class="btn" onclick="PH_ONBOARDING.changePassword(this)">保存新密码</button>
-        <span class="sub">改好后需要用新密码重新登录一次</span></div></details>`;
+        <span class="sub">改好后这台设备不用重新登录</span></div></details>`;
+  }
+  // 上手 3 步做完后，同一个位置换成「接下来 3 件事」，每件直接链到真实页面。
+  function nextSteps(){
+    let setup={};
+    try{ setup=(typeof STATE!=="undefined"&&STATE&&STATE.setup)||{}; }catch(_){}
+    const items=[
+      {done:false, icon:"🏪", t:"建门店", d:"录好门店，店长拍照就能巡店", href:"#/store"},
+      {done:!!setup.first_job, icon:"📋", t:"派第一个活", d:"一句话说清要什么，数字员工去做", href:"#/new"},
+      {done:!!setup.wechat, icon:"💬", t:"绑定微信", d:"做完了微信里直接收通知", href:"#/channels"},
+    ];
+    return `<div class="ph-next">${items.map(x=>`<a class="ph-next-i${x.done?" ph-ok":""}" href="${x.href}">
+        <b>${x.done?"✅":x.icon} ${x.t}</b><span class="sub">${x.done?"已完成":x.d}</span></a>`).join("")}</div>`;
   }
   function inner(){
     const st=S.state;
-    if(!st||!st.show) return "";
+    if(!st||(!st.show&&!S.reopened)) return "";
     if(st.done && !S.expand){
       return `<div class="card ph-onb ph-onb-done">
-        <span class="ph-grow">✅ 已完成上手,<a href="#/tools">去看看更多 →</a></span>
+        <span class="ph-grow">✅ 上手完成。接下来 3 件事：</span>
         <button type="button" class="ph-link" onclick="PH_ONBOARDING.toggle(true)">再看今天的文案</button>
         <button type="button" class="ph-x" aria-label="关闭上手提示" onclick="PH_ONBOARDING.dismiss()">×</button>
+        <div style="flex-basis:100%">${nextSteps()}</div>
         ${st.password_hint?`<div style="flex-basis:100%">${pwHint(st)}</div>`:""}
       </div>`;
     }
@@ -222,6 +238,7 @@
     try{
       await api("/onboarding/dismiss",{method:"POST",body:{},routeScoped:false});
       if(S.state) S.state.show=false;
+      S.reopened=false;
       paint();
     }catch(e){ say(e.message); }
   }
@@ -234,8 +251,10 @@
     btn.disabled=true;
     try{
       await api("/auth/password",{method:"PUT",body:{old:oldPw,new:nw},routeScoped:false});
-      say("密码改好了,请用新密码重新登录");
-      setTimeout(()=>{ location.href="/login"; },600);
+      // 服务端已给这台设备补发新会话，不用重新登录。
+      say("密码改好了，下次登录用新密码");
+      if(S.state) S.state.password_hint=false;
+      paint();
     }catch(e){ say(e.message); btn.disabled=false; }
   }
 
@@ -280,12 +299,15 @@
       const m=me();
       if(!m||m.role!=="owner") return "";
       ensureStyle();
-      if(!S.state){ load(); return `<div id="ph-onb"></div>`; }
+      // 第一次没有数据时等它到了再交给首页一起首屏渲染(首页会 await),页面不会晚一拍跳动。
+      if(!S.state) return load().then(()=>`<div id="ph-onb">${inner()}</div>`);
       // 每次回首页顺手刷新一次(比如别的页面改了企业档案);先用缓存立即出卡片。
       setTimeout(()=>load(), 0);
       return `<div id="ph-onb">${inner()}</div>`;
     },
     refresh(){ return load(true); },
+    // 「我的 → 新手引导重看」:关掉过的卡片在本次打开期间重新显示(展开 3 步)。
+    reopen(){ S.reopened=true; S.expand=true; },
     pickIndustry, saveStore, generate, copy, dismiss, changePassword,
     editStore(){ S.editing=true; paint(); },
     cancelEdit(){ S.editing=false; paint(); },
