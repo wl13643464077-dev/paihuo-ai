@@ -606,11 +606,12 @@ class OnboardingCardBrowserCase(unittest.IsolatedAsyncioTestCase):
             await page.wait_for_selector("#ui-dialog")
             dialog = await page.locator("#ui-dialog").inner_text()
             self.assertIn("用这个名字建第一家门店？", dialog)
-            self.assertIn("王记牛肉面 · 成都 春熙路", dialog)
+            # O6-2:第一家店叫「企业名·商圈店」,不和企业重名
+            self.assertIn("王记牛肉面·春熙路店 · 成都 春熙路", dialog)
             await page.locator("#ui-dialog [data-dialog-ok]").click()
             await page.wait_for_function(
                 "document.querySelector('#toast-stack')?.textContent.includes('第一家门店')")
-            self.assertEqual([{"name": "王记牛肉面", "region": "成都 春熙路"}], branches)
+            self.assertEqual([{"name": "王记牛肉面·春熙路店", "region": "成都 春熙路"}], branches)
             # 今天页的门店卡跟着刷新,不再是「还没录入门店」
             await page.wait_for_function(
                 "document.querySelector('#main .today-store:not(.today-store-empty)')")
@@ -800,21 +801,21 @@ class OnboardingCardBrowserCase(unittest.IsolatedAsyncioTestCase):
             await page.wait_for_selector("#ph-onb .ph-nostore")
             self.assertIn("还没建门店", await page.locator("#ph-onb .ph-nostore").inner_text())
             self.assertEqual([], branches)
-            # O-3:点入口打开建店表单,店名和城市已经填好
+            # O-3 / O6-2:点入口打开建店表单,城市已经填好,店名预填成「企业名·商圈店」(不和企业重名)
             await page.click("#ph-onb .ph-nostore >> text=建第一家店")
             await page.wait_for_function(
-                "document.querySelector('#store-form-name')?.value==='王记火锅'")
+                "document.querySelector('#store-form-name')?.value==='王记火锅·春熙路店'")
             self.assertEqual("成都 春熙路", await page.input_value("#store-form-region"))
             await page.click("#store-form [data-store-form-cancel]")
             await page.wait_for_function("!document.querySelector('#store-form')")
             # 从今天页门店空状态的「新建门店」进来也一样预填
             await page.click("#main .today-store-empty [data-empty-action]")
             await page.wait_for_function(
-                "document.querySelector('#store-form-name')?.value==='王记火锅'")
+                "document.querySelector('#store-form-name')?.value==='王记火锅·春熙路店'")
             self.assertEqual(3, await page.locator("#ph-onb .ph-step").count())
             await page.click("#store-form [data-store-form-ok]")
             await page.wait_for_function("!document.querySelector('#store-form')")
-            self.assertEqual([{"name": "王记火锅", "region": "成都 春熙路", "address": ""}], branches)
+            self.assertEqual([{"name": "王记火锅·春熙路店", "region": "成都 春熙路", "address": ""}], branches)
             # O-4:不刷新页面,上手卡收成一行,门店卡也换成有门店的样子
             await page.wait_for_selector("#ph-onb .ph-onb-line")
             await page.wait_for_function(
@@ -845,6 +846,70 @@ class OnboardingCardBrowserCase(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("接下来", line)
             self.assertEqual(1, await page.locator("#ph-onb button[aria-label='关闭上手提示']").count())
             self.assertEqual(1, await page.evaluate("window.__noReload"))
+            self.assertEqual([], errors)
+            await browser.close()
+
+    async def test_first_store_name_never_copies_company_name(self):
+        """O6-2:城市里没有商圈时店名留空、企业名只放进占位提示;老板已经动手输的不覆盖。"""
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            self.skipTest("playwright 不可用")
+        from urllib.parse import urlparse
+
+        async def api_route(route):
+            path = urlparse(route.request.url).path
+            payload = {}
+            if path == "/api/auth/me":
+                payload = {"id": 7, "username": "13800000000", "role": "owner", "tenant": "王记",
+                           "modules": ["content"], "all_modules": []}
+            elif path == "/api/state":
+                payload = {"jobs": [], "inbox": [], "notifications": [], "balance": 20,
+                           "setup": {"store": False}}
+            elif path == "/api/onboarding":
+                payload = {"show": False, "done": True}
+            await route.fulfill(status=200, content_type="application/json",
+                                body=json.dumps(payload, ensure_ascii=False))
+
+        async with async_playwright() as playwright:
+            executable = next((p for p in (
+                os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE") or "",
+                "/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser",
+            ) if p and os.path.isfile(p)), "")
+            options = {"headless": True}
+            if executable:
+                options["executable_path"] = executable
+            browser = await playwright.chromium.launch(**options)
+            page = await browser.new_page(viewport={"width": 375, "height": 800})
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            await page.add_init_script("window.EventSource=class{constructor(){} close(){}};")
+            await page.route("**/api/**", api_route)
+            await page.goto(f"{self.base}/static/index.html#/")
+            await page.wait_for_function("typeof firstStoreNameSuggestion==='function' && !!ME")
+            self.assertEqual(
+                ["王记火锅·春熙路店", "王记火锅·静安店", "", "", "王记火锅·万达店"],
+                await page.evaluate("""[
+                    firstStoreNameSuggestion('王记火锅','成都 春熙路'),
+                    firstStoreNameSuggestion('王记火锅','上海·静安'),
+                    firstStoreNameSuggestion('王记火锅','成都'),
+                    firstStoreNameSuggestion('','成都 春熙路'),
+                    firstStoreNameSuggestion('王记火锅','成都 万达店')]"""))
+            # 只写了城市:店名留空,占位提示带企业名
+            await page.evaluate("""window.PH_ONBOARDING.storeBasics=async()=>({name:'王记火锅',city:'成都'});
+                openStoreForm()""")
+            await page.wait_for_function(
+                "document.querySelector('#store-form-region')?.value==='成都'")
+            self.assertEqual("", await page.input_value("#store-form-name"))
+            self.assertIn("王记火锅", await page.get_attribute("#store-form-name", "placeholder"))
+            await page.click("#store-form [data-store-form-cancel]")
+            # 预填数据回来之前老板已经输了店名:不覆盖
+            await page.evaluate("""window.PH_ONBOARDING.storeBasics=()=>new Promise(r=>setTimeout(
+                ()=>r({name:'王记火锅',city:'成都 春熙路'}),300)); openStoreForm()""")
+            await page.wait_for_selector("#store-form-name")
+            await page.fill("#store-form-name", "老店")
+            await page.wait_for_timeout(500)
+            self.assertEqual("老店", await page.input_value("#store-form-name"))
             self.assertEqual([], errors)
             await browser.close()
 

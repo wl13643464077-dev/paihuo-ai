@@ -147,6 +147,60 @@ class PlatformAdminFrontendTests(unittest.IsolatedAsyncioTestCase):
             browser, page, errors = await self._open(playwright, "#/platform", me=OWNER)
             await page.wait_for_selector("text=这一页只有平台方能看")
             self.assertEqual(0, await page.locator("#tm-indrow-2").count())
+            # O6-4:看不了的页面,标签不写页面名
+            self.assertEqual("无权访问 · 派活", await page.title())
+            # 切走再切回来:切换那一刻也是「无权访问」
+            await page.evaluate("location.hash='#/'")
+            await page.wait_for_function("document.title === '今天 · 派活'")
+            title = await page.evaluate("""() => new Promise(resolve => {
+                window.addEventListener('hashchange', () => resolve(document.title), {once: true});
+                location.hash = '#/platform';
+            })""")
+            self.assertEqual("无权访问 · 派活", title)
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_forbidden_route_title_is_no_access(self):
+        """O6-4:服务端 403 的页面(如非平台账号直接打开 #/admin)标签也写「无权访问」。"""
+        async with async_playwright() as playwright:
+            browser = await _launch_chromium(playwright, self.executable)
+            page = await browser.new_page()
+            await page.add_init_script("window.EventSource = class { constructor(){} close(){} };")
+
+            async def api_route(route):
+                path = urlparse(route.request.url).path
+                if path.startswith("/api/admin/"):
+                    await route.fulfill(status=403, content_type="application/json",
+                                        body=json.dumps({"detail": "需要平台管理员权限"}, ensure_ascii=False))
+                    return
+                payload = {"/api/auth/me": OWNER, "/api/meta": META,
+                           "/api/state": {"inbox": [], "notifications": [], "jobs": [], "balance": 500}}.get(path, {})
+                await route.fulfill(status=200, content_type="application/json",
+                                    body=json.dumps(payload, ensure_ascii=False))
+
+            await page.route("**/api/**", api_route)
+            await page.goto(f"{self.base}/static/index.html#/admin")
+            await page.wait_for_selector("text=这个页面需要更高权限")
+            self.assertEqual("无权访问 · 派活", await page.title())
+            await browser.close()
+
+    async def test_platform_page_order_and_heading(self):
+        """P6-1/P6-2:企业管理在最上面,开通申请其次,对客联系方式放最后;有和其他页一样的 H2 大标题。"""
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(playwright, "#/platform")
+            await page.wait_for_selector("#tm-indrow-2")
+            heading = page.locator("#main > .hubhead h2")
+            self.assertIn("平台运营", await heading.inner_text())
+            self.assertIn("开通申请", await page.locator("#main > .hubhead .sub").inner_text())
+            self.assertEqual(0, await page.locator("#main > .notice").count())
+            order = await page.evaluate("""() => [...document.querySelectorAll('#main h2, #main h3')]
+                .map(h => h.textContent.trim())""")
+            idx = lambda word: next(i for i, t in enumerate(order) if word in t)
+            self.assertEqual(0, idx("平台运营"))
+            self.assertLess(idx("企业管理"), idx("开通申请"))
+            self.assertLess(idx("开通申请"), idx("对客联系方式"))
+            self.assertEqual(len(order) - 1, idx("对客联系方式"))
+            self.assertIn("上面「企业管理」", await page.locator("#pf-applies").inner_text())
             self._assert_no_browser_errors(errors)
             await browser.close()
 
@@ -155,8 +209,13 @@ class PlatformAdminFrontendTests(unittest.IsolatedAsyncioTestCase):
             browser, page, errors = await self._open(
                 playwright, "#/team", delay={"/api/admin/overview": 1.5})
             await page.wait_for_selector("[data-team-platform-link]")
-            await page.evaluate("location.hash='#/admin'")
-            await page.wait_for_function("document.title === '后台 · 派活'", timeout=1000)
+            # O6-3:改 hash 后同一刻(不等渲染、不等请求)标签就换成目标页的名字
+            #(测试的监听器注册在 app.js 之后,拿到的就是 hashchange 刚派发完、任何请求返回之前的标题)
+            title = await page.evaluate("""() => new Promise(resolve => {
+                window.addEventListener('hashchange', () => resolve(document.title), {once: true});
+                location.hash = '#/admin';
+            })""")
+            self.assertEqual("后台 · 派活", title)
             self.assertEqual(0, await page.locator("#adm-features").count())  # 还在加载
             labels = await page.evaluate(
                 "[ROUTE_LABELS['staff-tasks'], ROUTE_LABELS.checklists, ROUTE_LABELS['store-rank'], ROUTE_LABELS.team]")

@@ -137,6 +137,52 @@ class TeamCreateMobileTests(unittest.IsolatedAsyncioTestCase):
             self._assert_no_browser_errors(errors)
             await browser.close()
 
+    async def test_create_form_resets_to_staff_each_time(self):
+        """O6-1:刚建完店长,再点「新建账号」回到默认「店员」,账号/密码空着;只有一家店才默认勾上。"""
+        one_store = {**TEAM, "store_branches": {"items": TEAM["store_branches"]["items"][:1], "truncated": False}}
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(
+                playwright, "#/team", {"/api/team": one_store},
+                post={"/api/team/users": {"id": 32, "username": "laozhang",
+                                          "initial_password": "k7mn2pqr8stv3wxy", "branch_ids": [3]}})
+            await page.get_by_role("button", name="➕ 新建账号").click()
+            await page.wait_for_selector("#tm-create")
+            self.assertTrue(await page.locator('input[name="tm-store"]').is_checked())
+            await page.locator('.tm-kind[data-k="manager"]').click()
+            await page.fill("#tm-u", "laozhang")
+            await page.locator("#tm-p-auto").uncheck()
+            await page.fill("#tm-p", "abc")
+            await page.locator("#tm-p-auto").check()
+            await page.locator("#tm-create-ok").click()
+            await page.wait_for_selector("#tm-sendcard")
+            self.assertEqual("manager", self.posts[0][1]["job_title"])
+            await page.get_by_role("button", name="我发好了").click()
+            await page.get_by_role("button", name="➕ 新建账号").click()
+            await page.wait_for_selector("#tm-create")
+            checked = await page.locator("#tm-create .tm-kind[aria-checked='true']").get_attribute("data-k")
+            self.assertEqual("staff", checked)
+            self.assertEqual("", await page.input_value("#tm-u"))
+            self.assertEqual("", await page.input_value("#tm-p"))
+            self.assertTrue(await page.locator("#tm-p-auto").is_checked())
+            self.assertTrue(await page.locator('input[name="tm-store"]').is_checked())
+            # 取消后再开也一样回到店员
+            await page.locator('.tm-kind[data-k="office"]').click()
+            await page.locator("#tm-create").get_by_role("button", name="取消", exact=True).click()
+            await page.get_by_role("button", name="➕ 新建账号").click()
+            self.assertEqual("staff", await page.locator(
+                "#tm-create .tm-kind[aria-checked='true']").get_attribute("data-k"))
+            self.assertFalse(await page.locator("#tm-office-part").is_visible())
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+        # 两家店:不替老板默认勾任何一家
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(playwright, "#/team", {"/api/team": TEAM})
+            await page.get_by_role("button", name="➕ 新建账号").click()
+            await page.wait_for_selector("#tm-create")
+            self.assertEqual(0, await page.locator('input[name="tm-store"]:checked').count())
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
     async def test_branch_form_uses_checkboxes_and_opens_industry(self):
         async with async_playwright() as playwright:
             browser, page, errors = await self._open(
