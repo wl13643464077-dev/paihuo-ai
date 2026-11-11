@@ -143,8 +143,8 @@
           : (t.has_any_task===false ? `<div class="empty">还没有人给您派活</div>` : `<div class="empty">🎉 今天的活都做完了</div>`))
       + (rest.length ? `<h2>已交 / 已做完</h2>`+rest.map(cardHtml).join("") : "")
       + `<div class="foot"><button type="button" class="btn" data-act="refresh">🔄 刷新</button>
-          <a class="btn" href="/?full=1">💻 完整版</a>
-          <button type="button" class="btn" data-act="logout">🚪 退出</button></div>`;
+          ${t.user && t.user.can_open_full ? `<a class="btn" href="/?full=1">💻 完整版</a>` : ""}</div>
+        <div class="foot-links"><button type="button" class="linkbtn" data-act="logout">退出登录</button></div>`;
   }
 
   /* ---------- 派给我的活:拍照交差 ---------- */
@@ -192,6 +192,8 @@
     if(!files.length) return;
     const list = S.pending[key] = S.pending[key] || [];
     const err = $("#err");
+    // 拍好了照片,之前那句「请先点『拍照』」就不该再挂着(店员会以为照片没传上)。
+    if(err) err.innerHTML = "";
     for(const f of files.slice(0, 9-list.length)){
       try{ const blob = await compress(f); list.push({blob, url:URL.createObjectURL(blob)}); }
       catch(e){ if(err) err.innerHTML = msg(e.message); }

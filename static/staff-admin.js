@@ -73,17 +73,20 @@
   function draftHtml(d, i){
     const branches = (SA.meta&&SA.meta.branches)||[];
     const b = branchOf(d.branch_id);
+    const fe = d.fieldErrors || {};
     return `<div class="sa-draft ${d.sent?"sa-sent":""}" data-sa-draft="${i}">
       <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap">
         <b>第 ${i+1} 件${d.sent?" · ✅ 已派出":""}</b>
         ${d.sent?"":`<button type="button" class="btn sm" onclick="PH_STAFF_ADMIN._drop(${i})" aria-label="删掉第 ${i+1} 件">删掉</button>`}</div>
       <div class="sa-grid">
         <div style="grid-column:1/-1"><label>要做什么</label><input maxlength="60" value="${h(d.title)}" ${d.sent?"disabled":""}
-          oninput="PH_STAFF_ADMIN._set(${i},'title',this.value)" placeholder="比如:把冷柜清洗一遍"></div>
-        <div><label>哪家店</label><select ${d.sent?"disabled":""} onchange="PH_STAFF_ADMIN._set(${i},'branch_id',this.value,true)">
-          <option value="">请选择门店</option>${branches.map(x=>`<option value="${x.id}" ${String(x.id)===String(d.branch_id)?"selected":""}>${h(x.name)}</option>`).join("")}</select></div>
+          ${fe.title?'aria-invalid="true"':""} oninput="PH_STAFF_ADMIN._set(${i},'title',this.value)" placeholder="比如：把冷柜清洗一遍">
+          ${fe.title?`<div class="field-err" role="alert">${h(fe.title)}</div>`:""}</div>
+        <div><label>哪家店</label><select ${d.sent?"disabled":""} ${fe.branch?'aria-invalid="true"':""} onchange="PH_STAFF_ADMIN._set(${i},'branch_id',this.value,true)">
+          <option value="">请选择门店</option>${branches.map(x=>`<option value="${x.id}" ${String(x.id)===String(d.branch_id)?"selected":""}>${h(x.name)}</option>`).join("")}</select>
+          ${fe.branch?`<div class="field-err" role="alert">${h(fe.branch)}</div>`:""}</div>
         <div><label>派给谁</label><select ${d.sent?"disabled":""} onchange="PH_STAFF_ADMIN._set(${i},'assignee_user_id',this.value)">
-          <option value="">先不指定(店里谁有空谁做)</option>${(b?b.members:[]).map(u=>`<option value="${u.id}" ${String(u.id)===String(d.assignee_user_id)?"selected":""}>${h(u.name)}(${h(u.title_label)})</option>`).join("")}</select></div>
+          <option value="">先不指定(店里谁有空谁做)</option>${(b?b.members:[]).map(u=>`<option value="${u.id}" ${String(u.id)===String(d.assignee_user_id)?"selected":""}>${h(u.name)}（${h(u.title_label)}）</option>`).join("")}</select></div>
         <div><label>截止时间</label><input type="datetime-local" value="${tsToLocal(d.due_at)}" ${d.sent?"disabled":""}
           onchange="PH_STAFF_ADMIN._set(${i},'due_at',this.value)"></div>
         <div><label>&nbsp;</label><label style="display:flex;gap:6px;align-items:center;min-height:42px;font-size:15px">
@@ -112,15 +115,35 @@
     else if(field==="assignee_user_id") d.assignee_user_id = value?+value:null;
     else d[field] = value;
     d.error = "";
+    // 改了哪一项就只清那一项的红字,别的没填的继续标着
+    if(d.fieldErrors){
+      if(field==="title" && String(value||"").trim()) delete d.fieldErrors.title;
+      if(field==="branch_id" && value) delete d.fieldErrors.branch;
+      if(field==="title"){
+        const el = document.querySelector(`[data-sa-draft="${i}"] input[maxlength="60"]`);
+        if(el && String(value||"").trim()){ el.removeAttribute("aria-invalid"); el.parentElement.querySelector(".field-err")?.remove(); }
+      }
+    }
     if(redraw) drawDrafts();
   }
   async function sendAll(){
     if(SA.sending) return;
     const todo = SA.drafts.filter(d=>!d.sent);
+    // 一次校验所有字段:每件活里没填的项都标红,不是只报第一个
     for(const d of todo){
-      d.error = !String(d.title||"").trim() ? "请写要做什么" : !d.branch_id ? "请选择门店" : "";
+      const fe = {};
+      if(!String(d.title||"").trim()) fe.title = "请写要做什么";
+      if(!d.branch_id) fe.branch = "请选择门店";
+      d.fieldErrors = fe;
+      d.error = "";
     }
-    if(todo.some(d=>d.error)){ drawDrafts(); toast("有几件还没填完,看红字"); return; }
+    const bad = todo.filter(d=>Object.keys(d.fieldErrors).length);
+    if(bad.length){
+      drawDrafts();
+      const first = document.querySelector('#sa-drafts [aria-invalid="true"]'); if(first) first.focus();
+      toast(bad.length>1 ? `有 ${bad.length} 件还没填完，看红字` : "还有没填完的，看红字");
+      return;
+    }
     SA.sending = true; drawDrafts();
     let ok = 0;
     for(const d of todo){
@@ -169,7 +192,7 @@
     const b = branchOf(t.branch_id);
     if(!b || !t.can_manage_hint) return "";
     return `<select onchange="PH_STAFF_ADMIN._assign(${t.id},this.value)" aria-label="改派" style="min-height:36px;font-size:14px;max-width:190px">
-      <option value="">${t.assignee_name?"改派给…":"指派给…"}</option>${b.members.filter(u=>u.id!==t.assignee_user_id).map(u=>`<option value="${u.id}">${h(u.name)}(${h(u.title_label)})</option>`).join("")}</select>`;
+      <option value="">${t.assignee_name?"改派给…":"指派给…"}</option>${b.members.filter(u=>u.id!==t.assignee_user_id).map(u=>`<option value="${u.id}">${h(u.name)}（${h(u.title_label)}）</option>`).join("")}</select>`;
   }
   function taskHtml(t){
     const rejected = t.status==="todo" && t.review_note && t.reviewed_at;
@@ -203,8 +226,14 @@
     const over = items.filter(t=>t.status==="todo").sort((a,b)=>(b.overdue-a.overdue)||((a.due_at||9e12)-(b.due_at||9e12)));
     const pick = s=>s==="todo"?over:items.filter(t=>t.status===s);
     const ended = items.filter(t=>["approved","cancelled","rejected"].includes(t.status));
+    const m = SA.meta || {};
+    const u = me();
+    const owner = u && (u.role==="owner"||u.role==="root");
+    // 「AI 先看照片」是审核时用的计费开关:放在「等您审核」标题旁边,一眼能看到也好找
+    const aiToggle = owner ? `<label class="sa-ai-toggle"><input type="checkbox" ${m.ai_check_enabled?"checked":""} onchange="PH_STAFF_ADMIN._aiToggle(this.checked)">
+      AI 先看照片${m.prices&&m.prices.staff_ai_check?`（每次 ${m.prices.staff_ai_check} 点）`:""}</label>` : "";
     let html = groups.map(([s, title])=>{ const list = pick(s);
-      return `<h3 style="margin-top:18px">${title}(${list.length})</h3>`
+      return `<h3 style="margin-top:18px">${title}（${list.length}）${s==="submitted"?aiToggle:""}</h3>`
         + (list.length ? list.map(taskHtml).join("") : `<div class="sub">暂时没有</div>`); }).join("");
     if(ended.length) html += `<details style="margin-top:16px"><summary><b>已结束(${ended.length})</b></summary>${ended.map(taskHtml).join("")}</details>`;
     if(SA.list&&SA.list.next_before_id) html += `<div class="actions"><button type="button" class="btn" onclick="PH_STAFF_ADMIN._more()">加载更多</button></div>`;
@@ -213,8 +242,6 @@
   function draw(){
     const main = $("#main"); if(!main) return;
     const m = SA.meta || {branches:[]};
-    const u = me();
-    const owner = u && (u.role==="owner"||u.role==="root");
     const price = (m.prices||{}).staff_parse;
     main.innerHTML = `<div class="hubhead"><h2>🧑‍🍳 派给店员</h2>
         <div class="sub">把活派给店里的真人,店员用手机拍照交差,AI 先帮您看一眼照片,最后您来定。</div></div>
@@ -231,15 +258,12 @@
         <div id="sa-drafts"></div>
       </div>
       <div class="card">
-        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <select onchange="PH_STAFF_ADMIN._filter('branch',this.value)" aria-label="按门店看" style="min-height:40px">
+        <div class="sa-bar">
+          <select onchange="PH_STAFF_ADMIN._filter('branch',this.value)" aria-label="按门店看">
             <option value="">全部门店</option>${m.branches.map(b=>`<option value="${b.id}" ${String(b.id)===String(SA.filter.branch)?"selected":""}>${h(b.name)}</option>`).join("")}</select>
-          <select onchange="PH_STAFF_ADMIN._filter('status',this.value)" aria-label="按状态看" style="min-height:40px">
+          <select onchange="PH_STAFF_ADMIN._filter('status',this.value)" aria-label="按状态看">
             ${[["","全部状态"],["submitted","等审核"],["todo","待做"],["approved","已通过"],["cancelled","已取消"]].map(([v,l])=>`<option value="${v}" ${v===SA.filter.status?"selected":""}>${l}</option>`).join("")}</select>
           <button type="button" class="btn sm" onclick="PH_STAFF_ADMIN._reload()">🔄 刷新</button>
-          ${owner?`<label style="display:flex;gap:6px;align-items:center;margin-left:auto;font-size:14px">
-            <input type="checkbox" style="width:auto" ${m.ai_check_enabled?"checked":""} onchange="PH_STAFF_ADMIN._aiToggle(this.checked)">
-            AI 先看照片${m.prices&&m.prices.staff_ai_check?`(每次 ${m.prices.staff_ai_check} 点)`:""}</label>`:""}
         </div>
         ${listHtml()}
       </div>`;

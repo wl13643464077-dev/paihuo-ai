@@ -139,6 +139,32 @@ class StaffPageTests(unittest.IsolatedAsyncioTestCase):
             self._assert_no_browser_errors(errors)
             await browser.close()
 
+    async def test_home_footer_and_photo_error_clears_after_picking(self):
+        async with async_playwright() as playwright:
+            browser, context, page, errors = await self._open(playwright)
+            # 店长/店员看不到「完整版」(会走进老板工作台);退出是底部的小文字链。
+            foot = await page.locator("#main").inner_text()
+            self.assertNotIn("完整版", foot)
+            self.assertEqual(1, await page.locator(".foot-links [data-act=logout]").count())
+            self.assertEqual(0, await page.locator(".btn[data-act=logout]").count())
+            await page.locator(".card").first.click()
+            await page.wait_for_selector("[data-act=shoot]")
+            await page.locator("[data-act=submit]").click()
+            self.assertIn("请先点「拍照」", await page.locator("#err").inner_text())
+            async with page.expect_file_chooser() as chooser:
+                await page.locator("[data-act=shoot]").click()
+            fc = await chooser.value
+            await fc.set_files({"name": "big.jpg", "mimeType": "image/jpeg", "buffer": _jpeg()})
+            await page.wait_for_selector(".thumb img")
+            self.assertEqual("", (await page.locator("#err").inner_text()).strip())
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+        owner_todo = {**TODO, "user": {**TODO["user"], "can_open_full": True}}
+        async with async_playwright() as playwright:
+            browser, context, page, errors = await self._open(playwright, owner_todo)
+            self.assertIn("完整版", await page.locator("#main").inner_text())
+            await browser.close()
+
     async def test_manager_reviews_and_checklist_views(self):
         async with async_playwright() as playwright:
             browser, context, page, errors = await self._open(playwright)
@@ -217,7 +243,7 @@ class StaffAdminPageTests(unittest.IsolatedAsyncioTestCase):
             await page.goto(f"{self.base}/static/index.html#/staff-tasks")
             await page.wait_for_selector("#sa-one")
             main = await page.locator("#main").inner_text()
-            self.assertIn("等您审核(1)", main)
+            self.assertIn("等您审核（1）", main)
             self.assertIn("货架还是空的", main)
             await page.fill("#sa-one", "人民路店明天中午前把冷柜清一遍拍照给我，火星店盘点饮料")
             await page.get_by_role("button", name="✨ 拆成任务(0.2 点)").click()
