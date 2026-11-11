@@ -25,6 +25,17 @@ OWNER = {
     "industries": ["restaurant"],
 }
 
+MEMBER = {
+    "id": 24,
+    "username": "xiaoli",
+    "role": "member",
+    "job_title": "staff",
+    "tenant": "浏览器测试门店",
+    "modules": ["restaurant"],
+    "all_modules": [],
+    "industries": ["restaurant"],
+}
+
 META = {
     "app": {"name": "派活", "slogan": "测试"},
     "stations": [],
@@ -74,16 +85,20 @@ class FrontendFlowsFeedbackTests(unittest.IsolatedAsyncioTestCase):
     _capture_unexpected_browser_errors = _browser.FrontendBrowserBehaviorTests._capture_unexpected_browser_errors
     _assert_no_browser_errors = _browser.FrontendBrowserBehaviorTests._assert_no_browser_errors
 
-    async def _open(self, playwright, *, balance=100, init_script="", width=1280, hash_="#/"):
+    async def _open(self, playwright, *, balance=100, init_script="", width=1280, hash_="#/", me=None):
         browser = await _launch_chromium(playwright, self.executable)
         page = await browser.new_page(viewport={"width": width, "height": 900})
         errors = self._capture_unexpected_browser_errors(page)
         await page.add_init_script(
             "window.EventSource = class { constructor(){} close(){} };" + init_script)
         payloads = _api(balance)
+        if me is not None:
+            payloads["/api/auth/me"] = me
+        self.api_hits = []
 
         async def api_route(route):
             path = urlparse(route.request.url).path
+            self.api_hits.append(path)
             await route.fulfill(status=200, content_type="application/json",
                                 body=json.dumps(payloads.get(path, {}), ensure_ascii=False))
 
@@ -264,6 +279,99 @@ class FrontendFlowsFeedbackTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(info["inAcct"])
             self.assertGreaterEqual(info["gap"], 0)
             self.assertLess(info["gap"], 60)
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_member_sees_no_company_balance_and_no_billing_page(self):
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(playwright, me=MEMBER, hash_="#/mine")
+            await page.wait_for_function("document.querySelector('#main .hubgrid')")
+            mine = await page.evaluate(
+                """() => ({who: document.querySelector('#nav .nav-who')?.textContent,
+                  card: document.querySelector('#main .mine-who')?.textContent,
+                  cards: [...document.querySelectorAll('#main .hubcard .hc-t')].map(x=>x.textContent)})""")
+            self.assertEqual("浏览器测试门店 · xiaoli", mine["who"])
+            self.assertNotIn("余额", mine["card"])
+            self.assertNotIn("套餐", mine["cards"])
+            await page.evaluate("location.hash='#/'")
+            await page.wait_for_function("document.querySelector('.today-hello')")
+            self.assertEqual(0, await page.locator(".today-money").count())
+            await page.evaluate("location.hash='#/billing'")
+            await page.wait_for_function("document.querySelector('#billing-owner-only')")
+            text = await page.locator("#main").inner_text()
+            self.assertIn("套餐和点数由老板管理。", text)
+            self.assertNotIn("/api/billing", self.api_hits)
+            self.assertNotIn("/api/purchases", self.api_hits)
+            # 「点数不够」的按钮逻辑对成员照常可用
+            note = await page.evaluate("costNoteText(12)")
+            self.assertEqual("本次 12 点 · 余额 100 点", note)
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_owner_still_sees_balance_and_billing_card(self):
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(playwright, hash_="#/mine")
+            await page.wait_for_function("document.querySelector('#main .hubgrid')")
+            mine = await page.evaluate(
+                """() => ({card: document.querySelector('#main .mine-who')?.textContent,
+                  cards: [...document.querySelectorAll('#main .hubcard .hc-t')].map(x=>x.textContent)})""")
+            self.assertIn("余额 100 点", mine["card"])
+            self.assertIn("套餐", mine["cards"])
+            await page.evaluate("location.hash='#/'")
+            await page.wait_for_function("document.querySelector('.today-money')")
+            self.assertIn("余额 100 点", await page.locator(".today-money").inner_text())
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def _forced_change(self, playwright, me):
+        browser = await _launch_chromium(playwright, self.executable)
+        page = await browser.new_page(viewport={"width": 390, "height": 800})
+        errors = self._capture_unexpected_browser_errors(page)
+        await page.add_init_script("window.EventSource = class { constructor(){} close(){} };")
+        payloads = _api(100)
+        current = dict(me, must_change_password=True, password_change_needs_old=False)
+
+        async def api_route(route):
+            path = urlparse(route.request.url).path
+            if path == "/api/auth/me":
+                payload = current
+            elif path == "/api/auth/password":
+                current["must_change_password"] = False
+                payload = {"ok": True}
+            else:
+                payload = payloads.get(path, {})
+            await route.fulfill(status=200, content_type="application/json",
+                                body=json.dumps(payload, ensure_ascii=False))
+
+        async def staff_route(route):
+            await route.fulfill(status=200, content_type="text/html",
+                                body="<!doctype html><div id='staff-home'>店员手机版</div>")
+
+        await page.route("**/api/**", api_route)
+        await page.route("**/staff", staff_route)
+        await page.goto(f"{self.base}/static/index.html?full=1")
+        await page.wait_for_function(
+            "document.querySelector('#main')?.textContent.includes('请先设置您自己的密码')")
+        await page.locator("#forced-pw-new").fill("FreshPassword456!")
+        await page.locator("#forced-pw-confirm").fill("FreshPassword456!")
+        await page.locator("#forced-pw-confirm").press("Enter")
+        return browser, page, errors
+
+    async def test_forced_password_change_sends_store_staff_back_to_phone_app(self):
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._forced_change(
+                playwright, dict(MEMBER, prefers_staff_home=True))
+            await page.wait_for_selector("#staff-home", timeout=5000)
+            self.assertEqual("/staff", urlparse(page.url).path)
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_forced_password_change_keeps_owner_in_workspace(self):
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._forced_change(
+                playwright, dict(OWNER, prefers_staff_home=False))
+            await page.wait_for_function("document.querySelector('.today-hello')", timeout=5000)
+            self.assertEqual("/static/index.html", urlparse(page.url).path)
             self._assert_no_browser_errors(errors)
             await browser.close()
 

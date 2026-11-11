@@ -214,8 +214,7 @@ class FrontendNavMobileTests(unittest.IsolatedAsyncioTestCase):
                 "[...document.querySelectorAll('#main .hubcard .hc-t')].map(x=>x.textContent)"
             )
             self.assertIn("我的资料库", cards)
-            self.assertIn("套餐", cards)
-            for owner_only in ("团队与权限", "企业档案", "回收站", "员工进修管理", "后台"):
+            for owner_only in ("套餐", "团队与权限", "企业档案", "回收站", "员工进修管理", "后台"):
                 self.assertNotIn(owner_only, cards)
             self.assertTrue(await page.locator("#main button", has_text="退出登录").is_visible())
             self._assert_no_browser_errors(errors)

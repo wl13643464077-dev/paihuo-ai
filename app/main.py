@@ -1811,6 +1811,8 @@ def auth_me(request: Request = None):
             # 本企业授权的行业 key(平台租户/root 为空=不限);前端据此把自己行业排在前面。
             "industries": auth.tenant_industries(),
             "must_change_password": bool(u.get("must_change_password")),
+            # 已分门店的店员/店长默认用手机版 /staff;首登改密后前端据此跳回去。
+            "prefers_staff_home": stafftask.prefers_staff_home(u),
             # 首登改密是否还要再输当前密码:由服务端按会话判断,前端只据此决定显示。
             "password_change_needs_old": not _forced_change_without_old(u, request)}
 
