@@ -5,7 +5,7 @@
    依赖 app.js 的全局工具:api / esc / toast / copyText / render / uiConfirm / passwordPolicyError / ME。 */
 (function(){
   "use strict";
-  const S = {state:null, loading:null, editing:false, generating:false, industries:null, expand:false, reopened:false, sms:null};
+  const S = {state:null, loading:null, editing:false, generating:false, industries:null, expand:false, reopened:false, sms:null, storeMade:false};
   const me = ()=>{ try{ return typeof ME!=="undefined" ? ME : null; }catch(_){ return null; } };
   const h = s=>{ try{ return esc(s); }catch(_){ return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); } };
   const say = msg=>{ try{ toast(msg); }catch(_){ alert(msg); } };
@@ -151,7 +151,7 @@
     let setup={};
     try{ setup=(typeof STATE!=="undefined"&&STATE&&STATE.setup)||{}; }catch(_){}
     const items=[
-      {done:false, icon:"🏪", t:"建门店", d:"录好门店，店长拍照就能巡店", href:"#/store"},
+      {done:!!setup.store||S.storeMade, icon:"🏪", t:"建门店", d:"录好门店，店长拍照就能巡店", href:"#/store"},
       {done:!!setup.first_job, icon:"📋", t:"派第一个活", d:"一句话说清要什么，数字员工去做", href:"#/new"},
       {done:!!setup.wechat, icon:"💬", t:"绑定微信", d:"做完了微信里直接收通知", href:"#/channels"},
     ];
@@ -182,6 +182,7 @@
       ${stepBox(1,"选您的行业",stateOf(1,s.industry),industryBody(st))}
       ${stepBox(2,"填一下店铺基本信息",stateOf(2,s.store),storeBody(st))}
       ${stepBox(3,"一键写今天的 3 条文案",stateOf(3,s.posts),postsBody(st))}
+      ${st.done?`<div class="ph-step ph-now"><div class="ph-step-h">✅ 上手完成。接下来 3 件事：</div><div style="margin-top:10px">${nextSteps()}</div></div>`:""}
       ${pwHint(st)}
       <div class="ph-foot"><span class="sub">这张卡片只有老板账号能看到</span>
         <button type="button" class="ph-link" onclick="PH_ONBOARDING.dismiss()">先不用了,关掉</button></div>
@@ -217,7 +218,37 @@
       S.editing=false;
       say("店铺信息已保存,数字员工都记住了");
       await load(true);
+      await offerFirstStore(body);
     }catch(e){ say(e.message); btn.disabled=false; btn.textContent=t; }
+  }
+  // 第 2 步填的店名、城市和「新建门店」是同一份信息:企业还没有门店时问一句,点一下就建好第一家。
+  async function firstStoreMissing(){
+    try{
+      const r=await api("/inspections?limit=1",{routeScoped:false});
+      const s=r&&r.summary;
+      // 拿不准(没开巡店、接口没给数)就不问,宁可少问也不重复建店
+      return !!s && s.availability!==false && typeof s.total_branches==="number" && s.total_branches===0;
+    }catch(_){ return false; }
+  }
+  async function offerFirstStore(body){
+    if(!body||!body.name||!(await firstStoreMissing())) return;
+    const label=[body.name,body.city].filter(Boolean).join(" · ");
+    let ok=false;
+    try{
+      ok=await uiConfirm(`「${label}」。建好后店长拍照就能巡店，派活、开闭店清单也都按门店来；以后可以在「门店 → 我的门店」改名。`,
+        {title:"用这个名字建第一家门店？",confirmText:"建这家门店",cancelText:"先不建",danger:false});
+    }catch(_){ return; }
+    if(!ok) return;
+    try{
+      await api("/inspections/branches",{method:"POST",body:{name:body.name,region:body.city||""},routeScoped:false});
+      S.storeMade=true;
+      try{ if(STATE&&STATE.setup) STATE.setup.store=true; }catch(_){}
+      try{ STORE_TODAY={key:"",at:0,data:null}; }catch(_){}
+      say(`第一家门店「${body.name}」已建好`);
+      // 在「今天」页时把门店卡一起刷新;别的页面下次进来自然是新的
+      const onToday=!location.hash||location.hash==="#/"||location.hash==="#";
+      if(onToday){ try{ await render(); }catch(_){ paint(); } } else paint();
+    }catch(e){ say(e.message); }
   }
   async function generate(){
     if(S.generating) return;
@@ -241,6 +272,7 @@
       if(S.state) S.state.show=false;
       S.reopened=false;
       paint();
+      say("已关掉。随时可以在「我的 → 新手引导重看」找回来");
     }catch(e){ say(e.message); }
   }
   async function changePassword(btn){

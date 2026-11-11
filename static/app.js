@@ -625,7 +625,9 @@ function uiPrefsBoot(){
   const status=uiPrefGet("tc_status"), kind=uiPrefGet("tc_kind"), days=Number(uiPrefGet("boss_days"));
   if(typeof status==="string"&&/^[a-z_]{1,24}$/.test(status)) TC_STATUS=status;
   if(typeof kind==="string"&&/^[a-z_]{1,24}$/.test(kind)) TC_KIND=kind;
-  if([7,30,60,90].includes(days)) BOSS_DASH_FILTER.days=days;
+  // 周期统一成 7/30/90 天;上一版存过的 60 天按 90 天恢复
+  if([7,30,90].includes(days)) BOSS_DASH_FILTER.days=days;
+  else if(days===60) BOSS_DASH_FILTER.days=90;
   const industry=uiPrefGet("inspection_industry");
   if(!INSPECTION_INDUSTRY&&typeof industry==="string"&&/^[a-z0-9_-]{1,64}$/i.test(industry)) INSPECTION_INDUSTRY=industry;
 }
@@ -797,9 +799,17 @@ function nav(){
   const balance = ME&&STATE&&seesCompanyMoney()&&STATE.balance!=null
     ? ` · 余额 ${Math.round(Number(STATE.balance)||0)} 点` : "";
   const who = ME ? `${esc(ME.tenant||"")}${ME.tenant?" · ":""}${esc(ME.username||"")}${balance}` : "";
+  // 手机顶栏不放红色「退出」(「我的」页底部有),换成企业名,点开进「我的」;没有「我的」入口的账号仍保留退出
+  const org = ME&&ME.tenant ? `<a class="nav-org" href="#/mine" title="${esc(ME.tenant)} · ${esc(ME.username||"")}">${esc(ME.tenant)}</a>` : "";
+  // 在线圆点收进账号区:先摘下来,重画后再放回去(状态不丢)
+  let conn = $("#conn"); if(conn) conn.remove();
   $("#nav").innerHTML = items.map(x=>link(x,"nav-top")).join("")
-    + `<span class="nav-acct">${who?`<a class="nav-who" href="#/mine" title="${who}">${who}</a>`:""}`
+    + `<span class="nav-acct${items.some(x=>x.g.key==="mine")?"":" keep-out"}">${who?`<a class="nav-who" href="#/mine" title="${who}">${who}</a>`:""}${org}`
     + `<button type="button" class="nav-action navlogout" onclick="logout()" title="${ME?esc(ME.tenant)+" · "+esc(ME.username):""}">🚪 退出</button></span>`;
+  if(!conn){ conn=document.createElement("span"); conn.id="conn"; conn.className="nav-conn"; conn.setAttribute("role","status"); }
+  const acct = $("#nav .nav-acct");
+  acct.insertBefore(conn, acct.querySelector(".navlogout"));
+  connPaint(conn);
   const bar = $("#tabbar");
   if(bar) bar.innerHTML = items.map(x=>link(x,"tab")).join("");
   document.body.classList.toggle("has-tabbar", !!bar && items.length>0);
@@ -854,10 +864,14 @@ async function storeHub(){
   catch(e){ if(e?.name==="NavigationAbort") throw e; html=`<div class="sub">门店列表暂时读不到，请稍后刷新。</div>`; }
   const box=$("#my-stores"); if(box) box.innerHTML=html;
 }
-/* 「门店」页顶部的「我的门店」:几家店、新建、批量导入、前几家店名 */
+/* 「门店」页顶部的「我的门店」:几家店、新建、批量导入、前几家店名(点店名看这家店的巡店记录),
+   「管理」展开后可改名、停用 */
+let MY_STORES_CTX={industry:"",manage:false};
 async function myStoresBlock(){
   const meta=await api("/inspections/meta"),industry_key=String(meta?.industry_key||"");
-  const q=new URLSearchParams({industry_key,limit:"7"});
+  const manage=!!MY_STORES_CTX.manage&&MY_STORES_CTX.industry===industry_key;
+  MY_STORES_CTX={industry:industry_key,manage};
+  const q=new URLSearchParams({industry_key,limit:manage?"50":"7"});
   const [found,list]=await Promise.all([
     api(`/inspections/branches/search?${q}`).catch(e=>{ if(e?.name==="NavigationAbort") throw e; return {items:[]}; }),
     api(`/inspections?${new URLSearchParams({industry_key,limit:"1"})}`).catch(e=>{ if(e?.name==="NavigationAbort") throw e; return null; }),
@@ -867,11 +881,61 @@ async function myStoresBlock(){
   const canManage=canCreateStore()||!!meta?.permissions?.can_manage_branches;
   const head=`<div class="my-stores-head"><h2>🏪 我的门店</h2><span class="sub" data-my-stores-count>${total?`共 ${total} 家`:"还没有门店"}</span>
     ${canManage?`<span class="my-stores-acts"><button type="button" class="btn pri sm" onclick="openStoreForm()">＋ 新建门店</button>
-      <button type="button" class="btn sm" onclick="openStoreImport()">⇩ 批量导入</button></span>`:""}</div>`;
+      <button type="button" class="btn sm" onclick="openStoreImport()">⇩ 批量导入</button>
+      ${items.length?`<button type="button" class="btn sm" data-my-stores-manage aria-expanded="${manage?"true":"false"}" onclick="myStoresManage()">${manage?"收起管理":"⚙ 管理"}</button>`:""}</span>`:""}</div>`;
   if(!items.length) return head+noStoreEmptyState("还没有门店。建好门店，店长拍照就能巡店，清单、派活也都按门店来。",canManage);
+  const href=esc(inspectionRecordHash(0,industry_key));
+  if(manage&&canManage){
+    return head+`<div class="my-stores-manage" data-my-stores-manage-list>
+      <div class="sub">改名后，巡店记录、派活和清单里都会显示新名字；停用的门店不再出现在可巡门店里，历史记录仍可查看。</div>
+      ${items.map(b=>`<div class="my-store-row"><span class="my-store-row-name"><b>${esc(b.name||"未命名门店")}</b>${b.region?`<span class="sub">${esc(b.region)}</span>`:""}</span>
+        <button type="button" class="btn sm" onclick="myStoreRename(${Number(b.id)},${cp(String(b.name||""))})">改名</button>
+        <button type="button" class="btn sm bad" onclick="myStoreDisable(${Number(b.id)},${cp(String(b.name||""))})">停用</button></div>`).join("")}
+      ${total>items.length?`<div class="sub">只列出前 ${items.length} 家，其余请到 <a href="${href}" style="text-decoration:underline">巡店页</a> 搜索。</div>`:""}</div>`;
+  }
   const shown=items.slice(0,6);
-  return head+`<div class="my-stores-list">${shown.map(b=>`<span class="my-store-chip${b.active===false?" off":""}">${esc(b.name||"未命名门店")}${b.region?`<span class="sub">${esc(b.region)}</span>`:""}</span>`).join("")}
-    ${(items.length>6||total>6)?`<a class="btn sm" href="#/inspections">全部门店 ›</a>`:""}</div>`;
+  return head+`<div class="my-stores-list">${shown.map(b=>`<a class="my-store-chip${b.active===false?" off":""}" href="${href}" onclick="myStoreOpen(${Number(b.id)},${cp(industry_key)})" title="看「${esc(b.name||"未命名门店")}」的巡店记录">${esc(b.name||"未命名门店")}${b.region?`<span class="sub">${esc(b.region)}</span>`:""}<span class="my-store-go" aria-hidden="true">›</span></a>`).join("")}
+    ${(items.length>6||total>6)?`<a class="btn sm" href="${href}">全部门店 ›</a>`:""}</div>`;
+}
+/* 点店名:进巡店页并只看这家店(和巡店页里选门店是同一个筛选) */
+function myStoreOpen(branchId,industry){
+  const key=String(industry||"");
+  if(key&&key!==INSPECTION_INDUSTRY) inspectionResetScope(key);
+  INSPECTION_BRANCH_ID=Math.max(0,Number(branchId)||0);INSPECTION_REGION=null;
+  INSPECTION_CURSOR_STACK=[null];INSPECTION_CURSOR_PAGE=0;INSPECTION_DETAIL=null;
+}
+async function myStoresRefresh(){
+  const box=$("#my-stores"); if(!box) return;
+  try{ box.innerHTML=await myStoresBlock(); }
+  catch(e){ if(e?.name==="NavigationAbort") return; toast(e.message||"门店列表暂时读不到，请稍后刷新"); }
+}
+async function myStoresManage(){ MY_STORES_CTX.manage=!MY_STORES_CTX.manage; await myStoresRefresh(); }
+async function myStoreRename(branchId,name){
+  const next=await uiPrompt({title:"给门店改名",message:`现在叫「${name}」。`,value:name,label:"门店名称",
+    confirmText:"保存",requiredMessage:"请填写门店名称",
+    validate:v=>String(v).trim().length>80?"门店名称不能超过 80 个字":""});
+  if(next===null||next===undefined) return;
+  const clean=String(next).trim();
+  if(!clean||clean===name) return;
+  const body={name:clean}; if(MY_STORES_CTX.industry) body.industry_key=MY_STORES_CTX.industry;
+  try{
+    await api(`/inspections/branches/${Number(branchId)}`,{method:"PATCH",body,routeScoped:false});
+    STORE_TODAY={key:"",at:0,data:null};
+    toast(`已改名为「${clean}」`);
+    await myStoresRefresh();
+  }catch(e){ toast(e.message); }
+}
+async function myStoreDisable(branchId,name){
+  if(!await uiConfirm(`停用后「${name}」不再出现在可巡门店里，它的未闭环整改也不再计入统计；历史巡店记录仍可查看。`,{title:"停用门店",confirmText:"确定停用"})) return;
+  const body={active:false}; if(MY_STORES_CTX.industry) body.industry_key=MY_STORES_CTX.industry;
+  try{
+    await api(`/inspections/branches/${Number(branchId)}`,{method:"PATCH",body,routeScoped:false});
+    STORE_TODAY={key:"",at:0,data:null};
+    if(Number(INSPECTION_CAPTURE_BRANCH_ID)===Number(branchId)) INSPECTION_CAPTURE_BRANCH_ID=0;
+    if(Number(INSPECTION_BRANCH_ID)===Number(branchId)) INSPECTION_BRANCH_ID=0;
+    toast(`「${name}」已停用`);
+    await myStoresRefresh();
+  }catch(e){ toast(e.message); }
 }
 /* 「批量导入」:进巡店页并直接展开导入区(复用巡店页已有的导入工作台) */
 function openStoreImport(){
@@ -1177,6 +1241,17 @@ function scheduleSseReconnect(delayOverride=null){
     sse();
   },wait);
 }
+/* 实时连接状态:顶栏账号区里的一个小圆点(在线=绿点;断开时多显示「重连中」三个字) */
+let CONN_STATE="";
+function connPaint(el){
+  if(!el) return;
+  const online=CONN_STATE==="online", retry=CONN_STATE==="retry";
+  const label=online?"在线":retry?"重连中，稍等会自动恢复":"正在连接";
+  el.textContent=retry?"● 重连中":"●";
+  el.style.color=online?"#7fe0b0":retry?"#ff9d9f":"#cbb994";
+  el.title=label; el.setAttribute("aria-label",label);
+}
+function connSet(state){ CONN_STATE=state; connPaint($("#conn")); }
 function sse(){
   if(document.hidden) return;
   stopSse();
@@ -1189,13 +1264,13 @@ function sse(){
     SSE_RETRY_N=0;
     SSE_LAST_EVENT_AT=Date.now();
     startSseWatchdog();
-    const conn=$("#conn"); if(conn){ conn.textContent="● 在线"; conn.style.color="#7fe0b0"; }
+    connSet("online");
     refreshAuthoritativeState();
   };
   es.onerror = ()=>{
     if(SSE!==es) return;
     stopSse(false);
-    const conn=$("#conn"); if(conn){ conn.textContent="● 重连中"; conn.style.color="#ff9d9f"; }
+    connSet("retry");
     scheduleSseReconnect();
   };
   es.onmessage = e=>{
@@ -4981,7 +5056,8 @@ function metaCells(m){
 /* ---------- V51:行业老板决策看板 ---------- */
 let BOSS_DASH_SCOPES=null, BOSS_DASH_DATA=null, BOSS_DASH_REQUEST_SEQ=0,
   BOSS_EMPLOYEE_DETAIL=null,BOSS_EMPLOYEE_REQUEST_SEQ=0;
-let BOSS_DASH_FILTER={tenantId:0,industryKey:"",days:30};
+let BOSS_DASH_FILTER={tenantId:0,industryKey:"",days:7};
+const BOSS_DASH_PERIODS=[7,30,90];
 function bossDashDuration(value){
   if(value===null||value===undefined||value==="")return "—";
   const n=Number(value);if(!Number.isFinite(n)||n<0)return "—";
@@ -5453,7 +5529,7 @@ function meetingMemberLabel(member){
 }
 function bossDashboardScopeSnapshot(){
   return {tenantId:Number(BOSS_DASH_FILTER.tenantId)||0,
-    industryKey:String(BOSS_DASH_FILTER.industryKey||""),days:Number(BOSS_DASH_FILTER.days)||30};
+    industryKey:String(BOSS_DASH_FILTER.industryKey||""),days:Number(BOSS_DASH_FILTER.days)||7};
 }
 function bossDashboardRequestIsCurrent(request){
   const scope=bossDashboardScopeSnapshot(), expected=request?.scope||{};
@@ -5490,29 +5566,35 @@ function bossDashboardDraw(){
   const industries=tenant.industries||[],tasks=d.task_metrics||{},eff=d.efficiency_metrics||{},risk=d.risk_metrics||{},ins=d.inspection_metrics||{},inspectionBacklog=ins.backlog||{},biz=d.business_metrics||{},bizMetrics=biz.metrics||[];
   const trend=(d.trend||[]).slice(-14), employees=d.employees||[],recent=d.recent_activity||[];
   const selectStyle="min-width:150px;width:auto";
+  // 行业显示短名(「餐饮」而不是「餐饮产业部」);接口没给短名时退回全称
+  const industryLabel=(industries.find(i=>i.key===scope.industry_key)||{}).short_label||scope.industry_name||"";
+  // 员工表只列本期有数据的人,其余收成一行「另有 N 位本期没干活」
+  const bossEmpActive=e=>["tasks","completed","waiting","failed","refunded","inspection_visits"].some(k=>Number(e[k])>0);
+  const activeEmployees=employees.filter(bossEmpActive), idleEmployees=employees.filter(e=>!bossEmpActive(e));
   $("#main").innerHTML=`<div class="card" style="background:linear-gradient(120deg,#172126,#24343b);color:#fff;border-color:#172126">
-    <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap"><div style="flex:1;min-width:250px"><div class="sub" style="color:#b8c9c4">${esc(scope.industry_emoji||"")} ${esc(scope.industry_name||"")} · ${esc(scope.tenant_name||"")}</div>
-      <h2 style="margin:4px 0;color:#fff">老板看板</h2><div style="color:#b8c9c4;font-size:13px">老板经营驾驶舱</div><div style="color:#d9e4df">先看风险，再看员工产出与执行效率；所有数字都来自派活任务和巡店记录。</div></div>
+    <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap"><div style="flex:1;min-width:250px"><div class="sub" style="color:#b8c9c4">${esc(scope.industry_emoji||"")} ${esc(industryLabel)} · ${esc(scope.tenant_name||"")}</div>
+      <h2 style="margin:4px 0;color:#fff">老板看板</h2><div style="color:#d9e4df">先看风险，再看员工产出与执行效率；所有数字都来自派活任务和巡店记录。</div></div>
       ${scopes.can_cross_tenant?`<div><label style="color:#d9e4df;margin-top:0">企业</label><select style="${selectStyle}" onchange="bossDashTenant(this.value)">${tenants.map(t=>`<option value="${t.id}" ${Number(t.id)===Number(tenant.id)?"selected":""}>${esc(t.name)}</option>`).join("")}</select></div>`:""}
       <div><label style="color:#d9e4df;margin-top:0">行业</label><select style="${selectStyle}" onchange="bossDashIndustry(this.value)">${industries.map(i=>`<option value="${esc(i.key)}" ${i.key===scope.industry_key?"selected":""}>${esc(i.emoji||"")} ${esc(i.short_label||i.name)}</option>`).join("")}</select></div>
-      <div><label style="color:#d9e4df;margin-top:0">周期</label><select style="width:auto" onchange="bossDashDays(this.value)">${[7,30,60,90].map(x=>`<option value="${x}" ${Number(period.days)===x?"selected":""}>近${x}天</option>`).join("")}</select></div></div></div>
+      <div><label style="color:#d9e4df;margin-top:0">周期</label><select style="width:auto" onchange="bossDashDays(this.value)">${BOSS_DASH_PERIODS.map(x=>`<option value="${x}" ${Number(period.days)===x?"selected":""}>近${x}天</option>`).join("")}</select></div></div></div>
   <div class="grid3" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-bottom:14px">
     ${[["本期新建",bossDashNumber(tasks.total),"按任务创建时间"],["本期交付",bossDashNumber(tasks.completed),"按完成时间归期"],["派的活完成了多少",bossDashPct(tasks.completion_rate),"这段时间派的活，现在完成了多少"],["正在执行",bossDashNumber(tasks.active),"本期新建中的在办任务"],["失败 / 退款",`${bossDashNumber(tasks.failed)} / ${bossDashNumber(tasks.refunded)}`,"失败按终态时间，退款按结算记录"],["平均交付",bossDashDuration(eff.average_cycle_seconds),"本期完成任务周期"],isBoss()?["本期模型花费",`$${bossDashNumber(eff.cost_usd,2)}`,`点数消耗 ${bossDashNumber(eff.billing_points,1)} · tokens ${bossDashNumber(eff.tokens)}`]:["本期花费",`${bossDashNumber(eff.billing_points,1)} 点`,"这段时间派活消耗的点数"]].map(([l,v,n])=>`<div class="topic" style="margin:0"><div class="sub">${l}</div><div style="font-size:26px;font-weight:900;margin:4px 0">${v}</div><div class="sub">${n}</div></div>`).join("")}</div>
   <div class="row" style="align-items:stretch"><div class="card" style="flex:1;min-width:290px;margin:0"><h3 style="margin-top:0">🚨 先处理清单 <span class="sub" style="font-weight:400">（前两项是到现在还没处理的，其余只算这段时间）</span></h3>
     ${[["超24小时仍在跑（到现在还没处理的）",risk.stale_active_tasks],["等您拍板（到现在还没处理的）",risk.waiting_for_decision],["本期失败任务",risk.failed_tasks],["本期已退款任务",risk.refunded_tasks],["高风险巡店问题",risk.critical_inspection_issues],["逾期整改",risk.overdue_inspection_actions]].map(([l,v])=>`<div style="display:flex;justify-content:space-between;border-bottom:1px solid #eadfc4;padding:9px 0"><span>${l}</span><b style="color:${Number(v)>0?"#b4292f":"#28734f"}">${v===null||v===undefined?"未接入":v}</b></div>`).join("")}
   </div><div class="card" style="flex:2;min-width:330px;margin:0"><h3 style="margin-top:0">🏪 巡店执行</h3>${ins.availability?`<div class="grid3" style="grid-template-columns:repeat(3,1fr)">
     ${[["本期巡店",bossDashNumber(ins.visits)],["本期平均分",bossDashNumber(ins.average_score,1)],["还没解决的问题",bossDashNumber(inspectionBacklog.open_issues)],["还没解决的高风险问题",bossDashNumber(inspectionBacklog.critical_issues)],["正在整改",bossDashNumber(inspectionBacklog.open_actions)],["整改已逾期",bossDashNumber(inspectionBacklog.overdue_actions)]].map(([l,v])=>`<div><b style="font-size:21px">${v}</b><div class="sub">${l}</div></div>`).join("")}</div><div class="sub" style="margin-top:8px">“本期”两项只算上方选的时间段；其余四项是到现在还没处理的，不管是哪天发现的。</div>${d.can_open_records?`<div class="actions"><a class="btn sm pri" href="${inspectionRecordHash(0,scope.industry_key)}">打开巡店工作台</a></div>`:`<div class="sub" style="margin-top:8px">跨企业看板仅供查看，不提供可写工作台跳转。</div>`}`:`<div class="notice violet"><b>巡店数据源暂不可用</b><div class="sub">系统已显式标记“未接入”，不会把缺失数据伪装成 0。原因码：${esc(ins.reason_code||"inspection_schema_unavailable")}</div></div>`}</div></div>
-  <div class="card"><h3 style="margin-top:0">📈 ${esc(scope.industry_name||"本行业")} 经营指标</h3><div class="sub" style="margin-bottom:10px">这些是该行业老板需要关注的经营卡。没有接入可信业务数据源时明确标记“待接入”，不用员工任务数伪造经营数。</div>
+  <div class="card"><h3 style="margin-top:0">📈 ${esc(industryLabel||"本行业")} 经营指标</h3><div class="sub" style="margin-bottom:10px">这些是该行业老板需要关注的经营卡。没有接入可信业务数据源时明确标记“待接入”，不用员工任务数伪造经营数。</div>
     ${bizMetrics.length?`<div class="grid3" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr))">${bizMetrics.map(metric=>`<div class="topic" style="margin:0"><div class="sub">${esc(metric.label)}</div><b style="font-size:21px">${metric.availability?`${bossDashNumber(metric.value,2)} ${esc(metric.unit||"")}`:"待接入"}</b><div class="sub">所需数据：${esc(metric.source_required||"业务系统")}</div></div>`).join("")}</div>`:`<div class="notice violet">当前行业指标目录待配置。</div>`}</div>
   <div class="card"><h3 style="margin-top:0">📦 最近交付 / 动态</h3><div class="sub" style="margin-bottom:8px">仅展示员工、状态、轮次和时间，不在看板里暴露业务正文。</div>${recent.length?recent.map(item=>{const rawRoute=safeRouteUrl(item.target_route),route=inspectionScopedRoute(rawRoute,scope.industry_key),kind=item.kind==="inspection"?"巡店":"任务",carry=item.kind==="inspection"?` onclick="bossCarryInspectionIndustry(${cp(scope.industry_key)})"`:"";return `<div style="display:flex;gap:8px;align-items:center;border-top:1px solid #eadfc4;padding:9px 0;flex-wrap:wrap"><span class="pill ${bossStatusClass(item.status_group)}">${esc(bossStatusLabel(item.status))}</span><span class="tag">${kind}</span><b>${esc(item.employee_name||"员工")}</b>${item.revision_no?`<span class="sub">第 ${bossDashNumber(item.revision_no)} 轮</span>`:""}<span class="sub" style="margin-left:auto">${item.occurred_at?new Date(item.occurred_at*1000).toLocaleString("zh-CN"):"—"}</span>${route?`<a class="btn sm" href="${esc(route)}"${carry}>查看</a>`:""}</div>`;}).join(""):`<div class="empty">当前周期还没有交付动态。</div>`}</div>
-  <div class="card"><h3 style="margin-top:0">🧑‍💼 每个员工做了什么、效率怎么样</h3>${employees.length?`<div class="dimwrap"><table class="dimtable"><thead><tr><th>员工</th><th>本期新建</th><th>本期交付</th><th>派的活完成了多少</th><th>平均周期</th><th>等待/失败/退款</th><th>巡店</th><th></th></tr></thead><tbody>${employees.map(e=>`<tr><td><b>${esc(e.name)}</b>${e.employee_kind==="inspection"?`<div class="sub">区域巡店</div>`:`<div class="sub">${esc(employeeIdentityLabel(e))}${isBoss()&&Number(e.config_revision)>0?` · 配置 r${Number(e.config_revision)}`:""}</div>`}</td><td>${bossDashNumber(e.tasks)}</td><td>${bossDashNumber(e.completed)}</td><td>${bossDashPct(e.completion_rate)}</td><td>${bossDashDuration(e.average_cycle_seconds)}</td><td>${bossDashNumber(e.waiting)} / ${bossDashNumber(e.failed)} / ${bossDashNumber(e.refunded)}</td><td>${bossDashNumber(e.inspection_visits)}</td><td><button class="btn sm" onclick="bossEmployeeDetail(${e.idx},${cp(e.identity_ref||"")},this,0)">看记录</button></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">这个周期还没有员工任务。</div>`}<div id="boss-employee-detail"></div></div>
+  <div class="card"><h3 style="margin-top:0">🧑‍💼 每个员工做了什么、效率怎么样</h3>${activeEmployees.length?`<div class="dimwrap"><table class="dimtable"><thead><tr><th>员工</th><th>本期新建</th><th>本期交付</th><th>派的活完成了多少</th><th>平均周期</th><th>等待/失败/退款</th><th>巡店</th><th></th></tr></thead><tbody>${activeEmployees.map(e=>`<tr><td><b>${esc(e.name)}</b>${e.employee_kind==="inspection"?`<div class="sub">区域巡店</div>`:`<div class="sub">${esc(employeeIdentityLabel(e))}${isBoss()&&Number(e.config_revision)>0?` · 配置 r${Number(e.config_revision)}`:""}</div>`}</td><td>${bossDashNumber(e.tasks)}</td><td>${bossDashNumber(e.completed)}</td><td>${bossDashPct(e.completion_rate)}</td><td>${bossDashDuration(e.average_cycle_seconds)}</td><td>${bossDashNumber(e.waiting)} / ${bossDashNumber(e.failed)} / ${bossDashNumber(e.refunded)}</td><td>${bossDashNumber(e.inspection_visits)}</td><td><button class="btn sm" onclick="bossEmployeeDetail(${e.idx},${cp(e.identity_ref||"")},this,0)">看记录</button></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">这个周期还没有员工干活。</div>`}
+    ${idleEmployees.length?`<details class="boss-idle" data-boss-idle><summary>另有 ${idleEmployees.length} 位本期没干活</summary><div class="boss-idle-list">${idleEmployees.map(e=>`<span>${esc(e.name||"员工")}</span>`).join("")}</div></details>`:""}<div id="boss-employee-detail"></div></div>
   <div class="card"><h3 style="margin-top:0">📅 近14天节奏 <span class="sub" style="font-weight:400">（无论选多长周期，此表固定展示最近14天）</span></h3>${trend.length?`<div class="dimwrap"><table class="dimtable"><thead><tr><th>日期</th><th>新任务</th><th>完成</th><th>失败</th><th>巡店</th><th>巡店均分</th></tr></thead><tbody>${trend.map(x=>`<tr><td>${esc(x.day)}</td><td>${bossDashNumber(x.tasks_created)}</td><td>${bossDashNumber(x.tasks_completed)}</td><td>${bossDashNumber(x.tasks_failed)}</td><td>${bossDashNumber(x.inspection_visits)}</td><td>${bossDashNumber(x.inspection_average_score,1)}</td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">暂无趋势数据</div>`}</div>
   <div class="notice">💡 经营卡与派活员工效率分开计算；只有真实 POS、库存、排班、CRM 等数据接入后才会显示经营数值。</div>`;
   if(BOSS_EMPLOYEE_DETAIL) bossEmployeeDetailDraw();
 }
 async function bossDashTenant(value){BOSS_DASH_FILTER.tenantId=Number(value);BOSS_DASH_FILTER.industryKey="";await bossDashboardView().catch(e=>toast(e.message));}
 async function bossDashIndustry(value){BOSS_DASH_FILTER.industryKey=String(value||"");await bossDashboardView().catch(e=>toast(e.message));}
-async function bossDashDays(value){BOSS_DASH_FILTER.days=Number(value)||30;uiPrefSet("boss_days",BOSS_DASH_FILTER.days);await bossDashboardView().catch(e=>toast(e.message));}
+async function bossDashDays(value){BOSS_DASH_FILTER.days=Number(value)||7;uiPrefSet("boss_days",BOSS_DASH_FILTER.days);await bossDashboardView().catch(e=>toast(e.message));}
 async function bossEmployeeDetail(idx,identityRef,btn,offset=0){
   const requestSeq=++BOSS_EMPLOYEE_REQUEST_SEQ;
   const scopeToken=`${BOSS_DASH_FILTER.tenantId}:${BOSS_DASH_FILTER.industryKey}:${BOSS_DASH_FILTER.days}`;

@@ -4,7 +4,15 @@
    依赖 app.js 全局：routes / api / esc / toast / $ / ME / isOwnerLike。 */
 (function(){
   "use strict";
-  const CP = {days:7, data:null, meta:null, aiBusy:false, pick:{}, peopleAll:false};
+  const CP = {days:7, data:null, meta:null, aiBusy:false, pick:{}, peopleAll:false, prefFor:null};
+  // 周期和老板看板一样:7/30/90 天,默认 7 天;按账号记住上次选的(旧版存过的 60 天按 90 天恢复)
+  function loadDaysPref(){
+    let who=""; try{ who=String((typeof ME!=="undefined"&&ME&&(ME.username||ME.id))||""); }catch(_){}
+    if(CP.prefFor===who) return;
+    CP.prefFor=who;
+    let v=0; try{ v=Number(uiPrefGet("cockpit_days")); }catch(_){}
+    CP.days=[7,30,90].includes(v)?v:(v===60?90:7);
+  }
 
   function style(){
     if(document.getElementById("cp-style")) return;
@@ -150,6 +158,7 @@
   /* ---------- 渲染 ---------- */
   async function view(){
     style();
+    loadDaysPref();
     if(!isOwnerLike()){ $("#main").innerHTML=`<div class="card"><div class="empty">数据驾驶舱只有老板账号能看。</div></div>`; return; }
     $("#main").innerHTML=`<div class="cp"><div class="cp-hero"><div class="cp-eyebrow">派活 · 数据驾驶舱</div><h2>正在汇总…</h2><div class="cp-meta"><span class="spin"></span> 从派活里统计员工、门店和 AI 的工作记录</div></div></div>`;
     try{
@@ -305,7 +314,7 @@
   }
 
   /* ---------- 交互 ---------- */
-  window.cpDays = n => { CP.days=n; view(); };
+  window.cpDays = n => { CP.days=n; try{ uiPrefSet("cockpit_days",n); }catch(_){} view(); };
   window.cpReload = () => view();
   window.cpPeopleAll = () => { CP.peopleAll=!CP.peopleAll; draw(); };
   window.cpAi = async () => {

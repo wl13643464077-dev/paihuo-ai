@@ -501,6 +501,187 @@ class OnboardingCardBrowserCase(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([], errors)
             await browser.close()
 
+    async def test_store_info_offers_to_create_the_first_store(self):
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            self.skipTest("playwright 不可用")
+        from urllib.parse import urlparse
+
+        state = {
+            "show": True, "done": False,
+            "industry": {"key": "restaurant", "name": "餐饮"},
+            "steps": {"industry": True, "store": False, "posts": False},
+            "store": {"name": "", "city": "", "product": "", "feature": "", "price": ""},
+            "gen_used": 0, "gen_left": 3, "gen_limit": 3,
+            "posts": [], "posts_date": "", "password_hint": False,
+        }
+        calls = []
+        branches = []
+
+        async def api_route(route):
+            request = route.request
+            path = urlparse(request.url).path
+            body = request.post_data_json if request.post_data else None
+            calls.append((request.method, path, body))
+            if path == "/api/onboarding" and request.method == "GET":
+                payload = state
+            elif path == "/api/onboarding/store":
+                state["steps"]["store"] = True
+                state["store"] = {**body}
+                payload = {"ok": True, "store": state["store"]}
+            elif path == "/api/onboarding/posts":
+                state["done"] = True
+                state["steps"]["posts"] = True
+                payload = {"posts": GOOD_POSTS["posts"], "posts_date": "2026-09-26",
+                           "gen_used": 1, "gen_left": 2, "done": True}
+            elif path == "/api/inspections/branches" and request.method == "POST":
+                branches.append(body)
+                payload = {"id": 5, "name": body["name"], "region": body["region"], "active": True}
+            elif path == "/api/inspections":
+                payload = {"items": [], "summary": {"total_branches": len(branches)}}
+            elif path == "/api/onboarding/dismiss":
+                payload = {"ok": True}
+            elif path == "/api/auth/me":
+                payload = {"id": 7, "username": "13800000000", "role": "owner", "tenant": "王记",
+                           "modules": ["content", "avatar", "library"], "all_modules": []}
+            elif path == "/api/state":
+                payload = {"jobs": [], "inbox": [], "notifications": [], "balance": 20,
+                           "setup": {"store": bool(branches)}}
+            else:
+                payload = {}
+            await route.fulfill(status=200, content_type="application/json",
+                                body=json.dumps(payload, ensure_ascii=False))
+
+        async with async_playwright() as playwright:
+            executable = next((p for p in (
+                os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE") or "",
+                "/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser",
+            ) if p and os.path.isfile(p)), "")
+            options = {"headless": True}
+            if executable:
+                options["executable_path"] = executable
+            browser = await playwright.chromium.launch(**options)
+            page = await browser.new_page(viewport={"width": 375, "height": 800})
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            await page.add_init_script(
+                "window.EventSource=class{constructor(){} close(){}};")
+            await page.route("**/api/**", api_route)
+            await page.goto(f"{self.base}/static/index.html#/")
+            await page.wait_for_selector("#ph-s-name")
+
+            await page.fill("#ph-s-name", "王记牛肉面")
+            await page.fill("#ph-s-city", "成都 春熙路")
+            await page.fill("#ph-s-product", "现熬牛骨汤面")
+            await page.click("text=保存,下一步")
+            # 还没有门店:问一句「用这个名字建第一家门店？」
+            await page.wait_for_selector("#ui-dialog")
+            dialog = await page.locator("#ui-dialog").inner_text()
+            self.assertIn("用这个名字建第一家门店？", dialog)
+            self.assertIn("王记牛肉面 · 成都 春熙路", dialog)
+            await page.locator("#ui-dialog [data-dialog-ok]").click()
+            await page.wait_for_function(
+                "document.querySelector('#toast-stack')?.textContent.includes('第一家门店')")
+            self.assertEqual([{"name": "王记牛肉面", "region": "成都 春熙路"}], branches)
+            # 今天页的门店卡跟着刷新,不再是「还没录入门店」
+            await page.wait_for_function(
+                "document.querySelector('#main .today-store:not(.today-store-empty)')")
+
+            # 再改一次店铺信息:已经有门店了,不再问
+            await page.click("text=改一下")
+            await page.click("text=保存,下一步")
+            await page.wait_for_selector(".ph-go:not([disabled])")
+            await page.wait_for_timeout(300)
+            self.assertEqual(0, await page.locator("#ui-dialog").count())
+            self.assertEqual(1, len(branches))
+
+            # 3 步都做完:展开的卡片里也有「接下来 3 件事」,建门店已完成
+            await page.click(".ph-go")
+            await page.wait_for_function("document.querySelectorAll('#ph-onb .ph-post').length===3")
+            text = await page.locator("#ph-onb").inner_text()
+            self.assertIn("接下来 3 件事", text)
+            first = page.locator("#ph-onb .ph-next-i").first
+            self.assertIn("已完成", await first.inner_text())
+            self.assertIn("ph-ok", await first.get_attribute("class"))
+
+            # 关掉时告诉老板去哪找回来
+            await page.click("button[aria-label='收起']")
+            await page.click("button[aria-label='关闭上手提示']")
+            await page.wait_for_function(
+                "document.querySelector('#toast-stack')?.textContent.includes('新手引导重看')")
+            self.assertEqual([], errors)
+            await browser.close()
+
+    async def test_declining_first_store_creates_nothing(self):
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            self.skipTest("playwright 不可用")
+        from urllib.parse import urlparse
+
+        state = {
+            "show": True, "done": False,
+            "industry": {"key": "restaurant", "name": "餐饮"},
+            "steps": {"industry": True, "store": False, "posts": False},
+            "store": {"name": "", "city": "", "product": "", "feature": "", "price": ""},
+            "gen_used": 0, "gen_left": 3, "gen_limit": 3,
+            "posts": [], "posts_date": "", "password_hint": False,
+        }
+        posts = []
+
+        async def api_route(route):
+            request = route.request
+            path = urlparse(request.url).path
+            body = request.post_data_json if request.post_data else None
+            if request.method == "POST" and path == "/api/inspections/branches":
+                posts.append(body)
+            if path == "/api/onboarding" and request.method == "GET":
+                payload = state
+            elif path == "/api/onboarding/store":
+                state["steps"]["store"] = True
+                state["store"] = {**body}
+                payload = {"ok": True}
+            elif path == "/api/inspections":
+                payload = {"items": [], "summary": {"total_branches": 0}}
+            elif path == "/api/auth/me":
+                payload = {"id": 7, "username": "13800000000", "role": "owner", "tenant": "王记",
+                           "modules": ["content"], "all_modules": []}
+            elif path == "/api/state":
+                payload = {"jobs": [], "inbox": [], "notifications": []}
+            else:
+                payload = {}
+            await route.fulfill(status=200, content_type="application/json",
+                                body=json.dumps(payload, ensure_ascii=False))
+
+        async with async_playwright() as playwright:
+            executable = next((p for p in (
+                os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE") or "",
+                "/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser",
+            ) if p and os.path.isfile(p)), "")
+            options = {"headless": True}
+            if executable:
+                options["executable_path"] = executable
+            browser = await playwright.chromium.launch(**options)
+            page = await browser.new_page()
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            await page.add_init_script(
+                "window.EventSource=class{constructor(){} close(){}};")
+            await page.route("**/api/**", api_route)
+            await page.goto(f"{self.base}/static/index.html#/")
+            await page.wait_for_selector("#ph-s-name")
+            await page.fill("#ph-s-name", "王记牛肉面")
+            await page.fill("#ph-s-product", "现熬牛骨汤面")
+            await page.click("text=保存,下一步")
+            await page.wait_for_selector("#ui-dialog")
+            await page.locator("#ui-dialog [data-dialog-cancel]").click()
+            await page.wait_for_function("!document.querySelector('#ui-dialog')")
+            await page.wait_for_timeout(200)
+            self.assertEqual([], posts)
+            self.assertEqual([], errors)
+            await browser.close()
+
     async def test_card_is_empty_for_members(self):
         try:
             from playwright.async_api import async_playwright
