@@ -569,6 +569,17 @@ function markSetupChanged(flags){
   SHELL_DIRTY=true;
   try{ window.PH_ONBOARDING?.refresh?.(); }catch(_){}
 }
+/* 第一家店的建议店名:企业名 + 城市里的商圈(「成都 春熙路」→「王记火锅·春熙路店」);
+   城市里只写了一个词(没有商圈)就返回空,让老板自己起名,别和企业重名 */
+function firstStoreNameSuggestion(company,city){
+  const base=String(company||"").trim();
+  const parts=String(city||"").trim().split(/[\s·・,，、\/|]+/).filter(Boolean);
+  if(!base||parts.length<2) return "";
+  let area=parts[parts.length-1];
+  if(base.includes(area)) return "";
+  if(!/[店馆铺]$/.test(area)) area+="店";
+  return `${base}·${area}`;
+}
 async function openStoreForm({industryKey="",onCreated=null,edit=null,onSaved=null}={}){
   closeStoreForm();
   const openedHash=location.hash;
@@ -646,7 +657,9 @@ async function openStoreForm({industryKey="",onCreated=null,edit=null,onSaved=nu
       const basics=await window.PH_ONBOARDING?.storeBasics?.();
       const region=$("#store-form-region");
       if(basics&&$("#store-form")===overlay&&!name.value&&!region.value){
-        name.value=String(basics.name||"");
+        const company=String(basics.name||"").trim();
+        name.value=firstStoreNameSuggestion(company,basics.city);
+        if(!name.value&&company) name.placeholder=`例：${company}·人民路店`;
         region.value=String(basics.city||"");
         if(name.value){ err.textContent=""; name.removeAttribute("aria-invalid"); }
       }
@@ -664,6 +677,11 @@ async function openStoreForm({industryKey="",onCreated=null,edit=null,onSaved=nu
     }catch(_){ /* 读不到行业就按企业主行业建 */ }
   }
 }
+/* 切页一瞬间就换标签标题:最先注册、同步执行,不等任何请求和渲染(render 开头和渲染完还会再各设一次) */
+function routeTitleFromHash(){
+  try{ document.title=routeDocTitle(location.hash.replace("#/","").split("/")[0]); }catch(_){}
+}
+window.addEventListener("hashchange",routeTitleFromHash);
 // 切页时收起建店表单,不在别的页面突然冒出来
 window.addEventListener("hashchange",closeStoreForm);
 /* 「点数不足」提示条只属于当前页面:换页就收掉,不在别的页面盖住正文 */
@@ -1186,7 +1204,13 @@ const ROUTE_LABELS={"":"今天",tasks:"派出去的活",teamruns:"协同小队",
     mine:"我的",experts:"行业专家",settings:"设置",
     "staff-tasks":"派给店员",checklists:"开闭店清单","store-rank":"门店排行",guide:"今天"};
 /* 浏览器标签标题:导航一开始就换成目标页的名字,不等渲染完(否则会停在上一页的名字) */
+const NO_ACCESS_DOC_TITLE="无权访问 · 派活";
+/* 当前账号打不开、只会看到「只有…能看」说明的页面:标签写「无权访问」,不写页面名 */
+function routeBlocked(page){
+  return page==="platform"&&!!ME&&ME.role!=="root";
+}
 function routeDocTitle(page){
+  if(routeBlocked(page)) return NO_ACCESS_DOC_TITLE;
   if(!page&&ME?.role==="root") return "平台工作台 · 派活";
   const label=ROUTE_LABELS[page||""];
   return label&&label!=="派活"?`${label} · 派活`:"派活";
@@ -1267,6 +1291,7 @@ async function render(reuseShell=false){
     const box=$("#main");
     if(e?.status===403){
       // 权限不足是确定性的,不是网络故障:说清原因给出路,不再提供无效的「重新加载」
+      document.title=NO_ACCESS_DOC_TITLE;
       if(box) box.innerHTML=`<div class="card"><h2>这个页面需要更高权限</h2>
         <div class="sub">${esc(e?.message||"需要主账号权限")}${ME?.role==="member"?"。请找老板开通对应板块，或请老板代为操作":""}</div>
         <div class="actions"><a class="btn pri" href="#/">← 回今天</a></div></div>`;
@@ -8311,7 +8336,7 @@ async function teamView(){
   window.__modChips = modChips;
   window.__TEAM = t;
 }
-/* ---------- 平台运营(仅平台 root):开通申请、对客联系方式、企业列表 ----------
+/* ---------- 平台运营(仅平台 root):企业管理、开通申请、客资、对客联系方式 ----------
    数据全部来自 /api/team 的 root 段(服务端只对 root 返回 tenants/applies/guests)。 */
 const PLATFORM_LOW_BALANCE_POINTS = 20;
 function tmIndustryShort(t,key){
@@ -8331,32 +8356,10 @@ function platformTenantAlerts(t){
   const pending=(t.applies||[]).filter(a=>!a.status);
   return {customers,expiring,lowBalance,pending};
 }
+/* 顺序按使用频率:企业管理(天天用)→ 开通申请 → 客资 → 对客联系方式(一次性设置,放最后) */
 function tmPlatformSection(t){
   const pending=(t.applies||[]).filter(a=>!a.status).length;
-  return `${(t.guests||[]).length?`
-  <div class="card"><h2>📇 客资（访客留资 ${t.guests.length} 条）</h2>
-    <div class="dimwrap"><table class="dimtable" style="min-width:min(520px,100%)"><thead><tr>
-      <th>手机号</th><th>称呼</th><th>企业/行业</th><th>时间</th><th>状态</th></tr></thead><tbody>
-      ${t.guests.map(g=>`<tr><td><b>${esc(g.phone)}</b></td><td>${esc(g.name||"-")}</td>
-        <td>${esc(g.company||"-")}</td><td>${new Date(g.created_at*1000).toLocaleString("zh-CN")}</td>
-        <td>${g.used?"已体验":"已进参观"}</td></tr>`).join("")}</tbody></table></div>
-    <div class="sub" style="margin-top:6px">📮 配好 QQ 邮箱授权码（后台 → 邮件通知）后，每条新客资会实时发到您邮箱。</div></div>`:""}
-  <div class="card" id="pf-applies"><h2>📝 开通申请（${pending} 条待处理）</h2>
-    <div class="sub">来自登录页「申请开通账号」。点<b>「⚡ 一键开通」</b>自动建企业、主账号和随机密码，弹出可复制的开通话术直接发给客户；开完在下面「企业列表」里给 TA 充点、开套餐。</div>
-    <div class="notice" id="ap-auto-box" style="margin:8px 0">⏳ 载入自动开通设置…</div>
-    <div class="dimwrap"><table class="dimtable" style="min-width:640px"><thead><tr>
-      <th>手机号</th><th>称呼</th><th>企业/行业</th><th>想用来做什么</th><th>时间</th><th>登录账号</th><th>操作</th></tr></thead><tbody>
-      ${(t.applies||[]).map(a=>`<tr style="${a.status&&!a.username?"opacity:.45":""}"><td><b>${esc(a.phone)}</b></td><td>${esc(a.name||"-")}</td>
-        <td>${esc(a.company||"-")}</td><td>${esc(a.note||"-")}</td><td>${new Date(a.created_at*1000).toLocaleString("zh-CN")}</td>
-        <td>${a.username?`<b>${esc(a.username)}</b><div class="sub" style="font-size:11px">企业 #${a.tenant_id||"-"} · 密码忘了去成员列表重置</div>`:"<span class='sub'>未开通</span>"}</td>
-        <td style="white-space:nowrap">${a.username?"✅ 已开通"
-          :a.status?"📦 已归档"
-          :`<button class="btn sm pri" onclick="tmApprove(${a.id})">⚡ 一键开通</button>
-            <button class="btn sm" onclick="tmApplyDone(${a.id})" title="不开账号，仅归档">归档</button>`}</td></tr>`).join("")||`<tr><td colspan="7" class="sub">还没有开通申请。</td></tr>`}</tbody></table></div></div>
-  <div class="card"><h3 style="margin-top:0">📞 对客联系方式</h3>
-    <div class="sub">显示在所有客户企业的套餐页与「点数不足」提示里；不填的话，客户想充值只能靠右下角反馈留言。</div>
-    <div class="actions" style="margin-top:8px"><input id="sc-input" placeholder="如：微信 paihuo-vip / 电话 138xxxx" value="${esc(META?.support_contact||"")}" style="flex:1;min-width:220px">
-    <button class="btn sm pri" onclick="saveSupportContact(this)">保存</button></div></div>
+  return `
   <div class="card" id="pf-tenants" style="background:#fff6dc"><h2>🏦 企业管理（仅平台可见）</h2>
     <div class="sub">每个客户企业一个独立空间：开企业 → 给主账号 → 客户登录后自己开副账号。收款您线下收，这里给 TA 充点、开套餐。</div>
     <div class="actions"><button class="btn pri" onclick="tmTenantForm()">➕ 开新企业</button>
@@ -8376,7 +8379,31 @@ function tmPlatformSection(t){
         <button class="btn sm" onclick="tmSub(${x.id})">📦 开套餐</button>
         ${x.id!==1?`<button class="btn sm" onclick="tmTenantToggle(${x.id},${x.enabled?0:1})">${x.enabled?"⏸ 停用":"▶️ 启用"}</button>`:""}
       </div></div>`).join("")}
-  </div>`;
+  </div>
+  <div class="card" id="pf-applies"><h2>📝 开通申请（${pending} 条待处理）</h2>
+    <div class="sub">来自登录页「申请开通账号」。点<b>「⚡ 一键开通」</b>自动建企业、主账号和随机密码，弹出可复制的开通话术直接发给客户；开完在上面「企业管理」里给 TA 充点、开套餐。</div>
+    <div class="notice" id="ap-auto-box" style="margin:8px 0">⏳ 载入自动开通设置…</div>
+    <div class="dimwrap"><table class="dimtable" style="min-width:640px"><thead><tr>
+      <th>手机号</th><th>称呼</th><th>企业/行业</th><th>想用来做什么</th><th>时间</th><th>登录账号</th><th>操作</th></tr></thead><tbody>
+      ${(t.applies||[]).map(a=>`<tr style="${a.status&&!a.username?"opacity:.45":""}"><td><b>${esc(a.phone)}</b></td><td>${esc(a.name||"-")}</td>
+        <td>${esc(a.company||"-")}</td><td>${esc(a.note||"-")}</td><td>${new Date(a.created_at*1000).toLocaleString("zh-CN")}</td>
+        <td>${a.username?`<b>${esc(a.username)}</b><div class="sub" style="font-size:11px">企业 #${a.tenant_id||"-"} · 密码忘了去成员列表重置</div>`:"<span class='sub'>未开通</span>"}</td>
+        <td style="white-space:nowrap">${a.username?"✅ 已开通"
+          :a.status?"📦 已归档"
+          :`<button class="btn sm pri" onclick="tmApprove(${a.id})">⚡ 一键开通</button>
+            <button class="btn sm" onclick="tmApplyDone(${a.id})" title="不开账号，仅归档">归档</button>`}</td></tr>`).join("")||`<tr><td colspan="7" class="sub">还没有开通申请。</td></tr>`}</tbody></table></div></div>
+${(t.guests||[]).length?`
+  <div class="card"><h2>📇 客资（访客留资 ${t.guests.length} 条）</h2>
+    <div class="dimwrap"><table class="dimtable" style="min-width:min(520px,100%)"><thead><tr>
+      <th>手机号</th><th>称呼</th><th>企业/行业</th><th>时间</th><th>状态</th></tr></thead><tbody>
+      ${t.guests.map(g=>`<tr><td><b>${esc(g.phone)}</b></td><td>${esc(g.name||"-")}</td>
+        <td>${esc(g.company||"-")}</td><td>${new Date(g.created_at*1000).toLocaleString("zh-CN")}</td>
+        <td>${g.used?"已体验":"已进参观"}</td></tr>`).join("")}</tbody></table></div>
+    <div class="sub" style="margin-top:6px">📮 配好 QQ 邮箱授权码（后台 → 邮件通知）后，每条新客资会实时发到您邮箱。</div></div>`:""}
+  <div class="card"><h3 style="margin-top:0">📞 对客联系方式</h3>
+    <div class="sub">显示在所有客户企业的套餐页与「点数不足」提示里；不填的话，客户想充值只能靠右下角反馈留言。</div>
+    <div class="actions" style="margin-top:8px"><input id="sc-input" placeholder="如：微信 paihuo-vip / 电话 138xxxx" value="${esc(META?.support_contact||"")}" style="flex:1;min-width:220px">
+    <button class="btn sm pri" onclick="saveSupportContact(this)">保存</button></div></div>`;
 }
 /* #/platform:平台运营单独一页。非 root 打开只给一句说明(数据本来就只对 root 返回) */
 let PLATFORM_FOCUS="";
@@ -8388,7 +8415,7 @@ async function platformView(){
   }
   const t=await api("/team");
   window.__TEAM=t;
-  $("#main").innerHTML=`<div class="notice" style="margin-top:0">🏦 <b>平台运营</b>：开新企业、给企业充点和开套餐、处理开通申请。</div>
+  $("#main").innerHTML=`<div class="hubhead" data-platform-head><h2>🏦 平台运营</h2><div class="sub">开新企业、给企业充点和开套餐、处理开通申请。</div></div>
     ${tmPlatformSection(t)}`;
   const focus=PLATFORM_FOCUS; PLATFORM_FOCUS="";
   if(focus==="new") tmTenantForm();
@@ -8435,7 +8462,9 @@ const TM_KINDS=[
   {k:"office",icon:"💼",label:"办公室同事",desc:"运营、市场等，用电脑找 AI 专家干活"},
 ];
 let TM_KIND="staff", TM_CREATE_BUSY=false;
+/* 每次打开都是一张干净的表:类型回到默认「店员」,账号/密码重新空着(刚建完店长,接着建店员不会误建成店长) */
 function tmUserForm(){
+  TM_KIND="staff";
   const t=window.__TEAM||{};
   const titles=t.job_titles||[{key:"director",label:"总监"},{key:"manager",label:"经理"},{key:"staff",label:"员工"}];
   const titleDesc={director:"可给经理和员工分配数字员工",manager:"可给员工分配数字员工",staff:"只用分给自己的数字员工"};

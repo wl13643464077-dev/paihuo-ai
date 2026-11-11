@@ -275,7 +275,10 @@
   }
   async function offerFirstStore(body){
     if(!body||!body.name||!(await firstStoreMissing())) return;
-    const label=[body.name,body.city].filter(Boolean).join(" · ");
+    // 有商圈就叫「王记火锅·春熙路店」,不和企业重名;没有商圈才用店名本身
+    let storeName=body.name;
+    try{ storeName=firstStoreNameSuggestion(body.name,body.city)||body.name; }catch(_){}
+    const label=[storeName,body.city].filter(Boolean).join(" · ");
     let ok=false;
     try{
       ok=await uiConfirm(`「${label}」。建好后店长拍照就能巡店，派活、开闭店清单也都按门店来；以后可以在「门店 → 我的门店」改名。`,
@@ -283,11 +286,11 @@
     }catch(_){ return; }
     if(!ok) return;
     try{
-      await api("/inspections/branches",{method:"POST",body:{name:body.name,region:body.city||""},routeScoped:false});
+      await api("/inspections/branches",{method:"POST",body:{name:storeName,region:body.city||""},routeScoped:false});
       S.storeMade=true;
       try{ markSetupChanged({store:true}); }catch(_){ try{ if(STATE&&STATE.setup) STATE.setup.store=true; }catch(_){} }
       try{ STORE_TODAY={key:"",at:0,data:null}; }catch(_){}
-      say(`第一家门店「${body.name}」已建好`);
+      say(`第一家门店「${storeName}」已建好`);
       // 在「今天」页时把门店卡一起刷新;别的页面下次进来自然是新的
       const onToday=!location.hash||location.hash==="#/"||location.hash==="#";
       if(onToday){ try{ await render(); }catch(_){ paint(); } } else paint();
