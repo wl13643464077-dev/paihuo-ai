@@ -232,14 +232,14 @@ class StaffPageTests(unittest.IsolatedAsyncioTestCase):
     async def test_resubmitted_review_shows_last_reason_and_photo_opens_in_page(self):
         review = {"id": 50, "title": "补货", "branch_name": "人民路店", "assignee_name": "xiaowang",
                   "status": "submitted", "review_note": "货架还空着", "reviewed_at": 1790000000,
-                  "submit_count": 2,
+                  "submit_count": 2, "reviewer_label": "店长 laowang",
                   "photos": [{"id": 1, "url": "/static/img/avatar.png"}, {"id": 2, "url": "/static/favicon.svg"}]}
         todo = {**TODO, "reviews": [review]}
         async with async_playwright() as playwright:
             browser, context, page, errors = await self._open(playwright, todo)
             await page.locator("[data-go=reviews]").click()
             await page.wait_for_selector("[data-review-act=approve]")
-            self.assertIn("上次打回：货架还空着（第 2 次交）", await page.locator("#main").inner_text())
+            self.assertIn("店长 laowang 打回：货架还空着（第 2 次交）", await page.locator("#main").inner_text())
             pages = len(context.pages)
             await page.locator(".photos [data-view='0']").click()
             await page.wait_for_selector("#viewer img")
@@ -292,9 +292,11 @@ class StaffPageTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("本店在做的活（2）", await page.locator("#main").inner_text())
             first = page.locator(".card.store").first
             self.assertIn("等您审核", await first.inner_text())
-            self.assertIn("xiaowang 在做", await first.inner_text())
+            # 后半句跟状态走：等审核的写「已交」，逾期的写「还没交」（标签已写已逾期）
+            self.assertIn("xiaowang 已交", await first.inner_text())
+            self.assertNotIn("在做", await first.inner_text())
             second = await page.locator(".card.store").nth(1).inner_text()
-            self.assertIn("已逾期", second)
+            self.assertIn("xiaoli 还没交", second)
             self.assertIn("09-24 18:00", second)
 
             # 在做的活：只读，不给提交按钮
@@ -318,6 +320,87 @@ class StaffPageTests(unittest.IsolatedAsyncioTestCase):
             await page.locator("[data-review-act=approve]").click()
             await page.wait_for_function("document.querySelector('.msg.ok')?.textContent.includes('已通过')")
             self.assertEqual([{"action": "approve", "note": ""}], posts)
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_store_card_follows_state_and_manager_can_nudge(self):
+        redo = {"kind": "task", "id": 62, "title": "擦玻璃", "branch_name": "人民路店",
+                "assignee_user_id": 24, "assignee_name": "xiaoli", "status": "todo",
+                "store_state": "rejected", "urgency": "today", "review_note": "没擦干净",
+                "reviewed_at": 1790000000, "reviewer_label": "店长 laowang",
+                "due_text": "09-25 18:00", "photos": []}
+        doing = {"kind": "task", "id": 63, "title": "把冷柜清洗一遍", "branch_name": "人民路店",
+                 "assignee_user_id": 23, "assignee_name": "xiaowang", "status": "todo",
+                 "store_state": "later", "urgency": "later", "due_text": "09-28 18:00", "photos": []}
+        todo = {**TODO, "store_tasks": [redo, doing]}
+        nudges = []
+        detail = {
+            "/api/staff/tasks/62": {**redo, "can_manage": True, "can_submit": False},
+            "/api/staff/tasks/63": {**doing, "can_manage": True, "can_submit": False},
+        }
+        async with async_playwright() as playwright:
+            browser, context, page, errors = await self._open(playwright, todo, cards=5, extra=detail)
+            first = await page.locator(".card.store").first.inner_text()
+            self.assertIn("被打回", first)
+            self.assertIn("xiaoli 在重做", first)
+            self.assertNotIn("在做", first.replace("在重做", ""))
+            self.assertIn("xiaowang 在做", await page.locator(".card.store").nth(1).inner_text())
+
+            async def nudge_route(route):
+                nudges.append(urlparse(route.request.url).path)
+                if len(nudges) == 1:
+                    await route.fulfill(status=200, content_type="application/json",
+                                        body=json.dumps({"ok": True, "nudged_at": 1790000000,
+                                                         "nudged_text": "22:13"}))
+                else:
+                    await route.fulfill(status=429, content_type="application/json",
+                                        body=json.dumps({"detail": "刚催过，30 分钟后再催"},
+                                                        ensure_ascii=False))
+            await page.route("**/api/staff/tasks/*/nudge", nudge_route)
+
+            # 被打回的活：写清是谁打回的，能催一下
+            await page.locator(".card.store", has_text="擦玻璃").click()
+            await page.wait_for_selector("[data-act=nudge]")
+            main = await page.locator("#main").inner_text()
+            self.assertIn("店长 laowang 打回，在重做：没擦干净", main)
+            self.assertIn("催一下 xiaoli", await page.locator("[data-act=nudge]").inner_text())
+            await page.locator("[data-act=nudge]").click()
+            await page.wait_for_selector("#nudge .tag.checked")
+            self.assertIn("已催 · 22:13", await page.locator("#nudge").inner_text())
+            self.assertEqual(0, await page.locator("[data-act=nudge]").count())
+            self.assertEqual(["/api/staff/tasks/62/nudge"], nudges)
+            await page.locator(".back").click()
+
+            # 服务端说刚催过：把原因讲给店长听，按钮还在
+            await page.locator(".card.store", has_text="把冷柜清洗一遍").click()
+            await page.wait_for_selector("[data-act=nudge]")
+            await page.locator("[data-act=nudge]").click()
+            await page.wait_for_selector("#nudge .msg.err")
+            self.assertIn("刚催过，30 分钟后再催", await page.locator("#nudge").inner_text())
+            self.assertEqual(1, await page.locator("[data-act=nudge]").count())
+            # 浏览器会把这次故意返回的 429 记成资源加载失败，不算页面错误
+            errors[:] = [e for e in errors if "status of 429" not in e]
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_staff_sees_who_rejected_and_rejected_task_on_top(self):
+        rejected = {**TASK, "id": 42, "title": "擦玻璃", "urgency": "today", "review_note": "没擦干净",
+                    "reviewed_at": 1790000000, "reviewer_label": "店长 laowang",
+                    "dispatcher_label": "老板 wangji"}
+        staff = {**TODO, "reviews": [], "items": [rejected, *TODO["items"]],
+                 "user": {**TODO["user"], "role_label": "店员", "can_dispatch": False}}
+        async with async_playwright() as playwright:
+            browser, context, page, errors = await self._open(
+                playwright, staff, cards=4, extra={"/api/staff/tasks/42": rejected})
+            first = await page.locator(".card").first.inner_text()
+            self.assertIn("擦玻璃", first)
+            self.assertIn("被打回，要重做", first)
+            await page.locator(".card").first.click()
+            await page.wait_for_selector("[data-act=shoot]")
+            main = await page.locator("#main").inner_text()
+            self.assertIn("店长 laowang 打回：没擦干净", main)
+            self.assertNotIn("上次被打回", main)
+            self.assertEqual(0, await page.locator("[data-act=nudge]").count())
             self._assert_no_browser_errors(errors)
             await browser.close()
 
@@ -460,6 +543,7 @@ class StaffAdminPageTests(unittest.IsolatedAsyncioTestCase):
             50: {"id": 50, "title": "补货", "branch_id": 3, "branch_name": "人民路店", "assignee_user_id": 23,
                  "assignee_name": "xiaowang", "status": "submitted", "require_photo": True,
                  "review_note": "货架还空着", "reviewed_at": 1790000000, "submit_count": 2,
+                 "reviewer_label": "店长 laowang",
                  "photos": [{"id": 1, "url": "/static/img/avatar.png"}, {"id": 2, "url": "/static/favicon.svg"}]},
             51: {"id": 51, "title": "擦玻璃", "branch_id": 3, "branch_name": "人民路店", "assignee_user_id": None,
                  "assignee_name": "", "status": "todo", "overdue": False, "photos": []},
@@ -488,8 +572,12 @@ class StaffAdminPageTests(unittest.IsolatedAsyncioTestCase):
                     body = json.loads(route.request.post_data or "{}")
                     posts.append((path, body))
                     if path == "/api/staff/tasks/50/review":
-                        tasks[50].update(status="todo", review_note=body["note"], photos=[])
+                        tasks[50].update(status="todo", review_note=body["note"], photos=[],
+                                         reviewer_label="老板 boss")
                     payload = {"ok": True}
+                    if path == "/api/staff/tasks/50/nudge":
+                        nudged_at = __import__("time").time()
+                        payload = {"ok": True, "nudged_at": nudged_at, "nudged_text": "10:05"}
                 elif path == "/api/staff/tasks":
                     want = dict(p.split("=", 1) for p in url.query.split("&") if "=" in p).get("status")
                     payload = {"items": [t for t in sorted(tasks.values(), key=lambda t: -t["id"])
@@ -512,7 +600,10 @@ class StaffAdminPageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(0, await page.locator("#sa-one").count())
             self.assertIn("＋ 派一件新活", await page.locator("#sa-dispatch").inner_text())
             review = await page.locator("#sa-review").inner_text()
-            self.assertIn("上次打回：货架还空着（第 2 次交）", review)
+            # 写上是谁打回的
+            self.assertIn("店长 laowang 打回：货架还空着（第 2 次交）", review)
+            # 等审核的活没有「催一下」
+            self.assertEqual(0, await page.locator("#sa-task-50 [onclick*='_nudge']").count())
             # 老板没表过态：问一句要不要 AI 先看照片(默认不开)
             self.assertIn("要不要让 AI 先帮您看照片", review)
             await page.locator("#sa-ai-ask").get_by_role("button", name="先不用").click()
@@ -536,12 +627,19 @@ class StaffAdminPageTests(unittest.IsolatedAsyncioTestCase):
             await page.fill("#ui-dialog-field", "还是没补齐")
             await page.locator("#ui-dialog [data-dialog-ok]").click()
             await page.wait_for_function(
-                "document.querySelector('#sa-task-50')?.innerText.includes('打回过')")
+                "document.querySelector('#sa-task-50')?.innerText.includes('老板 boss 打回：还是没补齐')")
             self.assertEqual("", await page.locator(".sa-bar select[aria-label='按状态看']").input_value())
             self.assertIn("店员在做（2）", await page.locator("#main").inner_text())
             self.assertIn(("/api/staff/tasks/50/review", {"action": "reject", "note": "还是没补齐"}), posts)
             # 顶部「今天」的待处理角标马上消失
             self.assertEqual(0, await page.locator("[data-nav=today] .badge").count())
+            # 打回后在做的活能「催一下」；没指定人的活没有
+            self.assertEqual(0, await page.locator("#sa-task-51 [onclick*='_nudge']").count())
+            await page.locator("#sa-task-50").get_by_role("button", name="🔔 催一下").click()
+            await page.wait_for_function(
+                "document.querySelector('#sa-task-50')?.innerText.includes('已催 · ')")
+            self.assertIn(("/api/staff/tasks/50/nudge", {}), posts)
+            self.assertEqual(0, await page.locator("#sa-task-50 [onclick*='_nudge']").count())
             self._assert_no_browser_errors(errors)
             await browser.close()
 

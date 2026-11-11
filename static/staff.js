@@ -116,9 +116,16 @@
     let extra = "";
     if(it.kind==="checklist" && it.progress) extra = ` · 做了 ${it.progress.done}/${it.progress.total} 项`;
     if(it.kind==="task" && it.require_photo && it.status==="todo") extra = " · 要拍照";
+    // 店长/老板 24 小时内「催一下」过：卡片上提一句（店员手机上没有通知列表）
+    if(it.kind==="task" && it.status==="todo" && it.last_nudged_at && Date.now()/1000-it.last_nudged_at<86400)
+      extra += ` · 🔔 ${hhmm(it.last_nudged_at)} 催过`;
     return `<button type="button" class="card" data-open="${esc(it.kind)}:${esc(it.id)}">
       <div class="t">${KIND_ICON[it.kind]||"📌"} ${esc(it.title)}</div>
       <div class="m">${tag(it)}${sub}${esc(extra)}</div></button>`;
+  }
+  /* 打回原因前写上是谁打回的：「店长 laowang 打回：……」；老数据没有审核人时不写名字 */
+  function rejectLine(t, fallback){
+    return t.reviewer_label ? `${t.reviewer_label} 打回：${t.review_note}` : `${fallback}：${t.review_note}`;
   }
   function findItem(kind, id){
     const all = (S.todo&&S.todo.items)||[];
@@ -128,14 +135,16 @@
   }
 
   /* ---------- 店长:本店在做的活(谁、做什么、什么时候前、到哪一步了) ---------- */
-  const STORE_STATE = {submitted:["waiting","等您审核"], rejected:["overdue","被打回，在重做"],
+  const STORE_STATE = {submitted:["waiting","等您审核"], rejected:["overdue","被打回"],
     overdue:["overdue","已逾期"], today:["today","今天要做完"], later:["later","在做"]};
   function storeTag(it){
     const [cls, text] = STORE_STATE[it.store_state] || STORE_STATE.later;
     return `<span class="tag ${esc(cls)}">${esc(text)}</span>`;
   }
   function storeCardHtml(it){
-    const who = it.assignee_name ? `${it.assignee_name} 在做` : "还没指定人";
+    // 后半句跟着状态走，不和前面的标签打架
+    const doing = {submitted:"已交", rejected:"在重做", overdue:"还没交"}[it.store_state] || "在做";   // 标签已写「已逾期」，这里不再重复
+    const who = it.assignee_name ? `${it.assignee_name} ${doing}` : "还没指定人";
     // dueLine 已经转义过
     const sub = [esc(who), esc(it.branch_name||""), it.store_state==="submitted" ? "" : dueLine(it)].filter(Boolean);
     return `<button type="button" class="card store" data-open="store:${esc(it.id)}">
@@ -197,7 +206,7 @@
     let body = `${back()}<div class="panel"><div class="t" style="font-size:20px;font-weight:900">${esc(t.title)}</div>
       <p class="sub">${[t.branch_name, (t.dispatcher_label||t.created_by_name)?`${t.dispatcher_label||t.created_by_name} 派的`:"", t.due_text?`截止 ${t.due_text}`:""].filter(Boolean).map(esc).join(" · ")}</p>
       ${t.detail?`<p>${esc(t.detail)}</p>`:""}
-      ${rejected?msg("上次被打回："+t.review_note,"info"):""}</div>`;
+      ${rejected?msg(rejectLine(t, "上次被打回"),"info"):""}</div>`;
     if(t.status==="todo" && t.can_submit!==false){
       body += `<h2>${t.require_photo?"拍照交差（要照片）":"做完了就交"}</h2>
         <div id="picker">${photoPicker(key)}</div>
@@ -438,7 +447,7 @@
     return `<div class="panel" data-review="${esc(t.id)}"${after?` data-after="${esc(after)}"`:""}>
           <div class="t" style="font-size:18px;font-weight:900">${esc(t.title)}</div>
           <p class="sub">${[t.branch_name, t.assignee_name?`${t.assignee_name} 交的`:"", t.submit_note?`备注：${t.submit_note}`:""].filter(Boolean).map(esc).join(" · ")}</p>
-          ${t.review_note&&t.reviewed_at?msg(`上次打回：${t.review_note}${t.submit_count>1?`（第 ${t.submit_count} 次交）`:"（重交）"}`, "info"):""}
+          ${t.review_note&&t.reviewed_at?msg(`${rejectLine(t, "上次打回")}${t.submit_count>1?`（第 ${t.submit_count} 次交）`:"（重交）"}`, "info"):""}
           ${photosHtml(t.photos)}${aiHtml(t)}
           <div class="err-slot"></div>
           <div class="row"><button type="button" class="btn ok" data-review-act="approve" data-id="${t.id}">👍 通过</button>
@@ -466,12 +475,40 @@
       body += `<h2>🧐 交上来了，等您审核</h2>` + reviewCard(t, "home");
     } else {
       const label = t.status==="submitted" ? "已交，等审核"
-        : rejected ? `被打回，在重做：${t.review_note||""}`
+        : rejected ? (t.reviewer_label ? `${t.reviewer_label} 打回，在重做：${t.review_note||""}` : `被打回，在重做：${t.review_note||""}`)
         : t.overdue ? "已过截止时间，还没交" : "在做，还没交";
       body += msg(label, t.overdue||rejected ? "err" : "info") + photosHtml(t.photos)
+        + nudgeHtml(t, meId)
         + `<p class="sub">这里只看进度，不能替同事交差。</p>`;
     }
     main().innerHTML = body;
+  }
+  /* 催一下：还没交的活给负责的店员发一条通知；30 分钟内只能催一次（服务端把关） */
+  const NUDGE_GAP = 30*60;
+  function nudgeHtml(t, meId){
+    const open = ["todo","rejected"].includes(t.status);
+    if(!open || !t.can_manage || !t.assignee_user_id || String(t.assignee_user_id)===String(meId)) return "";
+    const last = Number(t.last_nudged_at)||0;
+    const fresh = last && Date.now()/1000-last < NUDGE_GAP;
+    return `<div id="nudge" class="nudge">${fresh
+      ? nudgedHtml(last)
+      : nudgeBtn(t)+(last?`<div class="sub">上次 ${esc(hhmm(last))} 催过</div>`:"")}</div>`;
+  }
+  function nudgeBtn(t){ return `<button type="button" class="btn" data-act="nudge">🔔 催一下${t.assignee_name?" "+esc(t.assignee_name):""}</button>`; }
+  function nudgedHtml(ts){
+    return `<span class="tag checked">🔔 已催 · ${esc(hhmm(ts))}</span><div class="sub">对方会收到通知，30 分钟后可以再催</div>`;
+  }
+  async function nudge(){
+    const t = S.current; if(!t || S.busy) return;
+    const box = $("#nudge"); if(!box) return;
+    const btn = box.querySelector("[data-act=nudge]");
+    S.busy = true; if(btn){ btn.disabled = true; btn.textContent = "正在催…"; }
+    try{
+      const r = await api(`/staff/tasks/${encodeURIComponent(t.id)}/nudge`, {method:"POST", body:{}});
+      t.last_nudged_at = r.nudged_at;
+      box.innerHTML = nudgedHtml(r.nudged_at);
+    }catch(e){ box.innerHTML = msg(e.message) + nudgeBtn(t); }
+    finally{ S.busy = false; }
   }
   async function review(id, action, box){
     if(S.busy) return;
@@ -534,6 +571,7 @@
     else if(act==="submit") submitTask();
     else if(act==="recheck") submitRecheck();
     else if(act==="dispatch") submitDispatch();
+    else if(act==="nudge") nudge();
     else if(act==="refresh") refresh();
     else if(act==="logout") logout();
   });

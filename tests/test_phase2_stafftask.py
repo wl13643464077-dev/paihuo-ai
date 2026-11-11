@@ -471,6 +471,148 @@ class StoreTasksTests(StaffTaskBase):
         self.assertEqual("", stafftask.get_task(2, self.u(23), system["id"])["dispatcher_label"])
 
 
+class RejectedFirstAndReviewerTests(StaffTaskBase):
+    """第六轮：被打回的活排在「我的待办」最前；打回原因写上是谁打回的。"""
+
+    def test_rejected_task_comes_first_then_overdue_today_others(self):
+        now = _cn(2026, 9, 25, 10, 0)
+        later = self.create(20, assignee_user_id=23, title="下周的活",
+                            due_at=_cn(2026, 9, 30, 18), now=now - 600)["id"]
+        rejected = self.create(22, assignee_user_id=23, title="擦玻璃",
+                               due_at=_cn(2026, 9, 28, 18), now=now - 600)["id"]
+        overdue = self.create(20, assignee_user_id=23, title="逾期的活",
+                              due_at=_cn(2026, 9, 24, 18), now=now - 600)["id"]
+        today = self.create(20, assignee_user_id=23, title="今天的活",
+                            due_at=_cn(2026, 9, 25, 20), now=now - 600)["id"]
+        self.submit(23, rejected, now=now - 300)
+        stafftask.review_task(2, self.u(22), rejected, approve=False,
+                              note="没擦干净", now=now - 200)
+
+        def runs_for_user(tid, uid, date):
+            return [{"id": 8, "name": "闭店清单", "branch_id": self.a, "status": "open",
+                     "due_at": _cn(2026, 9, 25, 9)}]     # 已过点(逾期)的清单也排在打回的后面
+
+        fake = types.ModuleType("app.checklist")
+        fake.runs_for_user = runs_for_user
+        with mock.patch.dict(sys.modules, {"app.checklist": fake}):
+            first = stafftask.todo_for_user(2, 23, now=now)
+            again = stafftask.todo_for_user(2, 23, now=now)
+        order = [(i["kind"], i["id"]) for i in first["items"]]
+        self.assertEqual([
+            ("task", rejected),                                # 被打回，要重做
+            ("task", overdue), ("checklist", 8),               # 逾期
+            ("task", today),                                   # 今天
+            ("task", later),                                   # 其他
+        ], order)
+        self.assertEqual(order, [(i["kind"], i["id"]) for i in again["items"]])   # 稳定
+
+    def test_reviewer_label_says_who_rejected(self):
+        by_manager = self.create(22, assignee_user_id=23)["id"]
+        by_boss = self.create(20, assignee_user_id=23)["id"]
+        for task_id, reviewer in ((by_manager, 22), (by_boss, 20)):
+            self.submit(23, task_id)
+            stafftask.review_task(2, self.u(reviewer), task_id, approve=False, note="重拍")
+        self.assertEqual("店长 renmin-dz",
+                         stafftask.get_task(2, self.u(23), by_manager)["reviewer_label"])
+        self.assertEqual("老板 boss", stafftask.get_task(2, self.u(23), by_boss)["reviewer_label"])
+        # 重交后审核卡(列表)也带上「上次是谁打回的」
+        self.submit(23, by_manager, now=NOW + 300)
+        review = [r for r in stafftask.todo_for_user(2, 20, now=NOW + 400)["reviews"]
+                  if r["id"] == by_manager][0]
+        self.assertEqual("店长 renmin-dz", review["reviewer_label"])
+        # 老数据没有审核人：不写名字
+        db.execute("UPDATE staff_task SET reviewed_by=NULL WHERE id=?", (by_boss,))
+        old = stafftask.get_task(2, self.u(23), by_boss)
+        self.assertEqual("", old["reviewer_label"])
+        self.assertEqual("重拍", old["review_note"])
+        # 没审核过：空
+        fresh = self.create(20, assignee_user_id=23)["id"]
+        self.assertEqual("", stafftask.get_task(2, self.u(23), fresh)["reviewer_label"])
+
+
+class NudgeTests(StaffTaskBase):
+    """第六轮：店长在只读详情里「催一下」。"""
+
+    def unread(self, uid):
+        user = db.one("SELECT id,tenant_id,role,job_title,enabled,modules_json FROM users WHERE id=?", (uid,))
+        user["modules"] = db.jloads(user.pop("modules_json"), [])
+        return notify.unread_for_user(2, user)
+
+    def nudges(self, uid):
+        return [n for n in self.unread(uid) if n["kind"] == "staff_remind"]
+
+    def test_manager_nudges_assignee_only_and_rate_limited(self):
+        task = self.create(20, assignee_user_id=23, due_at=_cn(2026, 9, 22, 18))
+        got = stafftask.nudge_task(2, self.u(22), task["id"], now=NOW)
+        self.assertEqual("店长 renmin-dz 催您：把冷柜清洗一遍（截止 09-22 18:00）", got["message"])
+        self.assertEqual(timeutil.format_cn(NOW, "%H:%M"), got["nudged_text"])
+        mine = self.nudges(23)
+        self.assertEqual(1, len(mine))
+        self.assertEqual(got["message"], mine[0]["title"])
+        self.assertEqual(f"#/staff-tasks/{task['id']}", mine[0]["link"])
+        for other in (20, 21, 22, 24, 25):
+            self.assertEqual([], self.nudges(other))
+        self.assertEqual(0, db.one("SELECT COUNT(*) n FROM notification WHERE user_id IS NULL")["n"])
+        # 轨迹里留一条，详情能拿到上次催的时间
+        detail = stafftask.get_task(2, self.u(22), task["id"])
+        self.assertEqual(NOW, detail["last_nudged_at"])
+        self.assertIn("nudged", [e["kind"] for e in detail["events"]])
+        # 30 分钟内再催：429，换老板也不行(按活限流)
+        with self.assertRaises(stafftask.StaffTaskError) as ctx:
+            stafftask.nudge_task(2, self.u(22), task["id"], now=NOW + 60)
+        self.assertEqual(429, ctx.exception.status)
+        self.assertIn("刚催过", str(ctx.exception))
+        self.assertIn("29 分钟后再催", str(ctx.exception))
+        with self.assertRaises(stafftask.StaffTaskError) as ctx:
+            stafftask.nudge_task(2, self.u(20), task["id"], now=NOW + 1799)
+        self.assertEqual(429, ctx.exception.status)
+        self.assertEqual(1, len(self.nudges(23)))
+        # 过了 30 分钟可以再催；老板催的写「老板」
+        again = stafftask.nudge_task(2, self.u(20), task["id"], now=NOW + 1800)
+        self.assertTrue(again["message"].startswith("老板 boss 催您："))
+        self.assertEqual(2, len(self.nudges(23)))
+
+    def test_only_managers_of_that_store_can_nudge(self):
+        task = self.create(20, assignee_user_id=23)
+        for uid in (25, 23, 24):           # 别家店的店长、店员(包括本人)
+            with self.assertRaises((stafftask.StaffTaskForbidden, stafftask.StaffTaskNotFound)):
+                stafftask.nudge_task(2, self.u(uid), task["id"], now=NOW)
+        # 别家企业的老板：拿不到这个租户
+        with self.assertRaises(stafftask.StaffTaskForbidden):
+            stafftask.nudge_task(2, self.u(30), task["id"], now=NOW)
+        # 用别家企业的租户号去催这件活：找不到
+        with self.assertRaises(stafftask.StaffTaskNotFound):
+            stafftask.nudge_task(3, self.u(30), task["id"], now=NOW)
+        self.assertEqual([], self.nudges(23))
+        # 总监可以
+        self.assertTrue(stafftask.nudge_task(2, self.u(21), task["id"], now=NOW)["ok"])
+
+    def test_only_open_tasks_with_assignee_can_be_nudged(self):
+        waiting = self.create(20, assignee_user_id=23)
+        self.submit(23, waiting["id"])
+        approved = self.create(20, assignee_user_id=23)
+        self.submit(23, approved["id"])
+        stafftask.review_task(2, self.u(20), approved["id"], approve=True)
+        cancelled = self.create(20, assignee_user_id=23)
+        stafftask.cancel_task(2, self.u(20), cancelled["id"])
+        for task in (waiting, approved, cancelled):
+            with self.assertRaises(stafftask.StaffTaskConflict):
+                stafftask.nudge_task(2, self.u(22), task["id"], now=NOW)
+        # 被打回的活可以催
+        rejected = self.create(20, assignee_user_id=23)
+        self.submit(23, rejected["id"])
+        stafftask.review_task(2, self.u(20), rejected["id"], approve=False, note="重拍")
+        self.assertTrue(stafftask.nudge_task(2, self.u(22), rejected["id"], now=NOW)["ok"])
+        # 没指定人、指派给自己的活：不能催
+        unassigned = self.create(20)
+        with self.assertRaises(stafftask.StaffTaskError):
+            stafftask.nudge_task(2, self.u(22), unassigned["id"], now=NOW)
+        own = self.create(20, assignee_user_id=22)
+        with self.assertRaises(stafftask.StaffTaskError):
+            stafftask.nudge_task(2, self.u(22), own["id"], now=NOW)
+        self.assertEqual(1, len(self.nudges(23)))
+
+
 class OneLinerTests(StaffTaskBase):
     def parse(self, uid, text, data=None, exc=None):
         prompts = []
