@@ -703,6 +703,8 @@ const routes = {"":dashboard,"new":newBrief,"job":jobView,"profiles":profilesVie
    纯数据:每个一级入口列出它的子功能卡片(中转页用)和归属它的其他路由(只用于高亮)。
    show 仍按原来的权限函数(canWork/can/isAdmin/角色)判断,没有权限的卡片不出现。 */
 const isOwnerLike = () => !!ME && (ME.role==="owner"||ME.role==="root");
+// 套餐、余额、流水是企业的账:只给老板(owner)和平台方看;参观模式看的是演示页,照旧。
+const canSeeBilling = () => isOwnerLike() || ME?.role==="tour";
 const NAV_GROUPS = [
   {key:"today", label:"今天", icon:"☀️", hub:"", extra:[], cards:[]},
   {key:"dispatch", label:"派活", icon:"📋", hub:"dispatch", extra:["job","delivery"],
@@ -737,7 +739,7 @@ const NAV_GROUPS = [
   {key:"mine", label:"我的", icon:"👤", hub:"mine", extra:["settings"],
     title:"我的", intro:"账号、团队和资料都在这里。",
     cards:[
-      {route:"billing", icon:"💎", title:"套餐", desc:"看余额、续费或升级套餐", show:()=>!!ME},
+      {route:"billing", icon:"💎", title:"套餐", desc:"看余额、续费或升级套餐", show:canSeeBilling},
       {route:"team", icon:"👥", title:"团队与权限", desc:"给店长、店员开账号，分配能用哪些功能", show:isOwnerLike},
       {route:"team", icon:"👥", title:"团队分配", desc:"把同事分到对应门店和板块", show:()=>!isOwnerLike()&&!!ME?.can_allocate},
       {route:"brand", icon:"🏷️", title:"品牌知识包", desc:"联网采集品牌资料，核对入库后所有数字员工统一使用这版品牌事实", show:()=>!!ME&&ME.role!=="tour"},
@@ -791,7 +793,7 @@ function nav(){
     + `${g.key==="today"&&inbox?`<span class="badge" aria-label="${inbox} 条待处理">${inbox}</span>`:""}</a>`;
   // 桌面:顶部导航;手机:同样的 5 个入口放进底部 Tab 栏(#tabbar),顶部只留退出
   // 右侧账号区:企业名 · 账号 · 余额(用已加载的数据,不额外请求) + 退出,紧挨着在线状态
-  const balance = ME&&STATE&&ME.role!=="root"&&ME.role!=="tour"&&STATE.balance!=null
+  const balance = ME&&STATE&&ME.role==="owner"&&STATE.balance!=null
     ? ` · 余额 ${Math.round(Number(STATE.balance)||0)} 点` : "";
   const who = ME ? `${esc(ME.tenant||"")}${ME.tenant?" · ":""}${esc(ME.username||"")}${balance}` : "";
   $("#nav").innerHTML = items.map(x=>link(x,"nav-top")).join("")
@@ -881,7 +883,7 @@ async function growthHub(){
 }
 async function mineHub(){
   const who = ME?`<div class="card mine-who"><b>${esc(ME.tenant||"")}</b> · ${esc(ME.username||"")}
-    ${ME.role!=="root"&&STATE?`<div class="sub" style="margin-top:4px">余额 ${Math.round(STATE.balance||0)} 点${STATE.plan?` · ${esc(STATE.plan)}`:""}</div>`:""}</div>`:"";
+    ${ME.role!=="root"&&canSeeBilling()&&STATE?`<div class="sub" style="margin-top:4px">余额 ${Math.round(STATE.balance||0)} 点${STATE.plan?` · ${esc(STATE.plan)}`:""}</div>`:""}</div>`:"";
   hubView("mine", who);
   $("#main").insertAdjacentHTML("beforeend",
     `<div class="actions" style="margin-top:18px"><button type="button" class="btn bad" onclick="logout()">🚪 退出登录</button></div>`);
@@ -935,6 +937,8 @@ async function forcedPasswordChange(){
     await api("/auth/password",{method:"PUT",body,routeScoped:false});
     // 服务端已给这台设备补发新会话，直接进入工作台。
     toast("密码已更新");
+    // 店员/店长(已分门店)改完密码回手机版,不留在老板的完整工作台。
+    if(ME?.prefers_staff_home){ location.replace("/staff"); return; }
     ME=null;
     await render();
   }catch(e){ toast(e.message); }
@@ -1608,7 +1612,7 @@ async function dashboard(){
   const tourBanner = ME&&ME.role==="tour" ? `<div class="notice" style="background:#ece3ff;margin-top:0">👀 <b>参观模式</b>:去看看每位数字员工能帮您的店做什么。<a href="#/experts" style="text-decoration:underline;font-weight:900">看数字员工 →</a> <a href="/promo#plans" style="text-decoration:underline;font-weight:900">查看套餐</a> 或联系开通企业账号后直接派活。</div>` : "";
   const d = new Date();
   const dateLabel = `${d.getMonth()+1}月${d.getDate()}日 周${"日一二三四五六"[d.getDay()]}`;
-  const money = ME.role!=="root"&&ME.role!=="tour"
+  const money = ME.role==="owner"
     ? `<a class="today-money" href="#/billing">余额 ${Math.round(STATE.balance||0)} 点${STATE.plan?` · ${esc(STATE.plan)}`:""} ›</a>` : "";
   const hello = `<div class="today-hello"><h2>☀️ ${ME.role==="member"?"同事好":"老板好"} <span class="sub">${dateLabel}</span></h2>${money}</div>`;
   // 等我处理的:等拍板 / 失败要处理 / 待审核整改 + 新进展
@@ -8532,6 +8536,13 @@ function billingPlansCardHtml(){
     ${plans.map(p=>purchasePlanHtml(p)).join("")}</div></div>`;
 }
 async function billingView(){
+  if(!canSeeBilling()){
+    // 店员、店长等成员账号不看企业的账:后端同样不返回流水和套餐。
+    $("#main").innerHTML=`<div class="card" id="billing-owner-only"><h2>💎 套餐与点数</h2>
+      <div class="notice" style="margin-bottom:0">套餐和点数由老板管理。点数不够用时，请联系老板充值。</div>
+      <div class="actions"><a class="btn pri" href="#/">← 回今天</a></div></div>`;
+    return;
+  }
   trackFunnelSessionOnce("pricing_view","billing");
   // 先用参考价把套餐和“1 点能做什么”画出来：账户接口再慢，老板也能先看到价格。
   if(!PURCHASE_CONTEXT.catalog) PURCHASE_CONTEXT={...PURCHASE_CONTEXT,catalog:purchaseReferenceCatalog()};
