@@ -398,7 +398,8 @@ def all_modules() -> list:
 def all_industries() -> list:
     """全部行业部门(供注册/开租户时选择),不受当前租户限制."""
     from . import departments
-    return [{"key": d["key"], "name": d["name"], "emoji": d["emoji"]}
+    return [{"key": d["key"], "name": d["name"], "emoji": d["emoji"],
+             "short_label": departments.short_label(d["key"], d["name"])}
             for d in departments.list_depts()]
 
 
