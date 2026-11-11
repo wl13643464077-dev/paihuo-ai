@@ -897,7 +897,12 @@ async function logout(){
     pcalYm:new Date().toISOString().slice(0,7), warm:null, leads:null,
     vars:null, shot:null, menu:null};
   location.href="/login"; }
+/* 首登改密页:服务端在改密前拒绝实时推送(428),不连 SSE,也藏掉「重连中」和反馈气泡,免得像出了故障。 */
+let FORCED_PW_MODE=false;
 function forcedPasswordView(){
+  FORCED_PW_MODE=true;
+  stopSse();
+  document.body.classList.add("forced-pw");
   $("#nav").innerHTML=`<span style="font-weight:900">🔐 账号安全升级</span>
     <span style="flex:1"></span>
     <button type="button" class="nav-action navlogout" onclick="logout()">🚪 退出</button>`;
@@ -907,15 +912,16 @@ function forcedPasswordView(){
   const needsOld=ME?.password_change_needs_old!==false;
   $("#main").innerHTML=`<form class="card" id="forced-pw-form" style="max-width:620px;margin:42px auto" onsubmit="event.preventDefault();forcedPasswordChange()">
     <h2>请先设置您自己的密码</h2>
-    <div class="notice">为了账号安全,初始/旧密码需要换成您自己的新密码(仅需一次),之后就能正常查看任务和使用数字员工。</div>
+    <div class="notice">为了账号安全，初始密码需要换成您自己的新密码（只需一次），之后就能正常查看任务和使用数字员工。</div>
     ${needsOld?`<div style="margin-top:14px"><label>当前密码</label>
-      <input id="forced-pw-old" type="password" autocomplete="current-password"></div>`:""}
+      <input id="forced-pw-old" type="password" autocomplete="current-password" aria-describedby="forced-pw-err"></div>`:""}
     <div class="row" style="margin-top:10px">
       <div><label>新密码（12—128 位，至少两类字符）</label>
-        <input id="forced-pw-new" type="password" autocomplete="new-password"></div>
+        <input id="forced-pw-new" type="password" autocomplete="new-password" aria-describedby="forced-pw-err"></div>
       <div><label>再次输入新密码</label>
-        <input id="forced-pw-confirm" type="password" autocomplete="new-password"></div>
+        <input id="forced-pw-confirm" type="password" autocomplete="new-password" aria-describedby="forced-pw-err"></div>
     </div>
+    <div class="field-err" id="forced-pw-err" role="alert"></div>
     <div class="actions"><button type="submit" class="btn pri">保存新密码</button></div>
     <div class="sub">保存后直接进入，不用重新登录。</div>
   </form>`;
@@ -929,9 +935,17 @@ async function forcedPasswordChange(){
   const newPassword=$("#forced-pw-new")?.value||"";
   const confirmation=$("#forced-pw-confirm")?.value||"";
   const policyError=passwordPolicyError(newPassword);
-  if(oldField&&!oldPassword) return toast("请输入当前密码");
-  if(policyError) return toast(policyError);
-  if(newPassword!==confirmation) return toast("两次输入的新密码不一致");
+  // 错误常驻在输入框下面,不只是底部一闪而过的提示条。
+  const errBox=$("#forced-pw-err");
+  const showErr=(text,field)=>{
+    if(errBox) errBox.textContent=text||"";
+    ["#forced-pw-old","#forced-pw-new","#forced-pw-confirm"].forEach(sel=>$(sel)?.removeAttribute("aria-invalid"));
+    if(field){ const el=$(field); if(el){ el.setAttribute("aria-invalid","true"); el.focus(); } }
+  };
+  if(oldField&&!oldPassword) return showErr("请输入当前密码","#forced-pw-old");
+  if(policyError) return showErr(policyError,"#forced-pw-new");
+  if(newPassword!==confirmation) return showErr("两次输入的新密码不一致","#forced-pw-confirm");
+  showErr("");
   FORCED_PW_BUSY=true;
   try{
     const body=oldField?{old:oldPassword,new:newPassword}:{new:newPassword};
@@ -940,9 +954,12 @@ async function forcedPasswordChange(){
     toast("密码已更新");
     // 店员/店长(已分门店)改完密码回手机版,不留在老板的完整工作台。
     if(ME?.prefers_staff_home){ location.replace("/staff"); return; }
+    FORCED_PW_MODE=false;
+    document.body.classList.remove("forced-pw");
     ME=null;
     await render();
-  }catch(e){ toast(e.message); }
+    sse();
+  }catch(e){ if(errBox) showErr(e.message); else toast(e.message); }
   finally{ FORCED_PW_BUSY=false; }
 }
 function routeLoading(page){
@@ -1178,7 +1195,7 @@ function scheduleSseReconnect(delayOverride=null){
   },wait);
 }
 function sse(){
-  if(document.hidden) return;
+  if(document.hidden||FORCED_PW_MODE) return;
   stopSse();
   let es;
   try{ es = new EventSource("/api/events"); }
@@ -7785,44 +7802,56 @@ const TM_TITLE_TAG = {director:["🎖 总监","#e7d9ff"],manager:["📋 经理",
 function tmTitleTag(u){
   if(u.role==="root") return `<span class="tag">👑 平台管理员</span>`;
   if(u.role==="owner") return `<span class="tag" style="background:#ffe59a">⭐ 老板(主账号)</span>`;
+  if(tmIsStorePerson(u)) return u.job_title==="manager"
+    ? `<span class="tag" style="background:#c9e2ff">🏪 店长</span>`
+    : `<span class="tag" style="background:#efe7d4">🧑‍🍳 店员</span>`;
   const [label,bg]=TM_TITLE_TAG[u.job_title||"staff"]||TM_TITLE_TAG.staff;
   return `<span class="tag" style="background:${bg}">${label}</span>`;
 }
+/* 店长/店员 = 经理/员工职级 + 已分了门店(与派活页、店员手机版的叫法一致) */
+function tmIsStorePerson(u){
+  return u&&u.role==="member"&&["manager","staff"].includes(u.job_title||"staff")&&(u.branch_ids||[]).length>0;
+}
 function tmAllocSummary(u,t){
   if(u.role!=="member") return "";
-  const industries=(u.modules||[]).map(k=>esc((t.all_modules.find(m=>m.key===k)||{}).label||k)).join(" · ")||"(未开通行业,啥也用不了)";
+  const industries=(u.modules||[]).map(k=>esc((t.all_modules.find(m=>m.key===k)||{}).label||k)).join(" · ")||"（还没开通）";
   const emp = u.allowed_emp_idxs===null||u.allowed_emp_idxs===undefined
     ? "行业内全部数字员工可用"
-    : `指定 ${u.allowed_emp_idxs.length} 名数字员工可用`;
+    : u.allowed_emp_idxs.length ? `指定 ${u.allowed_emp_idxs.length} 名数字员工可用` : "不开通（不花企业点数）";
   // 巡店负责门店:只有老板视图带门店数据;总监本来就看全部门店。
   const stores = !t.store_branches ? "" : (u.job_title==="director"
     ? "总监可看全部门店"
-    : (u.branch_ids||[]).length ? `负责 ${(u.branch_ids||[]).length} 家门店` : "还没分配门店(巡店页看不到任何门店)");
-  return `<div class="sub" style="margin-top:4px">行业/板块:${industries}</div>
-    <div class="sub" style="margin-top:2px">数字员工:${emp}</div>
-    ${stores?`<div class="sub" style="margin-top:2px">巡店门店:${esc(stores)}</div>`:""}`;
+    : (u.branch_ids||[]).length ? `负责 ${(u.branch_ids||[]).length} 家门店` : "还没分配门店（派活、巡店都看不到门店）");
+  return `<div class="sub" style="margin-top:4px">行业/板块：${industries}</div>
+    <div class="sub" style="margin-top:2px">AI 专家：${emp}</div>
+    ${stores?`<div class="sub" style="margin-top:2px">负责门店：${esc(stores)}</div>`:""}`;
+}
+function tmBranchLabel(b){ return `${b.store_code?b.store_code+" · ":""}${b.name}${b.region?` · ${b.region}`:""}`; }
+/* 门店多选一律用复选框:手机上也能点,不用「按住 Ctrl 多选」 */
+function tmBranchChecks(name, items, selected){
+  return `<div class="tm-checks" role="group" aria-label="门店">${items.map(b=>`<label class="tm-check"><input type="checkbox" name="${name}" value="${Number(b.id)}" ${selected.has(Number(b.id))?"checked":""}><span>${esc(tmBranchLabel(b))}</span></label>`).join("")}</div>`;
 }
 function tmBranchForm(uid, name){
   const t = window.__TEAM||{};
   const target = (t.users||[]).find(x=>Number(x.id)===Number(uid))||{};
   const targetMods = new Set(target.modules||[]);
-  const all = ((t.store_branches||{}).items||[]).filter(b=>targetMods.has(b.industry_key));
+  const all = ((t.store_branches||{}).items||[]);
   const sel = new Set((target.branch_ids||[]).map(Number));
   const box = $("#tm-allocbox")||$("#tm-modbox");
-  const label = b=>`${b.store_code?b.store_code+" · ":""}${b.name}${b.region?` · ${b.region}`:""}`;
+  const outside = all.some(b=>!targetMods.has(b.industry_key));
   box.innerHTML = `<div class="card" style="background:#fff6dc">
-    <b>给「${esc(name)}」分配负责门店</b>
-    <div class="sub" style="margin-top:6px">经理/员工只能看、只能巡自己负责的门店,也只能对这些门店的整改单点「开始整改/提交复查」。总监不受限制。</div>
-    ${all.length?`<select id="tm-branch-sel" multiple size="${Math.min(10,Math.max(4,all.length))}" style="width:100%;margin-top:8px">${all.map(b=>`<option value="${Number(b.id)}" ${sel.has(Number(b.id))?"selected":""}>${esc(label(b))}</option>`).join("")}</select>
-      <div class="sub" style="margin-top:4px">按住 Ctrl(苹果电脑按 ⌘)可多选;全部取消=不负责任何门店。${(t.store_branches||{}).truncated?"门店太多,这里只列出前 2000 家。":""}</div>`
-      :`<div class="sub" style="margin-top:8px">TA 开通的行业里还没有门店${target.modules&&target.modules.length?"(先去巡店页新建或导入门店)":"(先点「🧩 行业/板块」开通行业)"}。</div>`}
+    <b>「${esc(name)}」负责哪些门店</b>
+    <div class="sub" style="margin-top:6px">店长、店员只看得到自己负责的门店：能收到这些店的活，也只能处理这些店的整改。总监不受限制。</div>
+    ${all.length?`${tmBranchChecks("tm-branch",all,sel)}
+      <div class="sub" style="margin-top:4px">全部不勾 = 不负责任何门店。${outside?"门店所在的行业 TA 还没开通的，保存时会一起开通（不会开通 AI 专家）。":""}${(t.store_branches||{}).truncated?"门店太多，这里只列出前 2000 家。":""}</div>`
+      :`<div class="sub" style="margin-top:8px">还没有门店，先到「门店」页建一家。</div>`}
     <div class="actions" style="margin-top:10px">${all.length?`<button class="btn pri" onclick="tmSaveBranches(${uid})">💾 保存门店</button>`:""}
       <button class="btn" onclick="this.closest('.card').remove()">取消</button></div></div>`;
   box.scrollIntoView({behavior:"smooth"});
 }
 async function tmSaveBranches(uid){
-  const ids = [...($("#tm-branch-sel")?.selectedOptions||[])].map(o=>Number(o.value));
-  try{ await api(`/team/users/${uid}/branches`,{method:"PUT",body:{branch_ids:ids}});
+  const ids = [...document.querySelectorAll('input[name="tm-branch"]:checked')].map(o=>Number(o.value));
+  try{ await api(`/team/users/${uid}/branches`,{method:"PUT",body:{branch_ids:ids,open_industries:true}});
     toast(ids.length?`已分配 ${ids.length} 家门店`:"已清空负责门店"); render(); }catch(e){ toast(e.message); }
 }
 function tmMemberRow(u,t){
@@ -7833,7 +7862,7 @@ function tmMemberRow(u,t){
     btns.push(`<button class="btn sm" onclick="tmEditTitle(${u.id},${cp(u.username)},${cp(u.job_title||"staff")})">🎖 职级</button>`);
     btns.push(`<button class="btn sm" onclick="tmAllocForm(${u.id},${cp(u.username)})">🤝 分配数字员工</button>`);
     if(t.store_branches && u.job_title!=="director") btns.push(`<button class="btn sm" onclick="tmBranchForm(${u.id},${cp(u.username)})">🏪 负责门店</button>`);
-    btns.push(`<button class="btn sm" onclick="tmResetPw(${u.id})">🔑 改密</button>`);
+    btns.push(`<button class="btn sm" onclick="tmResetPw(${u.id})">🔑 重置密码</button>`);
     btns.push(`<button class="btn sm" onclick="tmToggle(${u.id},${u.enabled?0:1})">${u.enabled?"⏸ 停用":"▶️ 启用"}</button>`);
     btns.push(`<button class="btn sm bad" onclick="tmDel(${u.id},${cp(u.username)})">🗑</button>`);
   }else if(!t.is_admin && u.role==="member" && !isSelf){
@@ -7865,14 +7894,16 @@ async function teamView(){
     <div class="card"><h2>🤝 我管理的成员(${managed.length}人)</h2>
       ${managed.length?managed.map(u=>tmMemberRow(u,t)).join(""):`<div class="empty">暂时没有职级低于您的成员;请老板先创建员工级副账号。</div>`}
       <div id="tm-allocbox"></div></div>
-    <div class="card"><h2>🔑 改我自己的密码</h2>
-      <div class="row"><div><label>旧密码</label><input id="tm-old" type="password" autocomplete="current-password" ${enterSubmit("tmMyPw()")}></div>
-        <div><label>新密码(≥12位，至少两类字符)</label><input id="tm-new" type="password" autocomplete="new-password" ${enterSubmit("tmMyPw()")}></div></div>
-      <div class="actions"><button class="btn pri" onclick="tmMyPw()">💾 修改</button></div></div>`;
+    <div class="card"><h2>🔑 修改密码</h2>
+      <div class="row"><div><label>当前密码</label><input id="tm-old" type="password" autocomplete="current-password" ${enterSubmit("tmMyPw()")}></div>
+        <div><label>新密码（至少 12 位，至少两类字符）</label><input id="tm-new" type="password" autocomplete="new-password" ${enterSubmit("tmMyPw()")}></div></div>
+      <div class="actions"><button class="btn pri" onclick="tmMyPw()">💾 保存新密码</button></div></div>`;
     return;
   }
   $("#main").innerHTML = `
-  <div class="notice" style="margin-top:0">👥 <b>团队与权限</b>:老板全权掌控——副账号的职级(总监/经理/员工)、可见行业、可用的数字员工、密码与启停都在这里定;每个数字员工用什么模型在员工面板里调。总监/经理登录后也能在自己行业内给下级分配数字员工。${ME.role==="root"?"另含租户(客户企业)管理、平台后台。":""}数据按企业完全隔离。</div>
+  <div class="notice" style="margin-top:0">👥 <b>团队与权限</b>：给店长、店员和办公室同事开账号，定好谁管哪家店、能用哪些 AI 专家。
+    <details class="team-intro-more" style="margin-top:4px"><summary style="cursor:pointer;font-weight:800">了解更多</summary>
+      <div class="sub" style="margin-top:4px">账号的职级（总监/经理/员工）、能看的行业、能用的数字员工、密码和停用都由老板在这里定；每个数字员工用什么模型在员工面板里调。总监、经理登录后也能在自己的行业里给下级分配数字员工。${ME.role==="root"?"这里还有租户（客户企业）管理和平台后台。":""}各企业的数据完全隔开。</div></details></div>
   <div class="card"><h2>🏢 我的企业</h2>
     <div class="row" style="align-items:flex-end">
       <div style="flex:1"><label>企业名称</label><input id="tm-name" value="${esc(t.tenant.name)}"></div>
@@ -7880,16 +7911,16 @@ async function teamView(){
     <div class="kv" style="margin-top:8px"><span>成员 ${t.users.length} 人</span>
       <span>点数余额 ${(t.tenant.balance||0).toFixed(0)} 点</span>
       ${t.tenant.plan?`<span>套餐:${esc(t.tenant.plan)}</span>`:""}</div></div>
-  <div class="card"><h2>👤 成员与副账号</h2>
-    <div class="sub" style="margin-bottom:6px">职级说明:🎖 <b>总监</b>可给经理和员工分配数字员工;📋 <b>经理</b>可给员工分配;👤 <b>员工</b>只用被分配的。行业(板块)决定TA能看到哪个行业,数字员工名单决定TA在行业里能用谁——不设名单=行业内全部可用。</div>
-    <div class="actions"><button class="btn pri" onclick="tmUserForm()">➕ 创建副账号</button></div>
+  <div class="card"><h2>👤 成员</h2>
+    <div class="sub" style="margin-bottom:6px">🏪 <b>店长</b>能给自己店里的人派活、审核交差；🧑‍🍳 <b>店员</b>用手机看待办、拍照交差。办公室同事按职级：🎖 总监可给经理和员工分配数字员工，📋 经理可给员工分配，👤 员工只用分给自己的。</div>
+    <div class="actions"><button class="btn pri" onclick="tmUserForm()">➕ 新建账号</button></div>
     <div id="tm-uform"></div>
     ${t.users.map(u=>tmMemberRow(u,t)).join("")}
     <div id="tm-modbox"></div><div id="tm-allocbox"></div></div>
-  <div class="card"><h2>🔑 改我自己的密码</h2>
-    <div class="row"><div><label>旧密码</label><input id="tm-old" type="password" autocomplete="current-password" ${enterSubmit("tmMyPw()")}></div>
-      <div><label>新密码(≥12位，至少两类字符)</label><input id="tm-new" type="password" autocomplete="new-password" ${enterSubmit("tmMyPw()")}></div></div>
-    <div class="actions"><button class="btn pri" onclick="tmMyPw()">💾 修改</button></div></div>
+  <div class="card"><h2>🔑 修改密码</h2>
+    <div class="row"><div><label>当前密码</label><input id="tm-old" type="password" autocomplete="current-password" ${enterSubmit("tmMyPw()")}></div>
+      <div><label>新密码（至少 12 位，至少两类字符）</label><input id="tm-new" type="password" autocomplete="new-password" ${enterSubmit("tmMyPw()")}></div></div>
+    <div class="actions"><button class="btn pri" onclick="tmMyPw()">💾 保存新密码</button></div></div>
   ${ME.role==="root"&&(t.guests||[]).length?`
   <div class="card"><h2>📇 客资(访客留资 ${t.guests.length} 条)</h2>
     <div class="dimwrap"><table class="dimtable" style="min-width:min(520px,100%)"><thead><tr>
@@ -7940,29 +7971,142 @@ async function teamView(){
   window.__TEAM = t;
 }
 async function tmRename(){ try{ await api("/team/tenant",{method:"PUT",body:{name:$("#tm-name").value.trim()}}); toast("已保存"); ME=null; render(); }catch(e){ toast(e.message); } }
+/* 建号:先问「这个人是谁」。店长/店员 = 经理/员工职级 + 门店,默认不开 AI 专家(不花企业点数);
+   办公室同事才需要选职级和行业板块。密码默认由服务端生成,建好后给一张「发给 TA」卡片。 */
+const TM_KINDS=[
+  {k:"staff",icon:"🧑‍🍳",label:"店员",desc:"在店里干活，用手机看待办、拍照交差"},
+  {k:"manager",icon:"🏪",label:"店长",desc:"管一家或几家店，给店员派活、审核"},
+  {k:"office",icon:"💼",label:"办公室同事",desc:"运营、市场等，用电脑找 AI 专家干活"},
+];
+let TM_KIND="staff", TM_CREATE_BUSY=false;
 function tmUserForm(){
-  const titles=(window.__TEAM?.job_titles)||[{key:"director",label:"总监"},{key:"manager",label:"经理"},{key:"staff",label:"员工"}];
-  const titleDesc={director:"可给经理和员工分配数字员工",manager:"可给员工分配数字员工",staff:"只用被分配的数字员工"};
-  $("#tm-uform").innerHTML = `<div class="card" style="background:#fff6dc">
-    <div class="row"><div><label>用户名</label><input id="tm-u" ${enterSubmit("tmUserCreate()")}></div><div><label>密码(≥12位，至少两类字符)</label><input id="tm-p" type="password" autocomplete="new-password" ${enterSubmit("tmUserCreate()")}></div></div>
-    <label>职级</label><div class="chips" id="tm-title">${titles.map((x,i)=>`<span class="chip${x.key==="staff"?" on":""}" data-k="${x.key}" onclick="document.querySelectorAll('#tm-title .chip').forEach(c=>c.classList.remove('on'));this.classList.add('on')">${{director:"🎖",manager:"📋",staff:"👤"}[x.key]||""} ${esc(x.label)}<span class="sub" style="margin-left:4px">${titleDesc[x.key]||""}</span></span>`).join("")}</div>
-    <label>开通行业/板块(多选)</label><div class="chips" id="tm-mods">${window.__modChips([])}</div>
-    <div class="sub" style="margin-top:4px">建好后可点成员行的「🤝 分配数字员工」进一步限定TA能用行业里的哪些人;不限定=行业内全部可用。</div>
-    <div class="actions"><button class="btn pri" onclick="tmUserCreate()">💾 创建</button>
-      <button class="btn" onclick="$('#tm-uform').innerHTML=''">取消</button></div></div>`;
+  const t=window.__TEAM||{};
+  const titles=t.job_titles||[{key:"director",label:"总监"},{key:"manager",label:"经理"},{key:"staff",label:"员工"}];
+  const titleDesc={director:"可给经理和员工分配数字员工",manager:"可给员工分配数字员工",staff:"只用分给自己的数字员工"};
+  const branches=((t.store_branches||{}).items||[]);
+  $("#tm-uform").innerHTML = `<div class="card" id="tm-create" style="background:#fff6dc">
+    <h3 style="margin-top:0">➕ 新建账号</h3>
+    <label id="tm-kind-label">这个人是</label>
+    <div class="tm-kinds" role="radiogroup" aria-labelledby="tm-kind-label">${TM_KINDS.map(x=>`<button type="button" class="tm-kind" role="radio" data-k="${x.k}" aria-checked="${x.k===TM_KIND}" onclick="tmPickKind('${x.k}')"><b>${x.icon} ${x.label}</b><span class="sub">${x.desc}</span></button>`).join("")}</div>
+    <div style="margin-top:10px"><label for="tm-u">登录账号</label>
+      <input id="tm-u" maxlength="40" autocomplete="off" autocapitalize="off" placeholder="比如：xiaoli 或手机号" aria-describedby="tm-u-err" ${enterSubmit("tmUserCreate()")}>
+      <div class="field-err" id="tm-u-err" role="alert"></div></div>
+    <div id="tm-store-part">
+      <label>负责哪家店（可多选）</label>
+      ${branches.length?tmBranchChecks("tm-store",branches,new Set(branches.length===1?[Number(branches[0].id)]:[]))
+        :`<div class="sub">还没有门店。可以先建账号，建好门店后再点成员旁边的「🏪 负责门店」。</div>`}
+      <div class="sub" style="margin-top:6px">默认不开通 AI 专家，不会花企业的点数；以后需要，可以点成员旁边的「🧩 行业/板块」打开。</div>
+    </div>
+    <div id="tm-office-part" hidden>
+      <label>职级</label><div class="chips" id="tm-title">${titles.map(x=>`<span class="chip${x.key==="staff"?" on":""}" data-k="${x.key}" onclick="document.querySelectorAll('#tm-title .chip').forEach(c=>c.classList.remove('on'));this.classList.add('on')">${{director:"🎖",manager:"📋",staff:"👤"}[x.key]||""} ${esc(x.label)}<span class="sub" style="margin-left:4px">${titleDesc[x.key]||""}</span></span>`).join("")}</div>
+      <label>开通行业/板块（多选）</label><div class="chips" id="tm-mods">${window.__modChips([])}</div>
+      <div class="sub" style="margin-top:4px">建好后可以点「🤝 分配数字员工」，限定 TA 能用行业里的哪几位；不限定 = 行业里的都能用。</div>
+    </div>
+    <label style="display:flex;gap:8px;align-items:center;margin-top:12px;cursor:pointer;font-weight:700">
+      <input id="tm-p-auto" type="checkbox" checked style="width:auto;min-height:0;margin:0" onchange="tmTogglePw(this.checked)">
+      <span>系统自动生成初始密码（推荐）</span></label>
+    <div id="tm-p-wrap" hidden><label for="tm-p">自己设一个密码（至少 12 位，至少两类字符）</label>
+      <input id="tm-p" type="password" autocomplete="new-password" aria-describedby="tm-p-err" ${enterSubmit("tmUserCreate()")}>
+      <div class="field-err" id="tm-p-err" role="alert"></div></div>
+    <div class="sub" style="margin-top:4px">TA 第一次登录时，会让 TA 换成自己好记的密码。</div>
+    <div class="field-err" id="tm-create-err" role="alert"></div>
+    <div class="actions"><button type="button" class="btn pri" id="tm-create-ok" onclick="tmUserCreate()">创建账号</button>
+      <button type="button" class="btn" onclick="$('#tm-uform').innerHTML=''">取消</button></div></div>`;
+  tmPickKind(TM_KIND);
+  setTimeout(()=>$("#tm-u")?.focus(),30);
+}
+function tmPickKind(kind){
+  TM_KIND=TM_KINDS.some(x=>x.k===kind)?kind:"staff";
+  document.querySelectorAll("#tm-create .tm-kind").forEach(b=>b.setAttribute("aria-checked",String(b.dataset.k===TM_KIND)));
+  const store=$("#tm-store-part"), office=$("#tm-office-part");
+  if(store) store.hidden=TM_KIND==="office";
+  if(office) office.hidden=TM_KIND!=="office";
+}
+function tmTogglePw(auto){
+  const wrap=$("#tm-p-wrap"); if(!wrap) return;
+  wrap.hidden=!!auto;
+  if(auto){ $("#tm-p").value=""; tmFieldErr("tm-p",""); }
+  else $("#tm-p").focus();
+}
+function tmFieldErr(id,text){
+  const input=$("#"+id), box=$("#"+id+"-err");
+  if(box) box.textContent=text||"";
+  if(input){ if(text) input.setAttribute("aria-invalid","true"); else input.removeAttribute("aria-invalid"); }
 }
 async function tmUserCreate(){
-  const mods = [...document.querySelectorAll("#tm-mods .on")].map(e=>e.dataset.k);
-  const jobTitle = document.querySelector("#tm-title .on")?.dataset.k || "staff";
-  const password=$("#tm-p").value, passwordError=passwordPolicyError(password);
-  if(passwordError) return toast(passwordError);
-  if(!mods.length && !await uiConfirm(
-    "还没勾选任何行业/板块:成员登录后会是一片空白、啥也用不了。\n确定先建空账号,回头再分配?",
-    {title:"未分配板块",confirmText:"先建空账号"})) return;
-  try{ await api("/team/users",{method:"POST",body:{username:$("#tm-u").value.trim(),
-    password, modules:mods, job_title:jobTitle}});
-    toast(mods.length?"副账号已创建,把用户名密码发给TA即可"
-      :"副账号已创建(未分配板块):记得点「行业/板块」分配,TA 才能用"); render(); }catch(e){ toast(e.message); }
+  if(TM_CREATE_BUSY) return;
+  const username=($("#tm-u")?.value||"").trim();
+  const auto=$("#tm-p-auto")?.checked!==false;
+  const password=auto?"":($("#tm-p")?.value||"");
+  // 一次把所有没填对的地方都标出来,不是只报第一个。
+  const userErr=!username?"请填写登录账号"
+    :/[\s'"<>&\\]/.test(username)?"登录账号不能有空格、引号、尖括号等符号":"";
+  const pwErr=auto?"":(passwordPolicyError(password)||"");
+  tmFieldErr("tm-u",userErr); tmFieldErr("tm-p",pwErr);
+  $("#tm-create-err").textContent="";
+  if(userErr||pwErr){ $(userErr?"#tm-u":"#tm-p").focus(); return; }
+  const kind=TM_KIND, body={username};
+  if(password) body.password=password;
+  if(kind==="office"){
+    body.modules=[...document.querySelectorAll("#tm-mods .on")].map(e=>e.dataset.k);
+    body.job_title=document.querySelector("#tm-title .on")?.dataset.k||"staff";
+    if(!body.modules.length && !await uiConfirm(
+      "还没勾选任何行业/板块：TA 登录后什么都用不了。\n确定先建账号，回头再分配？",
+      {title:"还没开通板块",confirmText:"先建账号"})) return;
+  }else{
+    body.job_title=kind;
+    body.modules=[];
+    body.allowed_emp_idxs=[];
+    body.branch_ids=[...document.querySelectorAll('input[name="tm-store"]:checked')].map(o=>Number(o.value));
+  }
+  TM_CREATE_BUSY=true;
+  const ok=$("#tm-create-ok"); if(ok){ ok.disabled=true; ok.innerHTML='<span class="spin"></span> 正在创建…'; }
+  try{
+    const r=await api("/team/users",{method:"POST",body});
+    await render();
+    tmShowSendCard({username:r.username||username, password:r.initial_password||password,
+      kind, stores:(r.branch_ids||body.branch_ids||[]).length});
+  }catch(e){
+    const err=$("#tm-create-err"); if(err) err.textContent=e.message; else toast(e.message);
+    if(/用户名|账号/.test(e.message||"")) tmFieldErr("tm-u",e.message);
+  }finally{
+    TM_CREATE_BUSY=false;
+    const btn=$("#tm-create-ok"); if(btn){ btn.disabled=false; btn.textContent="创建账号"; }
+  }
+}
+function tmSendText(o){
+  const store=o.kind!=="office";
+  return [`账号：${o.username}`, `初始密码：${o.password}`,
+    store?`手机打开：${location.origin}/staff`:`电脑打开：${location.origin}`].join("\n");
+}
+/* 建好后的「发给 TA」卡:密码只在这里出现一次,关掉就没了(服务端只存哈希) */
+function tmShowSendCard(o){
+  const box=$("#tm-uform"); if(!box) return;
+  const store=o.kind!=="office";
+  box.innerHTML=`<div class="card tm-sendcard" id="tm-sendcard" role="status">
+    <h3 style="margin-top:0">✅ 账号建好了，把下面三行发给 TA</h3>
+    <pre id="tm-send-text">${esc(tmSendText(o))}</pre>
+    <div class="actions" style="margin-top:0"><button type="button" class="btn pri" id="tm-send-copy" onclick="tmCopySend()">📋 复制</button>
+      <button type="button" class="btn" onclick="$('#tm-uform').innerHTML=''">我发好了</button></div>
+    <div class="sub" style="margin-top:8px">⚠️ 初始密码<b>只显示这一次</b>，关掉就看不到了。忘了也不要紧，点成员旁边的「🔑 重置密码」重新设一个。TA 第一次登录会被要求换成自己的密码。</div>
+    ${store&&!o.stores?`<div class="notice" style="margin:8px 0 0">还没给 TA 分门店：TA 登录后收不到任何门店的活。点 TA 旁边的「🏪 负责门店」分一下。</div>`:""}
+  </div>`;
+  box.scrollIntoView({behavior:"smooth",block:"nearest"});
+}
+async function tmCopySend(){
+  const text=$("#tm-send-text")?.textContent||"";
+  let ok=false;
+  try{ if(navigator.clipboard&&window.isSecureContext){ await navigator.clipboard.writeText(text); ok=true; } }catch(_){}
+  if(!ok){
+    const ta=document.createElement("textarea");
+    ta.value=text; ta.setAttribute("readonly",""); ta.style.position="fixed"; ta.style.opacity="0";
+    document.body.appendChild(ta); ta.select();
+    try{ ok=document.execCommand("copy"); }catch(_){ ok=false; }
+    ta.remove();
+  }
+  const btn=$("#tm-send-copy");
+  if(ok){ toast("已复制，粘贴到微信发给 TA 就行"); if(btn) btn.textContent="✅ 已复制"; }
+  else toast("没能自动复制，请长按上面的文字手动复制");
 }
 function tmEditTitle(uid, name, cur){
   const titles=(window.__TEAM?.job_titles)||[];
@@ -8037,7 +8181,7 @@ async function tmResetPw(uid){
     validate:passwordPolicyError
   });
   if(pw===null) return;
-  try{ await api(`/team/users/${uid}`,{method:"PUT",body:{password:pw}}); toast("已改密"); }catch(e){ toast(e.message); }
+  try{ await api(`/team/users/${uid}`,{method:"PUT",body:{password:pw}}); toast("密码已重置，TA 下次登录要换成自己的密码"); }catch(e){ toast(e.message); }
 }
 async function tmToggle(uid,en){ try{ await api(`/team/users/${uid}`,{method:"PUT",body:{enabled:!!en}}); render(); }catch(e){ toast(e.message); } }
 async function tmAutoLoad(){
@@ -8220,6 +8364,35 @@ async function tmTenantToggle(tid,en){
 
 /* ---------- V8:套餐与点数 ---------- */
 let BILL_TAB="all";
+/* 点数明细的显示合并:一笔「退回:X · 原因」和它之前那笔同名、同额的「X」扣点配成一对,
+   合成一行 delta=0 的「没做成，未扣点」。只动显示,不碰扣点/退点逻辑和服务端统计。
+   log 按时间倒序(新的在前),所以退回行在前、对应的扣点行在后。 */
+function billMergeRefundPairs(log){
+  const rows=Array.isArray(log)?log:[];
+  const used=new Set(), out=[];
+  const labelOf=reason=>String(reason||"").split(" · ")[0];
+  rows.forEach((l,i)=>{
+    if(used.has(i)) return;
+    const reason=String(l.reason||"");
+    if(!(l.delta>0&&reason.startsWith("退回"))){ out.push(l); return; }
+    const label=labelOf(reason.replace(/^退回[:：]\s*/,""));
+    let pair=-1;
+    for(let j=i+1;j<rows.length;j++){
+      const c=rows[j];
+      if(used.has(j)||!(c.delta<0)) continue;
+      if(Math.abs(Math.abs(c.delta)-l.delta)>1e-9) continue;
+      if(labelOf(c.reason)!==label) continue;
+      pair=j; break;
+    }
+    if(pair<0||!label){ out.push(l); return; }
+    used.add(pair);
+    const charge=rows[pair];
+    const text=/验照片|看照片/.test(label)?"AI 没看成，未扣点":"没做成，点数已全额退回，未扣点";
+    out.push({...charge, delta:0, balance:l.balance, created_at:charge.created_at,
+      reason:charge.reason||label, merged:text});
+  });
+  return out;
+}
 function billReasonHtml(reason){
   // 流水项目里的单号变成可点链接:老板终于能从账单跳回"这笔钱买了哪单"
   // 长别名规则必须先于「工单」执行,否则「数字人工单 #7」会被错链到内容工单 #7
@@ -8585,7 +8758,9 @@ async function billingView(){
   b.prices=b.prices||{};
   const tourBanner = ME&&ME.role==="tour" ? `<div class="notice" style="background:#ece3ff;margin-top:0">👀 <b>参观模式</b>:点击员工卡片,了解每位数字员工可以为您的业务提供什么帮助。<a href="/promo#plans" style="text-decoration:underline;font-weight:900">查看套餐</a> 或联系开通企业账号后直接派活。</div>` : "";
   const isRefund = l=>l.delta>0&&String(l.reason||"").startsWith("退回");
-  const shown = (BILL_TAB==="in"?b.log.filter(l=>l.delta>0&&!isRefund(l)):BILL_TAB==="out"?b.log.filter(l=>l.delta<0):b.log);
+  // 只改显示:扣了又全额退回的一对流水合并成一行「没做成，未扣点」,老板不会以为被扣了钱。
+  const billLog = billMergeRefundPairs(b.log);
+  const shown = (BILL_TAB==="in"?billLog.filter(l=>l.delta>0&&!isRefund(l)):BILL_TAB==="out"?billLog.filter(l=>l.delta<0):billLog);
   const billWindowLabel=b.log_truncated?`最近 ${b.log.length} / ${b.txn_n||b.log.length}`:`全部 ${b.log.length}`;
   const spendActs = (!b.is_platform&&b.spend_by_action)?b.spend_by_action.filter(s=>(s.points||0)>0):[];
   const spendTotal = spendActs.reduce((sum,s)=>sum+(s.points||0),0);
@@ -8635,14 +8810,14 @@ async function billingView(){
     <div class="tabs">
       <span class="tb ${BILL_TAB==="all"?"on":""}" onclick="BILL_TAB='all';render()">${billWindowLabel}</span>
       <span class="tb ${BILL_TAB==="in"?"on":""}" onclick="BILL_TAB='in';render()">💰 充值记录(${b.log.filter(l=>l.delta>0&&!isRefund(l)).length})</span>
-      <span class="tb ${BILL_TAB==="out"?"on":""}" onclick="BILL_TAB='out';render()">🔻 消耗记录(${b.log.filter(l=>l.delta<0).length})</span></div>
+      <span class="tb ${BILL_TAB==="out"?"on":""}" onclick="BILL_TAB='out';render()">🔻 消耗记录(${billLog.filter(l=>l.delta<0).length})</span></div>
     ${shown.length?`<div class="dimwrap" style="margin-top:10px"><table class="dimtable" style="min-width:min(520px,100%)"><thead><tr>
       <th>时间</th><th>类型</th><th>项目</th><th>点数变动</th><th>余额</th></tr></thead><tbody>
       ${shown.map(l=>`<tr>
         <td class="sub" style="white-space:nowrap">${tcFmt(l.created_at)}</td>
-        <td>${isRefund(l)?'<span class="tag" style="background:#ffe3b3">退回</span>':l.delta>0?'<span class="tag" style="background:#a7ecc9">充值</span>':'<span class="tag" style="background:#ffd7d9">消耗</span>'}</td>
-        <td>${billReasonHtml(l.reason||"")}</td>
-        <td><b style="color:${l.delta<0?"#e5484d":"#2f9e6e"}">${l.delta>0?"+":""}${l.delta}</b></td>
+        <td>${l.merged?'<span class="tag" style="background:#eceae4">未扣点</span>':isRefund(l)?'<span class="tag" style="background:#ffe3b3">退回</span>':l.delta>0?'<span class="tag" style="background:#a7ecc9">充值</span>':'<span class="tag" style="background:#ffd7d9">消耗</span>'}</td>
+        <td>${l.merged?`${esc(l.merged)}<div class="sub" style="font-size:12px">${billReasonHtml(l.reason||"")}</div>`:billReasonHtml(l.reason||"")}</td>
+        <td><b style="color:${l.merged?"var(--ink2)":l.delta<0?"#e5484d":"#2f9e6e"}">${l.delta>0?"+":""}${l.delta}</b></td>
         <td class="sub">${l.balance.toFixed(0)}</td></tr>`).join("")}</tbody></table></div>`
       :`<div class="empty" style="padding:26px">${b.is_platform?"平台自用不产生账单":BILL_TAB==="in"?"还没有充值记录":BILL_TAB==="out"?"还没有消耗记录":"暂无点数变动记录"}</div>`}</div>
   <div class="card"><h2>📋 价目表(按次消耗)</h2>

@@ -1372,6 +1372,8 @@ def todo_for_user(tid: int, uid: int, *, now: float | None = None) -> dict:
             "name": user.get("username") or "",
             "role_label": role_label(user),
             "can_dispatch": can_dispatch(user),
+            # 手机版底部「完整版」只给老板/总监；店员、店长点进去是老板工作台，容易走错。
+            "can_open_full": sees_all_branches(user),
         },
         "branches": [{"id": b, "name": branch_names.get(b, "")} for b in bound],
         "tasks": tasks,
