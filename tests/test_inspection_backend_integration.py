@@ -252,6 +252,7 @@ class InspectionBackendIntegrationTests(unittest.TestCase):
         result = main.inspection_meta(None)
         self.assertEqual("auto", result["industry_key"])
         self.assertEqual(["auto"], [item["key"] for item in result["industries"]])
+        self.assertEqual("汽车后市场", result["industries"][0]["short_label"])
 
     def test_inspection_task_uses_industry_scope_and_disables_text_thread(self):
         task_id, visit = self._linked_task()

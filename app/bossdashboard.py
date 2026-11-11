@@ -286,6 +286,7 @@ def _industry_catalog() -> dict[str, dict[str, Any]]:
         catalog[key] = {
             "key": key,
             "name": str(item.get("name") or key),
+            "short_label": departments.short_label(key, item.get("name") or key),
             "emoji": str(item.get("emoji") or ""),
         }
     return catalog
@@ -554,6 +555,7 @@ def scopes(
             {
                 "key": key,
                 "name": meta["name"],
+                "short_label": meta["short_label"],
                 "emoji": meta["emoji"],
                 "is_primary": bool(row.get("is_primary")),
             }

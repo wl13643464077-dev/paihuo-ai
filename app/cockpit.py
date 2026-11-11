@@ -199,7 +199,7 @@ def _todo(tid: int, now: float, branches: dict[int, str], users: dict[int, dict]
                   "WHERE tenant_id=? AND deleted_at IS NULL AND status='submitted' "
                   "ORDER BY submitted_at LIMIT 30", (tid,)):
         items.append({"key": f"staff_review:{r['id']}", "type": "review", "level": "normal",
-                      "label": "店员已交差，等你验收", "title": _title(r["title"]),
+                      "label": "店员已交差，等您验收", "title": _title(r["title"]),
                       "branch_id": r["branch_id"], "branch": branches.get(r["branch_id"] or 0, ""),
                       "who": who(r["assignee_user_id"]), "since": r["submitted_at"],
                       "route": "#/staff-tasks", "dispatchable": False})
@@ -219,7 +219,7 @@ def _todo(tid: int, now: float, branches: dict[int, str], users: dict[int, dict]
             "('open','in_progress','reopened','awaiting_recheck') ORDER BY a.due_at LIMIT 60",
             (tid,)):
         if r["status"] == "awaiting_recheck":
-            label, level, typ = "整改已提交，等你复查", "normal", "recheck"
+            label, level, typ = "整改已提交，等您复查", "normal", "recheck"
         elif r["due_at"] and float(r["due_at"]) < now:
             label, level, typ = "巡店整改逾期", "high", "overdue"
         elif str(r["severity"]) in ("critical", "high"):
@@ -235,14 +235,14 @@ def _todo(tid: int, now: float, branches: dict[int, str], users: dict[int, dict]
                   f"AND deleted_at IS NULL AND LOWER(status) IN ({_in(WAITING)}) "
                   "ORDER BY updated_at LIMIT 20", (tid,)):
         items.append({"key": f"job:{r['id']}", "type": "content", "level": "normal",
-                      "label": "内容等你审稿", "title": _brief_title(r["brief_json"]) or f"内容工单 #{r['id']}",
+                      "label": "内容等您审稿", "title": _brief_title(r["brief_json"]) or f"内容工单 #{r['id']}",
                       "branch_id": None, "branch": "", "who": "AI 内容团队",
                       "since": r["updated_at"], "route": f"#/job/{r['id']}", "dispatchable": False})
     for r in db.q(f"SELECT id,brief_json,employee_name_snapshot,updated_at FROM task "
                   f"WHERE tenant_id=? AND deleted_at IS NULL AND LOWER(status) IN ({_in(WAITING)}) "
                   "ORDER BY updated_at LIMIT 20", (tid,)):
         items.append({"key": f"task:{r['id']}", "type": "content", "level": "normal",
-                      "label": "AI 员工等你确认", "title": _brief_title(r["brief_json"]) or f"任务 #{r['id']}",
+                      "label": "AI 员工等您确认", "title": _brief_title(r["brief_json"]) or f"任务 #{r['id']}",
                       "branch_id": None, "branch": "", "who": r["employee_name_snapshot"] or "AI 员工",
                       "since": r["updated_at"], "route": f"#/tasks/{r['id']}", "dispatchable": False})
     rank = {"high": 0, "mid": 1, "normal": 2}
@@ -435,7 +435,7 @@ def _headline(k: dict, todo: list, people: list, stores: list) -> list[str]:
     if high:
         lines.append(f"有 {len(high)} 件事已经逾期，建议先处理。")
     elif todo:
-        lines.append(f"有 {len(todo)} 件事等你拍板。")
+        lines.append(f"有 {len(todo)} 件事等您拍板。")
     idle = [p for p in people if p["flag"] in ("idle", "never") and p["role"] not in ("owner", "root")]
     if idle:
         names = "、".join(p["name"] for p in idle[:3])

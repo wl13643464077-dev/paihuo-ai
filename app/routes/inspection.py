@@ -81,6 +81,9 @@ def _inspection_scope(industry_key: str | None = None) -> tuple[str, list[dict]]
         {
             "key": row["industry_key"],
             "name": str(catalog[row["industry_key"]].get("name") or row["industry_key"]),
+            "short_label": departments.short_label(
+                row["industry_key"], catalog[row["industry_key"]].get("name")
+            ),
             "emoji": str(catalog[row["industry_key"]].get("emoji") or ""),
             "is_primary": bool(row.get("is_primary")),
         }

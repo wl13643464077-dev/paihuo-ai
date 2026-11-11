@@ -166,12 +166,12 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(slow_task_requested.wait(), timeout=5)
             await page.evaluate("location.hash='#/billing'")
             await page.wait_for_function(
-                "document.querySelector('#main')?.textContent.includes('我的积分账户')"
+                "document.querySelector('#main')?.textContent.includes('套餐与点数')"
             )
             await asyncio.sleep(0.9)
 
             text = await page.locator("#main").inner_text()
-            self.assertIn("我的积分账户", text)
+            self.assertIn("套餐与点数", text)
             self.assertNotIn("SLOW OLD TASK MUST NEVER WIN", text)
             self.assertEqual("#/billing", await page.evaluate("location.hash"))
             self._assert_no_browser_errors(browser_errors)
@@ -385,7 +385,7 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
             await page.route("**/api/**", api_route)
             await page.goto(f"{self.base}/static/index.html#/billing")
             await page.wait_for_function(
-                "document.querySelector('#main')?.textContent.includes('我的积分账户')"
+                "document.querySelector('#main')?.textContent.includes('套餐与点数')"
             )
             await page.wait_for_function("window.__eventSources.length === 1")
 
@@ -484,7 +484,7 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
             await page.route("**/api/**", api_route)
             await page.goto(f"{self.base}/static/index.html#/billing")
             await page.wait_for_function(
-                "document.querySelector('#main')?.textContent.includes('我的积分账户')"
+                "document.querySelector('#main')?.textContent.includes('套餐与点数')"
             )
 
             rendered = await page.evaluate(
@@ -657,7 +657,7 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
             await page.route("**/api/**", api_route)
             await page.goto(f"{self.base}/static/index.html#/billing")
             await page.wait_for_function(
-                "document.querySelector('#main')?.textContent.includes('我的积分账户')"
+                "document.querySelector('#main')?.textContent.includes('套餐与点数')"
             )
 
             result = await page.evaluate(
@@ -971,7 +971,7 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
             await page.route("**/api/**", api_route)
             await page.goto(f"{self.base}/static/index.html#/billing")
             await page.wait_for_function(
-                "document.querySelector('#main')?.textContent.includes('我的积分账户')"
+                "document.querySelector('#main')?.textContent.includes('套餐与点数')"
             )
 
             result = await page.evaluate(

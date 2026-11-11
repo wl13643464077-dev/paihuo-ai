@@ -136,7 +136,9 @@ function listContractNotice(contract,label="记录"){
   if(!contract||contract.total===null) return "";
   const count=contract.items?.length||0, start=count?contract.offset+1:0;
   const end=contract.offset+count;
-  return `<div class="notice" role="status">正在显示 ${start}–${end} 项${esc(label)}，共 ${contract.total} 项；筛选和分页均由服务端处理。</div>`;
+  /* 空列表或一页就能放下时不显示条数提示，避免对用户说技术细节。 */
+  if(!contract.total||(contract.offset<=0&&!contract.hasMore)) return "";
+  return `<div class="notice" role="status">正在显示第 ${start}–${end} 项${esc(label)}，共 ${contract.total} 项。</div>`;
 }
 const LIST_PAGE_SIZE=40;
 const LIST_OFFSETS={assets:0,knowledge:0,censor:0,video:0,publish:0,
@@ -156,6 +158,8 @@ function listGo(key,offset){
 }
 function listPager(contract,key){
   if(!contract||contract.total===null) return "";
+  /* 空列表或只有一页时隐藏翻页条。 */
+  if(!contract.total||(contract.offset<=0&&!contract.hasMore)) return "";
   const previous=Math.max(0,contract.offset-contract.limit);
   return `<div class="actions" style="justify-content:flex-end;margin-top:12px">
     <button class="btn sm" ${contract.offset<=0?"disabled":""} onclick="listGo(${cp(key)},${previous})">← 上一页</button>
@@ -710,7 +714,7 @@ function nav(){
   const on = navGroupOf(cur);
   const inbox = (STATE?.inbox?.length||0)+(STATE?.notifications?.length||0);
   const items = NAV_GROUPS.map(g=>({g, href:navGroupHref(g)})).filter(x=>x.href);
-  const link = ({g,href},cls)=>`<a href="${href}" class="${cls} ${on===g.key?"on":""}" data-nav="${g.key}" ${on===g.key?'aria-current="page"':""}>`
+  const link = ({g,href},cls)=>`<a href="${href}" class="${cls} ${on===g.key?"on":""}" data-nav="${g.key}" aria-label="${esc(g.label)}${g.key==="today"&&inbox?`，${inbox} 条待处理`:""}" ${on===g.key?'aria-current="page"':""}>`
     + `<span class="nav-ic" aria-hidden="true">${g.icon}</span><span class="nav-tx">${g.label}</span>`
     + `${g.key==="today"&&inbox?`<span class="badge" aria-label="${inbox} 条待处理">${inbox}</span>`:""}</a>`;
   // 桌面:顶部导航;手机:同样的 5 个入口放进底部 Tab 栏(#tabbar),顶部只留退出
@@ -834,11 +838,11 @@ async function forcedPasswordChange(){
   }catch(e){ toast(e.message); }
 }
 function routeLoading(page){
-  const labels={tasks:"派出去的活",teamruns:"协同小队",brand:"品牌知识包",new:"下达任务",avatar:"数字人视频",meetings:"专家商量室",
+  const labels={tasks:"派出去的活",teamruns:"协同小队",brand:"品牌知识包",new:"下达任务",avatar:"数字人视频",meetings:"多位专家一起商量",
     tools:"获客工具",channels:"发布渠道",schedules:"定时发布",profiles:"品牌人设",
     assets:"资料库",knowledge:"经验库",production:"员工产出",boss:"老板看板",cockpit:"数据驾驶舱",
-    inspections:"巡店工作台",company:"企业档案",
-    billing:"套餐",team:"权限管理",admin:"后台",job:"任务详情",delivery:"交付中心",
+    inspections:"巡店",censor:"内容审查",company:"企业档案",
+    billing:"套餐与点数",team:"权限管理",admin:"后台",job:"任务详情",delivery:"交付中心",
     trash:"回收站",notifications:"通知记录",dispatch:"派活",store:"门店",growth:"获客",
     mine:"我的",experts:"行业专家"};
   const box=$("#main"); if(!box) return;
@@ -1660,10 +1664,10 @@ async function notificationsView(offset=0){
       ${!n.is_read?`<button class="btn sm" onclick="notificationHistoryRead(${n.id},${pageOffset},this)">标为已读</button>`:""}
       <button class="btn sm pri" onclick="notificationOpen(${n.id},${cp(safeRouteUrl(n.link)||"#/")})">查看关联</button>
     </div>`).join(""):`<div class="empty">${NOTIFY_UNREAD_ONLY?"没有未读通知":"还没有通知记录"}</div>`}
-    <div class="actions" style="justify-content:flex-end">
+    ${pageOffset>0||data.has_more?`<div class="actions" style="justify-content:flex-end">
       <button class="btn sm" ${pageOffset<=0?"disabled":""} onclick="notificationsView(${Math.max(0,pageOffset-40)})">← 上一页</button>
       <button class="btn sm" ${data.has_more?"":"disabled"} onclick="notificationsView(${data.next_offset??0})">下一页 →</button>
-    </div></div>`;
+    </div>`:""}</div>`;
 }
 async function notificationHistoryRead(id,offset,btn){
   if(btn) btn.disabled=true;
@@ -5417,20 +5421,20 @@ function bossDashboardDraw(){
   const selectStyle="min-width:150px;width:auto";
   $("#main").innerHTML=`<div class="card" style="background:linear-gradient(120deg,#172126,#24343b);color:#fff;border-color:#172126">
     <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap"><div style="flex:1;min-width:250px"><div class="sub" style="color:#b8c9c4">${esc(scope.industry_emoji||"")} ${esc(scope.industry_name||"")} · ${esc(scope.tenant_name||"")}</div>
-      <h2 style="margin:4px 0;color:#fff">老板经营驾驶舱</h2><div style="color:#d9e4df">先看风险，再看员工产出与执行效率；所有数字都来自派活任务和巡店记录。</div></div>
+      <h2 style="margin:4px 0;color:#fff">老板看板</h2><div style="color:#b8c9c4;font-size:13px">老板经营驾驶舱</div><div style="color:#d9e4df">先看风险，再看员工产出与执行效率；所有数字都来自派活任务和巡店记录。</div></div>
       ${scopes.can_cross_tenant?`<div><label style="color:#d9e4df;margin-top:0">企业</label><select style="${selectStyle}" onchange="bossDashTenant(this.value)">${tenants.map(t=>`<option value="${t.id}" ${Number(t.id)===Number(tenant.id)?"selected":""}>${esc(t.name)}</option>`).join("")}</select></div>`:""}
-      <div><label style="color:#d9e4df;margin-top:0">行业</label><select style="${selectStyle}" onchange="bossDashIndustry(this.value)">${industries.map(i=>`<option value="${esc(i.key)}" ${i.key===scope.industry_key?"selected":""}>${esc(i.emoji||"")} ${esc(i.name)}</option>`).join("")}</select></div>
+      <div><label style="color:#d9e4df;margin-top:0">行业</label><select style="${selectStyle}" onchange="bossDashIndustry(this.value)">${industries.map(i=>`<option value="${esc(i.key)}" ${i.key===scope.industry_key?"selected":""}>${esc(i.emoji||"")} ${esc(i.short_label||i.name)}</option>`).join("")}</select></div>
       <div><label style="color:#d9e4df;margin-top:0">周期</label><select style="width:auto" onchange="bossDashDays(this.value)">${[7,30,60,90].map(x=>`<option value="${x}" ${Number(period.days)===x?"selected":""}>近${x}天</option>`).join("")}</select></div></div></div>
   <div class="grid3" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-bottom:14px">
-    ${[["本期新建",bossDashNumber(tasks.total),"按任务创建时间"],["本期交付",bossDashNumber(tasks.completed),"按完成时间归期"],["同批完成率",bossDashPct(tasks.completion_rate),"本期新建任务当前完成比例"],["正在执行",bossDashNumber(tasks.active),"本期新建中的在办任务"],["失败 / 退款",`${bossDashNumber(tasks.failed)} / ${bossDashNumber(tasks.refunded)}`,"失败按终态时间，退款按结算记录"],["平均交付",bossDashDuration(eff.average_cycle_seconds),"本期完成任务周期"],["本期模型花费",`$${bossDashNumber(eff.cost_usd,2)}`,`点数消耗 ${bossDashNumber(eff.billing_points,1)} · tokens ${bossDashNumber(eff.tokens)}`]].map(([l,v,n])=>`<div class="topic" style="margin:0"><div class="sub">${l}</div><div style="font-size:26px;font-weight:900;margin:4px 0">${v}</div><div class="sub">${n}</div></div>`).join("")}</div>
-  <div class="row" style="align-items:stretch"><div class="card" style="flex:1;min-width:290px;margin:0"><h3 style="margin-top:0">🚨 先处理清单 <span class="sub" style="font-weight:400">（各项已标注口径）</span></h3>
-    ${[["超24小时仍在跑（历史总账）",risk.stale_active_tasks],["等待老板决策（历史总账）",risk.waiting_for_decision],["本期失败任务",risk.failed_tasks],["本期已退款任务",risk.refunded_tasks],["高风险巡店问题",risk.critical_inspection_issues],["逾期整改",risk.overdue_inspection_actions]].map(([l,v])=>`<div style="display:flex;justify-content:space-between;border-bottom:1px solid #eadfc4;padding:9px 0"><span>${l}</span><b style="color:${Number(v)>0?"#b4292f":"#28734f"}">${v===null||v===undefined?"未接入":v}</b></div>`).join("")}
+    ${[["本期新建",bossDashNumber(tasks.total),"按任务创建时间"],["本期交付",bossDashNumber(tasks.completed),"按完成时间归期"],["派的活完成了多少",bossDashPct(tasks.completion_rate),"这段时间派的活，现在完成了多少"],["正在执行",bossDashNumber(tasks.active),"本期新建中的在办任务"],["失败 / 退款",`${bossDashNumber(tasks.failed)} / ${bossDashNumber(tasks.refunded)}`,"失败按终态时间，退款按结算记录"],["平均交付",bossDashDuration(eff.average_cycle_seconds),"本期完成任务周期"],isBoss()?["本期模型花费",`$${bossDashNumber(eff.cost_usd,2)}`,`点数消耗 ${bossDashNumber(eff.billing_points,1)} · tokens ${bossDashNumber(eff.tokens)}`]:["本期花费",`${bossDashNumber(eff.billing_points,1)} 点`,"这段时间派活消耗的点数"]].map(([l,v,n])=>`<div class="topic" style="margin:0"><div class="sub">${l}</div><div style="font-size:26px;font-weight:900;margin:4px 0">${v}</div><div class="sub">${n}</div></div>`).join("")}</div>
+  <div class="row" style="align-items:stretch"><div class="card" style="flex:1;min-width:290px;margin:0"><h3 style="margin-top:0">🚨 先处理清单 <span class="sub" style="font-weight:400">（前两项是到现在还没处理的，其余只算这段时间）</span></h3>
+    ${[["超24小时仍在跑（到现在还没处理的）",risk.stale_active_tasks],["等您拍板（到现在还没处理的）",risk.waiting_for_decision],["本期失败任务",risk.failed_tasks],["本期已退款任务",risk.refunded_tasks],["高风险巡店问题",risk.critical_inspection_issues],["逾期整改",risk.overdue_inspection_actions]].map(([l,v])=>`<div style="display:flex;justify-content:space-between;border-bottom:1px solid #eadfc4;padding:9px 0"><span>${l}</span><b style="color:${Number(v)>0?"#b4292f":"#28734f"}">${v===null||v===undefined?"未接入":v}</b></div>`).join("")}
   </div><div class="card" style="flex:2;min-width:330px;margin:0"><h3 style="margin-top:0">🏪 巡店执行</h3>${ins.availability?`<div class="grid3" style="grid-template-columns:repeat(3,1fr)">
-    ${[["本期巡店",bossDashNumber(ins.visits)],["本期平均分",bossDashNumber(ins.average_score,1)],["未闭环问题总账",bossDashNumber(inspectionBacklog.open_issues)],["高风险总账",bossDashNumber(inspectionBacklog.critical_issues)],["整改中总账",bossDashNumber(inspectionBacklog.open_actions)],["逾期整改总账",bossDashNumber(inspectionBacklog.overdue_actions)]].map(([l,v])=>`<div><b style="font-size:21px">${v}</b><div class="sub">${l}</div></div>`).join("")}</div><div class="sub" style="margin-top:8px">本期指标按上方时间范围；“总账”展示历史全部未闭环风险。</div>${d.can_open_records?`<div class="actions"><a class="btn sm pri" href="${inspectionRecordHash(0,scope.industry_key)}">打开巡店工作台</a></div>`:`<div class="sub" style="margin-top:8px">跨企业看板仅供查看，不提供可写工作台跳转。</div>`}`:`<div class="notice violet"><b>巡店数据源暂不可用</b><div class="sub">系统已显式标记“未接入”，不会把缺失数据伪装成 0。原因码：${esc(ins.reason_code||"inspection_schema_unavailable")}</div></div>`}</div></div>
+    ${[["本期巡店",bossDashNumber(ins.visits)],["本期平均分",bossDashNumber(ins.average_score,1)],["还没解决的问题",bossDashNumber(inspectionBacklog.open_issues)],["还没解决的高风险问题",bossDashNumber(inspectionBacklog.critical_issues)],["正在整改",bossDashNumber(inspectionBacklog.open_actions)],["整改已逾期",bossDashNumber(inspectionBacklog.overdue_actions)]].map(([l,v])=>`<div><b style="font-size:21px">${v}</b><div class="sub">${l}</div></div>`).join("")}</div><div class="sub" style="margin-top:8px">“本期”两项只算上方选的时间段；其余四项是到现在还没处理的，不管是哪天发现的。</div>${d.can_open_records?`<div class="actions"><a class="btn sm pri" href="${inspectionRecordHash(0,scope.industry_key)}">打开巡店工作台</a></div>`:`<div class="sub" style="margin-top:8px">跨企业看板仅供查看，不提供可写工作台跳转。</div>`}`:`<div class="notice violet"><b>巡店数据源暂不可用</b><div class="sub">系统已显式标记“未接入”，不会把缺失数据伪装成 0。原因码：${esc(ins.reason_code||"inspection_schema_unavailable")}</div></div>`}</div></div>
   <div class="card"><h3 style="margin-top:0">📈 ${esc(scope.industry_name||"本行业")} 经营指标</h3><div class="sub" style="margin-bottom:10px">这些是该行业老板需要关注的经营卡。没有接入可信业务数据源时明确标记“待接入”，不用员工任务数伪造经营数。</div>
     ${bizMetrics.length?`<div class="grid3" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr))">${bizMetrics.map(metric=>`<div class="topic" style="margin:0"><div class="sub">${esc(metric.label)}</div><b style="font-size:21px">${metric.availability?`${bossDashNumber(metric.value,2)} ${esc(metric.unit||"")}`:"待接入"}</b><div class="sub">所需数据：${esc(metric.source_required||"业务系统")}</div></div>`).join("")}</div>`:`<div class="notice violet">当前行业指标目录待配置。</div>`}</div>
   <div class="card"><h3 style="margin-top:0">📦 最近交付 / 动态</h3><div class="sub" style="margin-bottom:8px">仅展示员工、状态、轮次和时间，不在看板里暴露业务正文。</div>${recent.length?recent.map(item=>{const rawRoute=safeRouteUrl(item.target_route),route=inspectionScopedRoute(rawRoute,scope.industry_key),kind=item.kind==="inspection"?"巡店":"任务",carry=item.kind==="inspection"?` onclick="bossCarryInspectionIndustry(${cp(scope.industry_key)})"`:"";return `<div style="display:flex;gap:8px;align-items:center;border-top:1px solid #eadfc4;padding:9px 0;flex-wrap:wrap"><span class="pill ${bossStatusClass(item.status_group)}">${esc(bossStatusLabel(item.status))}</span><span class="tag">${kind}</span><b>${esc(item.employee_name||"员工")}</b>${item.revision_no?`<span class="sub">第 ${bossDashNumber(item.revision_no)} 轮</span>`:""}<span class="sub" style="margin-left:auto">${item.occurred_at?new Date(item.occurred_at*1000).toLocaleString("zh-CN"):"—"}</span>${route?`<a class="btn sm" href="${esc(route)}"${carry}>查看</a>`:""}</div>`;}).join(""):`<div class="empty">当前周期还没有交付动态。</div>`}</div>
-  <div class="card"><h3 style="margin-top:0">🧑‍💼 每个员工做了什么、效率怎么样</h3>${employees.length?`<div class="dimwrap"><table class="dimtable"><thead><tr><th>员工</th><th>本期新建</th><th>本期交付</th><th>同批完成率</th><th>平均周期</th><th>等待/失败/退款</th><th>巡店</th><th></th></tr></thead><tbody>${employees.map(e=>`<tr><td><b>${esc(e.name)}</b>${e.employee_kind==="inspection"?`<div class="sub">区域巡店</div>`:`<div class="sub">${esc(employeeIdentityLabel(e))}${Number(e.config_revision)>0?` · 配置 r${Number(e.config_revision)}`:""}</div>`}</td><td>${bossDashNumber(e.tasks)}</td><td>${bossDashNumber(e.completed)}</td><td>${bossDashPct(e.completion_rate)}</td><td>${bossDashDuration(e.average_cycle_seconds)}</td><td>${bossDashNumber(e.waiting)} / ${bossDashNumber(e.failed)} / ${bossDashNumber(e.refunded)}</td><td>${bossDashNumber(e.inspection_visits)}</td><td><button class="btn sm" onclick="bossEmployeeDetail(${e.idx},${cp(e.identity_ref||"")},this,0)">看记录</button></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">这个周期还没有员工任务。</div>`}<div id="boss-employee-detail"></div></div>
+  <div class="card"><h3 style="margin-top:0">🧑‍💼 每个员工做了什么、效率怎么样</h3>${employees.length?`<div class="dimwrap"><table class="dimtable"><thead><tr><th>员工</th><th>本期新建</th><th>本期交付</th><th>派的活完成了多少</th><th>平均周期</th><th>等待/失败/退款</th><th>巡店</th><th></th></tr></thead><tbody>${employees.map(e=>`<tr><td><b>${esc(e.name)}</b>${e.employee_kind==="inspection"?`<div class="sub">区域巡店</div>`:`<div class="sub">${esc(employeeIdentityLabel(e))}${isBoss()&&Number(e.config_revision)>0?` · 配置 r${Number(e.config_revision)}`:""}</div>`}</td><td>${bossDashNumber(e.tasks)}</td><td>${bossDashNumber(e.completed)}</td><td>${bossDashPct(e.completion_rate)}</td><td>${bossDashDuration(e.average_cycle_seconds)}</td><td>${bossDashNumber(e.waiting)} / ${bossDashNumber(e.failed)} / ${bossDashNumber(e.refunded)}</td><td>${bossDashNumber(e.inspection_visits)}</td><td><button class="btn sm" onclick="bossEmployeeDetail(${e.idx},${cp(e.identity_ref||"")},this,0)">看记录</button></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">这个周期还没有员工任务。</div>`}<div id="boss-employee-detail"></div></div>
   <div class="card"><h3 style="margin-top:0">📅 近14天节奏 <span class="sub" style="font-weight:400">（无论选多长周期，此表固定展示最近14天）</span></h3>${trend.length?`<div class="dimwrap"><table class="dimtable"><thead><tr><th>日期</th><th>新任务</th><th>完成</th><th>失败</th><th>巡店</th><th>巡店均分</th></tr></thead><tbody>${trend.map(x=>`<tr><td>${esc(x.day)}</td><td>${bossDashNumber(x.tasks_created)}</td><td>${bossDashNumber(x.tasks_completed)}</td><td>${bossDashNumber(x.tasks_failed)}</td><td>${bossDashNumber(x.inspection_visits)}</td><td>${bossDashNumber(x.inspection_average_score,1)}</td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">暂无趋势数据</div>`}</div>
   <div class="notice">💡 经营卡与派活员工效率分开计算；只有真实 POS、库存、排班、CRM 等数据接入后才会显示经营数值。</div>`;
   if(BOSS_EMPLOYEE_DETAIL) bossEmployeeDetailDraw();
@@ -5463,7 +5467,7 @@ function bossEmployeeDetailDraw(){
     ${visitItems.map(v=>{const scopedIndustry=d.scope?.industry_key||BOSS_DASH_FILTER.industryKey,route=inspectionScopedRoute(v.target_route,scopedIndustry),eventAt=v.period_event_at||v.created_at;return `<div style="display:flex;gap:8px;align-items:center;border-top:1px solid #eadfc4;padding:9px 0;flex-wrap:wrap"><span class="pill ${bossStatusClass(v.status==="completed"?"completed":v.status==="failed"?"failed":"active")}">${esc(bossStatusLabel(v.status))}</span>${route?`<a href="${esc(route)}" onclick="bossCarryInspectionIndustry(${cp(scopedIndustry)})">巡店 #${v.id}</a>`:`<b>巡店 #${v.id}</b>`}<span class="sub">评分 ${bossDashNumber(v.score,1)}</span><span class="sub" style="margin-left:auto">${eventAt?new Date(eventAt*1000).toLocaleString("zh-CN"):""}</span></div>`;}).join("")}
     ${!visitAvailable?`<div class="notice violet">巡店明细未接入（${esc(visits.reason_code||"inspection_schema_unavailable")}），不按 0 条展示。</div>`:""}
     ${!taskItems.length&&!visitItems.length?`<div class="empty">本页暂无记录</div>`:""}
-    <div class="actions" style="justify-content:flex-end"><button class="btn sm" ${hasPrevious?"":"disabled"} onclick="bossEmployeeDetailPage(${state.idx},${cp(state.identityRef)},${Math.max(0,offset-pageSize)})">← 上一页</button><span class="sub">第 ${Math.floor(offset/pageSize)+1} 页</span><button class="btn sm" ${hasNext?"":"disabled"} onclick="bossEmployeeDetailPage(${state.idx},${cp(state.identityRef)},${offset+pageSize})">下一页 →</button></div></div>`;
+    ${hasPrevious||hasNext?`<div class="actions" style="justify-content:flex-end"><button class="btn sm" ${hasPrevious?"":"disabled"} onclick="bossEmployeeDetailPage(${state.idx},${cp(state.identityRef)},${Math.max(0,offset-pageSize)})">← 上一页</button><span class="sub">第 ${Math.floor(offset/pageSize)+1} 页</span><button class="btn sm" ${hasNext?"":"disabled"} onclick="bossEmployeeDetailPage(${state.idx},${cp(state.identityRef)},${offset+pageSize})">下一页 →</button></div>`:""}</div>`;
 }
 function bossEmployeeDetailPage(idx,identityRef,offset){return bossEmployeeDetail(idx,identityRef,null,offset);}
 /* ---------- V51:区域经理巡店工作台 ---------- */
@@ -5612,7 +5616,7 @@ function inspectionBranchPickerHtml(){
     <label>选择门店 *</label><select id="inspection-branch" onchange="inspectionBranchSelect(this.value)">${items.map(branch=>`<option value="${Number(branch.id)}" ${Number(branch.id)===Number(INSPECTION_CAPTURE_BRANCH_ID)?"selected":""}>${esc(branch.store_code?branch.store_code+" · ":"")}${esc(branch.name||"未命名门店")}${branch.region?` · ${esc(branch.region)}`:""}</option>`).join("")}</select>
     <div class="sub" style="margin-top:8px">搜索结果：可选择本次巡店门店，也可直接查看该店历史。</div>
     <div class="dimwrap"><table class="dimtable"><thead><tr><th>门店</th><th>区域</th>${showAssignees?"<th>负责人</th>":""}<th>操作</th></tr></thead><tbody>${items.map(branch=>`<tr><td><b>${esc(branch.store_code||"—")}</b><div class="sub">${esc(branch.name||"未命名门店")}</div></td><td>${esc(branch.region||"未分区")}</td>${showAssignees?`<td>${(branch.assignees||[]).length?branch.assignees.map(a=>esc(a.username)).join("、"):`<span class="sub">未分配</span>`}</td>`:""}<td><div class="actions" style="margin:0;gap:6px">${canManage?`<button class="btn sm" onclick="inspectionBranchDeactivate(${Number(branch.id)},${cp(branch.name||"")})">停用</button>`:""}<button class="btn sm ${Number(branch.id)===Number(INSPECTION_CAPTURE_BRANCH_ID)?"pri":""}" onclick="inspectionBranchSelect(${Number(branch.id)})">选择巡店</button><button class="btn sm" onclick="inspectionFilterBranch(${Number(branch.id)})">看历史</button></div></td></tr>`).join("")}</tbody></table></div>
-    <div class="actions" style="justify-content:flex-end;flex-wrap:wrap"><button class="btn sm" ${state.page>0?"":"disabled"} onclick="inspectionBranchSearchPage(-1)">← 上一页</button><span class="sub">第 ${state.page+1} 页 · 每页最多 20 家</span><button class="btn sm" ${state.nextBeforeId!==null&&state.nextBeforeId!==undefined?"":"disabled"} onclick="inspectionBranchSearchPage(1)">下一页 →</button></div>`;
+    ${state.page>0||(state.nextBeforeId!==null&&state.nextBeforeId!==undefined)?`<div class="actions" style="justify-content:flex-end;flex-wrap:wrap"><button class="btn sm" ${state.page>0?"":"disabled"} onclick="inspectionBranchSearchPage(-1)">← 上一页</button><span class="sub">第 ${state.page+1} 页 · 每页最多 20 家</span><button class="btn sm" ${state.nextBeforeId!==null&&state.nextBeforeId!==undefined?"":"disabled"} onclick="inspectionBranchSearchPage(1)">下一页 →</button></div>`:""}`;
 }
 async function inspectionChecklistLoad(branchId,{silent=false}={}){
   const branch_id=Math.max(0,Number(branchId)||0),industry_key=INSPECTION_INDUSTRY;
@@ -5813,7 +5817,7 @@ async function inspectionFilterRegion(region){
 function inspectionImportActionHtml(){
   if(INSPECTION_DETAIL)return "";
   const status=String(INSPECTION_IMPORT.status||"idle"),statusText=status==="loading"?"预检中":status==="ready"?"待确认":status==="committed"?"已完成":status==="error"||status==="permission"?"需处理":"";
-  return `<button id="inspection-import-toggle" type="button" class="btn inspection-import-toggle ${INSPECTION_IMPORT_OPEN?"pri":""}" aria-controls="inspection-import-workbench" aria-expanded="${INSPECTION_IMPORT_OPEN?"true":"false"}" onclick="inspectionImportToggle()"><span class="inspection-import-toggle-icon" aria-hidden="true">⇩</span><span data-inspection-import-toggle-label>${INSPECTION_IMPORT_OPEN?"收起批量导入":"批量导入门店"}</span>${statusText?`<span class="inspection-import-toggle-status">${esc(statusText)}</span>`:""}</button>`;
+  return `<button id="inspection-import-toggle" type="button" class="btn inspection-import-toggle ${INSPECTION_IMPORT_OPEN?"pri":""}" aria-controls="inspection-import-workbench" aria-label="批量导入门店" aria-expanded="${INSPECTION_IMPORT_OPEN?"true":"false"}" onclick="inspectionImportToggle()"><span class="inspection-import-toggle-icon" aria-hidden="true">⇩</span><span data-inspection-import-toggle-label>${INSPECTION_IMPORT_OPEN?"收起批量导入":"批量导入门店"}</span>${statusText?`<span class="inspection-import-toggle-status">${esc(statusText)}</span>`:""}</button>`;
 }
 function inspectionImportToggle(force){
   const next=typeof force==="boolean"?force:!INSPECTION_IMPORT_OPEN;
@@ -5866,7 +5870,7 @@ function inspectionImportRender(){
       ${branchRows.length?`<div class="inspection-import-table-section"><h4>门店主表</h4><div class="inspection-import-table-wrap"><table class="dimtable inspection-import-table"><thead><tr><th>行</th><th>门店</th><th>处理</th><th>错误</th></tr></thead><tbody>${branchRows.map(row=>`<tr><td>${esc(row.row_no??row.row_number??"—")}</td><td class="inspection-import-break">${esc(row.store_code||"")}${row.name||row.data?.name?` · ${esc(row.name||row.data?.name)}`:""}</td><td>${esc(row.action||row.status||"—")}</td><td class="inspection-import-break">${esc(row.error_message||row.error_code||"—")}</td></tr>`).join("")}</tbody></table></div></div>`:""}
       ${businessRows.length?`<div class="inspection-import-table-section"><h4>经营数据预检</h4><div class="inspection-import-table-wrap is-business"><table class="dimtable inspection-import-table"><thead><tr><th>行 / 门店</th><th>指标</th><th>期间</th><th>实际值</th><th>单位</th><th>来源</th><th>处理 / 错误</th></tr></thead><tbody>${businessRows.map(row=>{const data=row.data||{};return `<tr><td>${esc(row.row_no??row.row_number??"—")} · ${esc(row.store_code||data.store_code||"—")}</td><td>${esc(data.metric_key||"—")}</td><td>${esc(data.period_start||"—")} 至 ${esc(data.period_end||"—")}</td><td>${esc(data.value??"—")}</td><td>${esc(data.unit||"—")}</td><td class="inspection-import-break">${esc(data.source_ref||"—")}</td><td>${esc(row.action||row.status||"—")}${row.error_message||row.error_code?` · ${esc(row.error_message||row.error_code)}`:""}</td></tr>`;}).join("")}</tbody></table></div></div>`:""}
       ${!page.loading&&!rows.length?`<div class="empty inspection-import-filter-empty">当前筛选下暂无预检明细。</div>`:""}
-      <div class="inspection-import-pager actions"><button type="button" class="btn sm" onclick="inspectionImportPage(-1)" ${page.page>0&&!page.loading?"":"disabled"}>← 上一页</button><span class="sub">第 ${page.page+1} 页</span><button type="button" class="btn sm" onclick="inspectionImportPage(1)" ${page.nextCursor!==null&&!page.loading?"":"disabled"}>下一页 →</button></div>
+      ${page.page>0||page.nextCursor!==null?`<div class="inspection-import-pager actions"><button type="button" class="btn sm" onclick="inspectionImportPage(-1)" ${page.page>0&&!page.loading?"":"disabled"}>← 上一页</button><span class="sub">第 ${page.page+1} 页</span><button type="button" class="btn sm" onclick="inspectionImportPage(1)" ${page.nextCursor!==null&&!page.loading?"":"disabled"}>下一页 →</button></div>`:""}
       <footer class="inspection-import-commit"><div><b aria-current="step">③ 确认导入</b><p>${totalErrors>0?"请修正门店或经营数据错误后重新上传；任一错误都会阻止提交。":"确认后将一次性写入门店、店长与经营数据，过程不会产生半成功记录。"}</p></div><button type="button" class="btn pri" onclick="inspectionImportCommit(this)" ${totalErrors===0&&state.status==="ready"?"":"disabled"}>${totalErrors>0?"存在错误，暂不能提交":"确认提交导入"}</button></footer>
     </section>`;
   }
@@ -5989,8 +5993,8 @@ function inspectionDraw(){
   const summary=data.summary||{},industries=meta.industries||[],branchMetrics=Array.isArray(summary.branches)?summary.branches:[],regionMetrics=Array.isArray(summary.regions)?summary.regions:[],legacyVisitedBranches=branchMetrics.filter(b=>Number(b.visits||0)>0).length,visitedBranches=summary.visited_branches!==null&&summary.visited_branches!==undefined?summary.visited_branches:legacyVisitedBranches,selectedBranch=branchMetrics.find(item=>Number(item.id)===Number(INSPECTION_BRANCH_ID)),selectedRegion=INSPECTION_REGION;
   $("#main").innerHTML=`<div class="card" style="background:linear-gradient(120deg,#dff4eb,#fffaf0 70%)">
     <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap"><div style="flex:1;min-width:240px">
-      <h2 style="margin:0">🏪 区域经理巡店</h2><div class="sub" style="margin-top:5px">上传现场照片，巡店经理会标出可见问题、生成整改责任与期限，并持续跟踪复查。</div></div>
-      ${industries.length>1?`<div style="min-width:170px"><label style="margin-top:0">巡店行业</label><select onchange="inspectionSelectIndustry(this.value)">${industries.map(item=>`<option value="${esc(item.key)}" ${item.key===meta.industry_key?"selected":""}>${esc(item.emoji||"")} ${esc(item.name)}</option>`).join("")}</select></div>`:""}
+      <h2 style="margin:0">🏪 巡店</h2><div class="sub" style="margin-top:5px">区域经理巡店 · 上传现场照片，巡店经理会标出可见问题、生成整改责任与期限，并持续跟踪复查。</div></div>
+      ${industries.length>1?`<div style="min-width:170px"><label style="margin-top:0">巡店行业</label><select onchange="inspectionSelectIndustry(this.value)">${industries.map(item=>`<option value="${esc(item.key)}" ${item.key===meta.industry_key?"selected":""}>${esc(item.emoji||"")} ${esc(item.short_label||item.name)}</option>`).join("")}</select></div>`:""}
       ${inspectionImportActionHtml()}
       ${inspectionPerm("can_manage_branches")?`<button class="btn" onclick="inspectionNewBranch()">＋ 新建门店</button>`:""}</div>
     ${meta.branch_scope?.notice?`<div class="notice" style="margin:10px 0 0">${esc(meta.branch_scope.notice)}</div>`:""}</div>
@@ -6009,7 +6013,7 @@ function inspectionDraw(){
     <div style="flex:1;min-width:200px"><b>#${v.id} · ${esc(v.branch?.name||"门店")}</b><div class="sub">${esc(v.branch?.region||"")} · ${new Date((v.visit_at||v.created_at)*1000).toLocaleDateString("zh-CN")} · ${inspectionStatusLabel(v.status)}</div></div>
     ${v.score!==null&&v.score!==undefined?`<span class="tag">得分 ${Math.round(v.score)}</span>`:""}<span class="tag">问题 ${v.issue_count||0}</span>${v.status==="needs_retake"?`<span class="tag">有照片要补拍</span>`:""}
     <a class="btn sm pri" href="${inspectionRecordHash(v.id)}">查看记录</a></div>`).join(""):`<div class="empty">还没有巡店记录。上传第一组现场照片即可开始。</div>`}
-    <div class="actions" style="justify-content:flex-end"><button class="btn sm" ${INSPECTION_CURSOR_PAGE>0?"":"disabled"} onclick="inspectionPage(-1)">← 上一页</button><span class="sub">第 ${INSPECTION_CURSOR_PAGE+1} 页</span><button class="btn sm" ${data.next_before_id?"":"disabled"} onclick="inspectionPage(1)">下一页 →</button></div></div>`}`;
+    ${INSPECTION_CURSOR_PAGE>0||data.next_before_id?`<div class="actions" style="justify-content:flex-end"><button class="btn sm" ${INSPECTION_CURSOR_PAGE>0?"":"disabled"} onclick="inspectionPage(-1)">← 上一页</button><span class="sub">第 ${INSPECTION_CURSOR_PAGE+1} 页</span><button class="btn sm" ${data.next_before_id?"":"disabled"} onclick="inspectionPage(1)">下一页 →</button></div>`:""}</div>`}`;
   enhanceResponsiveTables($("#main"));inspectionCaptureChanged();
 }
 async function inspectionNewBranch(){
@@ -6139,21 +6143,23 @@ async function productionView(){
   const t = d.total;
   const fmtDate = ts => ts? new Date(ts*1000).toLocaleDateString("zh-CN",{month:"numeric",day:"numeric"}) : "—";
   const ktok = n => n>=10000? (n/10000).toFixed(1)+"万" : String(n||0);
-  $("#main").innerHTML = `<div class="card"><h2>📊 员工产出总览</h2>
-    <div class="sub">您手下每个数字员工干了多少活、产出什么、烧了多少 token 和钱,一目了然。点某一行看 TA 的逐条产出。</div>
+  // 模型成本（美元/tokens）只给平台方看；客户看产出本身，花费去「套餐与点数」按点核对。
+  const showCost=isBoss();
+  $("#main").innerHTML = `<div class="card"><h2>📊 员工产出</h2>
+    <div class="sub">${showCost?"您手下每个数字员工干了多少活、产出什么、模型成本多少，一目了然。":"您手下每个数字员工干了多少活、产出了什么，一目了然；花了多少点请到「套餐与点数」查看。"}点某一行看 TA 的逐条产出。</div>
     <div style="display:flex;gap:12px;flex-wrap:wrap;margin:12px 0">
-      ${[["产出身份",t.employees],["总产出",t.runs],["总 tokens",ktok(t.tokens)],["总花费",rmb(t.cost_usd)]]
+      ${[["产出身份",t.employees],["总产出",t.runs],...(showCost?[["总 tokens",ktok(t.tokens)],["模型成本",rmb(t.cost_usd)]]:[])]
         .map(([l,v])=>`<div style="flex:1;min-width:110px;background:#fff6dc;border:2px solid var(--ink);border-radius:12px;padding:10px 14px">
           <div style="font-size:22px;font-weight:800">${v}</div><div class="sub">${l}</div></div>`).join("")}
     </div>
     ${d.employees.length?`<div class="dimwrap"><table class="dimtable">
-      <thead><tr><th>员工</th><th>部门</th><th>产出数</th><th>tokens</th><th>费用</th><th>最近</th><th></th></tr></thead>
+      <thead><tr><th>员工</th><th>部门</th><th>产出数</th>${showCost?"<th>tokens</th><th>模型成本</th>":""}<th>最近</th><th></th></tr></thead>
       <tbody>${d.employees.map(e=>{const rowKey=`pd-${e.idx}-${e.identity_ref||"unknown"}`;return `<tr>
-        <td><b>${esc(e.name)}</b><div class="sub">${esc(employeeIdentityLabel(e))}${Number(e.config_revision)>0?` · 配置 r${Number(e.config_revision)}`:""}</div></td><td class="sub">${esc(e.dept)}</td>
-        <td>${e.runs}</td><td>${ktok(e.tokens)}</td><td><b>${rmb(e.cost_usd)}</b></td>
+        <td><b>${esc(e.name)}</b><div class="sub">${esc(employeeIdentityLabel(e))}${showCost&&Number(e.config_revision)>0?` · 配置 r${Number(e.config_revision)}`:""}</div></td><td class="sub">${esc(e.dept)}</td>
+        <td>${e.runs}</td>${showCost?`<td>${ktok(e.tokens)}</td><td><b>${rmb(e.cost_usd)}</b></td>`:""}
         <td class="sub">${fmtDate(e.last_at)}</td>
         <td><button class="btn sm" onclick="prodDetail(${e.idx},${cp(e.identity_ref||"")},this)">看产出</button></td>
-      </tr><tr id="${esc(rowKey)}" style="display:none"><td colspan="7" style="background:#faf6ec"></td></tr>`}).join("")}</tbody>
+      </tr><tr id="${esc(rowKey)}" style="display:none"><td colspan="${showCost?7:5}" style="background:#faf6ec"></td></tr>`}).join("")}</tbody>
     </table></div>`:`<div class="empty">还没有产出记录。派活给员工、或跑一单内容,这里就会有数据。</div>`}
   </div>`;
 }
@@ -6167,7 +6173,7 @@ async function prodDetail(idx,identityRef,btn){
     cell.innerHTML = d.items.length? d.items.map(it=>`<div style="padding:8px 4px;border-bottom:1px solid #eadfc4">
       <div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap">
         <b>${it.kind==="task"?"🎯":"🎬"} ${esc(it.title)}</b>
-        <span class="sub">${it.tokens} tok · <b>${rmb(it.cost_usd)}</b> · ${new Date(it.at*1000).toLocaleString("zh-CN",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"})}</span>
+        <span class="sub">${isBoss()?`${it.tokens} tok · <b>${rmb(it.cost_usd)}</b> · `:""}${new Date(it.at*1000).toLocaleString("zh-CN",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"})}</span>
         ${it.kind==="task"?`<a class="sub" style="text-decoration:underline" href="#/tasks/${it.id}">🎯专家任务</a>`:`<a class="sub" style="text-decoration:underline" href="#/delivery/${it.job_id}">看交付 →</a>`}
       </div>
       <div class="sub" style="margin-top:3px;white-space:pre-wrap;max-height:66px;overflow:hidden">${esc(it.preview)}</div>
@@ -6698,7 +6704,7 @@ let SCHED_ROWS=[];
 async function schedulesView(selectedId){
   const rows = await api("/schedules");
   SCHED_ROWS = rows;
-  $("#main").innerHTML = `<div class="card"><h2>⏰ 定时任务</h2>
+  $("#main").innerHTML = `<div class="card"><h2>⏰ 定时发布</h2>
     <div class="sub">设好节奏,内容部到点自动开工(北京时间)。比如「每天 09:00 来一单日更选题」。到点若 3 单并行已满会自动顺延,不硬塞。</div>
     <div class="actions"><button class="btn pri" onclick="schedForm()">➕ 新建定时任务</button></div>
     <div id="sform"></div>
@@ -8054,7 +8060,7 @@ async function tmSaveIndustries(tid){
 }
 async function tmGrant(tid){
   const pts = await uiPrompt({
-    title:"充值积分",message:"1 点 = ¥1，请填写正整数。",
+    title:"充值点数",message:"1 点 = ¥1，请填写正整数。",
     label:"充值点数",type:"number",min:1,confirmText:"确认充值",
     validate:value=>Number.isInteger(Number(value))&&Number(value)>0?"":"请输入大于 0 的整数"
   });
@@ -8276,8 +8282,11 @@ function purchasePlanHtml(plan){
     <select aria-label="${esc(plan.name)}购买周期" onchange="purchasePlanPeriodChanged(${cp(plan.key)},this.value)" ${ME?.role==="owner"?"":"disabled"}>${periods}</select>
     <div class="sub purchase-quote" style="margin:8px 0">${quote?`${esc(quote.period_label)}合计 <b>¥${Number(quote.price)}</b> · ${Number(quote.points)} 点`:"以服务端报价为准"}</div>
     ${reference?`<div class="sub" style="color:#b45309;font-weight:700">参考价，以实际报价为准</div>`:""}
-    <div class="sub">${esc(plan.desc||"")}</div><div class="actions" style="justify-content:center">${action}</div></div>`;
+    <div class="sub">${esc(plan.desc||"")}</div><div class="actions" style="justify-content:center">${action}</div>
+    ${ME?.role==="owner"&&!active?`<div class="sub purchase-next-hint" style="margin-top:6px">${esc(PURCHASE_NEXT_STEP_HINT)}</div>`:""}</div>`;
 }
+/* 购买申请提交后的承诺时间；代码和文档里没有更早的约定，统一按 24 小时。 */
+const PURCHASE_NEXT_STEP_HINT="提交后顾问会在 24 小时内联系您，款项到账后点数立即到账。";
 function purchasePlanPeriodChanged(plan,period){
   const card=document.querySelector(`[data-purchase-plan="${plan}"]`);
   const quote=purchaseQuote(plan,period);
@@ -8303,13 +8312,30 @@ function purchaseOpen(plan){
         <button class="btn sm" onclick="$('#purchase-overlay')?.remove()" aria-label="关闭">✕</button></div>
       <div class="pbody">
         <div class="notice" style="margin-top:0"><b>${esc(quote.period_label)} · ¥${Number(quote.price)} · ${Number(quote.points)} 点</b><br>
-          这是线下购买申请，不会在线扣款。平台联系并确认到账后才开通。</div>
+          这是线下购买申请，不会在线扣款。平台联系并确认到账后才开通。<br>${esc(PURCHASE_NEXT_STEP_HINT)}</div>
         <label>联系方式 *</label><input id="purchase-contact" maxlength="80" value="${esc(savedContact)}" placeholder="手机号 / 微信 / 企业微信">
         <label style="margin-top:10px">补充说明（选填）</label><textarea id="purchase-note" maxlength="300" class="promptbox" style="min-height:100px" placeholder="如：工作日下午联系、需要对公合同"></textarea>
         <div class="actions"><button class="btn" onclick="$('#purchase-overlay')?.remove()">取消</button>
           <button class="btn pri" id="purchase-submit" onclick="purchaseSubmit(${cp(plan)},${cp(period)})">确认提交申请</button></div>
       </div></div></div>`);
   setTimeout(()=>$("#purchase-contact")?.focus(),0);
+}
+function purchaseSubmittedShow(contact,created){
+  $("#purchase-done-overlay")?.remove();
+  document.body.insertAdjacentHTML("beforeend",`<div class="overlay" id="purchase-done-overlay">
+    <div class="panel" role="dialog" aria-modal="true" aria-labelledby="purchase-done-title">
+      <div class="phead"><h2 id="purchase-done-title" style="margin:0;flex:1">${created?"✅ 购买申请已提交":"这条申请已经提交过了"}</h2>
+        <button class="btn sm" onclick="$('#purchase-done-overlay')?.remove()" aria-label="关闭">✕</button></div>
+      <div class="pbody">
+        <div class="sub" style="margin-bottom:8px">接下来这样走：</div>
+        <ol style="margin:0 0 0 20px;line-height:1.9">
+          <li>顾问会在 24 小时内通过「${esc(contact)}」联系您，确认套餐和付款方式。</li>
+          <li>您按约定付款，平台确认款项到账。</li>
+          <li>到账后套餐立即开通，点数立即到账。</li></ol>
+        <div class="sub" style="margin-top:8px">进度随时可以在本页「我的购买申请」里查看。</div>
+        <div class="actions"><button class="btn" onclick="$('#purchase-done-overlay')?.remove();document.getElementById('purchase-own')?.scrollIntoView({block:'start'})">查看进度</button>
+          <button class="btn pri" onclick="$('#purchase-done-overlay')?.remove()">知道了</button></div>
+      </div></div></div>`);
 }
 async function purchaseSubmit(plan,period){
   const contact=$("#purchase-contact")?.value.trim()||"";
@@ -8331,8 +8357,8 @@ async function purchaseSubmit(plan,period){
       localStorage.removeItem("paihuo:pending-purchase");
     }catch(_){}
     $("#purchase-overlay")?.remove();
-    toast(result.created?"✅ 购买申请已提交，平台会联系您":"这条购买申请已经提交，无需重复操作");
     await billingView();
+    purchaseSubmittedShow(contact,!!result.created);
   }catch(e){
     if(button){button.disabled=false;button.textContent="确认提交申请";}
     toast(e.message);
@@ -8341,13 +8367,13 @@ async function purchaseSubmit(plan,period){
 function purchaseOwnHtml(){
   const items=PURCHASE_CONTEXT.own?.items||[];
   if(ME?.role!=="owner") return "";
-  return `<div class="card"><h2>🧭 我的购买申请</h2>
+  return `<div class="card" id="purchase-own"><h2>🧭 我的购买申请</h2>
     <div class="sub">从申请、联系到到账开通，每一步都能在这里追踪。</div>
     ${items.length?items.map(item=>`<div class="topic" style="margin-top:10px">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><b style="flex:1">${esc(item.plan_name)} · ${esc(item.period_label)}</b>
         <span class="tag" style="background:${PURCHASE_STATUS_COLORS[item.status]||"#eee"}">${esc(PURCHASE_STATUS_LABELS[item.status]||item.status)}</span></div>
       <div class="sub" style="margin-top:6px">报价 ¥${Number(item.price)} · ${Number(item.points)} 点 · 申请于 ${tcFmt(item.created_at)}</div>
-      <div class="sub">${item.status==="requested"?"平台尚未确认联系，请保持联系方式畅通。":item.status==="contacted"?"平台已联系，确认线下到账后才会开通。":item.status==="paid"?"套餐与积分已开通，可在本页上方核对余额。":"本次申请已结束，如仍有需要可重新申请。"}</div>
+      <div class="sub">${item.status==="requested"?"平台尚未确认联系，请保持联系方式畅通。":item.status==="contacted"?"平台已联系，确认线下到账后才会开通。":item.status==="paid"?"套餐与点数已开通，可在本页上方核对余额。":"本次申请已结束，如仍有需要可重新申请。"}</div>
     </div>`).join(""):`<div class="empty" style="padding:24px">还没有购买申请。选择下面的套餐即可提交。</div>`}</div>`;
 }
 function purchaseAdminHtml(){
@@ -8372,10 +8398,10 @@ function purchaseAdminHtml(){
           ${["requested","contacted"].includes(item.status)?`<button class="btn sm pri" onclick="purchaseTransition(${Number(item.id)},${cp(item.status)},'paid')">确认已到账</button>
           <button class="btn sm bad" onclick="purchaseTransition(${Number(item.id)},${cp(item.status)},'lost')">结束申请</button>`:""}</div></td></tr>`).join("")}
       </tbody></table></div>`:`<div class="empty" style="padding:24px">当前筛选下暂无购买申请。</div>`}
-    <div class="actions" style="justify-content:flex-end">
+    ${PURCHASE_ADMIN_OFFSET>0||PURCHASE_ADMIN_OFFSET+items.length<Number(PURCHASE_CONTEXT.admin?.total||0)?`<div class="actions" style="justify-content:flex-end">
       <button class="btn sm" ${PURCHASE_ADMIN_OFFSET<=0?"disabled":""} onclick="purchaseAdminPage(${Math.max(0,PURCHASE_ADMIN_OFFSET-50)})">← 上一页</button>
       <button class="btn sm" ${PURCHASE_ADMIN_OFFSET+items.length>=Number(PURCHASE_CONTEXT.admin?.total||0)?"disabled":""} onclick="purchaseAdminPage(${PURCHASE_ADMIN_OFFSET+50})">下一页 →</button>
-    </div></div>`;
+    </div>`:""}</div>`;
 }
 async function purchaseAdminFilter(status){
   PURCHASE_ADMIN_STATUS=String(status||"");
@@ -8390,7 +8416,7 @@ async function purchaseAdminPage(offset){
 async function purchaseTransition(id,expected,target){
   let note="";
   if(target==="paid"){
-    const confirmed=await uiConfirm("请先核对线下款项确实到账。确认后系统会立即开通套餐并发放积分，此操作不可撤回。",{
+    const confirmed=await uiConfirm("请先核对线下款项确实到账。确认后系统会立即开通套餐并发放点数，此操作不可撤回。",{
       title:"确认真实到账",confirmText:"已核验到账并开通",danger:false,
     });
     if(!confirmed) return;
@@ -8409,7 +8435,7 @@ async function purchaseTransition(id,expected,target){
     await api(`/admin/purchases/${Number(id)}`,{method:"PATCH",body:{
       expected_status:expected,status:target,note,
     }});
-    toast(target==="paid"?"✅ 已确认到账，套餐与积分已开通":target==="contacted"?"已记录联系":"申请已结束");
+    toast(target==="paid"?"✅ 已确认到账，套餐与点数已开通":target==="contacted"?"已记录联系":"申请已结束");
     await billingView();
   }catch(e){toast(e.message);}
 }
@@ -8450,7 +8476,7 @@ async function billingView(){
   if(!PURCHASE_CONTEXT.catalog) PURCHASE_CONTEXT={...PURCHASE_CONTEXT,catalog:purchaseReferenceCatalog()};
   if(!document.getElementById("billing-plans")){
     $("#main").innerHTML=`<div class="card route-loading" role="status" aria-live="polite">
-      <div style="display:flex;align-items:center;gap:12px"><span class="spin"></span><b>正在读取积分账户…</b></div></div>`
+      <div style="display:flex;align-items:center;gap:12px"><span class="spin"></span><b>正在读取点数账户…</b></div></div>`
       +billingPointsCardHtml(null)+billingPlansCardHtml();
   }
   const [billingResult,digestResult,contextResult] = await Promise.allSettled([
@@ -8467,8 +8493,8 @@ async function billingView(){
   }
   if(billingResult.status==="rejected"){
     if(billingResult.reason?.status===403) throw billingResult.reason;
-    $("#main").innerHTML=`<div class="card"><h2>💎 积分账户</h2>
-      <div class="notice" style="margin-bottom:0">积分账户暂时没读出来(${esc(billingResult.reason?.message||"网络不稳")})。下面的套餐价格可以先看，稍后再点重新加载。</div>
+    $("#main").innerHTML=`<div class="card"><h2>💎 点数账户</h2>
+      <div class="notice" style="margin-bottom:0">点数账户暂时没读出来(${esc(billingResult.reason?.message||"网络不稳")})。下面的套餐价格可以先看，稍后再点重新加载。</div>
       <div class="actions"><button class="btn pri" onclick="render(true)">重新加载</button></div></div>`
       +billingPointsCardHtml(null)+billingPlansCardHtml();
     return;
@@ -8492,13 +8518,13 @@ async function billingView(){
   $("#main").innerHTML = tourBanner + expBanner + `
   <div class="card" style="background:linear-gradient(120deg,#fff6dc,#fffaf0 60%)">
     <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
-      <div style="flex:1;min-width:200px"><h2 style="margin:0">💎 我的积分账户</h2>
-        <div class="sub" style="margin-top:6px">1 积分 = ¥1${b.plan?` · 当前套餐 <b>${esc(b.plan)}</b>${b.plan_expires?`(至 ${new Date(b.plan_expires*1000).toLocaleDateString("zh-CN")})`:""}`:""}</div></div>
+      <div style="flex:1;min-width:200px"><h2 style="margin:0">💎 套餐与点数</h2>
+        <div class="sub" style="margin-top:6px">我的点数账户 · 1 点 = ¥1${b.plan?` · 当前套餐 <b>${esc(b.plan)}</b>${b.plan_expires?`(至 ${new Date(b.plan_expires*1000).toLocaleDateString("zh-CN")})`:""}`:""}</div></div>
       <div class="stat" style="background:#2b2317;color:#ffd166;border:3px solid var(--ink);border-radius:16px;padding:14px 30px;text-align:center;box-shadow:4px 4px 0 rgba(51,41,31,.25)">
         <div style="font-size:38px;font-weight:900;line-height:1">${b.is_platform?"∞":(b.balance||0).toFixed(0)}</div>
-        <div style="font-size:12px;opacity:.85">积分余额</div></div>
+        <div style="font-size:12px;opacity:.85">点数余额</div></div>
     </div>
-    ${b.is_platform?`<div class="notice" style="margin-bottom:0">👑 您是平台方,自己用不扣积分(显示∞)。下面看到的是给客户开通/客户消耗的真实记录。客户登录自己账号时,这里就是他的余额和账单。</div>`
+    ${b.is_platform?`<div class="notice" style="margin-bottom:0">👑 您是平台方,自己用不扣点数(显示∞)。下面看到的是给客户开通/客户消耗的真实记录。客户登录自己账号时,这里就是他的余额和账单。</div>`
       :`<div class="kv" style="margin-top:12px"><span>累计充值 <b style="color:#2f9e6e">+${(b.recharged||0).toFixed(0)}</b></span>
         <span>累计消耗 <b style="color:#e5484d">-${(b.spent||0).toFixed(0)}</b></span>
         ${(b.refunded_total||0)>0?`<span>失败退回 <b style="color:#b45309">+${(b.refunded_total||0).toFixed(0)}</b></span>`:""}
@@ -8506,7 +8532,7 @@ async function billingView(){
   ${purchaseOwnHtml()}${purchaseAdminHtml()}${wxpayAdminHtml()}
   ${b.is_platform?"":billingPointsCardHtml(b)}
   ${spendActs.length?`<div class="card"><h2>💸 近30天花在哪</h2>
-    <div class="sub">按功能统计最近 30 天实际消耗的积分,帮您看清钱被哪类动作花掉了。</div>
+    <div class="sub">按功能统计最近 30 天实际消耗的点数,帮您看清钱被哪类动作花掉了。</div>
     ${spendActs.map(s=>`<div style="margin-top:12px">
       <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
         <b style="flex:1">${esc((b.prices[s.action]&&b.prices[s.action].label)||s.action)}</b>
@@ -8520,7 +8546,7 @@ async function billingView(){
         <td style="color:#2f9e6e">+${(m.recharged||0).toFixed(0)}</td>
         <td style="color:#e5484d">-${(m.spent||0).toFixed(0)}</td>
         <td style="color:#b45309">${(m.refunded||0)>0?`+${(m.refunded||0).toFixed(0)}`:"—"}</td></tr>`).join("")}</tbody></table></div></div>`:""}
-  <div class="card"><h2 style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">🧾 积分明细(充值 & 消耗记录)
+  <div class="card"><h2 style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">🧾 点数明细(充值 & 消耗记录)
     ${isAdmin()&&!b.is_platform?`<a class="btn sm" style="margin-left:auto" href="/api/records/export.xlsx?kind=billing">⬇️ 导出全部流水</a>`:""}</h2>
     ${b.log_truncated?`<div class="notice" style="margin:8px 0">页面展示最近 ${b.log.length} 笔，共 ${b.txn_n} 笔；点击“导出全部流水”可核对完整账目。</div>`:""}
     <label style="display:flex;gap:8px;align-items:flex-start;margin:6px 0 4px;cursor:${isAdmin()?"pointer":"default"}">
@@ -8531,17 +8557,17 @@ async function billingView(){
       <span class="tb ${BILL_TAB==="in"?"on":""}" onclick="BILL_TAB='in';render()">💰 充值记录(${b.log.filter(l=>l.delta>0&&!isRefund(l)).length})</span>
       <span class="tb ${BILL_TAB==="out"?"on":""}" onclick="BILL_TAB='out';render()">🔻 消耗记录(${b.log.filter(l=>l.delta<0).length})</span></div>
     ${shown.length?`<div class="dimwrap" style="margin-top:10px"><table class="dimtable" style="min-width:min(520px,100%)"><thead><tr>
-      <th>时间</th><th>类型</th><th>项目</th><th>积分变动</th><th>余额</th></tr></thead><tbody>
+      <th>时间</th><th>类型</th><th>项目</th><th>点数变动</th><th>余额</th></tr></thead><tbody>
       ${shown.map(l=>`<tr>
         <td class="sub" style="white-space:nowrap">${tcFmt(l.created_at)}</td>
         <td>${isRefund(l)?'<span class="tag" style="background:#ffe3b3">退回</span>':l.delta>0?'<span class="tag" style="background:#a7ecc9">充值</span>':'<span class="tag" style="background:#ffd7d9">消耗</span>'}</td>
         <td>${billReasonHtml(l.reason||"")}</td>
         <td><b style="color:${l.delta<0?"#e5484d":"#2f9e6e"}">${l.delta>0?"+":""}${l.delta}</b></td>
         <td class="sub">${l.balance.toFixed(0)}</td></tr>`).join("")}</tbody></table></div>`
-      :`<div class="empty" style="padding:26px">${b.is_platform?"平台自用不产生账单":BILL_TAB==="in"?"还没有充值记录":BILL_TAB==="out"?"还没有消耗记录":"暂无积分变动记录"}</div>`}</div>
+      :`<div class="empty" style="padding:26px">${b.is_platform?"平台自用不产生账单":BILL_TAB==="in"?"还没有充值记录":BILL_TAB==="out"?"还没有消耗记录":"暂无点数变动记录"}</div>`}</div>
   <div class="card"><h2>📋 价目表(按次消耗)</h2>
-    <div class="dimwrap"><table class="dimtable" style="min-width:min(560px,100%)"><thead><tr><th>动作</th><th>消耗</th><th>成本参考</th></tr></thead>
-    <tbody>${Object.values(b.prices).map(p=>`<tr><td>${esc(p.label)}</td><td><b>${p.points} 点</b></td><td class="sub">${esc(p.cost||"")}</td></tr>`).join("")}</tbody></table></div></div>
+    <div class="dimwrap"><table class="dimtable" style="min-width:min(560px,100%)"><thead><tr><th>动作</th><th>消耗</th>${isBoss()?"<th>成本参考</th>":""}</tr></thead>
+    <tbody>${Object.values(b.prices).map(p=>`<tr><td>${esc(p.label)}</td><td><b>${p.points} 点</b></td>${isBoss()?`<td class="sub">${esc(p.cost||"")}</td>`:""}</tr>`).join("")}</tbody></table></div></div>
   ${billingPlansCardHtml()}
 `;
   enhanceResponsiveTables($("#main"));
@@ -8835,8 +8861,8 @@ async function meetingsView(mid){
         <div><button class="btn pri" ${(cur.intervention_count||0)>=2?"disabled":""} onclick="mtAsk(${cur.id},this)">重新验证(${(cur.members||[]).length}点)</button></div></div>
       <div class="sub" style="margin-top:4px">这不是继续闲聊：员工只补新证据，主持人立即重做决定并更新 Next Action。每场最多 2 次，已用 ${cur.intervention_count||0} 次。</div></div>`:""}
   </div>`:""}
-  <div class="notice"${cur?"":' style="margin-top:0"'}>🪑 <b>AI 结果型会议</b>:不是让数字员工无限聊天，而是强制走完「每人一案并按有效方案排 Top N（最多 3 个）→ 失败/市场/单位经济反向验证 → GO / NO-GO 并执行」。每人 1 点。</div>
-  <div class="card"><h2>🎯 发起结果型会议</h2>
+  <div class="notice"${cur?"":' style="margin-top:0"'}>🪑 <b>多位专家一起商量</b>:不是让数字员工无限聊天，而是强制走完「每人一案并按有效方案排 Top N（最多 3 个）→ 失败/市场/单位经济反向验证 → GO / NO-GO 并执行」。每人 1 点。</div>
+  <div class="card"><h2>🪑 多位专家一起商量</h2><div class="sub">发起一场结果型会议</div>
     <label>议题 *</label><textarea id="mt-q" placeholder="例:我们准备在新城市开第二个直营网点,预算 40 万,请判断 GO / NO-GO、最大风险和本周验证动作"></textarea>
     <div class="row"><div><label>已知约束(选填)</label><input id="mt-constraints" placeholder="例:预算40万；30天内开业；不能增加全职员工"></div>
       <div><label>什么算有结果(选填)</label><input id="mt-acceptance" placeholder="例:必须给明确GO/NO-GO、最大风险和本周可执行动作"></div></div>
@@ -9289,9 +9315,9 @@ async function censorView(){
     <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
       ${charSVG("#e63946","🛡️","idle",92)}
       <div style="flex:1;min-width:min(100%,240px)"><div class="sub" style="font-weight:800">🎬 内容生产部 · 合规审查部</div>
-      <h2 style="margin:2px 0 0">🛡️ 审查官的工作台</h2>
+      <h2 style="margin:2px 0 0">🛡️ 内容审查</h2><div class="sub">审查官的工作台</div>
       <div class="sub" style="margin-top:5px">内容制作流程里的质检关就是他;发布前把关(广告法/平台规范/敏感违禁),发布后复盘(数据判读/限流体检)。公众号、小红书等平台规范逐条对照,发草稿箱前会自动终审。</div></div>
-      <a class="btn sm" href="#/">← 回办公室</a></div></div>
+      <a class="btn sm" href="#/growth">← 返回获客</a></div></div>
   <div class="card">
     <div class="tabs">${tabs.map(([k,l])=>`<span class="tb ${CEN_TAB===k?"on":""}" onclick="CEN_TAB=${cp(k)};resetListPage('censor');resetListPage('publog');render()">${l}</span>`).join("")}</div>
     ${listNotice}
@@ -9731,14 +9757,14 @@ async function toolHistory(offset=0){
         ${job.progress?`<div class="sub">${esc(job.progress)}</div>`:""}
         ${job.status==="failed"?`<div class="sub">❌ ${esc(job.error||"任务失败，可重新发起")}</div>`:""}
       </div>`).join(""):`<div class="empty">当前筛选条件下没有任务</div>`}
-      <div class="actions" style="justify-content:flex-end">
+      ${contract.offset>0||contract.hasMore?`<div class="actions" style="justify-content:flex-end">
         <button class="btn sm" ${contract.offset<=0?"disabled":""} onclick="toolHistory(${Math.max(0,contract.offset-contract.limit)})">← 上一页</button>
         <button class="btn sm" ${contract.hasMore?"":"disabled"} onclick="toolHistory(${contract.nextOffset??0})">下一页 →</button>
-      </div></div></div>`);
+      </div>`:""}</div></div>`);
 }
 async function toolsView(tab,preserveDraft=false){
   if(ME?.role==="tour"||!can("content")){
-    $("#main").innerHTML=`<div class="card"><h2>该页面需要内容生产权限</h2><div class="sub">当前账号不能使用获客工具。</div><div class="actions"><a class="btn" href="#/">返回办公室</a></div></div>`;
+    $("#main").innerHTML=`<div class="card"><h2>该页面需要内容生产权限</h2><div class="sub">当前账号不能使用获客工具。</div><div class="actions"><a class="btn" href="#/">返回首页</a></div></div>`;
     return;
   }
   if(TOOL_TABS.some(([key])=>key===tab)) TS.tab=tab;

@@ -447,7 +447,7 @@ class OnboardingCardBrowserCase(unittest.IsolatedAsyncioTestCase):
             await page.route("**/api/**", api_route)
             await page.goto(f"{self.base}/static/index.html#/billing")
             await page.wait_for_function(
-                "document.querySelector('#main')?.textContent.includes('我的积分账户')")
+                "document.querySelector('#main')?.textContent.includes('套餐与点数')")
             self.assertTrue(await page.evaluate("typeof window.PH_ONBOARDING.card==='function'"))
             await page.evaluate(
                 "document.querySelector('#main').insertAdjacentHTML('afterbegin', PH_ONBOARDING.card())")
