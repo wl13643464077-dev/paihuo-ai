@@ -12,6 +12,7 @@
 平台自有租户(id=1,老板本人)不扣点。
 """
 import json
+import re
 import logging
 import time
 import uuid
@@ -113,6 +114,67 @@ def prices() -> dict:
     missing = {k: DEFAULT_PRICES[k] for k in NEW_ACTION_DEFAULTS
                if k in DEFAULT_PRICES and not isinstance(saved.get(k), dict)}
     return {**saved, **missing} if missing else saved
+
+
+# 给客户看的价目名：只换显示名，不改价目表里的 label（扣点流水按 label 记账、归类），
+# 也不改点数和动作 key。平台方（boss）照旧看带供应商的原名。
+PUBLIC_LABELS = {
+    "avatar_basic": "数字人视频·基础版",
+    "avatar_sales": "AI 带货短片(15秒)",
+}
+_SUPPLIER_WORDS = ("runninghub", "seedance", "可灵", "kling", "heygen", "豆包", "即梦",
+                   "doubao", "deepseek", "minimax", "elevenlabs", "海螺", "云雾")
+
+
+def _has_supplier(text: str) -> bool:
+    low = str(text or "").lower()
+    return any(word in low for word in _SUPPLIER_WORDS)
+
+
+def _strip_suppliers(text: str) -> str:
+    """去掉文字里的供应商片段：按「·」「/」切开，只留不含供应商名的片段。"""
+    parts = re.split(r"\s*[·/]\s*", text)
+    kept = [part for part in parts if part and not _has_supplier(part)]
+    return "·".join(kept)
+
+
+def public_label(action: str, label: str) -> str:
+    """价目名的客户版：默认价目用固定的能力名，后台改过的名字按规则去掉供应商名。"""
+    text = str(label or action or "")
+    default = (DEFAULT_PRICES.get(action) or {}).get("label")
+    if action in PUBLIC_LABELS and text == default:
+        return PUBLIC_LABELS[action]
+    if not _has_supplier(text):
+        return text
+
+    def _paren(match):
+        inner = _strip_suppliers(match.group(2))
+        return f"{match.group(1)}{inner}{match.group(3)}" if inner else ""
+
+    text = re.sub(r"([（(])([^（）()]*)([）)])", _paren, text)
+    if _has_supplier(text):
+        text = _strip_suppliers(text)
+    return text.strip() or str(action or "")
+
+
+def public_reason(reason: str) -> str:
+    """流水里的项目名同样去掉供应商名（只改显示，退款和扣款按同一规则处理）。"""
+    text = str(reason or "")
+    if not _has_supplier(text):
+        return text
+    prefix = ""
+    for head in ("退回:", "退回："):
+        if text.startswith(head):
+            prefix, text = head, text[len(head):]
+            break
+    core, sep, tail = text.partition(" · ")
+    for action, row in DEFAULT_PRICES.items():
+        if core.strip() == row.get("label"):
+            core = public_label(action, core.strip())
+            break
+    else:
+        core = public_label("", core)
+    return f"{prefix}{core}{sep}{tail}"
 
 
 # “1 点能做什么”：给老板看的大白话说明。这里只定说法，点数一律取自 prices()，

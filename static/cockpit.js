@@ -192,7 +192,7 @@
           <div class="cp-seg" role="tablist">${d.period.options.map(n=>`<button type="button" class="${n===d.period.days?"on":""}" onclick="cpDays(${n})">近 ${n} 天</button>`).join("")}</div>
         </div>
         <div class="cp-acts">
-          <button type="button" class="cp-btn gold" id="cp-ai-btn" onclick="cpAi()" ${CP.aiBusy?"disabled":""}>✨ ${CP.aiBusy?"AI 正在分析…":"AI 经营分析"}</button>
+          ${costButton({label:"✨ AI 经营分析",onclick:"cpAi()",cost:1,btnClass:"cp-btn gold",id:"cp-ai-btn",disabled:!!CP.aiBusy,disabledLabel:"✨ AI 正在分析…"})}
           <a class="cp-btn" href="/api/cockpit/export.xlsx?days=${d.period.days}">⬇ 导出 Excel</a>
           <button type="button" class="cp-btn" onclick="window.print()">🖨 打印 / 存 PDF</button>
           <button type="button" class="cp-btn" onclick="cpDispatch(null)">📤 下发任务</button>

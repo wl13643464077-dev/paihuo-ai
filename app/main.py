@@ -3008,6 +3008,7 @@ def depts_list():
         ]
         out.append({"key": d["key"],
                     "name": _display_dept_name(d["key"], d["name"]),
+                    "short_label": departments.short_label(d["key"], d["name"]),
                     "emoji": d["emoji"],
                     "tagline": d.get("tagline", ""), "groups": groups, "employees": emps})
     return out

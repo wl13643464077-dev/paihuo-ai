@@ -40,17 +40,23 @@ def billing_get():
                 "is_platform": TEN() == 1,
                 "restricted": True,
                 "prices": {
-                    action: {k: row.get(k) for k in ("points", "label")}
+                    action: {"points": row.get("points"),
+                             "label": billing.public_label(action, row.get("label"))}
                     for action, row in billing.prices().items()
                 }}
     price_rows = billing.prices()
     if not _is_boss():
+        # 客户看能力名,不看供应商名(只换显示名,点数与动作 key 不变)
         price_rows = {
-            action: {k: row.get(k) for k in ("points", "label")}
+            action: {"points": row.get("points"),
+                     "label": billing.public_label(action, row.get("label"))}
             for action, row in price_rows.items()
         }
     log_rows = db.q("SELECT delta, balance, reason, created_at FROM billing_log "
                     "WHERE tenant_id=? ORDER BY id DESC LIMIT 300", (TEN(),))
+    if not _is_boss():
+        log_rows = [{**row, "reason": billing.public_reason(row.get("reason"))}
+                    for row in log_rows]
     # 退点也是正向流水,但把它计成「充值」会让累计充值虚高、月度两列同抬:
     # 失败一单先计消耗再计充值。按 reason「退回」前缀单列。
     agg = db.one(

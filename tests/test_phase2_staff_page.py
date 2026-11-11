@@ -246,7 +246,7 @@ class StaffAdminPageTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("等您审核（1）", main)
             self.assertIn("货架还是空的", main)
             await page.fill("#sa-one", "人民路店明天中午前把冷柜清一遍拍照给我，火星店盘点饮料")
-            await page.get_by_role("button", name="✨ 拆成任务(0.2 点)").click()
+            await page.get_by_role("button", name="✨ 拆成任务").click()
             await page.wait_for_selector("[data-sa-draft='1']")
             self.assertIn("没找到「火星店」", await page.locator("[data-sa-draft='1']").inner_text())
             # 第二件没选门店，不能派

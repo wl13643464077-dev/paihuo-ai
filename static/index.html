@@ -303,9 +303,13 @@ details.log .steps{margin-top:8px}
 /* 全局请求进度条 */
 #busybar{position:fixed;top:0;left:0;height:3px;background:linear-gradient(90deg,#ffd166,#f4a261);width:0;z-index:999;transition:width .25s;opacity:0}
 #busybar.on{opacity:1}
-#fb-btn{position:fixed;right:18px;bottom:20px;z-index:150;width:52px;height:52px;border-radius:50%;
-  border:3px solid var(--ink);background:#ffd166;font-size:22px;cursor:pointer;box-shadow:3px 4px 0 rgba(51,41,31,.3);transition:transform .1s}
-#fb-btn:hover{transform:scale(1.08)} #fb-btn:active{transform:scale(.96)}
+#fb-btn{position:fixed;right:18px;bottom:20px;z-index:150;height:44px;padding:0 14px;border-radius:999px;
+  display:inline-flex;align-items:center;gap:6px;font-weight:900;font-size:14px;color:var(--ink);
+  border:3px solid var(--ink);background:#ffd166;cursor:pointer;box-shadow:3px 4px 0 rgba(51,41,31,.3);transition:transform .1s}
+#fb-btn .fb-ic{font-size:18px;line-height:1}
+#fb-btn:hover{transform:scale(1.05)} #fb-btn:active{transform:scale(.96)}
+/* 正在输入时把反馈按钮收起来,不盖住输入框 */
+body:has(input:focus,textarea:focus,select:focus) #fb-btn{opacity:0;pointer-events:none}
 /* ---------- 团队页:建店员/店长账号 ---------- */
 .field-err{color:var(--bad);font-size:13px;font-weight:700;margin-top:5px}
 .field-err:empty{display:none}
@@ -448,7 +452,10 @@ html,body{max-width:100%;overflow-x:hidden}
   .dimtable td:first-child{border-top:0}
   .dimtable td::before{content:attr(data-label);font-weight:900;color:var(--ink2);font-size:11.5px}
   .dimtable tr:hover td{background:transparent}
-  #fb-btn{width:46px;height:46px;right:12px;bottom:14px;font-size:19px}
+  /* 手机上只留一个小圆钮(「我的」页里也有「意见反馈」入口) */
+  #fb-btn{width:38px;height:38px;padding:0;justify-content:center;right:10px;bottom:14px;border-width:2px;opacity:.88}
+  #fb-btn .fb-tx{display:none}
+  #fb-btn .fb-ic{font-size:16px}
   /* 工单行:手机上标题占首行正常换行,进度点/工位/状态挪到第二行(不再挤成一列一字) */
   .jobrow{flex-wrap:wrap;gap:4px 10px}
   .jobrow .t{min-width:70%}
@@ -566,6 +573,7 @@ a.card.today-store{display:block;color:inherit}
 /* 花点数的按钮:按钮只写动作,下面一行小字写「本次 N 点 · 余额 M 点」 */
 .cost-act{display:inline-flex;flex-direction:column;align-items:flex-start;gap:4px;max-width:100%}
 .cost-note{font-size:12.5px;color:var(--ink2);font-weight:700}
+.cp-hero .cost-note{color:rgba(255,255,255,.78)}
 /* ---------- 第 1 期:弹窗打开时锁住背后页面滚动 ---------- */
 html:has(.overlay),html:has(.overlay) body{overflow:hidden}
 .overlay{overscroll-behavior:contain}
@@ -758,8 +766,8 @@ html:has(.overlay),html:has(.overlay) body{overflow:hidden}
 <div class="toast" id="toast"></div>
 <script src="/static/app.js?v=54"></script>
 <script src="/static/onboarding.js?v=3"></script>
-<script src="/static/staff-admin.js?v=3"></script>
+<script src="/static/staff-admin.js?v=4"></script>
 <script src="/static/checklist-admin.js?v=2"></script>
-<script src="/static/cockpit.js?v=5"></script>
+<script src="/static/cockpit.js?v=6"></script>
 </body>
 </html>
