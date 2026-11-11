@@ -879,6 +879,54 @@ def set_branch_active(
     return result
 
 
+def rename_branch(
+    tid: int,
+    uid: int,
+    industry_key: str,
+    branch_id: int,
+    name: Any,
+) -> dict:
+    """给门店改名，仅老板/平台管理员/总监可操作（与新建、停用同一权限）。
+
+    只改名称，不动门店编码、区域和绑定关系；历史巡店记录按门店 ID
+    关联，改名后自动显示新名字。
+    """
+    _actor(tid, uid, industry_key, branch_admin=True)
+    clean = _text(name, field="门店名称", limit=80, required=True)
+    target_id = _positive_id(branch_id, "门店")
+    now = time.time()
+    with db.atomic() as connection:
+        row = connection.execute(
+            "SELECT id,name FROM store_branch WHERE id=? AND tenant_id=? "
+            "AND industry_key=?",
+            (target_id, int(tid), industry_key),
+        ).fetchone()
+        if not row:
+            # 404 而非 403：不泄露其他租户是否存在该门店。
+            raise InspectionNotFound("门店不存在")
+        if str(row["name"]) != clean:
+            same = connection.execute(
+                "SELECT id FROM store_branch WHERE tenant_id=? AND industry_key=? "
+                "AND name=? AND id<>? LIMIT 1",
+                (int(tid), industry_key, clean, target_id),
+            ).fetchone()
+            if same:
+                raise InspectionConflict("同行业下已有同名门店")
+            connection.execute(
+                "UPDATE store_branch SET name=?,row_version=row_version+1,"
+                "updated_at=? WHERE id=? AND tenant_id=?",
+                (clean, now, target_id, int(tid)),
+            )
+        current = connection.execute(
+            "SELECT id,tenant_id,industry_key,name,region,address,active,"
+            "created_by,created_at,updated_at FROM store_branch WHERE id=?",
+            (target_id,),
+        ).fetchone()
+    result = dict(current)
+    result["active"] = bool(result.get("active"))
+    return result
+
+
 def branch_scope_info(tid: int, uid: int, industry_key: str) -> dict:
     """巡店页需要的门店范围与按钮权限，全部由服务端判定。"""
     user = _actor(tid, uid, industry_key)

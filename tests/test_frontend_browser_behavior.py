@@ -1539,15 +1539,15 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
             async def api_route(route):
                 parsed = urlparse(route.request.url)
                 if parsed.path == "/api/boss/dashboard/summary":
-                    days = int(parse_qs(parsed.query).get("days", ["30"])[0])
-                    if days == 7:
+                    days = int(parse_qs(parsed.query).get("days", ["7"])[0])
+                    if days == 30:
                         stale_started.set()
                         await release_stale.wait()
-                        payload = summary(7, "STALE-7")
-                    elif days == 60:
-                        payload = summary(60, "CURRENT-60")
+                        payload = summary(30, "STALE-30")
+                    elif days == 90:
+                        payload = summary(90, "CURRENT-90")
                     else:
-                        payload = summary(30, "INITIAL-30")
+                        payload = summary(7, "INITIAL-7")
                 else:
                     payload = common.get(parsed.path, {})
                 await route.fulfill(
@@ -1559,23 +1559,23 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
             await page.route("**/api/**", api_route)
             await page.goto(f"{self.base}/static/index.html#/boss")
             await page.wait_for_function(
-                "document.querySelector('#main')?.textContent.includes('INITIAL-30')"
+                "document.querySelector('#main')?.textContent.includes('INITIAL-7')"
             )
 
-            await page.evaluate("void bossDashDays(7)")
+            await page.evaluate("void bossDashDays(30)")
             await asyncio.wait_for(stale_started.wait(), timeout=5)
-            await page.evaluate("void bossDashDays(60)")
+            await page.evaluate("void bossDashDays(90)")
             await page.wait_for_function(
-                "document.querySelector('#main')?.textContent.includes('CURRENT-60')"
+                "document.querySelector('#main')?.textContent.includes('CURRENT-90')"
             )
             release_stale.set()
             await asyncio.sleep(0.2)
 
             main_text = await page.locator("#main").inner_text()
-            self.assertIn("CURRENT-60", main_text)
-            self.assertNotIn("STALE-7", main_text)
+            self.assertIn("CURRENT-90", main_text)
+            self.assertNotIn("STALE-30", main_text)
             self.assertEqual(
-                {"days": 60, "industry": "CURRENT-60"},
+                {"days": 90, "industry": "CURRENT-90"},
                 await page.evaluate(
                     "({days:BOSS_DASH_DATA.period.days,"
                     "industry:BOSS_DASH_DATA.scope.industry_name})"

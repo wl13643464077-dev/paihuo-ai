@@ -2368,7 +2368,9 @@ def state(limit: int | None = None, offset: int = 0):
     setup = {"profile": len(profiles) > 0,
              "first_job": (jobs_total > 0 if paged else len(jobs) > 0),
              "wechat": bool(_wc.get_conf(TEN()).get("appid")) or bool(_nt.get_webhook(TEN())),
-             "clone": len(avatar.cloned_voices()) > 0}
+             "clone": len(avatar.cloned_voices()) > 0,
+             # 上手卡「接下来 3 件事」里的「建门店」是否已完成
+             "store": bool(db.one("SELECT id FROM store_branch WHERE tenant_id=? AND active=1 LIMIT 1", (TEN(),)))}
     # V27.2:「发布三件套」向导进度(成片→审查→排版/发出去,各查一条就够)
     trio = {"video": bool(db.one("SELECT id FROM tv_job WHERE tenant_id=? AND status='done' LIMIT 1", (TEN(),))),
             "censor": bool(db.one("SELECT id FROM censor_log WHERE tenant_id=? LIMIT 1", (TEN(),))),

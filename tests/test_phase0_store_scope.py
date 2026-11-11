@@ -353,6 +353,69 @@ class BranchScopeTests(_ScopeDbCase):
         self.assertEqual("closed", reviewed["action"]["status"])
         self.assertEqual(21, reviewed["action"]["closed_by"])
 
+    def test_rename_branch_is_boss_only_and_tenant_scoped(self):
+        # 经理、店员、没开行业的成员都不能改名
+        for uid in (22, 23, 24):
+            with self.assertRaises(inspection.InspectionForbidden):
+                inspection.rename_branch(2, uid, "restaurant", self.a["id"], "改个名")
+        renamed = inspection.rename_branch(2, 20, "restaurant", self.a["id"], "  朝阳旗舰店 ")
+        self.assertEqual("朝阳旗舰店", renamed["name"])
+        self.assertEqual("华北", renamed["region"])
+        self.assertTrue(renamed["active"])
+        by_director = inspection.rename_branch(2, 21, "restaurant", self.b["id"], "静安一店")
+        self.assertEqual("静安一店", by_director["name"])
+        names = {row["id"]: row["name"] for row in inspection.list_branches(2, 20, "restaurant")}
+        self.assertEqual("朝阳旗舰店", names[self.a["id"]])
+        # 经理的门店绑定不受改名影响
+        self.assertEqual(
+            [self.a["id"]],
+            [row["id"] for row in inspection.list_branches(2, 22, "restaurant")],
+        )
+        # 别家企业的老板改不了这家店,也看不出门店存在(404)
+        with self.assertRaises(inspection.InspectionNotFound):
+            inspection.rename_branch(3, 30, "restaurant", self.a["id"], "偷改")
+        with self.assertRaises(inspection.InspectionNotFound):
+            inspection.rename_branch(2, 20, "restaurant", self.foreign["id"], "偷改")
+        self.assertEqual("别家店", db.one(
+            "SELECT name FROM store_branch WHERE id=?", (self.foreign["id"],))["name"])
+        # 同企业同行业不能重名;空名、超长都拦下
+        with self.assertRaises(inspection.InspectionConflict):
+            inspection.rename_branch(2, 20, "restaurant", self.c["id"], "静安一店")
+        with self.assertRaises(inspection.InspectionError):
+            inspection.rename_branch(2, 20, "restaurant", self.c["id"], "  ")
+        with self.assertRaises(inspection.InspectionError):
+            inspection.rename_branch(2, 20, "restaurant", self.c["id"], "店" * 81)
+        # 别家企业可以有同名门店
+        inspection.rename_branch(3, 30, "restaurant", self.foreign["id"], "静安一店")
+        # 名字没变也正常返回
+        same = inspection.rename_branch(2, 20, "restaurant", self.c["id"], "新开店")
+        self.assertEqual("新开店", same["name"])
+
+    def test_branch_patch_route_renames_or_disables(self):
+        from unittest import mock
+        from app.routes import inspection as routes
+
+        with mock.patch.object(routes, "TEN", return_value=2), \
+                mock.patch.object(routes, "_inspection_actor_id", return_value=20), \
+                mock.patch.object(routes, "_inspection_scope",
+                                  return_value=("restaurant", ["restaurant"])):
+            renamed = routes.inspection_branch_update(self.a["id"], {"name": "朝阳新店"})
+            self.assertEqual("朝阳新店", renamed["name"])
+            self.assertTrue(renamed["active"])
+            disabled = routes.inspection_branch_update(self.a["id"], {"active": False})
+            self.assertFalse(disabled["active"])
+            self.assertEqual("朝阳新店", disabled["name"])
+            with self.assertRaises(routes.HTTPException) as missing:
+                routes.inspection_branch_update(self.a["id"], {})
+            self.assertEqual(400, missing.exception.status_code)
+        with mock.patch.object(routes, "TEN", return_value=2), \
+                mock.patch.object(routes, "_inspection_actor_id", return_value=23), \
+                mock.patch.object(routes, "_inspection_scope",
+                                  return_value=("restaurant", ["restaurant"])):
+            with self.assertRaises(routes.HTTPException) as denied:
+                routes.inspection_branch_update(self.b["id"], {"name": "店员改名"})
+            self.assertEqual(403, denied.exception.status_code)
+
     def test_owner_assigns_member_branches_with_replace_semantics(self):
         result = inspection.set_member_branches(
             20, 23, [self.b["id"], self.c["id"], self.b["id"]],

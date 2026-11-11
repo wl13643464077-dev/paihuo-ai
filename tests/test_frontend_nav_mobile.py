@@ -117,9 +117,15 @@ class FrontendNavMobileTests(unittest.IsolatedAsyncioTestCase):
                 self.assertGreaterEqual(tab["height"], 44)
                 self.assertLessEqual(tab["bottom"], 844)
             self.assertEqual([True, False, False, False, False], [t["on"] for t in tabs])
-            # 顶部导航在手机上不再重复显示 5 个入口,只留退出
-            self.assertEqual([], await self._visible_tabs(page, "#nav a"))
-            self.assertTrue(await page.locator("#nav .navlogout").is_visible())
+            # 顶部导航在手机上不再重复显示 5 个入口;红色「退出」也不放顶栏(「我的」页底部有),换成企业名
+            self.assertEqual([], await self._visible_tabs(page, "#nav a.nav-top"))
+            self.assertFalse(await page.locator("#nav .navlogout").is_visible())
+            self.assertTrue(await page.locator("#nav .nav-org").is_visible())
+            self.assertEqual("阿花奶茶", (await page.locator("#nav .nav-org").inner_text()).strip())
+            self.assertEqual("#/mine", await page.locator("#nav .nav-org").get_attribute("href"))
+            self.assertTrue(await page.locator("#nav .nav-acct #conn").is_visible())
+            # 手机顶栏没有余额,问候语旁保留
+            self.assertTrue(await page.locator(".today-money").is_visible())
             widths = await page.evaluate(
                 "({doc: document.documentElement.scrollWidth, nav: document.querySelector('#tabbar').scrollWidth,"
                 " navClient: document.querySelector('#tabbar').clientWidth})"
@@ -255,6 +261,8 @@ class FrontendNavMobileTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(info["fold"])
             self.assertEqual(0, info["floors"])  # 行业专家楼层已挪去「派活 → 找行业专家」
             self.assertIn("余额 120 点", info["money"])
+            # 桌面顶栏账号区已显示余额,问候语旁的那一处藏起来
+            self.assertFalse(await page.locator(".today-money").is_visible())
             self.assertEqual(5, info["topNav"])  # 桌面仍是顶部导航
             self.assertEqual("none", info["tabbarShown"])
             self._assert_no_browser_errors(errors)
@@ -408,8 +416,133 @@ class FrontendNavMobileTests(unittest.IsolatedAsyncioTestCase):
             await page.wait_for_selector("#my-stores .my-store-chip")
             self.assertEqual(6, await page.locator("#my-stores .my-store-chip").count())
             self.assertEqual("共 12 家", (await page.locator("[data-my-stores-count]").inner_text()).strip())
-            self.assertEqual("#/inspections", await page.locator("#my-stores a", has_text="全部门店").get_attribute("href"))
+            self.assertEqual("#/inspections/0/tea", await page.locator("#my-stores a", has_text="全部门店").get_attribute("href"))
             self.assertTrue(await page.locator("#my-stores button", has_text="新建门店").is_visible())
+            # 门店胶囊是真链接:点了进巡店页,只看这家店
+            chip = page.locator("#my-stores a.my-store-chip").nth(1)
+            self.assertEqual("#/inspections/0/tea", await chip.get_attribute("href"))
+            await chip.click()
+            await page.wait_for_function("location.hash.startsWith('#/inspections')")
+            self.assertEqual(2, await page.evaluate("INSPECTION_BRANCH_ID"))
+            self.assertEqual("tea", await page.evaluate("INSPECTION_INDUSTRY"))
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+
+    async def test_store_hub_manage_renames_and_disables_a_store(self):
+        branches = [{"id": 1, "name": "人民路店", "region": "上海", "active": True},
+                    {"id": 2, "name": "南京路店", "region": "", "active": True}]
+        patches = []
+        overrides = {
+            "/api/inspections/meta": {"industry_key": "tea", "permissions": {"can_manage_branches": True}},
+            "/api/inspections/branches/search": {"items": branches},
+            "/api/inspections": {"items": [], "summary": {"total_branches": 2}},
+        }
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(playwright, hash_="#/store", api_overrides=overrides)
+
+            async def patch_route(route):
+                body = route.request.post_data_json
+                patches.append((urlparse(route.request.url).path, body))
+                await route.fulfill(status=200, content_type="application/json",
+                                    body=json.dumps({"id": 1, **body}, ensure_ascii=False))
+
+            await page.route("**/api/inspections/branches/*", lambda route: patch_route(route)
+                             if route.request.method == "PATCH" else route.fallback())
+            await page.wait_for_selector("#my-stores .my-store-chip")
+            await page.locator("#my-stores [data-my-stores-manage]").click()
+            await page.wait_for_selector("#my-stores [data-my-stores-manage-list]")
+            rows = await page.locator("#my-stores .my-store-row").all_inner_texts()
+            self.assertEqual(2, len(rows))
+            self.assertIn("改名", rows[0])
+            self.assertIn("停用", rows[0])
+            # 改名:弹出输入框,预填旧名
+            await page.locator("#my-stores .my-store-row").first.locator("button", has_text="改名").click()
+            await page.wait_for_selector("#ui-dialog-field")
+            self.assertEqual("人民路店", await page.input_value("#ui-dialog-field"))
+            await page.fill("#ui-dialog-field", "人民路旗舰店")
+            await page.locator("#ui-dialog [data-dialog-ok]").click()
+            await page.wait_for_function("document.querySelector('#toast-stack')?.textContent.includes('已改名')")
+            self.assertEqual(("/api/inspections/branches/1", {"name": "人民路旗舰店", "industry_key": "tea"}), patches[0])
+            # 停用:先确认,再发 active:false
+            await page.locator("#my-stores .my-store-row").nth(1).locator("button", has_text="停用").click()
+            await page.wait_for_selector("#ui-dialog")
+            self.assertIn("南京路店", await page.locator("#ui-dialog").inner_text())
+            await page.locator("#ui-dialog [data-dialog-ok]").click()
+            await page.wait_for_function("document.querySelector('#toast-stack')?.textContent.includes('已停用')")
+            self.assertEqual(("/api/inspections/branches/2", {"active": False, "industry_key": "tea"}), patches[1])
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_member_without_store_rights_sees_no_manage_button(self):
+        overrides = {
+            "/api/inspections/meta": {"industry_key": "tea", "permissions": {"can_manage_branches": False}},
+            "/api/inspections/branches/search": {"items": [{"id": 1, "name": "人民路店", "active": True}]},
+            "/api/inspections": {"items": [], "summary": {"total_branches": 1}},
+        }
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(
+                playwright, me=MEMBER_NO_CONTENT, hash_="#/store", api_overrides=overrides)
+            await page.wait_for_selector("#my-stores .my-store-chip")
+            self.assertEqual(0, await page.locator("#my-stores [data-my-stores-manage]").count())
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_boss_dashboard_one_title_short_label_and_folded_idle_staff(self):
+        def employee(i, tasks=0):
+            return {"idx": 1000 + i, "name": f"专家{i}", "employee_kind": "expert", "identity_ref": f"r{i}",
+                    "tasks": tasks, "completed": tasks, "completion_rate": 1 if tasks else None,
+                    "average_cycle_seconds": None, "waiting": 0, "failed": 0, "refunded": 0,
+                    "inspection_visits": 0}
+        employees = [employee(1, 3), employee(2, 1)] + [employee(i) for i in range(3, 63)]
+        employees[5]["inspection_visits"] = 2   # 只巡了店也算本期干了活
+        summary_days = []
+        summary = {
+            "scope": {"tenant_id": 1, "tenant_name": "阿花奶茶", "industry_key": "restaurant",
+                      "industry_name": "餐饮产业部", "industry_emoji": "🍜"},
+            "period": {"days": 7}, "task_metrics": {}, "efficiency_metrics": {}, "risk_metrics": {},
+            "inspection_metrics": {"availability": False, "backlog": {}},
+            "business_metrics": {"metrics": []}, "trend": [], "employees": employees,
+            "recent_activity": [], "can_open_records": True,
+        }
+        overrides = {
+            "/api/boss/dashboard/scopes": {"can_cross_tenant": False, "tenants": [{
+                "id": 1, "name": "阿花奶茶", "industries": [
+                    {"key": "restaurant", "name": "餐饮产业部", "short_label": "餐饮", "emoji": "🍜"}]}]},
+            "/api/boss/dashboard/summary": summary,
+        }
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(playwright, hash_="#/boss", api_overrides=overrides)
+            page.on("request", lambda r: summary_days.append(r.url.split("days=")[1].split("&")[0])
+                    if "/api/boss/dashboard/summary" in r.url else None)
+            await page.evaluate("render()")
+            await page.wait_for_selector("[data-boss-idle]")
+            info = await page.evaluate(
+                """() => ({
+                  titles: [...document.querySelectorAll('#main h2')].map(x => x.textContent.trim()),
+                  text: document.querySelector('#main').innerText,
+                  rows: document.querySelectorAll('#main .dimtable tbody tr').length,
+                  idle: document.querySelector('[data-boss-idle] summary').textContent,
+                  open: document.querySelector('[data-boss-idle]').open,
+                  periods: [...document.querySelectorAll('#main select')].pop()
+                    ? [...[...document.querySelectorAll('#main select')].pop().options].map(o => o.value) : [],
+                  height: document.documentElement.scrollHeight,
+                })""")
+            self.assertEqual(["老板看板"], info["titles"])
+            self.assertNotIn("老板经营驾驶舱", info["text"])
+            self.assertNotIn("餐饮产业部", info["text"])
+            self.assertIn("🍜 餐饮 · 阿花奶茶", info["text"])
+            self.assertIn("餐饮 经营指标", info["text"])
+            self.assertEqual(3, info["rows"])
+            self.assertEqual("另有 59 位本期没干活", info["idle"].strip())
+            self.assertFalse(info["open"])
+            self.assertEqual(["7", "30", "90"], info["periods"])
+            self.assertEqual("7", summary_days[-1])
+            # 手机上不再是三万像素的长表
+            self.assertLess(info["height"], 6000)
+            # 点开能看到没干活的人
+            await page.locator("[data-boss-idle] summary").click()
+            self.assertTrue(await page.locator("[data-boss-idle]", has_text="专家62").is_visible())
             self._assert_no_browser_errors(errors)
             await browser.close()
 

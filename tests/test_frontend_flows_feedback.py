@@ -247,6 +247,26 @@ class FrontendFlowsFeedbackTests(unittest.IsolatedAsyncioTestCase):
             self._assert_no_browser_errors(errors)
             await browser.close()
 
+    async def test_old_sixty_day_period_is_restored_as_ninety(self):
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(
+                playwright,
+                init_script="""
+                  localStorage.setItem('ui_pref_shop-owner_boss_days', JSON.stringify(60));
+                """,
+            )
+            self.assertEqual(90, await page.evaluate("BOSS_DASH_FILTER.days"))
+            self.assertEqual([7, 30, 90], await page.evaluate("BOSS_DASH_PERIODS"))
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
+    async def test_boss_dashboard_defaults_to_seven_days(self):
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(playwright)
+            self.assertEqual(7, await page.evaluate("BOSS_DASH_FILTER.days"))
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
     async def test_ui_prefs_survive_storage_that_throws(self):
         async with async_playwright() as playwright:
             browser, page, errors = await self._open(
@@ -266,19 +286,33 @@ class FrontendFlowsFeedbackTests(unittest.IsolatedAsyncioTestCase):
             self._assert_no_browser_errors(errors)
             await browser.close()
 
-    async def test_desktop_account_area_sits_next_to_online_status(self):
+    async def test_desktop_account_area_holds_online_dot(self):
         async with async_playwright() as playwright:
             browser, page, errors = await self._open(playwright)
+            await page.wait_for_function("document.querySelector('.today-money')")
             info = await page.evaluate(
-                """() => { const out = document.querySelector('#nav .navlogout').getBoundingClientRect();
+                """() => { const acct = document.querySelector('#nav .nav-acct');
+                  const kids = [...acct.children].map(x => x.id || x.className);
+                  const who = document.querySelector('#nav .nav-who').getBoundingClientRect();
                   const conn = document.querySelector('#conn').getBoundingClientRect();
                   return {who: document.querySelector('#nav .nav-who')?.textContent,
-                          inAcct: !!document.querySelector('#nav .nav-acct .navlogout'),
-                          gap: conn.left - out.right}; }""")
+                          kids, connCount: document.querySelectorAll('#conn').length,
+                          gap: conn.left - who.right,
+                          money: getComputedStyle(document.querySelector('.today-money')).display}; }""")
             self.assertEqual("浏览器测试门店 · shop-owner · 余额 100 点", info["who"])
-            self.assertTrue(info["inAcct"])
-            self.assertGreaterEqual(info["gap"], 0)
-            self.assertLess(info["gap"], 60)
+            # 在线圆点在账号区里:企业名·账号·余额 → 圆点 → 退出
+            self.assertEqual(1, info["connCount"])
+            self.assertEqual(["nav-who", "nav-org", "conn", "nav-action navlogout"], info["kids"])
+            self.assertGreaterEqual(info["gap"], -1)
+            self.assertLess(info["gap"], 40)
+            # 桌面顶栏已有余额,问候语旁不再重复
+            self.assertEqual("none", info["money"])
+            # 换页重画导航后圆点和状态还在
+            await page.evaluate("connSet('retry'); nav();")
+            state = await page.evaluate(
+                "({n: document.querySelectorAll('#conn').length, t: document.querySelector('#conn').textContent,"
+                " inAcct: !!document.querySelector('#nav .nav-acct #conn')})")
+            self.assertEqual({"n": 1, "t": "● 重连中", "inAcct": True}, state)
             self._assert_no_browser_errors(errors)
             await browser.close()
 
