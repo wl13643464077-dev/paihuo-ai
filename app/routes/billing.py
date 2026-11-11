@@ -49,9 +49,14 @@ def billing_get():
         # 客户看能力名,不看供应商名(只换显示名,点数与动作 key 不变)
         price_rows = {
             action: {"points": row.get("points"),
-                     "label": billing.public_label(action, row.get("label"))}
+                     "label": billing.public_label(action, row.get("label")),
+                     **billing.price_group(action)}
             for action, row in price_rows.items()
         }
+    else:
+        # 平台方照旧看原名和成本参考,只多带分组信息(显示用)
+        price_rows = {action: {**row, **billing.price_group(action)}
+                      for action, row in price_rows.items() if isinstance(row, dict)}
     log_rows = db.q("SELECT delta, balance, reason, created_at FROM billing_log "
                     "WHERE tenant_id=? ORDER BY id DESC LIMIT 300", (TEN(),))
     if not _is_boss():

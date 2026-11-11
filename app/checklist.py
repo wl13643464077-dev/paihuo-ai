@@ -537,6 +537,21 @@ def generate_runs(tid: int | None = None, *, date: str | None = None,
     return created
 
 
+def ensure_today(tid: int, run_date: str, now: float | None = None) -> int:
+    """看清单时顺手把「今天」该有的清单补出来（和后台循环用同一个 ``generate_runs``）。
+
+    只补今天：翻看过去或以后的日子不生成。幂等，已生成过的不会重复，
+    出错也不影响查看（后台循环还会再补）。
+    """
+    ts = _now(now)
+    if run_date != timeutil.today_cn(ts):
+        return 0
+    try:
+        return generate_runs(int(tid), date=run_date, now=ts)
+    except Exception:
+        return 0
+
+
 def _generate_for_tenant(tid: int, run_date: str, ts: float) -> int:
     branches = db.q(
         "SELECT id,industry_key,created_at FROM store_branch WHERE tenant_id=? "
@@ -736,6 +751,7 @@ def runs_for_user(tid: int, uid: int, date: str | None = None, *,
     """
     user = _user(tid, uid)
     run_date = _clean_date(date, now)
+    ensure_today(tid, run_date, now)
     rows = db.q(
         "SELECT * FROM checklist_run WHERE tenant_id=? AND run_date=? AND ("
         "assignee_user_id=? OR branch_id IN (SELECT branch_id FROM user_branch "
@@ -757,6 +773,7 @@ def runs_overview(tid: int, uid: int, date: str | None = None, *,
     """老板端「今天各店完成情况」：按门店分组，经理 / 员工只看绑定门店。"""
     user = _user(tid, uid)
     run_date = _clean_date(date, now)
+    ensure_today(tid, run_date, now)
     visible = set(visible_branch_ids(tid, user))
     branches = [row for row in db.q(
         "SELECT id,name,region FROM store_branch WHERE tenant_id=? AND active=1 "
@@ -764,7 +781,8 @@ def runs_overview(tid: int, uid: int, date: str | None = None, *,
     ) if int(row["id"]) in visible]
     if not branches:
         return {"date": run_date, "stores": [], "summary": {
-            "total": 0, "done": 0, "missed": 0, "open": 0, "rate": None}}
+            "total": 0, "done": 0, "missed": 0, "open": 0,
+            "items_total": 0, "items_done": 0, "rate": None}}
     ids = [int(b["id"]) for b in branches]
     rows: list[dict] = []
     for start in range(0, len(ids), 500):
@@ -780,7 +798,8 @@ def runs_overview(tid: int, uid: int, date: str | None = None, *,
     for run in public:
         by_branch.setdefault(run["branch_id"], []).append(run)
     stores = []
-    totals = {"total": 0, "done": 0, "missed": 0, "open": 0}
+    totals = {"total": 0, "done": 0, "missed": 0, "open": 0,
+              "items_total": 0, "items_done": 0}
     for branch in branches:
         runs = by_branch.get(int(branch["id"]), [])
         counts = {
@@ -788,6 +807,9 @@ def runs_overview(tid: int, uid: int, date: str | None = None, *,
             "done": sum(1 for r in runs if r["status"] == "done"),
             "missed": sum(1 for r in runs if r["status"] == "missed"),
             "open": sum(1 for r in runs if r["status"] == "open"),
+            # 进度按「项」算(和店员手机上的 0/8 一致)，份数只用来算按时完成率
+            "items_total": sum(int(r.get("total") or 0) for r in runs),
+            "items_done": sum(int(r.get("done_count") or 0) for r in runs),
         }
         for key in totals:
             totals[key] += counts[key]

@@ -119,9 +119,58 @@ def prices() -> dict:
 # 给客户看的价目名：只换显示名，不改价目表里的 label（扣点流水按 label 记账、归类），
 # 也不改点数和动作 key。平台方（boss）照旧看带供应商的原名。
 PUBLIC_LABELS = {
+    # 门店日常
+    "staff_parse": "一句话派活（AI 帮您拆成任务）",
+    "staff_ai_check": "店员交差（AI 先看照片）",
+    "cockpit_ai": "数据驾驶舱 AI 经营分析",
+    # 找专家
+    "expert_task": "请 AI 专家办一件事 / 答一个问题",
+    "learn": "AI 专家上网学新本事",
+    # 做内容
+    "content_job": "写一整篇带配图的营销内容",
+    "hot_pick": "今天发什么（热点扫描）",
+    "menu_copy": "看图写卖点 / 菜单文案",
+    "product_shot": "产品图美化",
+    "censor_check": "发之前深度检查一遍",
+    "censor_retro": "发完后数据复盘",
+    "wechat_draft": "一键存进公众号草稿箱（含终审）",
+    "pcal": "一整月的私域内容日历",
+    "warmup": "新账号 30 天起号计划",
+    "leads": "找潜在客户线索",
+    "bench_watch": "竞品每周动态",
+    "link_extract": "把爆款视频拆成口播稿",
+    "matrix_variants": "一篇口播改写成多个版本",
+    # 做视频
     "avatar_basic": "数字人视频·基础版",
+    "avatar_video": "数字人口播视频（30 秒内）",
+    "avatar_video_60": "数字人口播视频（31–60 秒）",
     "avatar_sales": "AI 带货短片(15秒)",
+    "text_video": "图文一键转成视频",
+    "studio_scene": "老板进店场景照（每张）",
+    "studio_topics": "72 小时行业热点选题",
+    "studio_script": "按选题写口播稿",
+    "studio_pack": "自动剪辑 + 封面 + 三平台发布包",
 }
+# 价目表分组（只用于显示）：门店日常排第一，其后找专家、做内容、做视频；没列到的归「其他」。
+PRICE_GROUPS = (
+    ("store", "门店日常", ("staff_parse", "staff_ai_check", "cockpit_ai")),
+    ("expert", "找专家", ("expert_task", "learn")),
+    ("content", "做内容", ("content_job", "hot_pick", "menu_copy", "product_shot", "censor_check",
+                         "censor_retro", "wechat_draft", "pcal", "warmup", "leads", "bench_watch",
+                         "link_extract", "matrix_variants")),
+    ("video", "做视频", ("avatar_basic", "avatar_video", "avatar_video_60", "avatar_sales",
+                       "voice_clone", "text_video", "studio_scene", "studio_topics",
+                       "studio_script", "studio_pack")),
+)
+_PRICE_GROUP_OF = {action: (key, label, order)
+                   for order, (key, label, actions) in enumerate(PRICE_GROUPS)
+                   for action in actions}
+
+
+def price_group(action: str) -> dict:
+    """价目动作属于哪一组（显示用），不认识的动作归「其他」排最后。"""
+    key, label, order = _PRICE_GROUP_OF.get(str(action or ""), ("other", "其他", len(PRICE_GROUPS)))
+    return {"group": key, "group_label": label, "group_order": order}
 _SUPPLIER_WORDS = ("runninghub", "seedance", "可灵", "kling", "heygen", "豆包", "即梦",
                    "doubao", "deepseek", "minimax", "elevenlabs", "海螺", "云雾")
 
@@ -158,9 +207,12 @@ def public_label(action: str, label: str) -> str:
 
 
 def public_reason(reason: str) -> str:
-    """流水里的项目名同样去掉供应商名（只改显示，退款和扣款按同一规则处理）。"""
+    """流水里的项目名同样换成客户版（去供应商名、默认价目用白话名；只改显示，退款和扣款同一规则）。"""
     text = str(reason or "")
-    if not _has_supplier(text):
+    plain_hit = any(text.split(" · ", 1)[0].removeprefix("退回:").removeprefix("退回：").strip()
+                    == row.get("label") and action in PUBLIC_LABELS
+                    for action, row in DEFAULT_PRICES.items())
+    if not _has_supplier(text) and not plain_hit:
         return text
     prefix = ""
     for head in ("退回:", "退回："):

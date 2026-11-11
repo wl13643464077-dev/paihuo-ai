@@ -41,6 +41,9 @@
 .ph-onb .ph-pw summary{cursor:pointer;font-weight:800}
 .ph-onb-done{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px}
 .ph-onb-done .ph-grow{flex:1;min-width:180px;font-weight:800}
+.ph-onb-line{padding:8px 14px}
+.ph-onb-line .ph-grow a{color:inherit;text-decoration:underline}
+.ph-onb-line .ph-grow .ph-link{font-size:inherit;font-weight:800;color:inherit;padding:0}
 .ph-onb .ph-next{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}
 .ph-onb .ph-next-i{display:flex;flex-direction:column;gap:2px;min-height:44px;padding:10px 12px;border:2px solid rgba(51,41,31,.18);border-radius:12px;background:#fffdf7;color:inherit;text-decoration:none}
 .ph-onb .ph-next-i.ph-ok{opacity:.65}
@@ -152,15 +155,29 @@
     try{ setup=(typeof STATE!=="undefined"&&STATE&&STATE.setup)||{}; }catch(_){}
     const items=[
       {done:!!setup.store||S.storeMade, icon:"🏪", t:"建门店", d:"录好门店，店长拍照就能巡店", href:"#/store"},
-      {done:!!setup.first_job, icon:"📋", t:"派第一个活", d:"一句话说清要什么，数字员工去做", href:"#/new"},
+      {done:!!setup.staff, icon:"👥", t:"给店员开账号", d:"店员手机上就能看到今天的活", href:"#/team"},
       {done:!!setup.wechat, icon:"💬", t:"绑定微信", d:"做完了微信里直接收通知", href:"#/channels"},
     ];
     return `<div class="ph-next">${items.map(x=>`<a class="ph-next-i${x.done?" ph-ok":""}" href="${x.href}">
         <b>${x.done?"✅":x.icon} ${x.t}</b><span class="sub">${x.done?"已完成":x.d}</span></a>`).join("")}</div>`;
   }
+  function hasStore(){
+    try{ if(typeof STATE!=="undefined"&&STATE&&STATE.setup&&STATE.setup.store) return true; }catch(_){}
+    return !!S.storeMade;
+  }
+  // 已经有门店：上手卡收成一行，不再每天压在首屏；想写文案点一下再展开 3 步。
+  function storeLine(st){
+    return `<div class="card ph-onb ph-onb-done ph-onb-line">
+        <span class="ph-grow">✅ 基本信息好了 · 接下来：<a href="#/team">开店员账号</a> / <a href="#/staff-tasks">派第一件活</a> / <button type="button" class="ph-link" onclick="PH_ONBOARDING.toggle(true)">写今天的文案</button></span>
+        <button type="button" class="ph-x" aria-label="关闭上手提示" onclick="PH_ONBOARDING.dismiss()">×</button>
+        ${st.password_hint?`<div style="flex-basis:100%">${pwHint(st)}</div>`:""}
+      </div>`;
+  }
   function inner(){
     const st=S.state;
     if(!st||(!st.show&&!S.reopened)) return "";
+    const collapsible=st.done||hasStore();
+    if(hasStore() && (st.steps||{}).industry && !S.expand && !S.editing && !S.generating) return storeLine(st);
     if(st.done && !S.expand){
       return `<div class="card ph-onb ph-onb-done">
         <span class="ph-grow">✅ 上手完成。接下来 3 件事：</span>
@@ -175,9 +192,9 @@
     const stateOf=(no,ok)=> ok&&!(no===2&&S.editing) ? "ok" : (no===now?"now":"");
     return `<div class="card ph-onb">
       <div style="display:flex;align-items:flex-start;gap:8px">
-        <div style="flex:1"><h2>👋 3 分钟上手:先让数字员工帮您写今天的文案</h2>
-          <div class="sub" style="margin-top:4px">跟着 3 步走,马上拿到能直接发的朋友圈、小红书、点评文案。</div></div>
-        ${st.done?`<button type="button" class="ph-x" aria-label="收起" onclick="PH_ONBOARDING.toggle(false)">−</button>`:""}
+        <div style="flex:1"><h2>👋 3 分钟上手：选行业、填店铺，AI 专家帮您写今天的文案</h2>
+          <div class="sub" style="margin-top:4px">跟着 3 步走，马上拿到能直接发的朋友圈、小红书、点评文案。</div></div>
+        ${collapsible?`<button type="button" class="ph-x" aria-label="收起" onclick="PH_ONBOARDING.toggle(false)">−</button>`:""}
       </div>
       ${stepBox(1,"选您的行业",stateOf(1,s.industry),industryBody(st))}
       ${stepBox(2,"填一下店铺基本信息",stateOf(2,s.store),storeBody(st))}

@@ -114,11 +114,14 @@
     // 没做完的门店排前面，老板先看要盯的
     const stores = [...ov.stores].sort((a,b)=>(b.missed-a.missed)||((b.total-b.done)-(a.total-a.done))||a.branch_name.localeCompare(b.branch_name,"zh"));
     const cards = stores.map(st=>{
-      const pct = st.total ? Math.round(st.done*100/st.total) : 0;
+      // 进度按「项」算(和店员手机上的 0/8 一致)；老接口没给项数时退回按份
+      const itTotal = st.items_total!=null ? st.items_total : st.total;
+      const itDone = st.items_done!=null ? st.items_done : st.done;
+      const pct = itTotal ? Math.round(itDone*100/itTotal) : 0;
       const open = !!CK.openStore[st.branch_id];
       const badge = st.missed ? `<span class="pill failed">${st.missed} 份超时</span>`
         : st.total && st.done===st.total ? `<span class="pill done">全部完成</span>`
-        : `<span class="pill running">${st.done}/${st.total}</span>`;
+        : `<span class="pill running">${itDone}/${itTotal} 项</span>`;
       return `<div class="card ck-store">
         <div class="ck-store-top" role="button" tabindex="0" aria-expanded="${open}"
           onclick="ckToggleStore(${cp(st.branch_id)})" onkeydown="if(event.key==='Enter')ckToggleStore(${cp(st.branch_id)})">

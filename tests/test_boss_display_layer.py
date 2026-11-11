@@ -76,8 +76,9 @@ class BossGlanceIntroTests(unittest.TestCase):
 class HomeGuideCopyTests(unittest.TestCase):
     def test_industry_market_replaces_group_floors(self):
         self.assertNotIn("集团楼层", APP_JS)
-        self.assertIn("行业市场", APP_JS)
-        self.assertIn("行业精品员工", APP_JS)
+        # 第四轮 N-22:「行业市场」是内部说法,页头改成大白话
+        self.assertNotIn("行业市场", APP_JS)
+        self.assertIn("每个行业一支 AI 专家队伍", APP_JS)
 
     def test_today_page_keeps_only_one_beginner_guide(self):
         # 「开工四步 / 发布三件套 / 新手上路」已从今天页撤掉,只留上手卡的 3 步
@@ -86,7 +87,7 @@ class HomeGuideCopyTests(unittest.TestCase):
         onboarding_js = (Path(__file__).resolve().parents[1] / "static" / "onboarding.js").read_text(
             encoding="utf-8")
         self.assertIn("接下来 3 件事", onboarding_js)
-        for href in ('href:"#/store"', 'href:"#/new"', 'href:"#/channels"'):
+        for href in ('href:"#/store"', 'href:"#/team"', 'href:"#/channels"'):
             self.assertIn(href, onboarding_js)
 
     def test_howto_hint_moves_to_experts_page_and_resets_with_guide(self):

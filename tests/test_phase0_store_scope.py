@@ -391,6 +391,51 @@ class BranchScopeTests(_ScopeDbCase):
         same = inspection.rename_branch(2, 20, "restaurant", self.c["id"], "新开店")
         self.assertEqual("新开店", same["name"])
 
+    def test_branch_info_update_has_same_rules_as_rename(self):
+        """N-13：区域、地址和名字一起改；权限、租户、行业规则与改名一致。"""
+        for uid in (22, 23, 24):
+            with self.assertRaises(inspection.InspectionForbidden):
+                inspection.update_branch_info(2, uid, "restaurant", self.a["id"],
+                                              {"region": "改区域"})
+        out = inspection.update_branch_info(
+            2, 20, "restaurant", self.a["id"],
+            {"name": "建设路店", "region": " 成都 建设路 ", "address": "建设路 1 号"})
+        self.assertEqual(("建设路店", "成都 建设路", "建设路 1 号"),
+                         (out["name"], out["region"], out["address"]))
+        # 只传地址时名字和区域不动
+        out = inspection.update_branch_info(2, 21, "restaurant", self.a["id"], {"address": ""})
+        self.assertEqual(("建设路店", "成都 建设路", ""), (out["name"], out["region"], out["address"]))
+        with self.assertRaises(inspection.InspectionNotFound):
+            inspection.update_branch_info(3, 30, "restaurant", self.a["id"], {"region": "偷改"})
+        with self.assertRaises(inspection.InspectionNotFound):
+            inspection.update_branch_info(2, 20, "restaurant", self.foreign["id"], {"region": "偷改"})
+        with self.assertRaises(inspection.InspectionError):
+            inspection.update_branch_info(2, 20, "restaurant", self.a["id"], {"region": "区" * 61})
+        with self.assertRaises(inspection.InspectionError):
+            inspection.update_branch_info(2, 20, "restaurant", self.a["id"], {"address": "址" * 201})
+
+    def test_branch_patch_route_accepts_region_and_address(self):
+        from unittest import mock
+        from app.routes import inspection as routes
+
+        with mock.patch.object(routes, "TEN", return_value=2), \
+                mock.patch.object(routes, "_inspection_actor_id", return_value=20), \
+                mock.patch.object(routes, "_inspection_scope",
+                                  return_value=("restaurant", ["restaurant"])):
+            out = routes.inspection_branch_update(
+                self.a["id"], {"name": "朝阳新店", "region": "北京 朝阳", "address": "朝阳路 9 号"})
+            self.assertEqual(("朝阳新店", "北京 朝阳", "朝阳路 9 号"),
+                             (out["name"], out["region"], out["address"]))
+            out = routes.inspection_branch_update(self.a["id"], {"region": "北京 东城"})
+            self.assertEqual(("朝阳新店", "北京 东城"), (out["name"], out["region"]))
+        with mock.patch.object(routes, "TEN", return_value=2), \
+                mock.patch.object(routes, "_inspection_actor_id", return_value=23), \
+                mock.patch.object(routes, "_inspection_scope",
+                                  return_value=("restaurant", ["restaurant"])):
+            with self.assertRaises(routes.HTTPException) as denied:
+                routes.inspection_branch_update(self.a["id"], {"address": "店员改地址"})
+            self.assertEqual(403, denied.exception.status_code)
+
     def test_branch_patch_route_renames_or_disables(self):
         from unittest import mock
         from app.routes import inspection as routes
