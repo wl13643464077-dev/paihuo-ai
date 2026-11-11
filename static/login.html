@@ -126,7 +126,7 @@ button:active{transform:translateY(1px);box-shadow:2px 2px 0 rgba(51,41,31,.2)}
     <div class="err" id="a-err" role="status" aria-live="polite"></div><div class="ok" id="a-ok" role="status" aria-live="polite"></div>
   </div>
   <div class="foot" id="staff-foot" hidden>忘了密码？找老板或店长重置</div>
-  <div class="foot" id="boss-foot">副账号:开通与重置密码都请找您的企业主 · <span id="forgot-line">主账号忘记密码?联系顾问重置</span> · <a href="/promo">了解产品 →</a></div>
+  <div class="foot" id="boss-foot"><div>副账号：开通与重置密码都请找您的企业主</div><div style="margin-top:4px"><span id="forgot-line">主账号忘记密码？联系顾问重置</span> · <a href="/promo">了解产品 →</a></div></div>
 </div>
 <script>
 const PURCHASE_PLAN_LABELS={trial:"体验版",startup:"创业版",biz:"企业版",flagship:"旗舰版"};
@@ -208,7 +208,7 @@ fetch("/api/guest/industries").then(r=>r.ok?r.json():null).then(d=>{
 }).catch(()=>{});
 fetch("/api/support-contact").then(r=>r.json()).then(d=>{
   if(d.contact){ const el=document.getElementById("forgot-line");
-    if(el) el.textContent = "忘记密码?联系顾问重置:" + d.contact; }
+    if(el) el.textContent = "主账号忘记密码？联系顾问重置：" + d.contact; }
 }).catch(()=>{});
 
 async function go(){
