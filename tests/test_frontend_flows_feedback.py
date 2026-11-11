@@ -323,6 +323,20 @@ class FrontendFlowsFeedbackTests(unittest.IsolatedAsyncioTestCase):
             self._assert_no_browser_errors(errors)
             await browser.close()
 
+    async def test_director_sees_balance_and_billing_card(self):
+        director = {**MEMBER, "id": 25, "username": "zongjian", "job_title": "director"}
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(playwright, me=director, hash_="#/mine")
+            await page.wait_for_function("document.querySelector('#main .hubgrid')")
+            cards = await page.evaluate(
+                "[...document.querySelectorAll('#main .hubcard .hc-t')].map(x=>x.textContent)")
+            self.assertIn("套餐", cards)
+            await page.evaluate("location.hash='#/'")
+            await page.wait_for_function("document.querySelector('.today-money')")
+            self.assertIn("余额 100 点", await page.locator(".today-money").inner_text())
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
     async def _forced_change(self, playwright, me):
         browser = await _launch_chromium(playwright, self.executable)
         page = await browser.new_page(viewport={"width": 390, "height": 800})

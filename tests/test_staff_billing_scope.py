@@ -38,24 +38,26 @@ class StaffBillingScopeTests(StaffTaskBase):
     def _as(self, uid):
         auth.set_current(auth.get_user(uid))
 
-    def test_owner_still_gets_ledger_and_plans(self):
+    def test_owner_and_director_get_ledger_and_plans(self):
         from app import main
 
-        self._as(20)
-        data = main.billing_get()
-        self.assertEqual(482, data["balance"])
-        self.assertEqual(2, len(data["log"]))
-        self.assertEqual(500, data["recharged"])
-        self.assertEqual(18, data["spent"])
-        self.assertTrue(data["monthly"])
-        self.assertTrue(data["plans"])
-        self.assertTrue(data["periods"])
-        self.assertNotIn("restricted", data)
+        for uid in (20, 21):   # 老板 / 总监
+            with self.subTest(uid=uid):
+                self._as(uid)
+                data = main.billing_get()
+                self.assertEqual(482, data["balance"])
+                self.assertEqual(2, len(data["log"]))
+                self.assertEqual(500, data["recharged"])
+                self.assertEqual(18, data["spent"])
+                self.assertTrue(data["monthly"])
+                self.assertTrue(data["plans"])
+                self.assertTrue(data["periods"])
+                self.assertNotIn("restricted", data)
 
     def test_members_get_balance_and_action_cost_only(self):
         from app import main
 
-        for uid in (21, 22, 23, 27):   # 总监 / 店长 / 店员 / 内容运营副账号
+        for uid in (22, 23, 27):   # 店长 / 店员 / 内容运营副账号
             with self.subTest(uid=uid):
                 self._as(uid)
                 data = main.billing_get()

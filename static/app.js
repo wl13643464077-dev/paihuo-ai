@@ -704,7 +704,8 @@ const routes = {"":dashboard,"new":newBrief,"job":jobView,"profiles":profilesVie
    show 仍按原来的权限函数(canWork/can/isAdmin/角色)判断,没有权限的卡片不出现。 */
 const isOwnerLike = () => !!ME && (ME.role==="owner"||ME.role==="root");
 // 套餐、余额、流水是企业的账:只给老板(owner)和平台方看;参观模式看的是演示页,照旧。
-const canSeeBilling = () => isOwnerLike() || ME?.role==="tour";
+const seesCompanyMoney = () => !!ME && (ME.role==="owner"||(ME.role==="member"&&ME.job_title==="director"));
+const canSeeBilling = () => isOwnerLike() || seesCompanyMoney() || ME?.role==="tour";
 const NAV_GROUPS = [
   {key:"today", label:"今天", icon:"☀️", hub:"", extra:[], cards:[]},
   {key:"dispatch", label:"派活", icon:"📋", hub:"dispatch", extra:["job","delivery"],
@@ -793,7 +794,7 @@ function nav(){
     + `${g.key==="today"&&inbox?`<span class="badge" aria-label="${inbox} 条待处理">${inbox}</span>`:""}</a>`;
   // 桌面:顶部导航;手机:同样的 5 个入口放进底部 Tab 栏(#tabbar),顶部只留退出
   // 右侧账号区:企业名 · 账号 · 余额(用已加载的数据,不额外请求) + 退出,紧挨着在线状态
-  const balance = ME&&STATE&&ME.role==="owner"&&STATE.balance!=null
+  const balance = ME&&STATE&&seesCompanyMoney()&&STATE.balance!=null
     ? ` · 余额 ${Math.round(Number(STATE.balance)||0)} 点` : "";
   const who = ME ? `${esc(ME.tenant||"")}${ME.tenant?" · ":""}${esc(ME.username||"")}${balance}` : "";
   $("#nav").innerHTML = items.map(x=>link(x,"nav-top")).join("")
@@ -1617,7 +1618,7 @@ async function dashboard(){
   const tourBanner = ME&&ME.role==="tour" ? `<div class="notice" style="background:#ece3ff;margin-top:0">👀 <b>参观模式</b>:去看看每位数字员工能帮您的店做什么。<a href="#/experts" style="text-decoration:underline;font-weight:900">看数字员工 →</a> <a href="/promo#plans" style="text-decoration:underline;font-weight:900">查看套餐</a> 或联系开通企业账号后直接派活。</div>` : "";
   const d = new Date();
   const dateLabel = `${d.getMonth()+1}月${d.getDate()}日 周${"日一二三四五六"[d.getDay()]}`;
-  const money = ME.role==="owner"
+  const money = seesCompanyMoney()
     ? `<a class="today-money" href="#/billing">余额 ${Math.round(STATE.balance||0)} 点${STATE.plan?` · ${esc(STATE.plan)}`:""} ›</a>` : "";
   const hello = `<div class="today-hello"><h2>☀️ ${ME.role==="member"?"同事好":"老板好"} <span class="sub">${dateLabel}</span></h2>${money}</div>`;
   // 等我处理的:等拍板 / 失败要处理 / 待审核整改 + 新进展
