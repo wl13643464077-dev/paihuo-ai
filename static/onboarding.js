@@ -44,6 +44,9 @@
 .ph-onb-line{padding:8px 14px}
 .ph-onb-line .ph-grow a{color:inherit;text-decoration:underline}
 .ph-onb-line .ph-grow .ph-link{font-size:inherit;font-weight:800;color:inherit;padding:0}
+.ph-onb-line .ph-did{white-space:nowrap;font-weight:700}
+.ph-onb .ph-nostore{margin-top:8px;padding:8px 10px;border-radius:10px;background:#fff;border:2px dashed rgba(51,41,31,.3);font-size:14px;font-weight:800}
+.ph-onb .ph-nostore .ph-link{font-size:14px;font-weight:900;color:#33291f;padding:0 2px}
 .ph-onb .ph-next{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}
 .ph-onb .ph-next-i{display:flex;flex-direction:column;gap:2px;min-height:44px;padding:10px 12px;border:2px solid rgba(51,41,31,.18);border-radius:12px;background:#fffdf7;color:inherit;text-decoration:none}
 .ph-onb .ph-next-i.ph-ok{opacity:.65}
@@ -104,12 +107,19 @@
     <div class="actions" style="margin-top:10px"><button type="button" class="btn pri" onclick="PH_ONBOARDING.saveStore(this)">保存,下一步</button>
       ${S.editing?`<button type="button" class="btn" onclick="PH_ONBOARDING.cancelEdit()">不改了</button>`:""}</div>`;
   }
+  // 店铺信息填了但还没建门店(弹窗点了「先不建」或误点到外面):留一行入口,点了打开预填好的建店表单。
+  function noStoreHint(){
+    if(hasStore()) return "";
+    let can=true; try{ can=typeof openStoreForm==="function"; }catch(_){ can=false; }
+    if(!can) return "";
+    return `<div class="ph-nostore">🏪 还没建门店 → <button type="button" class="ph-link" onclick="PH_ONBOARDING.createStore()">建第一家店</button></div>`;
+  }
   function storeBody(st){
     if(!st.steps.industry) return `<div class="sub" style="margin-top:4px">先选好行业,再填店铺信息。</div>`;
     const s=st.store||{};
     if(st.steps.store && !S.editing){
       const bits=[s.name,s.city,s.product].filter(Boolean).map(h).join(" · ");
-      return `<div class="sub" style="margin-top:4px">${bits||"已填好"} <button type="button" class="ph-link" onclick="PH_ONBOARDING.editStore()">改一下</button></div>`;
+      return `<div class="sub" style="margin-top:4px">${bits||"已填好"} <button type="button" class="ph-link" onclick="PH_ONBOARDING.editStore()">改一下</button></div>${noStoreHint()}`;
     }
     return `<div class="sub" style="margin-top:6px">花 1 分钟填一下,以后所有数字员工写东西都会照着您家的情况来。</div>${storeForm(s)}`;
   }
@@ -150,25 +160,41 @@
         <span class="sub">改好后这台设备不用重新登录</span></div></details>`;
   }
   // 上手 3 步做完后，同一个位置换成「接下来 3 件事」，每件直接链到真实页面。
-  function nextSteps(){
+  // 进度两处来源取「做过」:app.js 的 STATE.setup(建店后会先乐观改掉)和 /api/onboarding 每次重取的 progress。
+  function progress(){
     let setup={};
     try{ setup=(typeof STATE!=="undefined"&&STATE&&STATE.setup)||{}; }catch(_){}
+    const p=(S.state&&S.state.progress)||{};
+    const any=k=>!!setup[k]||!!p[k];
+    return {store:any("store")||S.storeMade, staff:any("staff"), staff_task:any("staff_task"), wechat:any("wechat")};
+  }
+  function nextSteps(){
+    const setup=progress();
     const items=[
-      {done:!!setup.store||S.storeMade, icon:"🏪", t:"建门店", d:"录好门店，店长拍照就能巡店", href:"#/store"},
+      {done:setup.store, icon:"🏪", t:"建门店", d:"录好门店，店长拍照就能巡店", href:"#/store"},
       {done:!!setup.staff, icon:"👥", t:"给店员开账号", d:"店员手机上就能看到今天的活", href:"#/team"},
       {done:!!setup.wechat, icon:"💬", t:"绑定微信", d:"做完了微信里直接收通知", href:"#/channels"},
     ];
     return `<div class="ph-next">${items.map(x=>`<a class="ph-next-i${x.done?" ph-ok":""}" href="${x.href}">
         <b>${x.done?"✅":x.icon} ${x.t}</b><span class="sub">${x.done?"已完成":x.d}</span></a>`).join("")}</div>`;
   }
-  function hasStore(){
-    try{ if(typeof STATE!=="undefined"&&STATE&&STATE.setup&&STATE.setup.store) return true; }catch(_){}
-    return !!S.storeMade;
-  }
+  function hasStore(){ return progress().store; }
   // 已经有门店：上手卡收成一行，不再每天压在首屏；想写文案点一下再展开 3 步。
+  // 做过的事打勾，不再当成「接下来」；三件都做完只剩一句「上手完成」。
   function storeLine(st){
-    return `<div class="card ph-onb ph-onb-done ph-onb-line">
-        <span class="ph-grow">✅ 基本信息好了 · 接下来：<a href="#/team">开店员账号</a> / <a href="#/staff-tasks">派第一件活</a> / <button type="button" class="ph-link" onclick="PH_ONBOARDING.toggle(true)">写今天的文案</button></span>
+    const p=progress();
+    const todo=[
+      {done:p.staff, html:`<a href="#/team">开店员账号</a>`, t:"开店员账号"},
+      {done:p.staff_task, html:`<a href="#/staff-tasks">派第一件活</a>`, t:"派第一件活"},
+      {done:!!st.done, html:`<button type="button" class="ph-link" onclick="PH_ONBOARDING.toggle(true)">写今天的文案</button>`, t:"写今天的文案"},
+    ];
+    const left=todo.filter(x=>!x.done);
+    const doneBits=todo.filter(x=>x.done).map(x=>`<span class="ph-did">✓ ${x.t}</span>`).join(" ");
+    const text=left.length
+      ? `✅ 基本信息好了 · 接下来：${left.map(x=>x.html).join(" / ")}${doneBits?` <span class="sub">${doneBits}</span>`:""}`
+      : `✅ 上手完成 <span class="sub">门店、店员账号、派活、文案都弄好了</span>`;
+    return `<div class="card ph-onb ph-onb-done ph-onb-line${left.length?"":" ph-onb-all"}">
+        <span class="ph-grow">${text}</span>
         <button type="button" class="ph-x" aria-label="关闭上手提示" onclick="PH_ONBOARDING.dismiss()">×</button>
         ${st.password_hint?`<div style="flex-basis:100%">${pwHint(st)}</div>`:""}
       </div>`;
@@ -259,7 +285,7 @@
     try{
       await api("/inspections/branches",{method:"POST",body:{name:body.name,region:body.city||""},routeScoped:false});
       S.storeMade=true;
-      try{ if(STATE&&STATE.setup) STATE.setup.store=true; }catch(_){}
+      try{ markSetupChanged({store:true}); }catch(_){ try{ if(STATE&&STATE.setup) STATE.setup.store=true; }catch(_){} }
       try{ STORE_TODAY={key:"",at:0,data:null}; }catch(_){}
       say(`第一家门店「${body.name}」已建好`);
       // 在「今天」页时把门店卡一起刷新;别的页面下次进来自然是新的
@@ -356,6 +382,15 @@
       return `<div id="ph-onb">${inner()}</div>`;
     },
     refresh(){ return load(true); },
+    // 新建门店表单用:还没有门店时拿上手卡第 2 步填过的店名、城市来预填(只有老板有这份数据)
+    async storeBasics(){
+      const m=me();
+      if(!m||m.role!=="owner") return null;
+      try{ if(!S.state) await load(); }catch(_){ return null; }
+      const s=S.state&&S.state.store;
+      return s&&String(s.name||"").trim()?{name:String(s.name||""),city:String(s.city||"")}:null;
+    },
+    createStore(){ try{ openStoreForm(); }catch(_){ location.hash="#/store"; } },
     // 「我的 → 新手引导重看」:关掉过的卡片在本次打开期间重新显示(展开 3 步)。
     reopen(){ S.reopened=true; S.expand=true; },
     pickIndustry, saveStore, generate, copy, dismiss, changePassword,

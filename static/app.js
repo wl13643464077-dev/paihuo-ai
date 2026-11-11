@@ -562,6 +562,13 @@ function noStoreEmptyState(text="还没有门店，先建一家门店吧。",can
 /* ---------- 新建门店:一张表单填完(名称必填,区域/地址选填) ----------
    传 edit={id,name,region,address} 时是「改门店资料」:同一张表单,保存时 PATCH 三栏 */
 function closeStoreForm(){ $("#store-form")?.remove(); }
+/* 建好门店 / 开好店员账号 / 派出第一件活之后调用一下:今天页的上手卡不用整页刷新就跟上进度。
+   flags 可选(如 {store:true}),先改本地快照让卡片立刻变;再标脏,下次进页面重新取 /api/state。 */
+function markSetupChanged(flags){
+  try{ if(STATE&&STATE.setup&&flags&&typeof flags==="object") Object.assign(STATE.setup,flags); }catch(_){}
+  SHELL_DIRTY=true;
+  try{ window.PH_ONBOARDING?.refresh?.(); }catch(_){}
+}
 async function openStoreForm({industryKey="",onCreated=null,edit=null,onSaved=null}={}){
   closeStoreForm();
   const openedHash=location.hash;
@@ -622,6 +629,7 @@ async function openStoreForm({industryKey="",onCreated=null,edit=null,onSaved=nu
       const qs=industry_key?`?${new URLSearchParams({industry_key})}`:"";
       const created=await api(`/inspections/branches${qs}`,{method:"POST",body,routeScoped:false});
       closeStoreForm(); STORE_TODAY={key:"",at:0,data:null};
+      markSetupChanged({store:true});
       toast(`「${body.name}」已建好`);
       if(location.hash!==openedHash) return;
       if(typeof onCreated==="function") await onCreated(created); else await render(true);
@@ -632,6 +640,18 @@ async function openStoreForm({industryKey="",onCreated=null,edit=null,onSaved=nu
     }
   });
   setTimeout(()=>name.focus(),0);
+  // 还没有门店:用上手卡第 2 步填过的店名、城市先填上,老板不用再输一遍(老板已经动手输了就不覆盖)
+  if(!editing&&!(STATE&&STATE.setup&&STATE.setup.store)){
+    try{
+      const basics=await window.PH_ONBOARDING?.storeBasics?.();
+      const region=$("#store-form-region");
+      if(basics&&$("#store-form")===overlay&&!name.value&&!region.value){
+        name.value=String(basics.name||"");
+        region.value=String(basics.city||"");
+        if(name.value){ err.textContent=""; name.removeAttribute("aria-invalid"); }
+      }
+    }catch(_){}
+  }
   // 没指定行业、企业又开了多个行业时,让老板选一下门店属于哪个行业(改资料时不换行业)
   if(!industryKey&&!editing){
     try{

@@ -119,6 +119,24 @@ def _store_ready(tid: int) -> bool:
                 and str(prof.get("business") or "").strip())
 
 
+def progress_flags(tid: int) -> dict:
+    """上手之后「建门店 / 开店员账号 / 派第一件活」做没做（各查一条，只看本企业）。
+
+    开闭店清单是系统按门店自动生成的，不算老板「派过活」。
+    """
+    tid = int(tid)
+    return {
+        "store": bool(db.one(
+            "SELECT id FROM store_branch WHERE tenant_id=? AND active=1 LIMIT 1", (tid,))),
+        "staff": bool(db.one(
+            "SELECT id FROM users WHERE tenant_id=? AND role='member' AND enabled=1 LIMIT 1",
+            (tid,))),
+        "staff_task": bool(db.one(
+            "SELECT id FROM staff_task WHERE tenant_id=? AND source<>'checklist' "
+            "AND deleted_at IS NULL LIMIT 1", (tid,))),
+    }
+
+
 def get_state(tid: int, user) -> dict:
     """首页上手卡片需要的全部信息。"""
     if not applies_to(user):
@@ -144,6 +162,8 @@ def get_state(tid: int, user) -> dict:
         "posts": posts,
         "posts_date": str(state.get("posts_date") or ""),
         "password_hint": auth.password_hint_pending((user or {}).get("id")),
+        # 卡片每次回今天页都会重取这一份，建店、开账号、派活后不用整页刷新也能跟上进度
+        "progress": progress_flags(tid),
     }
 
 
