@@ -102,7 +102,15 @@ def team_get():
     else:
         row = db.one("SELECT name FROM tenants WHERE id=?", (TEN(),)) or {}
         t = {"name": row.get("name") or ""}
-    out = {"tenant": t, "users": users, "all_modules": auth.all_modules(),
+    # 团队页的板块按钮用行业短名(「🍜 餐饮」而不是「🍜 餐饮产业部」)。
+    dept_meta = {d["key"]: d for d in departments.list_depts()}
+    team_modules = []
+    for m in auth.all_modules():
+        d = dept_meta.get(m["key"])
+        if d:
+            m = {**m, "label": f"{d['emoji']} {departments.short_label(d['key'], d['name'])}"}
+        team_modules.append(m)
+    out = {"tenant": t, "users": users, "all_modules": team_modules,
            "industry_employees": allocator,
            "job_titles": [
                {"key": key, "label": JOB_TITLE_LABELS[key]}
@@ -117,6 +125,18 @@ def team_get():
         for x in users:
             x["branch_ids"] = assignments.get(int(x["id"]), [])
         out["store_branches"] = inspection.assignable_branches(TEN())
+    else:
+        # 总监/经理的受限视图:只读地带上每人负责的门店名(不给门店多选候选),
+        # 店长据此看到「您负责的店员」,也能按「店长 / 店员」称呼人。
+        assignments = inspection.member_branch_assignments(TEN())
+        branch_names = {
+            int(row["id"]): str(row.get("name") or "")
+            for row in db.q("SELECT id,name FROM store_branch WHERE tenant_id=? AND active=1",
+                            (TEN(),))
+        }
+        for x in users:
+            x["branch_names"] = [branch_names[b] for b in assignments.get(int(x["id"]), [])
+                                 if b in branch_names]
     if auth.is_root():
         tenants = db.q("SELECT t.*, (SELECT COUNT(*) FROM users u WHERE u.tenant_id=t.id) n_users "
                        "FROM tenants t ORDER BY t.id")
@@ -215,11 +235,56 @@ def team_apply_done(aid: int):
     return {"ok": True}
 
 
+def _branch_industries(tid: int, raw_ids) -> tuple[list[int], list[str]]:
+    """建号/分配门店时用：校验门店都属于本企业且在营业，返回(门店编号, 所在行业)。
+
+    店长/店员要看到门店，成员板块里必须有门店所在的行业；这里把行业算出来，
+    由调用方并进板块，老板不用再先去勾「行业/板块」。"""
+    if raw_ids is None:
+        return [], []
+    if isinstance(raw_ids, (str, bytes, bytearray)) or not isinstance(raw_ids, list):
+        raise HTTPException(400, "门店名单格式无效")
+    ids: list[int] = []
+    for value in raw_ids:
+        try:
+            branch_id = int(value)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "门店名单格式无效") from None
+        if branch_id <= 0:
+            raise HTTPException(400, "门店名单格式无效")
+        if branch_id not in ids:
+            ids.append(branch_id)
+    if len(ids) > inspection.MAX_MEMBER_BRANCHES:
+        raise HTTPException(
+            400, f"一个成员最多负责 {inspection.MAX_MEMBER_BRANCHES} 家门店"
+        )
+    industries: list[str] = []
+    for branch_id in ids:
+        row = db.one(
+            "SELECT industry_key,name,active FROM store_branch "
+            "WHERE id=? AND tenant_id=?",
+            (branch_id, int(tid)),
+        )
+        if not row:
+            raise HTTPException(404, "门店不存在")
+        if not int(row.get("active") or 0):
+            raise HTTPException(409, f"门店「{row['name']}」已停用，不能分配")
+        key = str(row.get("industry_key") or "")
+        if key and key not in industries:
+            industries.append(key)
+    return ids, industries
+
+
 @router.post("/api/team/users")
 def team_user_create(body: dict):
     _need_admin()
     name = _clean_username(body.get("username"))
+    # 不填密码 = 让系统生成一个 16 位随机初始密码，只在这次响应里回给老板一次
+    # (库里只存哈希，不落明文、不写日志)；成员首次登录仍须换成自己的密码。
     pw = body.get("password") or ""
+    generated = not pw
+    if generated:
+        pw = auth.generate_initial_password()
     policy_error = auth.password_policy_error(pw)
     if policy_error:
         raise HTTPException(400, policy_error)
@@ -232,12 +297,40 @@ def team_user_create(body: dict):
     job_title = str(body.get("job_title") or "staff")
     if job_title not in auth.JOB_TITLES:
         raise HTTPException(400, "职级只能是总监、经理或员工")
-    uid = db.insert("users", {"tenant_id": tid, "username": name,
-                              "password_hash": auth.hash_pw(pw), "role": role,
-                              "modules_json": json.dumps(body.get("modules") or []),
-                              "job_title": job_title,
-                              "enabled": 1, "must_change_password": 1})
-    return {"id": uid}
+    modules = body.get("modules") or []
+    if not isinstance(modules, list):
+        raise HTTPException(400, "板块格式无效")
+    modules = [str(m) for m in modules]
+    branch_ids: list[int] = []
+    if role == "member" and body.get("branch_ids"):
+        branch_ids, industries = _branch_industries(tid, body.get("branch_ids"))
+        modules += [k for k in industries if k not in modules]
+    whitelist = None
+    if role == "member" and "allowed_emp_idxs" in body:
+        # 店长/店员默认传 []：行业里一个数字员工都不开，不会花企业的点数。
+        whitelist = _clean_emp_whitelist(body.get("allowed_emp_idxs"))
+    row = {"tenant_id": tid, "username": name,
+           "password_hash": auth.hash_pw(pw), "role": role,
+           "modules_json": json.dumps(modules),
+           "job_title": job_title,
+           "enabled": 1, "must_change_password": 1}
+    if whitelist is not None:
+        row["allowed_emp_idxs_json"] = whitelist
+    uid = db.insert("users", row)
+    if branch_ids:
+        try:
+            inspection.set_member_branches(
+                int((auth.current() or {}).get("id") or 0), uid, branch_ids
+            )
+        except inspection.InspectionError as exc:
+            with db.atomic() as connection:
+                connection.execute("DELETE FROM user_branch WHERE user_id=?", (uid,))
+                connection.execute("DELETE FROM users WHERE id=?", (uid,))
+            _raise_inspection_error(exc)
+    out = {"id": uid, "username": name, "branch_ids": sorted(branch_ids)}
+    if generated:
+        out["initial_password"] = pw
+    return out
 
 
 def _clean_emp_whitelist(raw) -> str | None:
@@ -390,6 +483,21 @@ def team_user_delete(uid: int):
 def team_user_branches(uid: int, body: dict):
     """老板给成员分配负责门店（整体替换）。"""
     _need_admin()
+    if body.get("open_industries"):
+        # 店长/店员分门店时顺带开通门店所在行业(只加行业，不动数字员工名单)。
+        member = db.one(
+            "SELECT id,tenant_id,role,modules_json FROM users WHERE id=?", (uid,)
+        )
+        if (member and str(member.get("role") or "") == "member"
+                and (auth.is_root() or int(member["tenant_id"]) == int(TEN()))):
+            _, industries = _branch_industries(
+                int(member["tenant_id"]), body.get("branch_ids") or []
+            )
+            modules = db.jloads(member.get("modules_json"), []) or []
+            modules = [str(m) for m in modules] if isinstance(modules, list) else []
+            missing = [k for k in industries if k not in modules]
+            if missing:
+                db.update("users", uid, {"modules_json": json.dumps(modules + missing)})
     try:
         return inspection.set_member_branches(
             int((auth.current() or {}).get("id") or 0),

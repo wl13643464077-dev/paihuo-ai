@@ -76,29 +76,29 @@ class BossGlanceIntroTests(unittest.TestCase):
 class HomeGuideCopyTests(unittest.TestCase):
     def test_industry_market_replaces_group_floors(self):
         self.assertNotIn("集团楼层", APP_JS)
-        self.assertIn("行业市场", APP_JS)
-        self.assertIn("行业精品员工", APP_JS)
+        # 第四轮 N-22:「行业市场」是内部说法,页头改成大白话
+        self.assertNotIn("行业市场", APP_JS)
+        self.assertIn("每个行业一支 AI 专家队伍", APP_JS)
 
-    def test_onboarding_steps_carry_why_and_how(self):
-        self.assertIn("开工四步", APP_JS)
-        self.assertIn("为什么:有了它,产出才像您本人写的", APP_JS)
-        self.assertIn("怎么做:选方向和模板→提交→8-15分钟收成品", APP_JS)
+    def test_today_page_keeps_only_one_beginner_guide(self):
+        # 「开工四步 / 发布三件套 / 新手上路」已从今天页撤掉,只留上手卡的 3 步
+        for removed in ("开工四步", "发布三件套", "🧭 新手上路", "guideFold()", "obCard()", "trioCard()"):
+            self.assertNotIn(removed, APP_JS)
+        onboarding_js = (Path(__file__).resolve().parents[1] / "static" / "onboarding.js").read_text(
+            encoding="utf-8")
+        self.assertIn("接下来 3 件事", onboarding_js)
+        for href in ('href:"#/store"', 'href:"#/team"', 'href:"#/channels"'):
+            self.assertIn(href, onboarding_js)
 
-    def test_release_trio_carries_how(self):
-        self.assertIn("发布三件套", APP_JS)
-        self.assertIn("怎么做:任务交付页→「一键成片」", APP_JS)
-        self.assertIn("一条内容的完整出路", APP_JS)
-
-    def test_howto_card_teaches_four_step_usage_and_resets_with_guide(self):
-        self.assertIn("数字员工怎么用 · 四步用人法", APP_JS)
-        # 第 1 期去术语:「④ 沉淀」→「④ 攒经验」,「Agent 团队协作执行」→「多位专家接力完成」
-        for kw in ("① 挑人", "② 派活", "③ 收活", "④ 攒经验"):
-            self.assertIn(kw, APP_JS)
-        self.assertIn("多位专家接力完成", APP_JS)
+    def test_howto_hint_moves_to_experts_page_and_resets_with_guide(self):
+        # 原「四步用人法」收成「找专家」页的一行提示
+        self.assertNotIn("数字员工怎么用 · 四步用人法", APP_JS)
+        self.assertIn("+ howtoCard()", APP_JS)
+        self.assertIn("越用越懂您的店", APP_JS)
         self.assertNotIn("Agent 团队协作执行", APP_JS)
-        # 「重看新手引导」必须能恢复教程卡
+        # 「重看新手引导」必须能恢复用法提示和上手卡
         self.assertIn('localStorage.removeItem("howto_hide_"', APP_JS)
-        self.assertIn("howtoCard()", APP_JS)
+        self.assertIn("PH_ONBOARDING?.reopen", APP_JS)
 
 
 if __name__ == "__main__":

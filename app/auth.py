@@ -198,6 +198,45 @@ def revoke_sessions(uid: int):
     )
 
 
+FORCED_CHANGE_FRESH_SECONDS = 15 * 60
+_FRESH_PASSWORD_LOGIN_KEY = "fresh_password_login:{uid}"
+
+
+def _token_digest(token: str) -> str:
+    return hashlib.sha256((token or "").encode()).hexdigest()
+
+
+def mark_fresh_password_login(uid: int, token: str) -> None:
+    """记下「这张会话 Cookie 是刚刚用密码登录换来的」。
+
+    首登强制改密时，只有这张刚验过密码的会话才允许不再重输当前密码；
+    是否处于这个状态完全由服务端判断，不信任前端传来的任何标记。
+    """
+    db.set_setting(
+        _FRESH_PASSWORD_LOGIN_KEY.format(uid=int(uid)),
+        f"{_token_digest(token)}:{int(time.time() + FORCED_CHANGE_FRESH_SECONDS)}",
+    )
+
+
+def is_fresh_password_login(uid, token: str) -> bool:
+    if not token:
+        return False
+    try:
+        raw = db.get_setting(_FRESH_PASSWORD_LOGIN_KEY.format(uid=int(uid))) or ""
+        digest, exp = raw.split(":")
+        return (int(exp) >= time.time()
+                and hmac.compare_digest(digest, _token_digest(token)))
+    except (TypeError, ValueError):
+        return False
+
+
+def clear_fresh_password_login(uid) -> None:
+    try:
+        db.set_setting(_FRESH_PASSWORD_LOGIN_KEY.format(uid=int(uid)), None)
+    except (TypeError, ValueError):
+        pass
+
+
 def get_user(uid: int):
     u = db.one(
         "SELECT u.* FROM users u JOIN tenants t ON t.id=u.tenant_id "
@@ -249,6 +288,20 @@ def job_title() -> str:
         return ""
     title = str(u.get("job_title") or "staff")
     return title if title in JOB_TITLES else "staff"
+
+
+def can_see_balance() -> bool:
+    """企业点数余额(具体数字)只给老板 owner、平台 root、总监 director 和参观模式。
+
+    店长、店员、办公室同事只拿到「点数够不够」的布尔值(billing.points_flags),
+    任何接口都不下发具体余额。按白名单放行,新增角色默认看不到。
+    """
+    u = current()
+    if not u:
+        return False
+    if u.get("role") in ("root", "owner", "tour"):
+        return True
+    return job_title() == "director"
 
 
 def can_allocate_members() -> bool:
@@ -345,7 +398,8 @@ def all_modules() -> list:
 def all_industries() -> list:
     """全部行业部门(供注册/开租户时选择),不受当前租户限制."""
     from . import departments
-    return [{"key": d["key"], "name": d["name"], "emoji": d["emoji"]}
+    return [{"key": d["key"], "name": d["name"], "emoji": d["emoji"],
+             "short_label": departments.short_label(d["key"], d["name"])}
             for d in departments.list_depts()]
 
 

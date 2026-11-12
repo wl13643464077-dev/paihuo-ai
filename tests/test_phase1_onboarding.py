@@ -138,6 +138,33 @@ class OnboardingStateCase(_DbCase):
         self.assertTrue(onboarding.get_state(other, self._owner(other))["show"])
 
 
+class ProgressFlagsCase(_DbCase):
+    """R-4 / O-4:上手卡「接下来」的进度每次从服务端重取，只看本企业，清单自动生成的活不算派过活。"""
+
+    def test_progress_flags_are_tenant_scoped(self):
+        tid = self._tenant()
+        owner = self._owner(tid)
+        other = self._tenant("隔壁店")
+        self.assertEqual({"store": False, "staff": False, "staff_task": False},
+                         onboarding.get_state(tid, owner)["progress"])
+        # 隔壁企业的门店、店员、派活都不能算到这家头上
+        db.insert("store_branch", {"tenant_id": other, "industry_key": "restaurant", "name": "隔壁店"})
+        db.insert("users", {"tenant_id": other, "username": "other-staff", "password_hash": "x",
+                            "role": "member"})
+        db.insert("staff_task", {"tenant_id": other, "title": "擦桌子", "source": "boss"})
+        self.assertEqual({"store": False, "staff": False, "staff_task": False},
+                         onboarding.progress_flags(tid))
+        # 开闭店清单是系统生成的，不算老板派过第一件活
+        db.insert("staff_task", {"tenant_id": tid, "title": "开店检查", "source": "checklist"})
+        self.assertFalse(onboarding.progress_flags(tid)["staff_task"])
+        db.insert("store_branch", {"tenant_id": tid, "industry_key": "restaurant", "name": "人民路店"})
+        db.insert("users", {"tenant_id": tid, "username": "xiaoli", "password_hash": "x",
+                            "role": "member"})
+        db.insert("staff_task", {"tenant_id": tid, "title": "拍门头", "source": "boss"})
+        self.assertEqual({"store": True, "staff": True, "staff_task": True},
+                         onboarding.get_state(tid, owner)["progress"])
+
+
 class StoreInfoCase(_DbCase):
     def test_validation_messages(self):
         tid = self._tenant()
@@ -447,10 +474,11 @@ class OnboardingCardBrowserCase(unittest.IsolatedAsyncioTestCase):
             await page.route("**/api/**", api_route)
             await page.goto(f"{self.base}/static/index.html#/billing")
             await page.wait_for_function(
-                "document.querySelector('#main')?.textContent.includes('我的积分账户')")
+                "document.querySelector('#main')?.textContent.includes('套餐与点数')")
             self.assertTrue(await page.evaluate("typeof window.PH_ONBOARDING.card==='function'"))
+            # 第一次没有缓存时 card() 返回 Promise:数据到了再整体插入,首页不会晚一拍跳动
             await page.evaluate(
-                "document.querySelector('#main').insertAdjacentHTML('afterbegin', PH_ONBOARDING.card())")
+                "Promise.resolve(PH_ONBOARDING.card()).then(html => document.querySelector('#main').insertAdjacentHTML('afterbegin', html))")
             await page.wait_for_selector("#ph-s-name")
             text = await page.locator("#ph-onb").inner_text()
             self.assertIn("您的行业:餐饮", text.replace(" ", ""))
@@ -485,10 +513,403 @@ class OnboardingCardBrowserCase(unittest.IsolatedAsyncioTestCase):
 
             await page.click("button[aria-label='收起']")
             await page.wait_for_selector(".ph-onb-done")
-            self.assertIn("已完成上手", await page.locator("#ph-onb").inner_text())
+            done_text = await page.locator("#ph-onb").inner_text()
+            self.assertIn("接下来 3 件事", done_text)
+            for item in ("建门店", "给店员开账号", "绑定微信"):
+                self.assertIn(item, done_text)
+            self.assertEqual(
+                ["#/store", "#/team", "#/channels"],
+                await page.evaluate(
+                    "[...document.querySelectorAll('#ph-onb .ph-next-i')].map(a => a.getAttribute('href'))"),
+            )
             await page.click("button[aria-label='关闭上手提示']")
             await page.wait_for_function("document.querySelector('#ph-onb').innerHTML.trim()===''")
             self.assertIn(("POST", "/api/onboarding/dismiss", {}), calls)
+            self.assertEqual([], errors)
+            await browser.close()
+
+    async def test_store_info_offers_to_create_the_first_store(self):
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            self.skipTest("playwright 不可用")
+        from urllib.parse import urlparse
+
+        state = {
+            "show": True, "done": False,
+            "industry": {"key": "restaurant", "name": "餐饮"},
+            "steps": {"industry": True, "store": False, "posts": False},
+            "store": {"name": "", "city": "", "product": "", "feature": "", "price": ""},
+            "gen_used": 0, "gen_left": 3, "gen_limit": 3,
+            "posts": [], "posts_date": "", "password_hint": False,
+        }
+        calls = []
+        branches = []
+
+        async def api_route(route):
+            request = route.request
+            path = urlparse(request.url).path
+            body = request.post_data_json if request.post_data else None
+            calls.append((request.method, path, body))
+            if path == "/api/onboarding" and request.method == "GET":
+                payload = state
+            elif path == "/api/onboarding/store":
+                state["steps"]["store"] = True
+                state["store"] = {**body}
+                payload = {"ok": True, "store": state["store"]}
+            elif path == "/api/onboarding/posts":
+                state["done"] = True
+                state["steps"]["posts"] = True
+                payload = {"posts": GOOD_POSTS["posts"], "posts_date": "2026-09-26",
+                           "gen_used": 1, "gen_left": 2, "done": True}
+            elif path == "/api/inspections/branches" and request.method == "POST":
+                branches.append(body)
+                payload = {"id": 5, "name": body["name"], "region": body["region"], "active": True}
+            elif path == "/api/inspections":
+                payload = {"items": [], "summary": {"total_branches": len(branches)}}
+            elif path == "/api/onboarding/dismiss":
+                payload = {"ok": True}
+            elif path == "/api/auth/me":
+                payload = {"id": 7, "username": "13800000000", "role": "owner", "tenant": "王记",
+                           "modules": ["content", "avatar", "library"], "all_modules": []}
+            elif path == "/api/state":
+                payload = {"jobs": [], "inbox": [], "notifications": [], "balance": 20,
+                           "setup": {"store": bool(branches)}}
+            else:
+                payload = {}
+            await route.fulfill(status=200, content_type="application/json",
+                                body=json.dumps(payload, ensure_ascii=False))
+
+        async with async_playwright() as playwright:
+            executable = next((p for p in (
+                os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE") or "",
+                "/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser",
+            ) if p and os.path.isfile(p)), "")
+            options = {"headless": True}
+            if executable:
+                options["executable_path"] = executable
+            browser = await playwright.chromium.launch(**options)
+            page = await browser.new_page(viewport={"width": 375, "height": 800})
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            await page.add_init_script(
+                "window.EventSource=class{constructor(){} close(){}};")
+            await page.route("**/api/**", api_route)
+            await page.goto(f"{self.base}/static/index.html#/")
+            await page.wait_for_selector("#ph-s-name")
+
+            await page.fill("#ph-s-name", "王记牛肉面")
+            await page.fill("#ph-s-city", "成都 春熙路")
+            await page.fill("#ph-s-product", "现熬牛骨汤面")
+            await page.click("text=保存,下一步")
+            # 还没有门店:问一句「用这个名字建第一家门店？」
+            await page.wait_for_selector("#ui-dialog")
+            dialog = await page.locator("#ui-dialog").inner_text()
+            self.assertIn("用这个名字建第一家门店？", dialog)
+            # O6-2:第一家店叫「企业名·商圈店」,不和企业重名
+            self.assertIn("王记牛肉面·春熙路店 · 成都 春熙路", dialog)
+            await page.locator("#ui-dialog [data-dialog-ok]").click()
+            await page.wait_for_function(
+                "document.querySelector('#toast-stack')?.textContent.includes('第一家门店')")
+            self.assertEqual([{"name": "王记牛肉面·春熙路店", "region": "成都 春熙路"}], branches)
+            # 今天页的门店卡跟着刷新,不再是「还没录入门店」
+            await page.wait_for_function(
+                "document.querySelector('#main .today-store:not(.today-store-empty)')")
+
+            # N-05:有门店以后上手卡收成一行,开账号/派活/写文案三个去处
+            await page.wait_for_selector("#ph-onb .ph-onb-line")
+            line = await page.locator("#ph-onb").inner_text()
+            self.assertIn("基本信息好了", line)
+            self.assertEqual("#/team", await page.locator(
+                "#ph-onb .ph-onb-line a", has_text="开店员账号").get_attribute("href"))
+            self.assertEqual(0, await page.locator("#ph-s-name").count())
+            card_h = await page.evaluate(
+                "document.querySelector('#ph-onb .ph-onb').getBoundingClientRect().height")
+            self.assertLess(card_h, 140)
+            # 点「写今天的文案」再展开 3 步
+            await page.click("#ph-onb .ph-onb-line >> text=写今天的文案")
+
+            # 再改一次店铺信息:已经有门店了,不再问
+            await page.click("text=改一下")
+            await page.click("text=保存,下一步")
+            await page.wait_for_selector(".ph-go:not([disabled])")
+            await page.wait_for_timeout(300)
+            self.assertEqual(0, await page.locator("#ui-dialog").count())
+            self.assertEqual(1, len(branches))
+
+            # 3 步都做完:展开的卡片里也有「接下来 3 件事」,建门店已完成
+            await page.click(".ph-go")
+            await page.wait_for_function("document.querySelectorAll('#ph-onb .ph-post').length===3")
+            text = await page.locator("#ph-onb").inner_text()
+            self.assertIn("接下来 3 件事", text)
+            first = page.locator("#ph-onb .ph-next-i").first
+            self.assertIn("已完成", await first.inner_text())
+            self.assertIn("ph-ok", await first.get_attribute("class"))
+
+            # 关掉时告诉老板去哪找回来
+            await page.click("button[aria-label='收起']")
+            await page.click("button[aria-label='关闭上手提示']")
+            await page.wait_for_function(
+                "document.querySelector('#toast-stack')?.textContent.includes('新手引导重看')")
+            self.assertEqual([], errors)
+            await browser.close()
+
+    async def test_declining_first_store_creates_nothing(self):
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            self.skipTest("playwright 不可用")
+        from urllib.parse import urlparse
+
+        state = {
+            "show": True, "done": False,
+            "industry": {"key": "restaurant", "name": "餐饮"},
+            "steps": {"industry": True, "store": False, "posts": False},
+            "store": {"name": "", "city": "", "product": "", "feature": "", "price": ""},
+            "gen_used": 0, "gen_left": 3, "gen_limit": 3,
+            "posts": [], "posts_date": "", "password_hint": False,
+        }
+        posts = []
+
+        async def api_route(route):
+            request = route.request
+            path = urlparse(request.url).path
+            body = request.post_data_json if request.post_data else None
+            if request.method == "POST" and path == "/api/inspections/branches":
+                posts.append(body)
+            if path == "/api/onboarding" and request.method == "GET":
+                payload = state
+            elif path == "/api/onboarding/store":
+                state["steps"]["store"] = True
+                state["store"] = {**body}
+                payload = {"ok": True}
+            elif path == "/api/inspections":
+                payload = {"items": [], "summary": {"total_branches": 0}}
+            elif path == "/api/auth/me":
+                payload = {"id": 7, "username": "13800000000", "role": "owner", "tenant": "王记",
+                           "modules": ["content"], "all_modules": []}
+            elif path == "/api/state":
+                payload = {"jobs": [], "inbox": [], "notifications": []}
+            else:
+                payload = {}
+            await route.fulfill(status=200, content_type="application/json",
+                                body=json.dumps(payload, ensure_ascii=False))
+
+        async with async_playwright() as playwright:
+            executable = next((p for p in (
+                os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE") or "",
+                "/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser",
+            ) if p and os.path.isfile(p)), "")
+            options = {"headless": True}
+            if executable:
+                options["executable_path"] = executable
+            browser = await playwright.chromium.launch(**options)
+            page = await browser.new_page()
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            await page.add_init_script(
+                "window.EventSource=class{constructor(){} close(){}};")
+            await page.route("**/api/**", api_route)
+            await page.goto(f"{self.base}/static/index.html#/")
+            await page.wait_for_selector("#ph-s-name")
+            await page.fill("#ph-s-name", "王记牛肉面")
+            await page.fill("#ph-s-product", "现熬牛骨汤面")
+            await page.click("text=保存,下一步")
+            await page.wait_for_selector("#ui-dialog")
+            await page.locator("#ui-dialog [data-dialog-cancel]").click()
+            await page.wait_for_function("!document.querySelector('#ui-dialog')")
+            await page.wait_for_timeout(200)
+            self.assertEqual([], posts)
+            # O-2:「先不建」后卡片上留一行入口，随时能建
+            self.assertIn("还没建门店", await page.locator("#ph-onb .ph-nostore").inner_text())
+            self.assertEqual([], errors)
+            await browser.close()
+
+    async def test_store_form_collapses_card_without_reload(self):
+        """O-2/O-3/O-4/R-4:误点弹窗外面后留入口;表单预填店名城市;建好门店不刷新就收成一行;
+        「接下来」随进度打勾,全做完只剩「上手完成」。"""
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            self.skipTest("playwright 不可用")
+        from urllib.parse import urlparse
+
+        state = {
+            "show": True, "done": False,
+            "industry": {"key": "restaurant", "name": "餐饮"},
+            "steps": {"industry": True, "store": False, "posts": False},
+            "store": {"name": "", "city": "", "product": "", "feature": "", "price": ""},
+            "gen_used": 0, "gen_left": 3, "gen_limit": 3,
+            "posts": [], "posts_date": "", "password_hint": False,
+            "progress": {"store": False, "staff": False, "staff_task": False},
+        }
+        branches = []
+
+        async def api_route(route):
+            request = route.request
+            path = urlparse(request.url).path
+            body = request.post_data_json if request.post_data else None
+            if path == "/api/onboarding" and request.method == "GET":
+                # 故意不跟着门店变:验证建店后 app.js 自己刷新 STATE.setup,不靠这份兜底
+                payload = state
+            elif path == "/api/onboarding/store":
+                state["steps"]["store"] = True
+                state["store"] = {**body}
+                payload = {"ok": True}
+            elif path == "/api/inspections/branches" and request.method == "POST":
+                branches.append(body)
+                payload = {"id": 5, "name": body["name"], "region": body["region"], "active": True}
+            elif path == "/api/inspections":
+                payload = {"items": [], "summary": {"total_branches": len(branches)}}
+            elif path == "/api/auth/me":
+                payload = {"id": 7, "username": "13800000000", "role": "owner", "tenant": "王记",
+                           "modules": ["content"], "all_modules": []}
+            elif path == "/api/state":
+                payload = {"jobs": [], "inbox": [], "notifications": [], "balance": 20,
+                           "setup": {"store": bool(branches)}}
+            else:
+                payload = {}
+            await route.fulfill(status=200, content_type="application/json",
+                                body=json.dumps(payload, ensure_ascii=False))
+
+        async with async_playwright() as playwright:
+            executable = next((p for p in (
+                os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE") or "",
+                "/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser",
+            ) if p and os.path.isfile(p)), "")
+            options = {"headless": True}
+            if executable:
+                options["executable_path"] = executable
+            browser = await playwright.chromium.launch(**options)
+            page = await browser.new_page(viewport={"width": 375, "height": 800})
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            await page.add_init_script(
+                "window.EventSource=class{constructor(){} close(){}};")
+            await page.route("**/api/**", api_route)
+            await page.goto(f"{self.base}/static/index.html#/")
+            await page.wait_for_selector("#ph-s-name")
+            await page.evaluate("window.__noReload = 1")
+            await page.fill("#ph-s-name", "王记火锅")
+            await page.fill("#ph-s-city", "成都 春熙路")
+            await page.fill("#ph-s-product", "牛油火锅")
+            await page.click("text=保存,下一步")
+            # O-2:误点到弹窗外面 = 先不建,但卡片上留一行入口
+            await page.wait_for_selector("#ui-dialog")
+            await page.mouse.click(5, 5)
+            await page.wait_for_function("!document.querySelector('#ui-dialog')")
+            await page.wait_for_selector("#ph-onb .ph-nostore")
+            self.assertIn("还没建门店", await page.locator("#ph-onb .ph-nostore").inner_text())
+            self.assertEqual([], branches)
+            # O-3 / O6-2:点入口打开建店表单,城市已经填好,店名预填成「企业名·商圈店」(不和企业重名)
+            await page.click("#ph-onb .ph-nostore >> text=建第一家店")
+            await page.wait_for_function(
+                "document.querySelector('#store-form-name')?.value==='王记火锅·春熙路店'")
+            self.assertEqual("成都 春熙路", await page.input_value("#store-form-region"))
+            await page.click("#store-form [data-store-form-cancel]")
+            await page.wait_for_function("!document.querySelector('#store-form')")
+            # 从今天页门店空状态的「新建门店」进来也一样预填
+            await page.click("#main .today-store-empty [data-empty-action]")
+            await page.wait_for_function(
+                "document.querySelector('#store-form-name')?.value==='王记火锅·春熙路店'")
+            self.assertEqual(3, await page.locator("#ph-onb .ph-step").count())
+            await page.click("#store-form [data-store-form-ok]")
+            await page.wait_for_function("!document.querySelector('#store-form')")
+            self.assertEqual([{"name": "王记火锅·春熙路店", "region": "成都 春熙路", "address": ""}], branches)
+            # O-4:不刷新页面,上手卡收成一行,门店卡也换成有门店的样子
+            await page.wait_for_selector("#ph-onb .ph-onb-line")
+            await page.wait_for_function(
+                "document.querySelector('#main .today-store:not(.today-store-empty)')")
+            self.assertEqual(1, await page.evaluate("window.__noReload"))
+            self.assertEqual(0, await page.locator("#ph-onb .ph-step").count())
+            line = await page.locator("#ph-onb").inner_text()
+            self.assertIn("开店员账号", line)
+            self.assertIn("派第一件活", line)
+
+            # R-4:开了店员账号、派了活之后,这两件打勾,不再当成「接下来」
+            state["progress"].update({"staff": True, "staff_task": True})
+            await page.evaluate("PH_ONBOARDING.refresh()")
+            await page.wait_for_function(
+                "!document.querySelector('#ph-onb .ph-onb-line a[href=\"#/team\"]')")
+            line = await page.locator("#ph-onb").inner_text()
+            self.assertIn("✓ 开店员账号", line)
+            self.assertIn("✓ 派第一件活", line)
+            self.assertEqual(0, await page.locator("#ph-onb .ph-onb-line a[href='#/staff-tasks']").count())
+            self.assertIn("写今天的文案", line)
+            # 文案也写过了:只剩一句「上手完成」和关闭按钮
+            state["done"] = True
+            state["steps"]["posts"] = True
+            await page.evaluate("PH_ONBOARDING.refresh()")
+            await page.wait_for_selector("#ph-onb .ph-onb-all")
+            line = await page.locator("#ph-onb").inner_text()
+            self.assertIn("上手完成", line)
+            self.assertNotIn("接下来", line)
+            self.assertEqual(1, await page.locator("#ph-onb button[aria-label='关闭上手提示']").count())
+            self.assertEqual(1, await page.evaluate("window.__noReload"))
+            self.assertEqual([], errors)
+            await browser.close()
+
+    async def test_first_store_name_never_copies_company_name(self):
+        """O6-2:城市里没有商圈时店名留空、企业名只放进占位提示;老板已经动手输的不覆盖。"""
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            self.skipTest("playwright 不可用")
+        from urllib.parse import urlparse
+
+        async def api_route(route):
+            path = urlparse(route.request.url).path
+            payload = {}
+            if path == "/api/auth/me":
+                payload = {"id": 7, "username": "13800000000", "role": "owner", "tenant": "王记",
+                           "modules": ["content"], "all_modules": []}
+            elif path == "/api/state":
+                payload = {"jobs": [], "inbox": [], "notifications": [], "balance": 20,
+                           "setup": {"store": False}}
+            elif path == "/api/onboarding":
+                payload = {"show": False, "done": True}
+            await route.fulfill(status=200, content_type="application/json",
+                                body=json.dumps(payload, ensure_ascii=False))
+
+        async with async_playwright() as playwright:
+            executable = next((p for p in (
+                os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE") or "",
+                "/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser",
+            ) if p and os.path.isfile(p)), "")
+            options = {"headless": True}
+            if executable:
+                options["executable_path"] = executable
+            browser = await playwright.chromium.launch(**options)
+            page = await browser.new_page(viewport={"width": 375, "height": 800})
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            await page.add_init_script("window.EventSource=class{constructor(){} close(){}};")
+            await page.route("**/api/**", api_route)
+            await page.goto(f"{self.base}/static/index.html#/")
+            await page.wait_for_function("typeof firstStoreNameSuggestion==='function' && !!ME")
+            self.assertEqual(
+                ["王记火锅·春熙路店", "王记火锅·静安店", "", "", "王记火锅·万达店"],
+                await page.evaluate("""[
+                    firstStoreNameSuggestion('王记火锅','成都 春熙路'),
+                    firstStoreNameSuggestion('王记火锅','上海·静安'),
+                    firstStoreNameSuggestion('王记火锅','成都'),
+                    firstStoreNameSuggestion('','成都 春熙路'),
+                    firstStoreNameSuggestion('王记火锅','成都 万达店')]"""))
+            # 只写了城市:店名留空,占位提示带企业名
+            await page.evaluate("""window.PH_ONBOARDING.storeBasics=async()=>({name:'王记火锅',city:'成都'});
+                openStoreForm()""")
+            await page.wait_for_function(
+                "document.querySelector('#store-form-region')?.value==='成都'")
+            self.assertEqual("", await page.input_value("#store-form-name"))
+            self.assertIn("王记火锅", await page.get_attribute("#store-form-name", "placeholder"))
+            await page.click("#store-form [data-store-form-cancel]")
+            # 预填数据回来之前老板已经输了店名:不覆盖
+            await page.evaluate("""window.PH_ONBOARDING.storeBasics=()=>new Promise(r=>setTimeout(
+                ()=>r({name:'王记火锅',city:'成都 春熙路'}),300)); openStoreForm()""")
+            await page.wait_for_selector("#store-form-name")
+            await page.fill("#store-form-name", "老店")
+            await page.wait_for_timeout(500)
+            self.assertEqual("老店", await page.input_value("#store-form-name"))
             self.assertEqual([], errors)
             await browser.close()
 

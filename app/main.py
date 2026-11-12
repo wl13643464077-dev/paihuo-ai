@@ -115,6 +115,10 @@ async def _friendly_http_exception(request, exc: HTTPException):
     detail = exc.detail
     if isinstance(detail, str) and detail in _BARE_DETAIL_CN:
         detail = _BARE_DETAIL_CN[detail]
+    if (exc.status_code == 402 and isinstance(detail, str)
+            and auth.current() and not auth.can_see_balance()):
+        # 店长/店员看不到企业余额:「点数不足」提示里的余额数字在出口统一去掉
+        detail = billing.hide_balance_text(detail)
     return JSONResponse({"detail": detail}, status_code=exc.status_code,
                         headers=getattr(exc, "headers", None))
 
@@ -840,6 +844,10 @@ async def _auth_mw(request: Request, call_next):
                 )
         finally:
             request._receive = original_receive
+    if path == "/staff" and not user and not tour:
+        # 店员手机版没登录：去「店员登录」页，登录后回到 /staff(next 只认站内固定路径)
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse("/login?next=/staff", status_code=302)
     if (path == "/" or path.startswith("/files/")) and not user and not tour:
         from fastapi.responses import RedirectResponse
         if path == "/":
@@ -1125,9 +1133,9 @@ def records_export(kind: str = "billing"):
                                     .startswith("退回"))
                          else "充值" if r["delta"] > 0 else "消耗"),
                 "项目": r.get("reason") or "",
-                "积分变动": r["delta"],
+                "点数变动": r["delta"],
                 "余额": r["balance"]} for r in rows]
-        headers, name = ["时间", "类型", "项目", "积分变动", "余额"], "积分流水"
+        headers, name = ["时间", "类型", "项目", "点数变动", "余额"], "点数流水"
     elif kind == "publog":
         _need_module("content")
         state_cn = {"pending": "待复盘", "notified": "已提醒",
@@ -1664,6 +1672,15 @@ def auth_login(body: dict, request: Request):
     return _login_success_response(u, request, "password")
 
 
+def _set_session_cookie(resp, uid: int, request: Request) -> str:
+    token = auth.make_session(uid)
+    resp.set_cookie("cc_sess", token,
+                    max_age=auth.SESSION_DAYS * 86400, path="/",
+                    httponly=True, samesite="lax",
+                    secure=_request_is_https(request))
+    return token
+
+
 def _login_success_response(u: dict, request: Request, method: str):
     """密码登录与短信验证码登录共用:签发会话 Cookie + 记漏斗。"""
     resp = JSONResponse({
@@ -1672,10 +1689,10 @@ def _login_success_response(u: dict, request: Request, method: str):
         "role": u["role"],
         "must_change_password": bool(u.get("must_change_password")),
     })
-    secure = _request_is_https(request)
-    resp.set_cookie("cc_sess", auth.make_session(u["id"]),
-                    max_age=auth.SESSION_DAYS * 86400, path="/",
-                    httponly=True, samesite="lax", secure=secure)
+    token = _set_session_cookie(resp, u["id"], request)
+    if method == "password" and u.get("must_change_password"):
+        # 刚用密码登录进来的首登改密，不必再输一遍当前密码(15 分钟内有效)。
+        auth.mark_fresh_password_login(u["id"], token)
     # 发布器的一次性只读账号只验证服务，不应污染真实产品漏斗。
     if not str(u["username"]).startswith("__release_smoke_"):
         funnel.record_safe(
@@ -1772,8 +1789,16 @@ def auth_logout():
     return resp
 
 
+def _forced_change_without_old(u: dict, request: Request | None) -> bool:
+    """仅「被强制改密 + 这张会话刚用密码登录」时免输当前密码；两者都以服务端状态为准。"""
+    if not u or not u.get("must_change_password") or request is None:
+        return False
+    return auth.is_fresh_password_login(
+        u.get("id"), request.cookies.get("cc_sess") or "")
+
+
 @app.get("/api/auth/me")
-def auth_me():
+def auth_me(request: Request = None):
     u = auth.current()
     if u and u.get("role") == "tour":
         return {"id": 0, "username": "访客", "role": "tour", "tenant": "参观模式",
@@ -1791,7 +1816,38 @@ def auth_me():
             "needs_industry": (
                 u["role"] == "owner" and signup.tenant_needs_industry(u["tenant_id"])
             ),
-            "must_change_password": bool(u.get("must_change_password"))}
+            # 本企业授权的行业 key(平台租户/root 为空=不限);前端据此把自己行业排在前面。
+            "industries": auth.tenant_industries(),
+            "must_change_password": bool(u.get("must_change_password")),
+            # 已分门店的店员/店长默认用手机版 /staff;首登改密后前端据此跳回去。
+            "prefers_staff_home": stafftask.prefers_staff_home(u),
+            # 首登改密是否还要再输当前密码:由服务端按会话判断,前端只据此决定显示。
+            "password_change_needs_old": not _forced_change_without_old(u, request),
+            # 成员能用几位 AI 专家(老板/root 不限=None);前端据此藏掉用不了的入口
+            **_member_expert_counts(u)}
+
+
+def _member_expert_counts(u: dict) -> dict:
+    """成员账号实际能用的 AI 专家人数(板块授权 + 员工白名单 + 已启用)。
+
+    expert_count:能派活的专家总数;meeting_expert_count:其中能进商量室的
+    (巡店经理不参加无照片圆桌会议)。老板/root 返回 None,表示不限。
+    """
+    if (u or {}).get("role") != "member":
+        return {"expert_count": None, "meeting_expert_count": None}
+    idxs: list[int] = []
+    if auth.allowed("content"):
+        idxs.extend(int(s["idx"]) for s in registry.STATIONS)
+    for department in departments.list_depts():
+        if not auth.dept_visible(department["key"]) or not auth.allowed(department["key"]):
+            continue
+        idxs.extend(
+            int(e["idx"]) for e in department["employees"]
+            if auth.employee_allowed(e["idx"], department["key"]))
+    cfgs = employees.get_configs(idxs) if idxs else {}
+    usable = [i for i in idxs if (cfgs.get(i) or {"enabled": True}).get("enabled", True)]
+    return {"expert_count": len(usable),
+            "meeting_expert_count": sum(1 for i in usable if i != inspection.EMPLOYEE_IDX)}
 
 
 @app.get("/api/guest/industries")
@@ -1863,17 +1919,20 @@ def onboarding_dismiss():
 
 
 @app.put("/api/auth/password")
-def auth_password(body: dict):
+def auth_password(body: dict, request: Request = None):
     u = auth.current()
     row = db.one("SELECT username,password_hash FROM users WHERE id=?", (u["id"],))
-    # 与登录共用按账号的全局失败计数:拿到会话也不能无限次猜旧密码。
-    throttle_name = (row or {}).get("username") or u.get("username") or ""
-    _login_guard_check(throttle_name)
-    if not auth.verify_login_password(
-            body.get("old") or "", (row or {}).get("password_hash")):
-        _login_guard_fail(throttle_name)
-        raise HTTPException(400, "旧密码不对")
-    _login_guard_ok(throttle_name)
+    # 首登强制改密且这张会话刚用密码登录过:不再重复验证当前密码。
+    # 主动改密、短信登录、升级前留下的老会话一律照旧要验旧密码。
+    if not _forced_change_without_old(u, request):
+        # 与登录共用按账号的全局失败计数:拿到会话也不能无限次猜旧密码。
+        throttle_name = (row or {}).get("username") or u.get("username") or ""
+        _login_guard_check(throttle_name)
+        if not auth.verify_login_password(
+                body.get("old") or "", (row or {}).get("password_hash")):
+            _login_guard_fail(throttle_name)
+            raise HTTPException(400, "旧密码不对")
+        _login_guard_ok(throttle_name)
     new_password = body.get("new") or ""
     policy_error = auth.password_policy_error(new_password)
     if policy_error:
@@ -1884,7 +1943,14 @@ def auth_password(body: dict):
     })
     db.set_setting("bootstrap_pw", None)
     auth.clear_password_hint(u["id"])   # 改过密码就不再提示「建议改成好记的密码」
-    return {"ok": True}
+    auth.clear_fresh_password_login(u["id"])
+    if request is None:
+        return {"ok": True}
+    # 会话签名里带密码哈希，改密后旧 Cookie 全部失效(其他设备被踢下线)；
+    # 给当前这台设备补发新 Cookie，用户不用再登录一遍。
+    resp = JSONResponse({"ok": True})
+    _set_session_cookie(resp, u["id"], request)
+    return resp
 
 
 # ---------------- V8:权限管理(成员/企业/租户) ----------------
@@ -2335,16 +2401,25 @@ def state(limit: int | None = None, offset: int = 0):
     setup = {"profile": len(profiles) > 0,
              "first_job": (jobs_total > 0 if paged else len(jobs) > 0),
              "wechat": bool(_wc.get_conf(TEN()).get("appid")) or bool(_nt.get_webhook(TEN())),
-             "clone": len(avatar.cloned_voices()) > 0}
+             "clone": len(avatar.cloned_voices()) > 0,
+             # 上手卡「接下来」里的 建门店 / 开店员账号 / 派第一件活 是否已完成(按企业各查一条)
+             **onboarding.progress_flags(TEN())}
     # V27.2:「发布三件套」向导进度(成片→审查→排版/发出去,各查一条就够)
     trio = {"video": bool(db.one("SELECT id FROM tv_job WHERE tenant_id=? AND status='done' LIMIT 1", (TEN(),))),
             "censor": bool(db.one("SELECT id FROM censor_log WHERE tenant_id=? LIMIT 1", (TEN(),))),
             "publish": bool(db.one("SELECT id FROM publish_log WHERE tenant_id=? LIMIT 1", (TEN(),)))}
     result = {"jobs": jobs, "profiles": profiles, "inbox": inbox,
               "notifications": notifications,
+              # 「今天」页待办：当前账号能审核的店员交差件数(不能审核的账号恒为 0)
+              "staff_review_count": stafftask.review_pending_count(TEN(), auth.current()),
               "balance": ten_row.get("balance") or 0,
               "plan": ten_row.get("plan") or "",
               "setup": setup, "trio": trio}
+    if not auth.can_see_balance():
+        # 店长、店员、办公室同事不看企业余额:不下发数字,只给「点数够不够」
+        result["balance"] = None
+        result["plan"] = ""
+        result.update(billing.points_flags(TEN(), ten_row.get("balance")))
     if paged:
         page = _page_result(jobs, jobs_total, page_limit, page_offset)
         page.pop("items")
@@ -2936,14 +3011,20 @@ def depts_list():
         viewer.get("allowed_emp_idxs")
         if viewer.get("role") == "member" else None
     )
+    is_member = viewer.get("role") == "member"
     for d in visible:
         emps = []
+        dept_allowed = (not is_member) or auth.allowed(d["key"])
         for e in d["employees"]:
             if (
                 member_whitelist is not None
                 and int(e["idx"]) not in member_whitelist
             ):
                 # 白名单成员只看到被分配的数字员工；楼层可见性即使用权。
+                continue
+            if not dept_allowed:
+                # 成员没开通这个行业板块:楼层里的专家一个都派不了,不列出来,
+                # 商量室选人、找行业专家的人数都只算这个账号真能用的人。
                 continue
             cfg = cfgs.get(e["idx"]) or employees.get_config(e["idx"])
             scoped_employee = {
@@ -2971,6 +3052,7 @@ def depts_list():
         ]
         out.append({"key": d["key"],
                     "name": _display_dept_name(d["key"], d["name"]),
+                    "short_label": departments.short_label(d["key"], d["name"]),
                     "emoji": d["emoji"],
                     "tagline": d.get("tagline", ""), "groups": groups, "employees": emps})
     return out
@@ -15363,6 +15445,13 @@ _HTML_ENTRY_NO_CACHE_HEADERS = {
     "Pragma": "no-cache",
     "Expires": "0",
 }
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return FileResponse(os.path.join(ROOT, "static", "favicon.svg"),
+                        media_type="image/svg+xml",
+                        headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/login")

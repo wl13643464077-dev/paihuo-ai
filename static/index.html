@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>派活 — 老板会派活，数字员工去干活</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <style>
 :root{
   --paper:#f4edde; --card:#fffaf0; --ink:#33291f; --ink2:#6b5d4b; --line:#d8cbb2;
@@ -33,7 +34,14 @@ header nav a,header nav .nav-action{color:#cbb994;padding:7px 13px;border-radius
 header nav .nav-action{font-family:inherit;background:transparent;cursor:pointer}
 header nav a.on{background:#ffd166;color:var(--ink);border-color:var(--ink);box-shadow:2px 2px 0 rgba(0,0,0,.35)}
 header nav a:not(.on):hover,header nav .nav-action:hover{color:#ffd166}
-header nav .navlogout{margin-left:auto;color:#e9a8a0}
+header nav .navlogout{color:#e9a8a0}
+/* 账号区(企业名 · 账号 · 余额 · 退出)靠右,紧挨在线状态 */
+header nav .nav-acct{margin-left:auto;display:flex;align-items:center;gap:4px;min-width:0}
+header nav a.nav-who{display:block;min-width:0;white-space:nowrap;font-size:12px;padding:7px 6px;overflow:hidden;text-overflow:ellipsis;max-width:280px;color:#cbb994}
+/* 在线状态:账号区里的小圆点(断开时显示「重连中」);手机顶栏的企业名只在窄屏出现 */
+.nav-conn{font-size:12px;font-weight:700;white-space:nowrap;color:#cbb994;padding:0 4px;cursor:default}
+header nav a.nav-org{display:none}
+header .hdr-spacer{flex:0 0 0}
 /* 第 1 期:一级入口只剩 5 个(今天/派活/门店/获客/我的),桌面一行放得下,不再需要「更多」下拉和横滑 */
 header nav a{display:inline-flex;align-items:center;gap:5px}
 header nav .nav-ic{font-size:15px;line-height:1}
@@ -295,9 +303,41 @@ details.log .steps{margin-top:8px}
 /* 全局请求进度条 */
 #busybar{position:fixed;top:0;left:0;height:3px;background:linear-gradient(90deg,#ffd166,#f4a261);width:0;z-index:999;transition:width .25s;opacity:0}
 #busybar.on{opacity:1}
-#fb-btn{position:fixed;right:18px;bottom:20px;z-index:150;width:52px;height:52px;border-radius:50%;
-  border:3px solid var(--ink);background:#ffd166;font-size:22px;cursor:pointer;box-shadow:3px 4px 0 rgba(51,41,31,.3);transition:transform .1s}
-#fb-btn:hover{transform:scale(1.08)} #fb-btn:active{transform:scale(.96)}
+#fb-btn{position:fixed;right:18px;bottom:20px;z-index:150;height:44px;padding:0 14px;border-radius:999px;
+  display:inline-flex;align-items:center;gap:6px;font-weight:900;font-size:14px;color:var(--ink);
+  border:3px solid var(--ink);background:#ffd166;cursor:pointer;box-shadow:3px 4px 0 rgba(51,41,31,.3);transition:transform .1s}
+#fb-btn .fb-ic{font-size:18px;line-height:1}
+#fb-btn:hover{transform:scale(1.05)} #fb-btn:active{transform:scale(.96)}
+/* 正在输入时把反馈按钮收起来,不盖住输入框 */
+body:has(input:focus,textarea:focus,select:focus) #fb-btn{opacity:0;pointer-events:none}
+/* ---------- 团队页:建店员/店长账号 ---------- */
+.field-err{color:var(--bad);font-size:13px;font-weight:700;margin-top:5px}
+.field-err:empty{display:none}
+input[aria-invalid="true"],select[aria-invalid="true"]{border-color:var(--bad)}
+body.forced-pw #conn,body.forced-pw #fb-btn{display:none!important}
+.tm-kinds{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-top:4px}
+.tm-kind{display:flex;flex-direction:column;align-items:flex-start;gap:2px;text-align:left;padding:10px 12px;border:2px solid var(--ink);border-radius:14px;background:#fff;cursor:pointer;font:inherit;color:inherit;min-height:48px}
+.tm-kind b{font-size:15px}
+.tm-kind .sub{font-size:12.5px}
+.tm-kind[aria-checked="true"]{background:var(--ink);color:#ffd166}
+.tm-kind[aria-checked="true"] .sub{color:#f3e6c8}
+.tm-checks{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:6px;margin-top:4px;max-height:280px;overflow:auto}
+.tm-check{display:flex;align-items:center;gap:8px;min-height:44px;padding:6px 10px;border:2px solid rgba(51,41,31,.25);border-radius:12px;background:#fff;cursor:pointer;font-weight:700;margin:0}
+.tm-check input{width:20px;height:20px;min-height:0;margin:0;flex:none}
+.tm-check:has(input:checked){border-color:var(--ink);background:#fff1bd}
+.tm-check span{min-width:0;word-break:break-all}
+.tm-sendcard{background:#eefaf1;border:2.5px solid var(--ink)}
+.tm-row-more{position:relative;display:inline-block}
+.tm-row-more>summary{list-style:none;cursor:pointer}
+.tm-row-more>summary::-webkit-details-marker{display:none}
+.tm-row-more-box{position:absolute;right:0;top:calc(100% + 4px);z-index:20;display:flex;flex-direction:column;gap:6px;min-width:150px;padding:8px;background:#fffdf7;border:2px solid var(--ink);border-radius:12px;box-shadow:3px 3px 0 rgba(51,41,31,.15)}
+.tm-row-more-box .btn{justify-content:flex-start;white-space:nowrap}
+.tm-sendcard pre{white-space:pre-wrap;word-break:break-all;background:#fff;border:2px dashed rgba(51,41,31,.35);border-radius:12px;padding:12px;font-family:inherit;font-size:15px;line-height:1.8;font-weight:700;margin:10px 0}
+.sa-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.sa-bar select{width:auto;flex:1 1 130px;min-width:0;max-width:240px;min-height:40px;margin:0}
+.sa-bar .btn{flex:none}
+.sa-ai-toggle{display:inline-flex;gap:6px;align-items:center;font-size:13px;font-weight:700;margin:0 0 0 8px;cursor:pointer;vertical-align:middle}
+.sa-ai-toggle input{width:auto;min-height:0;margin:0}
 /* ---------- 巡店：批量导入工作台 ---------- */
 .inspection-import-toggle{position:relative;background:#fffaf0;white-space:nowrap}
 .inspection-import-toggle-icon{font-size:16px;line-height:1;transition:transform .2s ease}
@@ -417,7 +457,10 @@ html,body{max-width:100%;overflow-x:hidden}
   .dimtable td:first-child{border-top:0}
   .dimtable td::before{content:attr(data-label);font-weight:900;color:var(--ink2);font-size:11.5px}
   .dimtable tr:hover td{background:transparent}
-  #fb-btn{width:46px;height:46px;right:12px;bottom:14px;font-size:19px}
+  /* 手机上只留一个小圆钮(「我的」页里也有「意见反馈」入口) */
+  #fb-btn{width:38px;height:38px;padding:0;justify-content:center;right:10px;bottom:14px;border-width:2px;opacity:.88}
+  #fb-btn .fb-tx{display:none}
+  #fb-btn .fb-ic{font-size:16px}
   /* 工单行:手机上标题占首行正常换行,进度点/工位/状态挪到第二行(不再挤成一列一字) */
   .jobrow{flex-wrap:wrap;gap:4px 10px}
   .jobrow .t{min-width:70%}
@@ -428,6 +471,13 @@ html,body{max-width:100%;overflow-x:hidden}
   header nav{flex:0 0 auto;order:5}
   header nav .nav-top{display:none}
   header nav .navlogout{margin-left:0;padding:6px 10px}
+  header nav .nav-acct{margin-left:0}
+  header nav a.nav-who{display:none}
+  /* 手机顶栏:不放红色「退出」(「我的」页底部有),换成企业名 */
+  header nav .nav-acct:not(.keep-out) .navlogout{display:none}
+  header nav a.nav-org{display:block;max-width:9em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    font-size:13px;font-weight:800;padding:6px 8px;color:#f4edde}
+  header .hdr-spacer{flex:1}
   #tabbar{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:90;gap:2px;
     background:#2b2317;border-top:3px solid var(--ink);box-shadow:0 -3px 0 rgba(51,41,31,.2);
     padding:5px 4px calc(5px + env(safe-area-inset-bottom))}
@@ -465,11 +515,48 @@ html,body{max-width:100%;overflow-x:hidden}
   font-size:19px;padding:15px 18px;border-radius:16px}
 .btn.today-post .sub{font-size:12.5px;font-weight:700;color:var(--ink)}
 .hubhead+.btn.today-post{margin-bottom:16px}
+/* ---------- 统一空状态(emptyState):居中一句话 + 一个按钮 ---------- */
+.empty-state{display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;padding:30px 12px;color:var(--ink2)}
+.empty-state .es-ic{font-size:34px;line-height:1}
+.empty-state .es-tx{margin:0;max-width:32em;font-weight:700;line-height:1.55;text-wrap:balance}
+.empty-state .btn{margin-top:4px}
+/* ---------- 新建门店表单 ---------- */
+.store-form{max-width:460px;width:100%}
+.store-form-row{margin-bottom:12px}
+.store-form-row label{display:block;font-weight:800;margin-bottom:5px}
+.store-form-row input,.store-form-row select{width:100%;font-size:16px}
+.store-form-req{font-size:12px;color:var(--bad);font-weight:700;margin-left:4px}
+.store-form-error{color:var(--bad);font-size:13px;margin-top:5px;min-height:0}
+.store-form-error:empty{display:none}
+.store-form input[aria-invalid="true"]{border-color:var(--bad)}
+/* ---------- 「门店」页:我的门店 ---------- */
+.my-stores{margin-bottom:16px}
+.my-stores-head{display:flex;align-items:center;gap:6px 12px;flex-wrap:wrap}
+.my-stores-head h2{margin:0;font-size:19px}
+.my-stores-acts{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
+.my-stores-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;align-items:center}
+.my-store-chip{display:inline-flex;align-items:baseline;gap:6px;border:2px solid var(--ink);border-radius:12px;padding:5px 11px;font-weight:800;background:var(--card);max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.my-store-chip .sub{font-size:12px;font-weight:600}
+.my-store-chip.off{opacity:.55}
+a.my-store-chip,button.my-store-chip{color:inherit;text-decoration:none;cursor:pointer;min-height:36px;align-items:center;font:inherit;font-weight:800}
+a.my-store-chip:hover,a.my-store-chip:focus-visible,button.my-store-chip:hover,button.my-store-chip:focus-visible{background:#fff1bd}
+.store-card-grid{grid-template-columns:repeat(auto-fit,minmax(110px,1fr));margin-top:10px}
+.store-card-grid a{color:inherit;text-decoration:none;border:2px solid var(--line);border-radius:13px;padding:10px;background:#fff;text-align:center}
+.store-card-grid a.bad{border-color:var(--bad);background:#fff1f1}
+.my-store-go{font-weight:900;color:var(--ink2)}
+.my-stores-manage{margin-top:12px;display:flex;flex-direction:column;gap:8px}
+.my-store-row{display:flex;align-items:center;gap:8px;border-top:1px dashed var(--line);padding-top:8px}
+.my-store-row-name{flex:1;min-width:0;display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}
+.boss-idle{margin-top:10px}
+.boss-idle summary{cursor:pointer;font-weight:800;color:var(--ink2);padding:6px 0}
+.boss-idle-list{display:flex;flex-wrap:wrap;gap:6px 12px;font-size:13px;color:var(--ink2);padding:4px 0}
 /* ---------- 第 1 期:「今天」页 ---------- */
 .today-hello{display:flex;align-items:baseline;gap:6px 14px;flex-wrap:wrap;margin:2px 0 14px}
 .today-hello h2{font-size:22px;margin:0}
 .today-hello .sub{font-size:13px;font-weight:700;margin-left:4px}
 .today-money{font-size:12.5px;color:var(--ink2);font-weight:700;text-decoration:underline;margin-left:auto}
+/* 桌面顶栏账号区已经显示余额,问候语旁不再重复;手机顶栏没有余额,这里保留 */
+@media (min-width:761px){.today-money{display:none}}
 .today-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}
 .today-head h2,.today-head h3{margin:0;flex:1;min-width:0}
 .todo-row{display:flex;align-items:center;gap:10px;padding:10px 2px;border-bottom:2px dashed var(--line)}
@@ -486,18 +573,15 @@ a.card.today-store{display:block;color:inherit}
 .today-stats span{font-size:12px;color:var(--ink2);font-weight:700}
 .today-stats .bad{border-color:var(--bad);background:#fff1f1}
 .today-growth h2{margin-bottom:10px}
-/* 新手上路:三套引导合成一个默认折叠的区块 */
-.guide-fold>summary{cursor:pointer;display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-height:44px;list-style:none}
-.guide-fold>summary::-webkit-details-marker{display:none}
-.guide-fold>summary:before{content:"▸";font-weight:900}
-.guide-fold[open]>summary:before{content:"▾"}
-.guide-fold>summary b{font-size:17px}
-.guide-sec{border-top:2px dashed var(--line);margin-top:14px;padding-top:12px}
-.guide-sec-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.guide-sec-head h3{margin:0;flex:1;min-width:200px}
 /* 「不再提示」这类文字按钮:点击区至少 44px */
 .link-btn.dismiss{min-height:44px;min-width:44px;padding:0 8px;display:inline-flex;align-items:center;justify-content:center;
   color:var(--ink2);font-size:13px;text-decoration:underline}
+/* 中转页「最近用过」一行 */
+.hub-recent{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 12px}
+/* 花点数的按钮:按钮只写动作,下面一行小字写「本次 N 点 · 余额 M 点」 */
+.cost-act{display:inline-flex;flex-direction:column;align-items:flex-start;gap:4px;max-width:100%}
+.cost-note{font-size:12.5px;color:var(--ink2);font-weight:700}
+.cp-hero .cost-note{color:rgba(255,255,255,.78)}
 /* ---------- 第 1 期:弹窗打开时锁住背后页面滚动 ---------- */
 html:has(.overlay),html:has(.overlay) body{overflow:hidden}
 .overlay{overscroll-behavior:contain}
@@ -681,17 +765,17 @@ html:has(.overlay),html:has(.overlay) body{overflow:hidden}
 <header>
   <div class="logo"><span class="bulb"></span>派活 PaiHuo<span class="bulb"></span></div>
   <nav id="nav" aria-label="主导航"></nav>
-  <div style="flex:1"></div>
-  <div class="sub" style="color:#cbb994;font-weight:700" id="conn">●</div>
+  <div class="hdr-spacer"></div>
+  <span class="nav-conn" id="conn" role="status" title="正在连接" aria-label="正在连接">●</span>
 </header>
 <main id="main"></main>
 <nav id="tabbar" aria-label="主导航(手机)"></nav>
 <div id="modal"></div>
 <div class="toast" id="toast"></div>
 <script src="/static/app.js?v=54"></script>
-<script src="/static/onboarding.js?v=1"></script>
-<script src="/static/staff-admin.js?v=1"></script>
-<script src="/static/checklist-admin.js?v=1"></script>
-<script src="/static/cockpit.js?v=3"></script>
+<script src="/static/onboarding.js?v=6"></script>
+<script src="/static/staff-admin.js?v=10"></script>
+<script src="/static/checklist-admin.js?v=3"></script>
+<script src="/static/cockpit.js?v=7"></script>
 </body>
 </html>

@@ -879,6 +879,80 @@ def set_branch_active(
     return result
 
 
+def rename_branch(
+    tid: int,
+    uid: int,
+    industry_key: str,
+    branch_id: int,
+    name: Any,
+) -> dict:
+    """给门店改名，仅老板/平台管理员/总监可操作（与新建、停用同一权限）。
+
+    只改名称，不动门店编码、区域和绑定关系；历史巡店记录按门店 ID
+    关联，改名后自动显示新名字。
+    """
+    return update_branch_info(tid, uid, industry_key, branch_id, {"name": name})
+
+
+def update_branch_info(
+    tid: int,
+    uid: int,
+    industry_key: str,
+    branch_id: int,
+    raw: Mapping[str, Any],
+) -> dict:
+    """改门店资料（名称 / 区域 / 地址，传哪项改哪项）。
+
+    权限、租户和行业校验与改名完全相同：仅老板/平台管理员/总监，
+    别家企业或别的行业的门店一律 404。不动门店编码和绑定关系。
+    """
+    _actor(tid, uid, industry_key, branch_admin=True)
+    if not isinstance(raw, Mapping):
+        raise InspectionError("门店信息格式无效")
+    changes: dict[str, str] = {}
+    if "name" in raw:
+        changes["name"] = _text(raw.get("name"), field="门店名称", limit=80, required=True)
+    if "region" in raw:
+        changes["region"] = _text(raw.get("region"), field="所属区域", limit=60)
+    if "address" in raw:
+        changes["address"] = _text(raw.get("address"), field="门店地址", limit=200)
+    target_id = _positive_id(branch_id, "门店")
+    now = time.time()
+    with db.atomic() as connection:
+        row = connection.execute(
+            "SELECT id,name,region,address FROM store_branch WHERE id=? AND tenant_id=? "
+            "AND industry_key=?",
+            (target_id, int(tid), industry_key),
+        ).fetchone()
+        if not row:
+            # 404 而非 403：不泄露其他租户是否存在该门店。
+            raise InspectionNotFound("门店不存在")
+        if "name" in changes and str(row["name"]) != changes["name"]:
+            same = connection.execute(
+                "SELECT id FROM store_branch WHERE tenant_id=? AND industry_key=? "
+                "AND name=? AND id<>? LIMIT 1",
+                (int(tid), industry_key, changes["name"], target_id),
+            ).fetchone()
+            if same:
+                raise InspectionConflict("同行业下已有同名门店")
+        diff = {k: v for k, v in changes.items() if str(row[k] or "") != v}
+        if diff:
+            sets = ",".join(f"{k}=?" for k in diff)
+            connection.execute(
+                f"UPDATE store_branch SET {sets},row_version=row_version+1,"
+                "updated_at=? WHERE id=? AND tenant_id=?",
+                (*diff.values(), now, target_id, int(tid)),
+            )
+        current = connection.execute(
+            "SELECT id,tenant_id,industry_key,name,region,address,active,"
+            "created_by,created_at,updated_at FROM store_branch WHERE id=?",
+            (target_id,),
+        ).fetchone()
+    result = dict(current)
+    result["active"] = bool(result.get("active"))
+    return result
+
+
 def branch_scope_info(tid: int, uid: int, industry_key: str) -> dict:
     """巡店页需要的门店范围与按钮权限，全部由服务端判定。"""
     user = _actor(tid, uid, industry_key)

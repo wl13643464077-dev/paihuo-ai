@@ -84,6 +84,7 @@ class SummaryTests(CockpitBase):
 
     def test_people_usage_and_idle_flags(self):
         self.seed()
+        db.execute("UPDATE users SET created_at=? WHERE tenant_id=2", (NOW - 30 * DAY_S,))
         people = {p["id"]: p for p in cockpit.summary(2, 7, now=NOW)["people"]}
         self.assertNotIn(30, people)                          # 别家老板
         self.assertEqual(2, people[22]["ai_tasks"])           # 1 任务 + 1 内容
@@ -92,6 +93,22 @@ class SummaryTests(CockpitBase):
         self.assertEqual(1, people[24]["overdue"])
         self.assertEqual("never", people[21]["flag"])         # 总监从没用过
         self.assertEqual(["朝阳店"], people[23]["branches"])
+
+    def test_new_accounts_are_not_called_idle_and_staff_judged_by_submissions(self):
+        """N-04：几分钟前才建的账号不算「超过 7 天没用」；店员按没交差/没打卡说。"""
+        db.execute("UPDATE users SET created_at=? WHERE id IN (21,24)", (NOW - 600,))
+        db.execute("UPDATE users SET created_at=? WHERE id IN (22,23)", (NOW - 30 * DAY_S,))
+        d = cockpit.summary(2, 7, now=NOW)
+        people = {p["id"]: p for p in d["people"]}
+        self.assertEqual("new", people[21]["flag"])
+        self.assertEqual("new", people[24]["flag"])
+        self.assertEqual("never", people[22]["flag"])          # 建号 30 天的店长
+        self.assertEqual("never", people[23]["flag"])          # 建号 30 天的店员
+        text = "".join(d["headline"])
+        self.assertNotIn("u21", text)
+        self.assertNotIn("u24", text)
+        self.assertIn("u22 1 个账号超过 7 天没用派活", text)
+        self.assertIn("u23 1 位店员超过 7 天没交差、没打卡", text)
 
     def test_tracking_only_shows_cockpit_dispatches(self):
         self.seed()
@@ -112,9 +129,9 @@ class SummaryTests(CockpitBase):
         from openpyxl import load_workbook
         self.seed()
         wb = load_workbook(io.BytesIO(cockpit.export_xlsx(cockpit.summary(2, 30, now=NOW))))
-        self.assertEqual(["概览", "员工使用", "门店", "待拍板", "下发追踪", "每日趋势", "AI员工"],
+        self.assertEqual(["概览", "账号使用", "门店", "待拍板", "下发追踪", "每日趋势", "AI专家"],
                          wb.sheetnames)
-        self.assertEqual("u20", wb["员工使用"]["A2"].value or wb["员工使用"]["A3"].value)
+        self.assertEqual("u20", wb["账号使用"]["A2"].value or wb["账号使用"]["A3"].value)
 
 
 class AiTests(CockpitBase):

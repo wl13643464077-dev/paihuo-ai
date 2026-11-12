@@ -18,17 +18,47 @@ from ..web_common import TEN, _is_boss, _need_admin, _need_root
 router = APIRouter()
 
 
+def _can_see_ledger() -> bool:
+    """企业的账(流水/对账/套餐价目)只给老板 owner、平台 root 和总监 director。
+
+    按白名单放行,新增角色默认看不到。参观模式(tour)的租户是 -1,
+    没有任何真实数据,保持原样返回完整结构,演示页照常能画。
+    """
+    return auth.can_see_balance()
+
+
 @router.get("/api/billing")
 def billing_get():
     t = db.one("SELECT * FROM tenants WHERE id=?", (TEN(),))
+    if not _can_see_ledger():
+        # 店员/店长不看企业的账:只给「点数够不够」(布尔值,不带余额数字)
+        # 和每个动作花几点;余额、流水、对账、累计、套餐价目一律不回。
+        return {**billing.points_flags(TEN(), (t or {}).get("balance")),
+                "is_platform": TEN() == 1,
+                "restricted": True,
+                "prices": {
+                    action: {"points": row.get("points"),
+                             "label": billing.public_label(action, row.get("label"))}
+                    for action, row in billing.prices().items()
+                }}
     price_rows = billing.prices()
     if not _is_boss():
+        # 客户看能力名,不看供应商名(只换显示名,点数与动作 key 不变)
         price_rows = {
-            action: {k: row.get(k) for k in ("points", "label")}
+            action: {"points": row.get("points"),
+                     "label": billing.public_label(action, row.get("label")),
+                     **billing.price_group(action)}
             for action, row in price_rows.items()
         }
+    else:
+        # 平台方照旧看原名和成本参考,只多带分组信息(显示用)
+        price_rows = {action: {**row, **billing.price_group(action)}
+                      for action, row in price_rows.items() if isinstance(row, dict)}
     log_rows = db.q("SELECT delta, balance, reason, created_at FROM billing_log "
                     "WHERE tenant_id=? ORDER BY id DESC LIMIT 300", (TEN(),))
+    if not _is_boss():
+        log_rows = [{**row, "reason": billing.public_reason(row.get("reason"))}
+                    for row in log_rows]
     # 退点也是正向流水,但把它计成「充值」会让累计充值虚高、月度两列同抬:
     # 失败一单先计消耗再计充值。按 reason「退回」前缀单列。
     agg = db.one(

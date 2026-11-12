@@ -108,17 +108,20 @@
         <div><b>${s.open||0}</b><span>待完成</span></div>
         <div><b style="color:var(--bad)">${s.missed||0}</b><span>超时没做完</span></div></div></div>`;
     if(!ov.stores.length){
-      $("#ck-body").innerHTML = head + `<div class="card"><div class="empty">还没有门店，或者老板还没给您分配门店。先在「巡店」里建门店、在「团队」里把店员绑定到门店。</div></div>`;
+      $("#ck-body").innerHTML = head + `<div class="card">${noStoreEmptyState("还没有门店。建好门店，再在「团队与权限」里把店员分到门店，就能每天按清单打勾。")}</div>`;
       return;
     }
     // 没做完的门店排前面，老板先看要盯的
     const stores = [...ov.stores].sort((a,b)=>(b.missed-a.missed)||((b.total-b.done)-(a.total-a.done))||a.branch_name.localeCompare(b.branch_name,"zh"));
     const cards = stores.map(st=>{
-      const pct = st.total ? Math.round(st.done*100/st.total) : 0;
+      // 进度按「项」算(和店员手机上的 0/8 一致)；老接口没给项数时退回按份
+      const itTotal = st.items_total!=null ? st.items_total : st.total;
+      const itDone = st.items_done!=null ? st.items_done : st.done;
+      const pct = itTotal ? Math.round(itDone*100/itTotal) : 0;
       const open = !!CK.openStore[st.branch_id];
       const badge = st.missed ? `<span class="pill failed">${st.missed} 份超时</span>`
         : st.total && st.done===st.total ? `<span class="pill done">全部完成</span>`
-        : `<span class="pill running">${st.done}/${st.total}</span>`;
+        : `<span class="pill running">${itDone}/${itTotal} 项</span>`;
       return `<div class="card ck-store">
         <div class="ck-store-top" role="button" tabindex="0" aria-expanded="${open}"
           onclick="ckToggleStore(${cp(st.branch_id)})" onkeydown="if(event.key==='Enter')ckToggleStore(${cp(st.branch_id)})">
@@ -243,7 +246,7 @@
           ${why}<div class="ck-parts">${parts}</div></div></div>`;
     }).join("");
     $("#ck-rank").innerHTML = `<details class="notice"><summary>分数怎么算的？</summary><div style="margin-top:6px">${esc(r.formula||"")}</div></details>`
-      + (cards || `<div class="card"><div class="empty">还没有门店，或者老板还没给您分配门店。</div></div>`);
+      + (cards || `<div class="card">${noStoreEmptyState("还没有门店，建好门店后这里会给各店排名。")}</div>`);
   }
 
   routes["checklists"] = checklistsView;

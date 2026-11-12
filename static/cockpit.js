@@ -1,10 +1,18 @@
-/* 老板数据驾驶舱（#/cockpit）：一屏看清员工用派活做了什么、门店执行、等老板拍板的事。
+/* 老板数据驾驶舱（#/cockpit）：一屏看清每个账号用派活做了什么、门店执行、等老板拍板的事。
    数据全部来自 /api/cockpit/summary（派活自己的业务表），不接外部数据、不做估算。
    导出 Excel / 打印 PDF、AI 经营分析、下发给门店或具体的人（复用「派给店员」）、追踪下发结果。
    依赖 app.js 全局：routes / api / esc / toast / $ / ME / isOwnerLike。 */
 (function(){
   "use strict";
-  const CP = {days:7, data:null, meta:null, aiBusy:false, pick:{}, peopleAll:false};
+  const CP = {days:7, data:null, meta:null, aiBusy:false, pick:{}, peopleAll:false, prefFor:null};
+  // 周期和老板看板一样:7/30/90 天,默认 7 天;按账号记住上次选的(旧版存过的 60 天按 90 天恢复)
+  function loadDaysPref(){
+    let who=""; try{ who=String((typeof ME!=="undefined"&&ME&&(ME.username||ME.id))||""); }catch(_){}
+    if(CP.prefFor===who) return;
+    CP.prefFor=who;
+    let v=0; try{ v=Number(uiPrefGet("cockpit_days")); }catch(_){}
+    CP.days=[7,30,90].includes(v)?v:(v===60?90:7);
+  }
 
   function style(){
     if(document.getElementById("cp-style")) return;
@@ -122,7 +130,8 @@
 
   /* ---------- 图表（纯 SVG） ---------- */
   function trendChart(rows){
-    if(!rows?.length) return `<div class="cp-empty">暂无数据</div>`;
+    // 没数据（或全是 0）就不画坐标轴，免得出现「0 / 1 / 1」这种怪刻度
+    if(!rows?.length||!rows.some(r=>(r.ai+r.staff+r.checklist)>0)) return `<div class="cp-empty" data-trend-empty>这段时间还没有完成的活</div>`;
     const W=640,H=220,L=30,R=8,T=12,B=26, iw=W-L-R, ih=H-T-B;
     const max=Math.max(1,...rows.map(r=>r.ai+r.staff+r.checklist));
     const step=iw/rows.length, bw=Math.max(3,Math.min(26,step*.62));
@@ -149,8 +158,9 @@
   /* ---------- 渲染 ---------- */
   async function view(){
     style();
+    loadDaysPref();
     if(!isOwnerLike()){ $("#main").innerHTML=`<div class="card"><div class="empty">数据驾驶舱只有老板账号能看。</div></div>`; return; }
-    $("#main").innerHTML=`<div class="cp"><div class="cp-hero"><div class="cp-eyebrow">派活 · 数据驾驶舱</div><h2>正在汇总…</h2><div class="cp-meta"><span class="spin"></span> 从派活里统计员工、门店和 AI 的工作记录</div></div></div>`;
+    $("#main").innerHTML=`<div class="cp"><div class="cp-hero"><div class="cp-eyebrow">派活 · 数据驾驶舱</div><h2>正在汇总…</h2><div class="cp-meta"><span class="spin"></span> 从派活里统计账号、门店和 AI 专家的工作记录</div></div></div>`;
     try{
       const [data, meta] = await Promise.all([
         api(`/cockpit/summary?days=${CP.days}`),
@@ -182,7 +192,7 @@
           <div class="cp-seg" role="tablist">${d.period.options.map(n=>`<button type="button" class="${n===d.period.days?"on":""}" onclick="cpDays(${n})">近 ${n} 天</button>`).join("")}</div>
         </div>
         <div class="cp-acts">
-          <button type="button" class="cp-btn gold" id="cp-ai-btn" onclick="cpAi()" ${CP.aiBusy?"disabled":""}>✨ ${CP.aiBusy?"AI 正在分析…":"AI 经营分析"}</button>
+          ${costButton({label:"✨ AI 经营分析",onclick:"cpAi()",cost:1,btnClass:"cp-btn gold",id:"cp-ai-btn",disabled:!!CP.aiBusy,disabledLabel:"✨ AI 正在分析…"})}
           <a class="cp-btn" href="/api/cockpit/export.xlsx?days=${d.period.days}">⬇ 导出 Excel</a>
           <button type="button" class="cp-btn" onclick="window.print()">🖨 打印 / 存 PDF</button>
           <button type="button" class="cp-btn" onclick="cpDispatch(null)">📤 下发任务</button>
@@ -200,15 +210,15 @@
       </div>
 
       <div class="cp-grid">
-        <section class="cp-panel"><h3>等你拍板 <span>${d.todo_counts.high?`<span class="cp-tag high">逾期 ${d.todo_counts.high}</span>`:""}<span class="cp-tag">${d.todo_counts.total} 件</span></span></h3>
+        <section class="cp-panel"><h3>等您拍板 <span>${d.todo_counts.high?`<span class="cp-tag high">逾期 ${d.todo_counts.high}</span>`:""}<span class="cp-tag">${d.todo_counts.total} 件</span></span></h3>
           <div class="cp-sub">逾期的排在最前；逾期和高风险的事可以直接下发给门店或负责人</div>
           <div class="cp-list">${todoList(d.todo)}</div></section>
         ${aiPanel(d.ai_analysis)}
       </div>
 
-      <section class="cp-panel" style="margin-bottom:16px"><h3>员工用派活做了什么
+      <section class="cp-panel" style="margin-bottom:16px"><h3>每个账号做了什么
           ${(()=>{const nv=d.people.filter(p=>p.flag==="never"&&!isOwnerRole(p)).length, idl=d.people.filter(p=>p.flag==="idle"&&!isOwnerRole(p)).length;
-            return `<span><span class="cp-tag ${nv?"high":""}">从没用过 ${nv}</span><span class="cp-tag ${idl?"mid":""}">7 天没用 ${idl}</span></span>`;})()}</h3>
+            return `<span><span class="cp-tag ${nv?"high":""}">一直没动静 ${nv}</span><span class="cp-tag ${idl?"mid":""}">7 天没动静 ${idl}</span></span>`;})()}</h3>
         <div class="cp-sub">每个账号本期派给 AI 的活、派给店员的活、自己交差的任务和打卡的清单；“最近使用”看全部历史</div>
         ${peopleTable(d.people)}</section>
 
@@ -219,7 +229,7 @@
       <div class="cp-grid">
         <section class="cp-panel"><h3>下发追踪 <span class="cp-tag">${d.tracking.length} 件</span></h3>
           <div class="cp-sub">从驾驶舱下发出去的事，店员在派活里拍照交差，状态实时更新</div>${trackTable(d.tracking)}</section>
-        <section class="cp-panel"><h3>AI 数字员工产出</h3><div class="cp-sub">本期交付最多的 AI 员工</div>${aiEmployees(d.ai_employees)}
+        <section class="cp-panel"><h3>AI 专家产出</h3><div class="cp-sub">本期交付最多的 AI 专家</div>${aiEmployees(d.ai_employees)}
           <h3 style="margin-top:16px">内容发布</h3><div class="cp-sub">发布台账里本期登记的发布</div>${content(d.content)}</section>
       </div>
       <div class="cp-foot">${esc(d.notes||"")}</div>
@@ -229,7 +239,7 @@
   function fmtRange(p){ return `${day(p.start)} – ${day(p.end)}`; }
 
   function todoList(items){
-    if(!items.length) return `<div class="cp-empty">🎉 没有等你处理的事</div>`;
+    if(!items.length) return `<div class="cp-empty">🎉 没有等您处理的事</div>`;
     const col={high:"#d64545",mid:"#e0a019",normal:"#3d6fd9"};
     CP.pick.todo=items;
     return items.map((t,i)=>`<div class="cp-item"><span class="dot" style="background:${col[t.level]||"#3d6fd9"}"></span>
@@ -240,14 +250,14 @@
 
   function aiPanel(a){
     if(!a) return `<section class="cp-panel cp-ai"><h3>✨ AI 经营分析</h3>
-      <div class="cp-sub">AI 只读上面这些派活里的统计，帮你找出做得好的、要警惕的，并给出可以直接下发的动作。每次 1 点，失败自动退。</div>
-      <div class="cp-empty"><button type="button" class="cp-mini pri" onclick="cpAi()" ${CP.aiBusy?"disabled":""}>${CP.aiBusy?"分析中…":"开始分析"}</button></div></section>`;
+      <div class="cp-sub">AI 只读上面这些派活里的统计，帮您找出做得好的、要警惕的，并给出可以直接下发的动作。每次 1 点，失败自动退。</div>
+      <div class="cp-empty">${CP.aiBusy?"AI 正在分析…":"点页头的「✨ AI 经营分析」开始"}</div></section>`;
     CP.pick.actions=a.actions||[];
     const acts=(a.actions||[]).map((x,i)=>`<div class="cp-item" style="grid-template-columns:1fr auto"><div><div class="t">${esc(x.title)}</div>
       <div class="s">${x.priority==="high"?`<span class="cp-tag high">紧急</span>`:""}${x.branch?esc(x.branch)+" · ":""}${x.owner?esc(x.owner)+" · ":""}${x.due_days} 天内${x.detail?" · "+esc(x.detail):""}</div></div>
       <div class="ops"><button type="button" class="cp-mini pri" onclick="cpDispatchAi(${i})">下发</button></div></div>`).join("");
-    return `<section class="cp-panel cp-ai"><h3>✨ AI 经营分析 <button type="button" class="cp-mini cp-noprint" onclick="cpAi()" ${CP.aiBusy?"disabled":""}>${CP.aiBusy?"分析中…":"重新分析"}</button></h3>
-      <div class="cp-sub">基于近 ${a.days} 天数据 · ${esc(when(a.created_at))}</div>
+    return `<section class="cp-panel cp-ai"><h3>✨ AI 经营分析</h3>
+      <div class="cp-sub">基于近 ${a.days} 天数据 · ${esc(when(a.created_at))} · 要重新分析，点页头的「✨ AI 经营分析」</div>
       <div class="verdict">${esc(a.verdict)}</div>
       ${a.highlights?.length?`<div class="sec">做得好</div><ul>${a.highlights.map(x=>`<li>${esc(x)}</li>`).join("")}</ul>`:""}
       ${a.risks?.length?`<div class="sec">要警惕</div><ul>${a.risks.map(x=>`<li>${esc(x)}</li>`).join("")}</ul>`:""}
@@ -255,11 +265,19 @@
   }
 
   function peopleTable(rows){
-    if(!rows.length) return `<div class="cp-empty">还没有员工账号，去「团队与权限」给店长、店员开账号</div>`;
+    if(!rows.length) return `<div class="cp-empty">还没有店员账号，去「团队与权限」给店长、店员开账号</div>`;
     const list=CP.peopleAll?rows:rows.slice(0,12);
     const max=Math.max(1,...rows.map(r=>r.total));
     CP.pick.people=list;
-    const flag=p=>isOwnerRole(p)?"":p.flag==="never"?`<span class="cp-tag high">从没用过</span>`:p.flag==="idle"?`<span class="cp-tag mid">${p.idle_days} 天没用</span>`:p.flag==="overdue"?`<span class="cp-tag high">有逾期</span>`:`<span class="cp-tag ok">正常</span>`;
+    // 店员不派活：按「没交差 / 没打卡」说；新建不到 7 天的账号只标「新账号」
+    const flag=p=>{
+      if(isOwnerRole(p)) return "";
+      const staff=p.role==="staff";
+      if(p.flag==="new") return `<span class="cp-tag">新账号</span>`;
+      if(p.flag==="never") return `<span class="cp-tag high">${staff?"还没交差过":"还没用过"}</span>`;
+      if(p.flag==="idle") return `<span class="cp-tag mid">${p.idle_days} 天${staff?"没交差、没打卡":"没用"}</span>`;
+      return p.flag==="overdue"?`<span class="cp-tag high">有逾期</span>`:`<span class="cp-tag ok">正常</span>`;
+    };
     const body=list.map((p,i)=>`<tr><td><div class="cp-who"><span class="cp-av">${esc((p.name||"?").slice(0,1).toUpperCase())}</span><div><b>${esc(p.name)}</b><div class="sub">${esc(p.role_label)}${p.branches.length?" · "+esc(p.branches.join("、")):""}</div></div></div></td>
       <td><span class="cp-spark" style="width:${(p.total/max*90).toFixed(0)}px"></span>${num(p.total)}</td>
       <td class="n">${num(p.ai_tasks)}</td><td class="n">${num(p.dispatched)}</td><td class="n">${num(p.staff_done)}</td><td class="n">${num(p.checklists)}</td>
@@ -271,7 +289,7 @@
   }
 
   function storeCards(rows){
-    if(!rows.length) return `<div class="cp-empty">还没有门店。在「巡店」里添加门店后，这里会显示每家店的执行情况</div>`;
+    if(!rows.length) return noStoreEmptyState("还没有门店。建好门店后，这里会显示每家店的执行情况。");
     CP.pick.stores=rows;
     const comp=(label,v)=>`<div class="cp-comp"><span>${label}</span><div class="bar"><i style="width:${v==null?0:Math.max(0,Math.min(100,v))}%"></i></div><span>${v==null?"—":Math.round(v)}</span></div>`;
     return `<div class="cp-stores">${rows.map((s,i)=>`<div class="cp-store ${s.needs_attention?"warn":""}">
@@ -293,7 +311,7 @@
   }
 
   function aiEmployees(rows){
-    if(!rows.length) return `<div class="cp-empty">本期还没有 AI 员工交付</div>`;
+    if(!rows.length) return `<div class="cp-empty">本期还没有 AI 专家交付</div>`;
     const max=Math.max(1,...rows.map(r=>r.count));
     return `<div class="cp-mix">${rows.map(r=>`<div class="cp-mix-row" style="grid-template-columns:150px 1fr 36px"><span title="${esc(r.dept)}"><b>${esc(r.name)}</b><div class="sub" style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(r.dept)}</div></span><div class="bar"><i style="width:${(r.count/max*100).toFixed(1)}%;background:#7c5cd6"></i></div><b>${num(r.count)}</b></div>`).join("")}</div>`;
   }
@@ -304,7 +322,7 @@
   }
 
   /* ---------- 交互 ---------- */
-  window.cpDays = n => { CP.days=n; view(); };
+  window.cpDays = n => { CP.days=n; try{ uiPrefSet("cockpit_days",n); }catch(_){} view(); };
   window.cpReload = () => view();
   window.cpPeopleAll = () => { CP.peopleAll=!CP.peopleAll; draw(); };
   window.cpAi = async () => {
@@ -335,7 +353,7 @@
   function openDispatch(o){
     const bs=branchesMeta();
     if(!CP.meta?.can_dispatch) return toast("当前账号不能派活");
-    if(!bs.length) return toast("还没有门店，先在「巡店」里添加门店，才能把事情下发下去");
+    if(!bs.length){ toast("还没有门店，先建一家门店，才能把事情下发下去"); openStoreForm(); return; }
     const st={title:o.title||"", detail:o.detail||"", branch_id:o.branch_id||bs[0].id, assignee:o.assignee||null,
       level:o.assignee?"person":"store", priority:o.priority||"normal", due:dueText(o.days), photo:true, ref:o.ref||"manual"};
     if(!bs.some(b=>b.id===st.branch_id)) st.branch_id=bs[0].id;
@@ -349,7 +367,7 @@
         <label>说明（可选）</label><textarea id="cp-d-detail" rows="3" maxlength="500" placeholder="做到什么程度、注意什么">${esc(st.detail)}</textarea>
         <label>下发给</label><div class="cp-lv"><button type="button" class="${st.level==="store"?"on":""}" data-lv="store">整家门店</button><button type="button" class="${st.level==="person"?"on":""}" data-lv="person">门店里的某个人</button></div>
         <div class="cp-row2"><div><label>门店</label><select id="cp-d-branch">${bs.map(x=>`<option value="${x.id}" ${x.id===b.id?"selected":""}>${esc(x.name)}</option>`).join("")}</select></div>
-          <div>${st.level==="person"?`<label>负责人</label>${members.length?`<select id="cp-d-user">${members.map(m=>`<option value="${m.id}" ${m.id===st.assignee?"selected":""}>${esc(m.name)}（${esc(m.title_label||"")}）</option>`).join("")}</select>`:`<div class="sub" style="padding:10px 0">这家店还没绑定员工</div>`}`:`<label>&nbsp;</label><div class="sub" style="padding:10px 0">店里谁先接谁做，店长统一跟进</div>`}</div></div>
+          <div>${st.level==="person"?`<label>负责人</label>${members.length?`<select id="cp-d-user">${members.map(m=>`<option value="${m.id}" ${m.id===st.assignee?"selected":""}>${esc(m.name)}（${esc(m.title_label||"")}）</option>`).join("")}</select>`:`<div class="sub" style="padding:10px 0">这家店还没绑定店员</div>`}`:`<label>&nbsp;</label><div class="sub" style="padding:10px 0">店里谁先接谁做，店长统一跟进</div>`}</div></div>
         <div class="cp-row2"><div><label>截止日期（当天 18:00）</label><input id="cp-d-due" type="date" value="${esc(st.due)}"></div>
           <div><label>紧急程度</label><select id="cp-d-pri"><option value="normal" ${st.priority==="normal"?"selected":""}>普通</option><option value="high" ${st.priority==="high"?"selected":""}>紧急</option><option value="low" ${st.priority==="low"?"selected":""}>不急</option></select></div></div>
         <label style="display:flex;gap:8px;align-items:center;font-weight:700"><input id="cp-d-photo" type="checkbox" style="width:auto" ${st.photo?"checked":""}> 要求拍照交差</label>

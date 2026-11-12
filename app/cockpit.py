@@ -1,4 +1,4 @@
-"""老板数据驾驶舱：一屏看清「员工用派活做了什么、门店执行得怎样、哪些事等老板拍板」。
+"""老板数据驾驶舱：一屏看清「每个账号用派活做了什么、门店执行得怎样、哪些事等老板拍板」。
 
 口径原则（给老板讲得清楚）：
 - 只读派活自己的业务表（任务、内容工单、数字人/成片、工具、会议、店员任务、清单、
@@ -199,7 +199,7 @@ def _todo(tid: int, now: float, branches: dict[int, str], users: dict[int, dict]
                   "WHERE tenant_id=? AND deleted_at IS NULL AND status='submitted' "
                   "ORDER BY submitted_at LIMIT 30", (tid,)):
         items.append({"key": f"staff_review:{r['id']}", "type": "review", "level": "normal",
-                      "label": "店员已交差，等你验收", "title": _title(r["title"]),
+                      "label": "店员已交差，等您验收", "title": _title(r["title"]),
                       "branch_id": r["branch_id"], "branch": branches.get(r["branch_id"] or 0, ""),
                       "who": who(r["assignee_user_id"]), "since": r["submitted_at"],
                       "route": "#/staff-tasks", "dispatchable": False})
@@ -219,7 +219,7 @@ def _todo(tid: int, now: float, branches: dict[int, str], users: dict[int, dict]
             "('open','in_progress','reopened','awaiting_recheck') ORDER BY a.due_at LIMIT 60",
             (tid,)):
         if r["status"] == "awaiting_recheck":
-            label, level, typ = "整改已提交，等你复查", "normal", "recheck"
+            label, level, typ = "整改已提交，等您复查", "normal", "recheck"
         elif r["due_at"] and float(r["due_at"]) < now:
             label, level, typ = "巡店整改逾期", "high", "overdue"
         elif str(r["severity"]) in ("critical", "high"):
@@ -235,15 +235,15 @@ def _todo(tid: int, now: float, branches: dict[int, str], users: dict[int, dict]
                   f"AND deleted_at IS NULL AND LOWER(status) IN ({_in(WAITING)}) "
                   "ORDER BY updated_at LIMIT 20", (tid,)):
         items.append({"key": f"job:{r['id']}", "type": "content", "level": "normal",
-                      "label": "内容等你审稿", "title": _brief_title(r["brief_json"]) or f"内容工单 #{r['id']}",
+                      "label": "内容等您审稿", "title": _brief_title(r["brief_json"]) or f"内容工单 #{r['id']}",
                       "branch_id": None, "branch": "", "who": "AI 内容团队",
                       "since": r["updated_at"], "route": f"#/job/{r['id']}", "dispatchable": False})
     for r in db.q(f"SELECT id,brief_json,employee_name_snapshot,updated_at FROM task "
                   f"WHERE tenant_id=? AND deleted_at IS NULL AND LOWER(status) IN ({_in(WAITING)}) "
                   "ORDER BY updated_at LIMIT 20", (tid,)):
         items.append({"key": f"task:{r['id']}", "type": "content", "level": "normal",
-                      "label": "AI 员工等你确认", "title": _brief_title(r["brief_json"]) or f"任务 #{r['id']}",
-                      "branch_id": None, "branch": "", "who": r["employee_name_snapshot"] or "AI 员工",
+                      "label": "AI 专家等您确认", "title": _brief_title(r["brief_json"]) or f"任务 #{r['id']}",
+                      "branch_id": None, "branch": "", "who": r["employee_name_snapshot"] or "AI 专家",
                       "since": r["updated_at"], "route": f"#/tasks/{r['id']}", "dispatchable": False})
     rank = {"high": 0, "mid": 1, "normal": 2}
     items.sort(key=lambda x: (rank.get(x["level"], 3), float(x["since"] or 0)))
@@ -318,8 +318,16 @@ def _people(tid: int, s: float, e: float, users: dict[int, dict], now: float) ->
                "staff_done": done.get(uid, 0), "overdue": overdue.get(uid, 0),
                "checklists": checklists.get(uid, 0), "last_active": t, "idle_days": idle}
         row["total"] = row["ai_tasks"] + row["dispatched"] + row["staff_done"] + row["checklists"]
-        row["flag"] = ("never" if t is None else "idle" if idle is not None and idle >= IDLE_DAYS
-                       else "overdue" if row["overdue"] else "")
+        # 建号不到 IDLE_DAYS 天的账号还在上手期：不判「从没用过 / N 天没用」，标成 new
+        born = u.get("created_at")
+        age = int((now - float(born)) // 86400) if born else None
+        young = age is not None and age < IDLE_DAYS
+        if t is None:
+            row["flag"] = "new" if young else "never"
+        elif idle is not None and idle >= IDLE_DAYS:
+            row["flag"] = "idle"
+        else:
+            row["flag"] = "overdue" if row["overdue"] else ""
         rows.append(row)
     rows.sort(key=lambda r: (-r["total"], r["id"]))
     return rows
@@ -435,11 +443,17 @@ def _headline(k: dict, todo: list, people: list, stores: list) -> list[str]:
     if high:
         lines.append(f"有 {len(high)} 件事已经逾期，建议先处理。")
     elif todo:
-        lines.append(f"有 {len(todo)} 件事等你拍板。")
+        lines.append(f"有 {len(todo)} 件事等您拍板。")
+    # 新账号(flag=new)不算；店员本来就不派活，按「没交差、没打卡」说，其他账号按「没用派活」说
     idle = [p for p in people if p["flag"] in ("idle", "never") and p["role"] not in ("owner", "root")]
-    if idle:
-        names = "、".join(p["name"] for p in idle[:3])
-        lines.append(f"{names}{'等' if len(idle) > 3 else ''} {len(idle)} 个账号超过 {IDLE_DAYS} 天没用派活。")
+    office = [p for p in idle if p["role"] != "staff"]
+    staff = [p for p in idle if p["role"] == "staff"]
+    if office:
+        names = "、".join(p["name"] for p in office[:3])
+        lines.append(f"{names}{'等' if len(office) > 3 else ''} {len(office)} 个账号超过 {IDLE_DAYS} 天没用派活。")
+    if staff:
+        names = "、".join(p["name"] for p in staff[:3])
+        lines.append(f"{names}{'等' if len(staff) > 3 else ''} {len(staff)} 位店员超过 {IDLE_DAYS} 天没交差、没打卡。")
     weak = [s for s in stores if s.get("needs_attention")]
     if weak:
         lines.append(f"{'、'.join(s['name'] for s in weak[:3])} 需要盯一下。")
@@ -483,7 +497,7 @@ def summary(tid: int, days: Any = DEFAULT_DAYS, *, now: float | None = None) -> 
     kpis = {
         "dispatched": _kpi("派出的活", sum(cr_c.values()), sum(cr_p.values()), "件",
                            "AI 任务、内容、视频、工具、会议和店员任务的新建数"),
-        "ai_done": _kpi("AI 交付", ai_total_c, ai_total_p, "件", "AI 数字员工做完交付的活"),
+        "ai_done": _kpi("AI 交付", ai_total_c, ai_total_p, "件", "AI 专家做完交付的活"),
         "staff_done": _kpi("店员交差", staff_done_c, staff_done_p, "件", "店员拍照交差的任务"),
         "staff_rate": _kpi("店员按时率", st_c["rate"], st_p["rate"], "%",
                            f"到期 {st_c['due']} 件，按时交差 {st_c['on_time']} 件"),
@@ -571,7 +585,7 @@ def export_xlsx(data: Mapping[str, Any]) -> bytes:
         overview.append([k["label"], "—" if k["value"] is None else f"{k['value']}{k['unit']}",
                          "—" if k["prev"] is None else f"上期 {k['prev']}{k['unit']}", k["hint"]])
     sheet("概览", ["指标", "本期", "上期", "说明"], overview, first=True)
-    sheet("员工使用", ["账号", "角色", "门店", "派给AI的活", "派给店员的活", "交差", "清单", "逾期", "最近使用", "未用天数"],
+    sheet("账号使用", ["账号", "角色", "门店", "派给AI的活", "派给店员的活", "交差", "清单", "逾期", "最近使用", "未用天数"],
           [[u["name"], u["role_label"], "、".join(u["branches"]), u["ai_tasks"], u["dispatched"],
             u["staff_done"], u["checklists"], u["overdue"], _fmt_ts(u["last_active"]),
             "" if u["idle_days"] is None else u["idle_days"]] for u in data["people"]])
@@ -585,7 +599,7 @@ def export_xlsx(data: Mapping[str, Any]) -> bytes:
             _fmt_ts(t["created_at"])] for t in data["tracking"]])
     sheet("每日趋势", ["日期", "AI交付", "店员交差", "清单完成"],
           [[d["day"], d["ai"], d["staff"], d["checklist"]] for d in data["trend"]])
-    sheet("AI员工", ["AI 员工", "部门", "交付件数"],
+    sheet("AI专家", ["AI 专家", "部门", "交付件数"],
           [[a["name"], a["dept"], a["count"]] for a in data["ai_employees"]])
     buf = io.BytesIO()
     wb.save(buf)

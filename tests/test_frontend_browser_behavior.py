@@ -166,12 +166,12 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(slow_task_requested.wait(), timeout=5)
             await page.evaluate("location.hash='#/billing'")
             await page.wait_for_function(
-                "document.querySelector('#main')?.textContent.includes('我的积分账户')"
+                "document.querySelector('#main')?.textContent.includes('套餐与点数')"
             )
             await asyncio.sleep(0.9)
 
             text = await page.locator("#main").inner_text()
-            self.assertIn("我的积分账户", text)
+            self.assertIn("套餐与点数", text)
             self.assertNotIn("SLOW OLD TASK MUST NEVER WIN", text)
             self.assertEqual("#/billing", await page.evaluate("location.hash"))
             self._assert_no_browser_errors(browser_errors)
@@ -385,7 +385,7 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
             await page.route("**/api/**", api_route)
             await page.goto(f"{self.base}/static/index.html#/billing")
             await page.wait_for_function(
-                "document.querySelector('#main')?.textContent.includes('我的积分账户')"
+                "document.querySelector('#main')?.textContent.includes('套餐与点数')"
             )
             await page.wait_for_function("window.__eventSources.length === 1")
 
@@ -484,7 +484,7 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
             await page.route("**/api/**", api_route)
             await page.goto(f"{self.base}/static/index.html#/billing")
             await page.wait_for_function(
-                "document.querySelector('#main')?.textContent.includes('我的积分账户')"
+                "document.querySelector('#main')?.textContent.includes('套餐与点数')"
             )
 
             rendered = await page.evaluate(
@@ -657,7 +657,7 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
             await page.route("**/api/**", api_route)
             await page.goto(f"{self.base}/static/index.html#/billing")
             await page.wait_for_function(
-                "document.querySelector('#main')?.textContent.includes('我的积分账户')"
+                "document.querySelector('#main')?.textContent.includes('套餐与点数')"
             )
 
             result = await page.evaluate(
@@ -971,7 +971,7 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
             await page.route("**/api/**", api_route)
             await page.goto(f"{self.base}/static/index.html#/billing")
             await page.wait_for_function(
-                "document.querySelector('#main')?.textContent.includes('我的积分账户')"
+                "document.querySelector('#main')?.textContent.includes('套餐与点数')"
             )
 
             result = await page.evaluate(
@@ -1126,7 +1126,7 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
             self._assert_no_browser_errors(browser_errors)
             await browser.close()
 
-    async def test_must_change_password_blocks_shell_data_and_returns_to_login(self):
+    async def test_must_change_password_blocks_shell_data_and_enters_app(self):
         requested_api_paths: list[str] = []
         password_payloads: list[dict] = []
         auth_payload = {
@@ -1162,7 +1162,15 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
                     password_payloads.append(
                         json.loads(route.request.post_data or "{}")
                     )
+                    auth_payload["must_change_password"] = False
+                    auth_payload["password_change_needs_old"] = True
                     payload = {"ok": True}
+                elif path == "/api/state":
+                    payload = {"jobs": [], "inbox": [], "notifications": []}
+                elif path == "/api/employees":
+                    payload = []
+                elif path == "/api/task-center":
+                    payload = {"items": [], "total": 0, "counts": {}}
                 else:
                     payload = {}
                 await route.fulfill(
@@ -1189,7 +1197,7 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("任务中心", await page.locator("#nav").inner_text())
             main_text = await page.locator("#main").inner_text()
             self.assertIn("请先设置您自己的密码", main_text)
-            self.assertIn("之后就能正常查看任务和使用数字员工", main_text)
+            self.assertIn("之后就能正常使用派活", main_text)
             self.assertEqual(1, await page.locator("#main .card").count())
             self.assertNotIn("/api/meta", requested_api_paths)
             self.assertNotIn("/api/state", requested_api_paths)
@@ -1198,15 +1206,85 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
             await page.locator("#forced-pw-old").fill("LegacyPass123!")
             await page.locator("#forced-pw-new").fill("FreshPassword456!")
             await page.locator("#forced-pw-confirm").fill("FreshPassword456!")
-            await page.get_by_role("button", name="保存新密码").click()
-            await page.wait_for_url("**/login", timeout=3000)
+            # 在最后一个输入框按回车即可提交。
+            await page.locator("#forced-pw-confirm").press("Enter")
+            await page.wait_for_function(
+                "!document.querySelector('#main')?.textContent.includes('请先设置您自己的密码')",
+                timeout=5000,
+            )
 
             self.assertEqual(
                 [{"old": "LegacyPass123!", "new": "FreshPassword456!"}],
                 password_payloads,
             )
-            self.assertNotIn("/api/meta", requested_api_paths)
-            self.assertEqual("/login", urlparse(page.url).path)
+            # 改密成功后直接进入工作台，不再跳回登录页。
+            self.assertIn("/api/meta", requested_api_paths)
+            self.assertNotEqual("/login", urlparse(page.url).path)
+            self.assertNotIn("账号安全升级", await page.locator("#nav").inner_text())
+            self._assert_no_browser_errors(browser_errors)
+            await browser.close()
+
+    async def test_fresh_forced_password_change_hides_current_password(self):
+        password_payloads: list[dict] = []
+        auth_payload = {
+            "id": 10,
+            "username": "first-login-test",
+            "role": "owner",
+            "tenant": "浏览器测试企业",
+            "modules": ["content"],
+            "all_modules": [],
+            "must_change_password": True,
+            "password_change_needs_old": False,
+        }
+
+        async with async_playwright() as playwright:
+            browser = await _launch_chromium(playwright, self.executable)
+            page = await browser.new_page()
+            browser_errors = self._capture_unexpected_browser_errors(page)
+            await page.add_init_script(
+                "window.EventSource = class { constructor(){} close(){} };"
+            )
+
+            async def api_route(route):
+                path = urlparse(route.request.url).path
+                if path == "/api/auth/me":
+                    payload = auth_payload
+                elif path == "/api/auth/password":
+                    password_payloads.append(
+                        json.loads(route.request.post_data or "{}")
+                    )
+                    auth_payload["must_change_password"] = False
+                    auth_payload["password_change_needs_old"] = True
+                    payload = {"ok": True}
+                elif path == "/api/state":
+                    payload = {"jobs": [], "inbox": [], "notifications": []}
+                elif path == "/api/employees":
+                    payload = []
+                elif path == "/api/task-center":
+                    payload = {"items": [], "total": 0, "counts": {}}
+                else:
+                    payload = {}
+                await route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(payload, ensure_ascii=False),
+                )
+
+            await page.route("**/api/**", api_route)
+            await page.goto(f"{self.base}/static/index.html#/tasks")
+            await page.wait_for_function(
+                "document.querySelector('#main')?.textContent.includes('请先设置您自己的密码')"
+            )
+            self.assertEqual(0, await page.locator("#forced-pw-old").count())
+            await page.locator("#forced-pw-new").fill("FreshPassword456!")
+            await page.locator("#forced-pw-confirm").fill("FreshPassword456!")
+            await page.locator("#forced-pw-confirm").press("Enter")
+            await page.wait_for_function(
+                "!document.querySelector('#main')?.textContent.includes('请先设置您自己的密码')",
+                timeout=5000,
+            )
+            self.assertEqual([{"new": "FreshPassword456!"}], password_payloads)
+            self.assertNotEqual("/login", urlparse(page.url).path)
             self._assert_no_browser_errors(browser_errors)
             await browser.close()
 
@@ -1461,15 +1539,15 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
             async def api_route(route):
                 parsed = urlparse(route.request.url)
                 if parsed.path == "/api/boss/dashboard/summary":
-                    days = int(parse_qs(parsed.query).get("days", ["30"])[0])
-                    if days == 7:
+                    days = int(parse_qs(parsed.query).get("days", ["7"])[0])
+                    if days == 30:
                         stale_started.set()
                         await release_stale.wait()
-                        payload = summary(7, "STALE-7")
-                    elif days == 60:
-                        payload = summary(60, "CURRENT-60")
+                        payload = summary(30, "STALE-30")
+                    elif days == 90:
+                        payload = summary(90, "CURRENT-90")
                     else:
-                        payload = summary(30, "INITIAL-30")
+                        payload = summary(7, "INITIAL-7")
                 else:
                     payload = common.get(parsed.path, {})
                 await route.fulfill(
@@ -1481,23 +1559,23 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
             await page.route("**/api/**", api_route)
             await page.goto(f"{self.base}/static/index.html#/boss")
             await page.wait_for_function(
-                "document.querySelector('#main')?.textContent.includes('INITIAL-30')"
+                "document.querySelector('#main')?.textContent.includes('INITIAL-7')"
             )
 
-            await page.evaluate("void bossDashDays(7)")
+            await page.evaluate("void bossDashDays(30)")
             await asyncio.wait_for(stale_started.wait(), timeout=5)
-            await page.evaluate("void bossDashDays(60)")
+            await page.evaluate("void bossDashDays(90)")
             await page.wait_for_function(
-                "document.querySelector('#main')?.textContent.includes('CURRENT-60')"
+                "document.querySelector('#main')?.textContent.includes('CURRENT-90')"
             )
             release_stale.set()
             await asyncio.sleep(0.2)
 
             main_text = await page.locator("#main").inner_text()
-            self.assertIn("CURRENT-60", main_text)
-            self.assertNotIn("STALE-7", main_text)
+            self.assertIn("CURRENT-90", main_text)
+            self.assertNotIn("STALE-30", main_text)
             self.assertEqual(
-                {"days": 60, "industry": "CURRENT-60"},
+                {"days": 90, "industry": "CURRENT-90"},
                 await page.evaluate(
                     "({days:BOSS_DASH_DATA.period.days,"
                     "industry:BOSS_DASH_DATA.scope.industry_name})"

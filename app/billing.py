@@ -12,6 +12,7 @@
 平台自有租户(id=1,老板本人)不扣点。
 """
 import json
+import re
 import logging
 import time
 import uuid
@@ -115,6 +116,119 @@ def prices() -> dict:
     return {**saved, **missing} if missing else saved
 
 
+# 给客户看的价目名：只换显示名，不改价目表里的 label（扣点流水按 label 记账、归类），
+# 也不改点数和动作 key。平台方（boss）照旧看带供应商的原名。
+PUBLIC_LABELS = {
+    # 门店日常
+    "staff_parse": "一句话派活（AI 帮您拆成任务）",
+    "staff_ai_check": "店员交差（AI 先看照片）",
+    "cockpit_ai": "数据驾驶舱 AI 经营分析",
+    # 找专家
+    "expert_task": "请 AI 专家办一件事 / 答一个问题",
+    "learn": "AI 专家上网学新本事",
+    # 做内容
+    "content_job": "写一整篇带配图的营销内容",
+    "hot_pick": "今天发什么（热点扫描）",
+    "menu_copy": "看图写卖点 / 菜单文案",
+    "product_shot": "产品图美化",
+    "censor_check": "发之前深度检查一遍",
+    "censor_retro": "发完后数据复盘",
+    "wechat_draft": "一键存进公众号草稿箱（含终审）",
+    "pcal": "一整月的私域内容日历",
+    "warmup": "新账号 30 天起号计划",
+    "leads": "找潜在客户线索",
+    "bench_watch": "竞品每周动态",
+    "link_extract": "把爆款视频拆成口播稿",
+    "matrix_variants": "一篇口播改写成多个版本",
+    # 做视频
+    "avatar_basic": "数字人视频·基础版",
+    "avatar_video": "数字人口播视频（30 秒内）",
+    "avatar_video_60": "数字人口播视频（31–60 秒）",
+    "avatar_sales": "AI 带货短片(15秒)",
+    "text_video": "图文一键转成视频",
+    "studio_scene": "老板进店场景照（每张）",
+    "studio_topics": "72 小时行业热点选题",
+    "studio_script": "按选题写口播稿",
+    "studio_pack": "自动剪辑 + 封面 + 三平台发布包",
+}
+# 价目表分组（只用于显示）：门店日常排第一，其后找专家、做内容、做视频；没列到的归「其他」。
+PRICE_GROUPS = (
+    ("store", "门店日常", ("staff_parse", "staff_ai_check", "cockpit_ai")),
+    ("expert", "找专家", ("expert_task", "learn")),
+    ("content", "做内容", ("content_job", "hot_pick", "menu_copy", "product_shot", "censor_check",
+                         "censor_retro", "wechat_draft", "pcal", "warmup", "leads", "bench_watch",
+                         "link_extract", "matrix_variants")),
+    ("video", "做视频", ("avatar_basic", "avatar_video", "avatar_video_60", "avatar_sales",
+                       "voice_clone", "text_video", "studio_scene", "studio_topics",
+                       "studio_script", "studio_pack")),
+)
+_PRICE_GROUP_OF = {action: (key, label, order)
+                   for order, (key, label, actions) in enumerate(PRICE_GROUPS)
+                   for action in actions}
+
+
+def price_group(action: str) -> dict:
+    """价目动作属于哪一组（显示用），不认识的动作归「其他」排最后。"""
+    key, label, order = _PRICE_GROUP_OF.get(str(action or ""), ("other", "其他", len(PRICE_GROUPS)))
+    return {"group": key, "group_label": label, "group_order": order}
+_SUPPLIER_WORDS = ("runninghub", "seedance", "可灵", "kling", "heygen", "豆包", "即梦",
+                   "doubao", "deepseek", "minimax", "elevenlabs", "海螺", "云雾")
+
+
+def _has_supplier(text: str) -> bool:
+    low = str(text or "").lower()
+    return any(word in low for word in _SUPPLIER_WORDS)
+
+
+def _strip_suppliers(text: str) -> str:
+    """去掉文字里的供应商片段：按「·」「/」切开，只留不含供应商名的片段。"""
+    parts = re.split(r"\s*[·/]\s*", text)
+    kept = [part for part in parts if part and not _has_supplier(part)]
+    return "·".join(kept)
+
+
+def public_label(action: str, label: str) -> str:
+    """价目名的客户版：默认价目用固定的能力名，后台改过的名字按规则去掉供应商名。"""
+    text = str(label or action or "")
+    default = (DEFAULT_PRICES.get(action) or {}).get("label")
+    if action in PUBLIC_LABELS and text == default:
+        return PUBLIC_LABELS[action]
+    if not _has_supplier(text):
+        return text
+
+    def _paren(match):
+        inner = _strip_suppliers(match.group(2))
+        return f"{match.group(1)}{inner}{match.group(3)}" if inner else ""
+
+    text = re.sub(r"([（(])([^（）()]*)([）)])", _paren, text)
+    if _has_supplier(text):
+        text = _strip_suppliers(text)
+    return text.strip() or str(action or "")
+
+
+def public_reason(reason: str) -> str:
+    """流水里的项目名同样换成客户版（去供应商名、默认价目用白话名；只改显示，退款和扣款同一规则）。"""
+    text = str(reason or "")
+    plain_hit = any(text.split(" · ", 1)[0].removeprefix("退回:").removeprefix("退回：").strip()
+                    == row.get("label") and action in PUBLIC_LABELS
+                    for action, row in DEFAULT_PRICES.items())
+    if not _has_supplier(text) and not plain_hit:
+        return text
+    prefix = ""
+    for head in ("退回:", "退回："):
+        if text.startswith(head):
+            prefix, text = head, text[len(head):]
+            break
+    core, sep, tail = text.partition(" · ")
+    for action, row in DEFAULT_PRICES.items():
+        if core.strip() == row.get("label"):
+            core = public_label(action, core.strip())
+            break
+    else:
+        core = public_label("", core)
+    return f"{prefix}{core}{sep}{tail}"
+
+
 # “1 点能做什么”：给老板看的大白话说明。这里只定说法，点数一律取自 prices()，
 # 后台改价后说明自动跟着变，不在前端写死。
 POINT_EXAMPLES = (
@@ -151,6 +265,48 @@ def balance(tid: int = None) -> float:
     tid = tid or auth.tenant_id()
     r = db.one("SELECT balance FROM tenants WHERE id=?", (tid,))
     return (r or {}).get("balance") or 0
+
+
+def points_flags(tid: int, bal) -> dict:
+    """给看不到余额的成员:只说「点数够不够」,不带具体余额。
+
+    points_ok:够不够最便宜的一个动作;points_ok_by_cost:按价目表里出现过的每个点数
+    (键是去掉多余小数的字符串,如 "0.2"、"18")给一个布尔值,前端按按钮的点数查表。
+    平台自有租户(1)免扣,恒为够。
+    """
+    costs = set()
+    for row in prices().values():
+        try:
+            pts = float((row or {}).get("points") or 0)
+        except (TypeError, ValueError):
+            continue
+        if pts > 0:
+            costs.add(pts)
+    free = int(tid or 0) == 1
+    try:
+        have = float(bal or 0)
+    except (TypeError, ValueError):
+        have = 0.0
+
+    def key(pts: float) -> str:
+        return str(int(pts)) if float(pts).is_integer() else f"{pts:g}"
+
+    by_cost = {key(c): (free or have >= c) for c in sorted(costs)}
+    cheapest = min(costs) if costs else 0
+    return {"points_ok": bool(free or have >= cheapest), "points_ok_by_cost": by_cost}
+
+
+_BALANCE_IN_TEXT = re.compile(r"[,，、;；]?\s*(?:当前)?余额\s*-?[\d.]+\s*点")
+
+
+_RECHARGE_HINT = re.compile(r"请充值[^。]*。?")
+
+
+def hide_balance_text(text: str) -> str:
+    """把「点数不足:本次需 18 点,余额 5 点。请充值或升级套餐」改成成员能看的说法:
+    去掉余额数字,充值引导换成「点数由老板管理，请联系老板充值」。"""
+    out = _BALANCE_IN_TEXT.sub("", str(text or ""))
+    return _RECHARGE_HINT.sub("点数由老板管理，请联系老板充值。", out)
 
 
 class InsufficientPoints(Exception):
