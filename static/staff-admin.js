@@ -111,8 +111,26 @@
       ${d.error?`<div class="sa-hint" role="alert">❌ ${h(d.error)}</div>`:""}
     </div>`;
   }
+  /* 只有一家店时，「哪家店」不用再选：门店信息晚到（刚建完店就来派活）时也补上 */
+  function fillOnlyBranch(){
+    const branches = (SA.meta&&SA.meta.branches)||[];
+    if(branches.length!==1) return;
+    for(const d of SA.drafts){ if(!d.sent && !d.branch_id) d.branch_id = branches[0].id; }
+  }
+  /* 这家企业还没有任何店长 / 店员账号：派出去的活没人能在手机上看到 */
+  function noStaffYet(){
+    const branches = (SA.meta&&SA.meta.branches)||[];
+    return branches.length>0 && branches.every(x=>!(x.members||[]).length);
+  }
+  function noStaffHint(){
+    if(!noStaffYet()) return "";
+    let canOpen = false;
+    try{ canOpen = typeof ME!=="undefined" && !!ME && (ME.role==="owner"||ME.role==="root"); }catch(_){}
+    return `<div class="notice" id="sa-nostaff" style="margin:0 0 10px">还没有店长或店员账号，派出去的活暂时没人能在手机上看到。${canOpen?` <a href="#/team">去开账号 ›</a>`:"请老板先开账号。"}</div>`;
+  }
   function drawDrafts(){
     const box = document.getElementById("sa-drafts"); if(!box) return;
+    fillOnlyBranch();
     const waiting = SA.drafts.filter(d=>!d.sent).length;
     box.innerHTML = SA.drafts.length ? SA.drafts.map(draftHtml).join("")
       + `<div class="actions" style="margin-top:10px">
@@ -140,6 +158,7 @@
   }
   async function sendAll(){
     if(SA.sending) return;
+    fillOnlyBranch();
     const todo = SA.drafts.filter(d=>!d.sent);
     // 一次校验所有字段:每件活里没填的项都标红,不是只报第一个
     for(const d of todo){
@@ -167,7 +186,8 @@
       }catch(e){ d.error = e.message; }
     }
     SA.sending = false;
-    toast(ok===todo.length ? `✅ 派出去 ${ok} 件,店员手机上能看到` : `派出去 ${ok} 件,还有 ${todo.length-ok} 件没成功`);
+    const seen = noStaffYet() ? "还没有店员账号，开了账号店员才能看到" : "店员手机上能看到";
+    toast(ok===todo.length ? `✅ 派出去 ${ok} 件，${seen}` : `派出去 ${ok} 件，还有 ${todo.length-ok} 件没成功`);
     if(ok>0){ try{ window.markSetupChanged?.({staff_task:true}); }catch(_){} }   // 上手卡「派第一件活」立刻打勾
     if(SA.drafts.every(d=>d.sent)) SA.drafts = [];
     await loadList(); draw();
@@ -330,6 +350,7 @@
     const dispatchCard = folded
       ? `<div class="card sa-one" id="sa-dispatch"><button type="button" class="btn" onclick="PH_STAFF_ADMIN._openDispatchBox()" ${!m.branches.length?"disabled":""}>＋ 派一件新活</button></div>`
       : `<div class="card sa-one" id="sa-dispatch">
+        ${noStaffHint()}
         <h3 style="margin-top:0">🗣️ 一句话派活</h3>
         <textarea id="sa-one" maxlength="500" placeholder="比如:人民路店明天中午前把冷柜清一遍,拍照给我">${h(SA.oneText||"")}</textarea>
         <div class="actions">

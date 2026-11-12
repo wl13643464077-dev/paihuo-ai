@@ -273,6 +273,27 @@ class TeamCreateMobileTests(unittest.IsolatedAsyncioTestCase):
             self._assert_no_browser_errors(errors)
             await browser.close()
 
+    async def test_single_store_is_preselected_and_no_staff_is_said_plainly(self):
+        # 只有一家店：「哪家店」自动选上；还没有店员账号：页面和派出后的提示都如实说
+        meta = {"can_dispatch": True, "can_review": True, "sees_all": True, "role_label": "老板",
+                "ai_check_enabled": False, "prices": {"staff_parse": 0.2, "staff_ai_check": 0.2},
+                "branches": [{"id": 6, "name": "忘记火锅·春熙路店", "members": []}]}
+        async with async_playwright() as playwright:
+            browser, page, errors = await self._open(
+                playwright, "#/staff-tasks", {"/api/staff/meta": meta,
+                                              "/api/staff/tasks": {"items": [], "next_before_id": None}})
+            await page.wait_for_selector("#sa-nostaff")
+            hint = await page.locator("#sa-nostaff").inner_text()
+            self.assertIn("还没有店长或店员账号", hint)
+            self.assertEqual("#/team", await page.locator("#sa-nostaff a").get_attribute("href"))
+            await page.get_by_role("button", name="✍️ 手动派一件").click()
+            self.assertEqual("6", await page.locator("[data-sa-draft='0'] select").first.input_value())
+            # 门店信息晚到的草稿(branch_id 为空)在重画时也会补上
+            await page.evaluate("PH_STAFF_ADMIN._set(0,'branch_id','',true)")
+            self.assertEqual("6", await page.locator("[data-sa-draft='0'] select").first.input_value())
+            self._assert_no_browser_errors(errors)
+            await browser.close()
+
 
 if __name__ == "__main__":
     unittest.main()
