@@ -9,7 +9,10 @@
 本次整合保留已上线的品牌知识包、品牌活动图、协同小队和多轮修改功能。原离线升级包的
 v58/v59/v60 与线上迁移号重叠，现将成员门店分配、微信支付订单、店员任务分别续排到
 v62/v63/v64。迁移按实体幂等补齐，保留已有历史账本和业务数据；不要把原 v60 包直接部署到 v61 线上库。
-本次使用已有不可变发布体系（`contentcrew.service`）；不切换到简易部署服务。
+> **历史说明：** 本文保留的是本次 schema64 升级的业务影响和数据迁移注意事项。
+> 当时使用的不可变发布链已经停用；当前生产发布统一使用
+> [`deploy/simple/README.md`](../deploy/simple/README.md)，不要按本文旧的固定
+> launcher、旧服务或 `deploy/DEPLOYMENT.md` 操作。
 
 ---
 
@@ -63,16 +66,16 @@ v62/v63/v64。迁移按实体幂等补齐，保留已有历史账本和业务数
 ## 三、上线前运维必做
 
 - [ ] 读完本说明，确认上线时间窗口（停服通常 1 分钟内，但请选在门店营业低峰）。
-- [ ] **备份**：`sudo systemctl start paihuo-backup-simple.service`（或旧体系的
-      `paihuo-backup.service`），确认 `/var/backups/paihuo/` 里有刚生成的 `db-*.db`。
+- [ ] **备份**：`sudo systemctl start paihuo-backup-simple.service`，确认
+      `/var/backups/paihuo/` 里有刚生成的 `db-*.db`。
 - [ ] 确认 `/etc/paihuo/paihuo.env` 已离线另存一份（配置加密密钥丢了，后台填过的所有密钥都读不出来）。
 - [ ] 确认磁盘剩余空间 ≥ 数据库大小 × 2 + 2GB。
 - [ ] 更新 `/etc/caddy/Caddyfile` 为新版 `deploy/Caddyfile`（换成自己的域名），`caddy validate` 后 reload。
-- [ ] 新服务器或想换用简易通道的：按 `deploy/simple/README.md` 装好 `paihuo.service`；
-      旧体系服务器切换时先 `systemctl disable --now contentcrew.service`。
+- [ ] 按 `deploy/simple/README.md` 装好并验收 `paihuo.service`；如果服务器还留有旧
+      `contentcrew.service`，先确认它已停止，再由运维按交接单完成旧 unit 清理。
 - [ ] 演练：在生产备份的独立副本上迁移至 v64，核对原表数据、点数和完整性，并重复启动验证幂等。
-- [ ] 正式发布：按 `deploy/DEPLOYMENT.md` 构建、校验、封印依赖并通过固定升级入口发布；
-      确认发布回执为 `status=succeeded, phase=complete`。保留停服最终快照及关联的旧制品。
+- [ ] 正式发布：按 `deploy/simple/README.md` 执行预检、备份、发布和健康检查；
+      保留停服最终快照及关联的当前/上一版本。旧版 `deploy/DEPLOYMENT.md` 仅为停用说明。
 - [ ] 通知所有老板：① 去团队页给店长/店员分配负责门店、补手机号；② 高风险功能已默认关闭；
       ③ 数字人需要勾选授权；④ 内容默认带 AI 生成标识。
 

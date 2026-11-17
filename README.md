@@ -99,12 +99,9 @@ node --check static/app.js
 
 ## 部署
 
-两种方式，二选一：
-
-1. **简易部署（推荐 1–2 人团队）**：一条命令发布、失败自动回滚，见
-   [deploy/simple/README.md](deploy/simple/README.md)。
-2. **不可变发布体系**：确定性构建制品、独立验证、固定运维代码，见
-   [deploy/DEPLOYMENT.md](deploy/DEPLOYMENT.md)。
+当前生产只使用**简易部署通道**：一条命令发布、失败自动回滚，见
+[deploy/simple/README.md](deploy/simple/README.md)。旧不可变发布体系已经停用；
+[deploy/DEPLOYMENT.md](deploy/DEPLOYMENT.md) 仅保留停用说明，不能作为生产操作手册。
 
 备份与恢复见 [deploy/BACKUP_RECOVERY.md](deploy/BACKUP_RECOVERY.md)。
 从旧版本（数据库 v57 或已上线的 v61）升级到本版本前，务必先读
