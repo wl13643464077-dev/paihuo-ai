@@ -380,6 +380,8 @@ class R7NamesDueBrowserTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("累计消耗 0", kv)
             for bad in ("-0", "−0", "+0"):
                 self.assertNotIn(bad, kv)
+            # 账单明细默认收起(第七轮 A 组)，先展开再读表
+            await page.evaluate("document.querySelector('#billing-ledger').open=true")
             rows = await page.evaluate(
                 "[...document.querySelectorAll('#main .dimtable')]"
                 ".find(t=>t.innerText.includes('月份'))"

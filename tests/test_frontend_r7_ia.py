@@ -417,7 +417,10 @@ class FrontendInfoArchitectureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"boss":bossRedirectView', app_js)
         self.assertIn('location.replace("#/cockpit")', app_js)
         self.assertNotIn('route:"boss"', app_js)
-        self.assertNotIn("#/boss\"", app_js.replace('旧地址 #/boss', ""))
+        # 唯一保留的入口：平台管理员工作台的「各企业看板」(跨企业切换只有老板看板有)
+        self.assertIn('if(ME?.role==="root") return bossDashboardView();', app_js)
+        self.assertEqual(1, app_js.count('href="#/boss"'))
+        self.assertIn('<a class="btn" href="#/boss">📈 各企业看板</a>', app_js)
         # 后端接口和看板服务层保留
         self.assertTrue(os.path.exists(os.path.join(root, "app", "bossdashboard.py")))
         self.assertIn('api("/auth/password",{method:"PUT"', app_js)
