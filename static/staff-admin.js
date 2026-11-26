@@ -23,26 +23,26 @@
     const st = document.createElement("style");
     st.id = "ph-sa-style";
     st.textContent = `
-.sa-draft{border:2px dashed rgba(51,41,31,.35);border-radius:14px;padding:12px;margin-top:10px;background:#fffdf7}
-.sa-draft.sa-sent{opacity:.6;border-style:solid;background:#eefaf1}
+.sa-draft{border:1px solid var(--line);border-radius:14px;padding:12px;margin-top:10px;background:#fffdf7}
+.sa-draft.sa-sent{opacity:.6;border-style:solid;background:var(--ok-bg)}
 .sa-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-top:8px}
-.sa-grid label{display:block;font-weight:800;font-size:13px;margin-bottom:3px}
-.sa-grid input,.sa-grid select{width:100%;box-sizing:border-box;min-height:42px;font-size:15px}
+.sa-grid label{display:block;font-weight:600;font-size:13px;margin-bottom:3px}
+.sa-grid input,.sa-grid select{width:100%;box-sizing:border-box;min-height:var(--h-md);font-size:15px}
 .sa-hint{font-size:13px;color:#b35c00;margin-top:6px}
-.sa-task{border:2px solid rgba(51,41,31,.22);border-radius:14px;padding:12px;margin-top:10px;background:#fff}
-.sa-task.sa-over{border-color:#e03131;background:#fff5f5}
+.sa-task{border:1px solid var(--line);border-radius:14px;padding:12px;margin-top:10px;background:#fff}
+.sa-task.sa-over{border-color:var(--bad-line);background:var(--bad-bg);box-shadow:inset 3px 0 0 var(--bad)}
 .sa-task.sa-focus{outline:3px solid #ffd166}
 .sa-photos{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;margin-top:8px}
 .sa-photos a{display:block;cursor:zoom-in}
-.sa-photos img{width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:9px;border:2px solid rgba(51,41,31,.3);display:block}
+.sa-photos img{width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:9px;border:1px solid var(--line);display:block}
 @media(max-width:520px){.sa-photos{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .sa-viewer{position:fixed;inset:0;z-index:1000;background:rgba(20,16,12,.92);display:flex;align-items:center;justify-content:center;padding:56px 12px 64px}
 .sa-viewer img{max-width:100%;max-height:100%;object-fit:contain;border-radius:8px;background:#fff}
-.sa-viewer button{position:absolute;min-width:48px;min-height:48px;border:2px solid #fff;border-radius:24px;background:rgba(0,0,0,.4);color:#fff;font-size:22px;font-weight:900;cursor:pointer}
+.sa-viewer button{position:absolute;min-width:48px;min-height:48px;border:2px solid #fff;border-radius:24px;background:rgba(0,0,0,.4);color:#fff;font-size:22px;font-weight:700;cursor:pointer}
 .sa-viewer .vx{top:10px;right:10px}.sa-viewer .vp{left:10px;bottom:10px}.sa-viewer .vn{right:10px;bottom:10px}
-.sa-viewer .vc{position:absolute;bottom:22px;left:0;right:0;text-align:center;color:#fff;font-weight:800;pointer-events:none}
+.sa-viewer .vc{position:absolute;bottom:22px;left:0;right:0;text-align:center;color:#fff;font-weight:600;pointer-events:none}
 .sa-one .actions{align-items:flex-start}
-.sa-ask{border:2px solid #f4a261;background:#fff6dc;border-radius:12px;padding:10px 12px;margin-top:8px}
+.sa-ask{border:1px solid var(--warn-line);background:var(--brand-soft);border-radius:12px;padding:10px 12px;margin-top:8px}
 .sa-ask .actions{margin-top:8px}
 .sa-filtered{font-size:13px;font-weight:700;color:#8b7355}
 .sa-ai{border-radius:10px;padding:7px 10px;margin-top:8px;font-weight:700;font-size:14px}
@@ -50,10 +50,10 @@
 .sa-events{margin:8px 0 0 18px;font-size:13px}
 .sa-one textarea{width:100%;box-sizing:border-box;min-height:74px;font-size:16px}
 .sa-more .tm-row-more-box{left:0;right:auto;min-width:210px}
-.sa-more .tm-row-more-box label{font-weight:800;font-size:13px;margin:0}
+.sa-more .tm-row-more-box label{font-weight:600;font-size:13px;margin:0}
 .sa-more .tm-row-more-box select{width:100%;min-height:44px;font-size:15px}
 .sa-more .tm-row-more-box .btn{min-height:44px}
-.sa-task .due-over{color:#c92a2a;font-weight:800}
+.sa-task .due-over{color:#c92a2a;font-weight:600}
 `;
     document.head.appendChild(st);
   }
@@ -305,7 +305,7 @@
     const rejected = t.status==="todo" && t.review_note && t.reviewed_at;
     // meta 每一段都是已转义的 HTML(截止时间那段带 title)
     const meta = [h(t.branch_name), h(t.assignee_name?`👤 ${t.assignee_name}`:"👤 还没指定人"), dueLine(t),
-      (t.dispatcher_label||t.created_by_name)?h(`${t.dispatcher_label||t.created_by_name} 派的`):"", t.remind_count?h(`已催 ${t.remind_count} 次`):""].filter(Boolean);
+      (t.dispatcher_label||t.created_by_name)?h((l=>/[）)]$/.test(l)?`${l}派的`:`${l} 派的`)(String(t.dispatcher_label||t.created_by_name))):"", t.remind_count?h(`已催 ${t.remind_count} 次`):""].filter(Boolean);
     const cancelBtn = ["todo","submitted"].includes(t.status)?`<button type="button" class="btn sm" onclick="PH_STAFF_ADMIN._cancel(${t.id})">取消这件</button>`:"";
     const eventsBtn = `<button type="button" class="btn sm" onclick="PH_STAFF_ADMIN._events(${t.id})">🕘 经过</button>`;
     const open = ["todo","submitted"].includes(t.status);
@@ -384,8 +384,8 @@
         <textarea id="sa-one" maxlength="500" placeholder="比如：人民路店明天中午前把冷柜清一遍，拍照给我">${h(SA.oneText||"")}</textarea>
         <div class="actions">
           ${price&&typeof costButton==="function"
-            ?costButton({label:"✨ 拆成任务",onclick:"PH_STAFF_ADMIN._parse()",cost:price,disabled:SA.parsing||!m.branches.length,disabledLabel:SA.parsing?"AI 正在拆…":""})
-            :`<button type="button" class="btn pri" onclick="PH_STAFF_ADMIN._parse()" ${SA.parsing||!m.branches.length?"disabled":""}>${SA.parsing?"AI 正在拆…":"✨ 拆成任务"}</button>`}
+            ?costButton({label:"拆成任务",attrs:'data-ic="sparkles"',onclick:"PH_STAFF_ADMIN._parse()",cost:price,disabled:SA.parsing||!m.branches.length,disabledLabel:SA.parsing?"AI 正在拆…":""})
+            :`<button type="button" class="btn pri" data-ic="sparkles" onclick="PH_STAFF_ADMIN._parse()" ${SA.parsing||!m.branches.length?"disabled":""}>${SA.parsing?"AI 正在拆…":"拆成任务"}</button>`}
           <button type="button" class="btn" onclick="PH_STAFF_ADMIN._add()" ${!m.branches.length?"disabled":""}>✍️ 手动派一件</button>
           <a class="btn" href="/staff" target="_blank" rel="noopener">📱 看店员手机版</a>
         </div>

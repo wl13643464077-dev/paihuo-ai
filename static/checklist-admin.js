@@ -18,18 +18,18 @@
       .ck-head{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:12px}
       .ck-head h2{margin:0}
       .ck-sum{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:8px 0 4px}
-      .ck-sum div{background:#fff;border:2px solid var(--ink);border-radius:14px;padding:8px 6px;text-align:center}
+      .ck-sum div{background:#fff;border:1px solid var(--line);border-radius:14px;padding:8px 6px;text-align:center}
       .ck-sum b{display:block;font-size:22px}
       .ck-sum span{font-size:13px;color:var(--ink2)}
       .ck-store{padding:14px 16px}
       .ck-store-top{display:flex;gap:10px;align-items:center;justify-content:space-between;cursor:pointer;font-size:16px}
-      .ck-bar{height:10px;border:2px solid var(--ink);border-radius:99px;background:#f0e4c8;overflow:hidden;margin-top:8px}
-      .ck-bar i{display:block;height:100%;background:#8ee6bd}
-      .ck-run{border-top:1.5px dashed var(--line);padding:10px 0 4px;font-size:15px}
+      .ck-bar{height:8px;border-radius:99px;background:var(--sunken);overflow:hidden;margin-top:8px}
+      .ck-bar i{display:block;height:100%;background:var(--ok)}
+      .ck-run{border-top:1px solid var(--line);padding:10px 0 4px;font-size:15px}
       .ck-run-top{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
       .ck-items{margin:8px 0 0;padding:0;list-style:none}
       .ck-items li{display:flex;gap:8px;align-items:flex-start;padding:5px 0;font-size:14px}
-      .ck-items .ok{color:var(--ok);font-weight:900}
+      .ck-items .ok{color:var(--ok);font-weight:700}
       .ck-items .no{color:var(--ink2)}
       .ck-items a{white-space:nowrap}
       .ck-tpl{padding:14px 16px}
@@ -38,17 +38,20 @@
       .ck-edit-row input[type=text]{flex:1;min-width:0;font-size:16px}
       .ck-edit-row label{white-space:nowrap;font-size:14px;display:flex;gap:4px;align-items:center}
       .ck-rank{display:flex;gap:12px;align-items:flex-start;padding:14px 16px}
-      .ck-rank.warn{background:#fff1f1}
-      .ck-rank-no{flex:none;width:42px;height:42px;border-radius:50%;border:2.5px solid var(--ink);display:flex;align-items:center;justify-content:center;font-weight:900;font-size:18px;background:#fff}
-      .ck-rank-no.top{background:#ffd166}
+      .ck-rank.warn{box-shadow:inset 3px 0 0 var(--bad),var(--shadow-1)}
+      .ck-rank-no{flex:none;width:42px;height:42px;border-radius:50%;border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:18px;background:#fff}
+      .ck-rank-no.top{background:var(--brand);border-color:var(--brand-d)}
       .ck-rank-no.warn{background:#fff;border-color:var(--bad);color:var(--bad)}
-      .ck-rank-no.none{background:#f3ede0;color:var(--ink2);border-color:rgba(51,41,31,.35)}
+      .ck-rank-no.none{background:var(--sunken);color:var(--ink2)}
       .ck-rank-body{flex:1;min-width:0}
-      .ck-rank-score{font-size:26px;font-weight:900;line-height:1}
-      .ck-delta{font-size:13px;font-weight:800;margin-left:6px}
+      .ck-rank-score{font-size:26px;font-weight:700;line-height:1}
+      .ck-delta{font-size:13px;font-weight:600;margin-left:6px}
       .ck-delta.up{color:var(--ok)} .ck-delta.down{color:var(--bad)}
       .ck-parts{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;margin-top:8px;font-size:13px;color:var(--ink2)}
       .ck-why{margin:8px 0 0;padding-left:18px;font-size:14px}
+      .ck-parts-none{grid-column:1/-1;color:var(--ink3)}
+      .ck-date{display:inline-flex;align-items:center;gap:8px;margin:0;font-weight:400}
+      .ck-date input{width:auto;min-width:150px}
       @media (max-width:560px){.ck-sum{grid-template-columns:repeat(2,minmax(0,1fr))}.ck-parts{grid-template-columns:1fr}}
     `;
     document.head.appendChild(st);
@@ -109,7 +112,7 @@
     const missed = byItem && s.items_missed!=null ? Number(s.items_missed)||0 : null;
     const head = `<div class="card"><div class="ck-head" style="margin:0">
         <b style="font-size:16px">${esc(ov.date||"")} 各店清单</b>
-        <label class="sub">换一天 <input type="date" value="${esc(CK.date||ov.date||"")}" onchange="ckPickDate(this.value)" style="font-size:16px"></label></div>
+        <label class="sub ck-date">换一天 <input type="date" value="${esc(CK.date||ov.date||"")}" onchange="ckPickDate(this.value)"></label></div>
       <div class="ck-sum">
         <div><b>${s.rate==null?"—":Math.round(s.rate)+"%"}</b><span>清单按时做完的比例</span></div>
         <div data-ck-sum="done"><b>${done} / ${total}</b><span>已做（${unit}）</span></div>
@@ -248,7 +251,11 @@
       const d = s.delta;
       const delta = d==null ? "" : d>0 ? `<span class="ck-delta up">↑${d}</span>` : d<0 ? `<span class="ck-delta down">↓${Math.abs(d)}</span>` : `<span class="ck-delta">持平</span>`;
       const move = ranked && s.rank_change ? `<span class="sub">（名次${s.rank_change>0?"上升":"下降"} ${Math.abs(s.rank_change)}）</span>` : "";
-      const parts = ["checklist","action","task","issue"].map(k=>s.components?.[k]).filter(Boolean).map(ckPart).join("");
+      // 没数据的维度不逐行写「没数据」，合成一句「清单、整改、巡店还没有记录」
+      const dims = ["checklist","action","task","issue"].filter(k=>s.components?.[k]);
+      const empty = dims.filter(k=>s.components[k].score==null).map(k=>({checklist:"清单",action:"整改",task:"派活",issue:"巡店"})[k]);
+      const parts = dims.filter(k=>s.components[k].score!=null).map(k=>ckPart(s.components[k])).join("")
+        + (empty.length ? `<div class="ck-parts-none">${empty.join("、")}还没有记录</div>` : "");
       const why = (s.reasons||[]).length ? `<ul class="ck-why">${s.reasons.map(x=>`<li>${esc(x)}</li>`).join("")}</ul>` : "";
       return `<div class="card ck-rank ${s.needs_attention?"warn":""}">
         <div class="ck-rank-no ${noCls}">${no}</div>
@@ -256,7 +263,7 @@
           <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline;flex-wrap:wrap">
             <b style="font-size:17px">${esc(s.branch_name)}</b>
             <span><span class="ck-rank-score">${s.score==null?"—":Math.round(s.score)}</span>${delta}</span></div>
-          ${move}${s.needs_attention?`<div style="color:var(--bad);font-weight:800;margin-top:4px">要盯一下</div>`:""}
+          ${move}${s.needs_attention?`<div style="color:var(--bad);font-weight:600;margin-top:4px">要盯一下</div>`:""}
           ${why}<div class="ck-parts">${parts}</div></div></div>`;
     }).join("");
     $("#ck-rank").innerHTML = `<details class="notice"><summary>分数怎么算的？</summary><div style="margin-top:6px">${esc(r.formula||"")}</div></details>`

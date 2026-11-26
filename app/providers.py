@@ -1542,7 +1542,7 @@ async def call_text(idx: int | None, prompt: str, web: bool = False,
 如果证据包明确标为待核验,如实保留该标记。严格遵守原任务要求的输出格式。"""
 
     if not direct and not legacy_conf[1]:
-        raise ProviderError("未配置云雾API key，所有数字员工已禁止回退本地 Claude 登录态")
+        raise ProviderError("未配置云雾API key，所有AI 专家已禁止回退本地 Claude 登录态")
 
     async def generate(private_system: str) -> dict:
         if model == CLAUDE_LOCAL:

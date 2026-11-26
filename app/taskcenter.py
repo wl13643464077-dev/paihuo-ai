@@ -12,7 +12,7 @@ from .skills import registry
 
 
 KIND_META = {
-    "expert": ("🧑‍💼", "数字员工任务"),
+    "expert": ("🧑‍💼", "AI 专家任务"),
     "content": ("📝", "内容工单"),
     "meeting": ("🪑", "AI会议"),
     "avatar": ("🎥", "数字人视频"),

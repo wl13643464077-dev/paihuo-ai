@@ -199,7 +199,7 @@ def _require_followup_employee(connection, emp_idx: int) -> None:
             "巡店经理必须在巡店工作台上传照片并按整改闭环继续",
         )
     raise ThreadConflict(
-        "employee_disabled", "该数字员工已停用，重新启用后才能继续修改"
+        "employee_disabled", "该AI 专家已停用，重新启用后才能继续修改"
     )
 
 
@@ -887,7 +887,7 @@ def create_followup(
         ):
             raise ThreadConflict(
                 "employee_mismatch",
-                "该任务不属于当前数字员工",
+                "该任务不属于当前AI 专家",
             )
         _require_followup_employee(connection, int(task["emp_idx"]))
         from . import departments, employeeidentity
@@ -1117,7 +1117,7 @@ def mark_satisfied(
             and int(task["emp_idx"]) != expected_emp_idx
         ):
             raise ThreadConflict(
-                "employee_mismatch", "该任务不属于当前数字员工"
+                "employee_mismatch", "该任务不属于当前AI 专家"
             )
         _require_accept_employee(connection, int(task["emp_idx"]))
         if task.get("status") != "done":

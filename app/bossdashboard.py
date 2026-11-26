@@ -1493,7 +1493,7 @@ def _recent_activity(
         employee_name = (
             inspector["name"]
             if kind == "inspection" and inspector
-            else str(row.get("employee_name") or "历史数字员工")
+            else str(row.get("employee_name") or "历史AI 专家")
         )
         items.append({
             "kind": kind,
