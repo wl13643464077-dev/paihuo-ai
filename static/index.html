@@ -506,6 +506,14 @@ html,body{max-width:100%;overflow-x:hidden}
 .hubcard .hc-body{flex:1;min-width:0;display:flex;flex-direction:column}
 .hubcard .hc-t{font-weight:900;font-size:17px}
 .hubcard .hc-d{font-size:13px;color:var(--ink2);margin-top:4px;font-weight:600;line-height:1.45}
+/* 卡片上的实时小字(几件等审核、今天几项)：数字回来才显示，逾期/失败标红 */
+.hubcard .hc-stat{font-size:12.5px;font-weight:800;margin-top:6px;color:var(--ink)}
+.hubcard .hc-stat.hot{color:var(--bad)}
+/* 套餐页底部「账单明细」折叠区 */
+.billing-ledger>summary{list-style:none}
+.billing-ledger>summary::-webkit-details-marker{display:none}
+.billing-ledger>summary::before{content:"▸ ";font-weight:900}
+.billing-ledger[open]>summary::before{content:"▾ "}
 .hubcard .hc-subs{display:flex;gap:8px;flex-wrap:wrap;margin-top:9px}
 .hubcard .hc-arrow{font-size:20px;font-weight:900;flex:none}
 .hubcard.hub-root{background:#f2ecdd}
@@ -776,6 +784,6 @@ html:has(.overlay),html:has(.overlay) body{overflow:hidden}
 <script src="/static/onboarding.js?v=6"></script>
 <script src="/static/staff-admin.js?v=10"></script>
 <script src="/static/checklist-admin.js?v=3"></script>
-<script src="/static/cockpit.js?v=7"></script>
+<script src="/static/cockpit.js?v=8"></script>
 </body>
 </html>

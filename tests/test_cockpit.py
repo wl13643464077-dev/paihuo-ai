@@ -72,6 +72,43 @@ class SummaryTests(CockpitBase):
         self.assertEqual(4, sum(x["ai"] for x in d["trend"]))
         self.assertTrue(d["headline"])
 
+    def test_ai_employee_rows_carry_the_detail_merged_from_boss_board(self):
+        """原老板看板「AI 专家干了什么、效率怎么样」并进驾驶舱：每位专家带新建/交付/等确认/失败/用时。"""
+        self.seed()
+        self.task(2, "failed", IN, name="选品顾问")
+        slow = self.task(2, "done", IN, name="选品顾问")
+        db.execute("UPDATE task SET created_at=? WHERE id=?", (IN - 1800, slow))
+        self.task(3, "failed", IN, name="选品顾问")        # 别家企业的不算
+        d = cockpit.summary(2, 7, now=NOW)
+        self.assertEqual(["店长助理", "选品顾问"], [r["name"] for r in d["ai_employees"]])
+        helper, picker = d["ai_employees"]
+        self.assertEqual((2, 3, 1, 0, 0), (helper["count"], helper["created"], helper["waiting"],
+                                           helper["failed"], helper["refunded"]))
+        self.assertEqual((1, 2, 0, 1), (picker["count"], picker["created"], picker["waiting"],
+                                        picker["failed"]))
+        self.assertEqual(1800, picker["avg_cycle_seconds"])
+        # 交给模型的仍只有交付过的专家和件数，不带明细
+        prompt = cockpit.build_ai_prompt(d)
+        self.assertNotIn("avg_cycle_seconds", prompt)
+        # 导出表带上明细列
+        from openpyxl import load_workbook
+        sheet = load_workbook(io.BytesIO(cockpit.export_xlsx(d)))["AI专家"]
+        self.assertEqual(["AI 专家", "部门", "本期交付", "本期新建", "等您确认", "本期失败", "本期退款",
+                          "平均用时(分钟)"], [c.value for c in sheet[1]])
+        self.assertEqual(30, sheet.cell(row=3, column=8).value)
+
+    def test_todo_flags_ai_task_stuck_for_over_a_day(self):
+        """原老板看板「先处理清单」里驾驶舱没有的一项：AI 任务超 24 小时仍在跑。"""
+        stuck = self.task(2, "running", NOW - 2 * DAY_S)
+        self.task(2, "running", NOW - 3600)                  # 刚开跑的不提醒
+        self.task(3, "running", NOW - 2 * DAY_S, uid=30)     # 别家企业
+        todo = cockpit.summary(2, 7, now=NOW)["todo"]
+        stale = [t for t in todo if t["type"] == "stale"]
+        self.assertEqual([f"task_stale:{stuck}"], [t["key"] for t in stale])
+        self.assertEqual(("mid", f"#/tasks/{stuck}", False),
+                         (stale[0]["level"], stale[0]["route"], stale[0]["dispatchable"]))
+        self.assertEqual("AI 任务超过 24 小时还在跑", stale[0]["label"])
+
     def test_todo_lists_overdue_first_then_reviews(self):
         self.seed()
         todo = cockpit.summary(2, 7, now=NOW)["todo"]

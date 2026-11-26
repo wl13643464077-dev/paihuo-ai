@@ -256,7 +256,10 @@ class PlatformAdminFrontendTests(unittest.IsolatedAsyncioTestCase):
             "/api/boss/dashboard/summary": summary,
         }
         async with async_playwright() as playwright:
-            browser, page, errors = await self._open(playwright, "#/boss", overrides, me=OWNER)
+            browser, page, errors = await self._open(playwright, "#/mine", overrides, me=OWNER)
+            # 老板看板已并进数据驾驶舱、不再有入口(#/boss 会跳 #/cockpit)；视图函数还保留，这里直接调用它
+            await page.wait_for_selector("#main .hubhead")
+            await page.evaluate("void bossDashboardView()")
             await page.wait_for_selector("[data-boss-metrics-fold]")
             fold = page.locator("[data-boss-metrics-fold]")
             self.assertFalse(await fold.evaluate("e=>e.open"))
