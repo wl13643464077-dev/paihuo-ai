@@ -152,13 +152,22 @@
     if(it.due_at) return dueHtml(it.due_at, open);
     return (it.urgency==="overdue"?"⏰ 已过截止 ":"截止 ")+esc(it.due_text);
   }
+  /* 「王总（老板）派的」：称呼以全角括号结尾时后面不再垫空格 */
+  function sentBy(label){ label=String(label||""); return /[）)]$/.test(label) ? `${label}派的` : `${label} 派的`; }
+  /* 逾期徽标直接写「已逾期 2 天」(带完整时间的 title)，后面就不再重复一遍；没有时间戳的老数据返回空串，照旧分两处写 */
+  function overdueTag(it){
+    const info = it.due_at ? dueInfo(it.due_at, true) : null;
+    if(!info || !info.overdue) return "";
+    return `<span class="tag overdue due-rel" title="原定 ${esc(info.full)} 截止">${esc(info.text)}</span>`;
+  }
   function tag(it){
     let key = it.urgency, text = URGENCY[key]||"";
     if(it.kind==="task" && it.status==="todo" && it.review_note && it.reviewed_at){ text = "被打回，要重做"; key = "overdue"; }
     return text ? `<span class="tag ${esc(key)}">${esc(text)}</span>` : "";
   }
   function cardHtml(it){
-    const sub = [it.branch_name, dueLine(it)].filter(Boolean).join(" · ");
+    const merged = tag(it).includes(">已逾期<") ? overdueTag(it) : "";
+    const sub = [esc(it.branch_name||""), merged ? "" : dueLine(it)].filter(Boolean).join(" · ");
     let extra = "";
     if(it.kind==="checklist" && it.progress) extra = ` · 做了 ${it.progress.done}/${it.progress.total} 项`;
     if(it.kind==="task" && it.require_photo && it.status==="todo") extra = " · 要拍照";
@@ -167,7 +176,7 @@
       extra += ` · 🔔 ${hhmm(it.last_nudged_at)} 催过`;
     return `<button type="button" class="card" data-open="${esc(it.kind)}:${esc(it.id)}">
       <div class="t">${KIND_ICON[it.kind]||"📌"} ${esc(it.title)}</div>
-      <div class="m">${tag(it)}${sub}${esc(extra)}</div></button>`;
+      <div class="m">${merged||tag(it)}${sub}${esc(extra)}</div></button>`;
   }
   /* 打回原因前写上是谁打回的：「老王（店长） 打回：……」(reviewer_label 由后端按姓名+身份算好)；老数据没有审核人时不写名字 */
   function rejectLine(t, fallback){
@@ -192,10 +201,11 @@
     const doing = {submitted:"已交", rejected:"在重做", overdue:"还没交"}[it.store_state] || "在做";   // 标签已写「已逾期」，这里不再重复
     const who = it.assignee_name ? `${it.assignee_name} ${doing}` : "还没指定人";
     // dueLine 已经转义过
-    const sub = [esc(who), esc(it.branch_name||""), it.store_state==="submitted" ? "" : dueLine(it)].filter(Boolean);
+    const merged = it.store_state==="overdue" ? overdueTag(it) : "";
+    const sub = [esc(who), esc(it.branch_name||""), it.store_state==="submitted"||merged ? "" : dueLine(it)].filter(Boolean);
     return `<button type="button" class="card store" data-open="store:${esc(it.id)}">
       <div class="t">📋 ${esc(it.title)}</div>
-      <div class="m">${storeTag(it)}${sub.join(" · ")}</div></button>`;
+      <div class="m">${merged||storeTag(it)}${sub.join(" · ")}</div></button>`;
   }
 
   /* ---------- 首页:我的待办 ---------- */
@@ -249,8 +259,8 @@
     S.current = t;
     const key = "task:"+t.id;
     const rejected = t.status==="todo" && t.review_note && t.reviewed_at;
-    let body = `${back()}<div class="panel"><div class="t" style="font-size:20px;font-weight:900">${esc(t.title)}</div>
-      <p class="sub">${[esc(t.branch_name||""), (t.dispatcher_label||t.created_by_name)?esc(`${t.dispatcher_label||t.created_by_name} 派的`):"", dueDetail(t, t.status==="todo")].filter(Boolean).join(" · ")}</p>
+    let body = `${back()}<div class="panel"><div class="t" style="font-size:20px;font-weight:700">${esc(t.title)}</div>
+      <p class="sub">${[esc(t.branch_name||""), (t.dispatcher_label||t.created_by_name)?esc(sentBy(t.dispatcher_label||t.created_by_name)):"", dueDetail(t, t.status==="todo")].filter(Boolean).join(" · ")}</p>
       ${t.detail?`<p>${esc(t.detail)}</p>`:""}
       ${rejected?msg(rejectLine(t, "上次被打回"),"info"):""}</div>`;
     if(t.status==="todo" && t.can_submit!==false){
@@ -354,7 +364,7 @@
     if(!run){ main().innerHTML = back()+msg("这张清单找不到了，请刷新"); return; }
     S.current = run;
     const items = Array.isArray(run.items) ? run.items : [];
-    main().innerHTML = `${back()}<div class="panel"><div class="t" style="font-size:20px;font-weight:900">${esc(run.title)}</div>
+    main().innerHTML = `${back()}<div class="panel"><div class="t" style="font-size:20px;font-weight:700">${esc(run.title)}</div>
       <p class="sub">${[run.branch_name, run.due_text?`${run.due_text} 前做完`:""].filter(Boolean).map(esc).join(" · ")}</p>
       ${run.progress?`<p>做了 ${run.progress.done}/${run.progress.total} 项</p>`:""}</div>
       <div id="err"></div>
@@ -406,7 +416,7 @@
     if(!a){ main().innerHTML = back()+msg("这条整改找不到了，请刷新"); return; }
     S.current = a;
     const canSubmit = ["open","in_progress","reopened"].includes(a.status);
-    main().innerHTML = `${back()}<div class="panel"><div class="t" style="font-size:20px;font-weight:900">🔧 ${esc(a.title)}</div>
+    main().innerHTML = `${back()}<div class="panel"><div class="t" style="font-size:20px;font-weight:700">🔧 ${esc(a.title)}</div>
       <p class="sub">${[esc(a.branch_name||""), dueDetail(a, canSubmit)].filter(Boolean).join(" · ")}</p>
       ${a.plan?`<p><b>怎么改：</b>${esc(a.plan)}</p>`:""}
       ${a.hint?`<p class="sub">${esc(a.hint)}</p>`:""}</div>
@@ -491,7 +501,7 @@
   }
   function reviewCard(t, after){
     return `<div class="panel" data-review="${esc(t.id)}"${after?` data-after="${esc(after)}"`:""}>
-          <div class="t" style="font-size:18px;font-weight:900">${esc(t.title)}</div>
+          <div class="t" style="font-size:18px;font-weight:700">${esc(t.title)}</div>
           <p class="sub">${[t.branch_name, t.assignee_name?`${t.assignee_name} 交的`:"", t.submit_note?`备注：${t.submit_note}`:""].filter(Boolean).map(esc).join(" · ")}</p>
           ${t.review_note&&t.reviewed_at?msg(`${rejectLine(t, "上次打回")}${t.submit_count>1?`（第 ${t.submit_count} 次交）`:"（重交）"}`, "info"):""}
           ${photosHtml(t.photos)}${aiHtml(t)}
@@ -513,8 +523,8 @@
     const rejected = t.status==="rejected" || (t.status==="todo" && t.review_note && t.reviewed_at);
     const who = t.assignee_name ? `交给 ${t.assignee_name}` : "还没指定人";
     const by = t.dispatcher_label||t.created_by_name;
-    let body = `${back()}<div class="panel"><div class="t" style="font-size:20px;font-weight:900">${esc(t.title)}</div>
-      <p class="sub">${[esc(t.branch_name||""), esc(who), by?esc(`${by} 派的`):"", dueDetail(t, t.status==="todo")].filter(Boolean).join(" · ")}</p>
+    let body = `${back()}<div class="panel"><div class="t" style="font-size:20px;font-weight:700">${esc(t.title)}</div>
+      <p class="sub">${[esc(t.branch_name||""), esc(who), by?esc(sentBy(by)):"", dueDetail(t, t.status==="todo")].filter(Boolean).join(" · ")}</p>
       ${t.detail?`<p>${esc(t.detail)}</p>`:""}</div>`;
     const reviewable = t.status==="submitted" && t.can_manage && String(t.assignee_user_id)!==String(meId);
     if(reviewable){

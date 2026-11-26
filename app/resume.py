@@ -353,7 +353,7 @@ def _build(employee: dict, profile: dict | None = None,
     details = capability_details if isinstance(capability_details, dict) else {}
     contract = employee.get("decision_contract") or {}
     dept_key = str(employee.get("dept_key") or "content")
-    job = str(employee.get("name") or "数字员工").strip()
+    job = str(employee.get("name") or "AI 专家").strip()
     titles = _titles(job)
     seed = _seed(key)
 

@@ -352,17 +352,17 @@ def _clean_emp_whitelist(raw) -> str | None:
     if raw is None:
         return None
     if not isinstance(raw, list):
-        raise HTTPException(400, "数字员工名单格式无效")
+        raise HTTPException(400, "AI 专家名单格式无效")
     idxs = sorted({
         int(v) for v in raw
         if isinstance(v, (int, str)) and str(v).lstrip("-").isdigit()
     })
     if len(idxs) > 500:
-        raise HTTPException(400, "数字员工名单过长")
+        raise HTTPException(400, "AI 专家名单过长")
     for emp_idx in idxs:
         emp = departments.get_active(emp_idx)
         if not emp:
-            raise HTTPException(400, f"名单包含不存在的数字员工 #{emp_idx}")
+            raise HTTPException(400, f"名单包含不存在的AI 专家 #{emp_idx}")
     return json.dumps(idxs)
 
 
@@ -377,7 +377,7 @@ def team_user_update(uid: int, body: dict):
         if set(body) - {"allowed_emp_idxs"}:
             raise HTTPException(403, "板块、职级、密码与启停只能由企业主账号管理")
         if "allowed_emp_idxs" not in body:
-            raise HTTPException(400, "缺少要分配的数字员工名单")
+            raise HTTPException(400, "缺少要分配的AI 专家名单")
     actor_is_root = auth.is_root()
     actor_tenant_id = TEN()
     data = {}
@@ -418,7 +418,7 @@ def team_user_update(uid: int, body: dict):
             u["role"] != "member"
             and ("job_title" in data or "allowed_emp_idxs_json" in data)
         ):
-            raise HTTPException(400, "职级与数字员工分配只适用于副账号成员")
+            raise HTTPException(400, "职级与AI 专家分配只适用于副账号成员")
         if "allowed_emp_idxs_json" in data:
             target_modules = set(db.jloads(u.get("modules_json"), []))
             target_list = (
@@ -439,10 +439,10 @@ def team_user_update(uid: int, body: dict):
                 # 经理/总监的分配边界：目标职级低于自己、行业和员工都在
                 # 自己的可用范围内；自己被限定名单时不得放开为“全部”。
                 if u["id"] == actor.get("id"):
-                    raise HTTPException(403, "不能给自己调整数字员工名单")
+                    raise HTTPException(403, "不能给自己调整AI 专家名单")
                 actor_rank = auth.JOB_TITLE_RANK.get(auth.job_title(), 0)
                 if _member_job_rank(u) >= actor_rank:
-                    raise HTTPException(403, "只能给职级低于自己的成员分配数字员工")
+                    raise HTTPException(403, "只能给职级低于自己的成员分配AI 专家")
                 if target_list is None:
                     if (actor.get("allowed_emp_idxs") is not None):
                         raise HTTPException(

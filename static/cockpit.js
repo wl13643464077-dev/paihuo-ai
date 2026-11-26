@@ -21,32 +21,32 @@
     st.textContent=`
     .cp{--cp-navy:#1d2740;--cp-navy2:#2b3a5e;--cp-line:#e6dfd0;--cp-soft:#f7f3ea;--cp-up:#1f9d6b;--cp-down:#d64545;--cp-blue:#3d6fd9;--cp-amber:#e0a019;--cp-violet:#7c5cd6}
     .cp *{box-sizing:border-box}
-    .cp-hero{background:linear-gradient(135deg,var(--cp-navy) 0%,var(--cp-navy2) 100%);color:#fff;border-radius:22px;padding:22px 24px;margin-bottom:16px;border:2.5px solid var(--ink);box-shadow:var(--shadow)}
+    .cp-hero{background:linear-gradient(135deg,var(--cp-navy) 0%,var(--cp-navy2) 100%);color:#fff;border-radius:var(--r-lg);padding:22px 24px;margin-bottom:16px;border:0;box-shadow:var(--shadow-1)}
     .cp-hero-top{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-start;justify-content:space-between}
-    .cp-eyebrow{font-size:12px;letter-spacing:2px;color:#ffd166;font-weight:800}
+    .cp-eyebrow{font-size:12px;letter-spacing:2px;color:#ffd166;font-weight:600}
     .cp-hero h2{margin:4px 0 2px;font-size:24px;color:#fff}
     .cp-hero .cp-meta{font-size:12.5px;color:#b9c3dc}
     .cp-seg{display:inline-flex;background:rgba(255,255,255,.1);border-radius:12px;padding:3px;gap:2px}
-    .cp-seg button{border:0;background:transparent;color:#d7deef;font-weight:800;font-size:13px;padding:6px 12px;border-radius:9px;cursor:pointer}
+    .cp-seg button{border:0;background:transparent;color:#d7deef;font-weight:600;font-size:13px;padding:6px 12px;border-radius:9px;cursor:pointer}
     .cp-seg button.on{background:#ffd166;color:var(--cp-navy)}
     .cp-acts{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px}
-    .cp-btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid rgba(255,255,255,.35);background:rgba(255,255,255,.08);color:#fff;border-radius:11px;padding:7px 13px;font-weight:800;font-size:13px;cursor:pointer;text-decoration:none}
+    .cp-btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid rgba(255,255,255,.35);background:rgba(255,255,255,.08);color:#fff;border-radius:var(--r-sm);min-height:var(--h-sm);padding:0 13px;font-weight:600;font-size:13px;cursor:pointer;text-decoration:none;font-family:inherit}
     .cp-btn:hover{background:rgba(255,255,255,.18)}
     .cp-btn.gold{background:#ffd166;color:var(--cp-navy);border-color:#ffd166}
     .cp-btn[disabled]{opacity:.55;cursor:wait}
     .cp-head-lines{margin:16px 0 0;padding:14px 16px;background:rgba(255,255,255,.07);border-radius:14px;font-size:14.5px;line-height:1.75}
     .cp-head-lines b{color:#ffd166}
     .cp-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:16px}
-    .cp-kpi{background:#fff;border:2px solid var(--ink);border-radius:16px;padding:14px 16px;position:relative;overflow:hidden}
+    .cp-kpi{background:#fff;border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--shadow-1);padding:14px 16px;position:relative;overflow:hidden}
     .cp-kpi::before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px;background:var(--cp-accent,var(--cp-blue))}
-    .cp-kpi .l{font-size:12.5px;color:var(--ink2);font-weight:800;display:flex;justify-content:space-between;gap:6px}
-    .cp-kpi .v{font-size:30px;font-weight:900;margin:6px 0 2px;letter-spacing:-.5px;font-variant-numeric:tabular-nums}
-    .cp-kpi .v small{font-size:13px;font-weight:800;color:var(--ink2);margin-left:3px}
+    .cp-kpi .l{font-size:12.5px;color:var(--ink2);font-weight:600;display:flex;justify-content:space-between;gap:6px}
+    .cp-kpi .v{font-size:30px;font-weight:700;margin:6px 0 2px;letter-spacing:-.5px;font-variant-numeric:tabular-nums}
+    .cp-kpi .v small{font-size:13px;font-weight:600;color:var(--ink2);margin-left:3px}
     .cp-kpi .h{font-size:12px;color:var(--ink2);line-height:1.45}
-    .cp-delta{font-size:11.5px;font-weight:900;padding:1px 7px;border-radius:99px;white-space:nowrap}
+    .cp-delta{font-size:11.5px;font-weight:700;padding:1px 7px;border-radius:99px;white-space:nowrap}
     .cp-delta.good{background:#dff5ea;color:var(--cp-up)} .cp-delta.bad{background:#fde4e4;color:var(--cp-down)} .cp-delta.flat{background:#efeae0;color:var(--ink2)}
     .cp-grid{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(0,1fr);gap:16px;margin-bottom:16px}
-    .cp-panel{background:var(--card);border:2.5px solid var(--ink);border-radius:20px;padding:18px 20px;box-shadow:var(--shadow);min-width:0}
+    .cp-panel{background:var(--card);border:1px solid var(--line);border-radius:var(--r-lg);padding:18px 20px;box-shadow:var(--shadow-1);min-width:0}
     .cp-panel h3{margin:0 0 4px;font-size:16px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
     .cp-panel .cp-sub{font-size:12px;color:var(--ink2);margin-bottom:12px}
     .cp-legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--ink2);font-weight:700}
@@ -61,24 +61,24 @@
     .cp-list{display:flex;flex-direction:column;gap:8px;max-height:420px;overflow:auto;padding-right:2px}
     .cp-item{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;background:#fff;border:1.5px solid var(--cp-line);border-radius:13px;padding:10px 12px}
     .cp-item .dot{width:9px;height:9px;border-radius:50%}
-    .cp-item .t{font-weight:800;font-size:13.5px;line-height:1.35}
+    .cp-item .t{font-weight:600;font-size:13.5px;line-height:1.35}
     .cp-item .s{font-size:12px;color:var(--ink2);margin-top:2px}
     .cp-item .ops{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
-    .cp-mini{border:1.5px solid var(--ink);background:#fff;border-radius:9px;padding:3px 10px;font-size:12px;font-weight:800;cursor:pointer;color:var(--ink);text-decoration:none;white-space:nowrap}
+    .cp-mini{display:inline-flex;align-items:center;min-height:28px;border:1px solid var(--line2);background:#fff;border-radius:var(--r-sm);padding:0 10px;font-size:12px;font-weight:600;cursor:pointer;color:var(--ink);text-decoration:none;white-space:nowrap}
     .cp-mini.pri{background:var(--cp-navy);color:#ffd166;border-color:var(--cp-navy)}
-    .cp-tag{display:inline-block;font-size:11px;font-weight:800;padding:1px 8px;border-radius:99px;background:#efeae0;color:var(--ink2);margin-right:4px}
+    .cp-tag{display:inline-block;font-size:11px;font-weight:600;padding:1px 8px;border-radius:99px;background:#efeae0;color:var(--ink2);margin-right:4px}
     .cp-tag.high{background:#fde4e4;color:var(--cp-down)} .cp-tag.mid{background:#fff1d1;color:#9a6a00} .cp-tag.ok{background:#dff5ea;color:var(--cp-up)} .cp-tag.blue{background:#e4ecfd;color:var(--cp-blue)}
     .cp-table-wrap{overflow:auto;margin:0 -4px}
     .cp-table{width:100%;border-collapse:collapse;font-size:13px;min-width:640px}
-    .cp-table th{text-align:left;font-size:11.5px;color:var(--ink2);font-weight:800;padding:8px 8px;border-bottom:2px solid var(--cp-line);white-space:nowrap}
+    .cp-table th{text-align:left;font-size:11.5px;color:var(--ink2);font-weight:600;padding:8px 8px;border-bottom:2px solid var(--cp-line);white-space:nowrap}
     .cp-table td{padding:9px 8px;border-bottom:1px solid var(--cp-line);vertical-align:middle}
-    .cp-table td.n{text-align:right;font-variant-numeric:tabular-nums;font-weight:800}
+    .cp-table td.n{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
     .cp-table tr:hover td{background:#fffdf6}
     .cp-who{display:flex;align-items:center;gap:9px}
-    .cp-av{width:30px;height:30px;border-radius:50%;background:var(--cp-navy);color:#ffd166;display:grid;place-items:center;font-weight:900;font-size:13px;flex:none}
+    .cp-av{width:30px;height:30px;border-radius:50%;background:var(--cp-navy);color:#ffd166;display:grid;place-items:center;font-weight:700;font-size:13px;flex:none}
     .cp-spark{display:inline-block;height:8px;border-radius:99px;background:var(--cp-blue);vertical-align:middle;margin-right:6px;min-width:2px}
     .cp-stores{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}
-    .cp-store{background:#fff;border:2px solid var(--ink);border-radius:16px;padding:14px}
+    .cp-store{background:#fff;border:1px solid var(--line);border-radius:var(--r-lg);padding:14px}
     .cp-store.warn{border-color:var(--cp-down);box-shadow:0 0 0 3px #fde4e4}
     .cp-store-top{display:flex;align-items:center;gap:12px}
     .cp-ring{flex:none}
@@ -87,18 +87,18 @@
     .cp-comp .bar{height:6px;background:var(--cp-soft);border-radius:99px;overflow:hidden}
     .cp-comp .bar i{display:block;height:100%;background:var(--cp-blue)}
     .cp-ai{background:linear-gradient(180deg,#f5f1ff,#fff);border-color:var(--cp-violet)}
-    .cp-ai .verdict{font-size:16px;font-weight:900;line-height:1.5;margin:6px 0 10px}
+    .cp-ai .verdict{font-size:16px;font-weight:700;line-height:1.5;margin:6px 0 10px}
     .cp-ai ul{margin:4px 0 10px;padding-left:18px;font-size:13px;line-height:1.7}
-    .cp-ai .sec{font-size:12px;font-weight:900;color:var(--cp-violet);letter-spacing:1px;margin-top:8px}
+    .cp-ai .sec{font-size:12px;font-weight:700;color:var(--cp-violet);letter-spacing:1px;margin-top:8px}
     .cp-empty{color:var(--ink2);font-size:13px;text-align:center;padding:26px 8px}
     .cp-foot{font-size:12px;color:var(--ink2);text-align:center;margin:8px 0 20px}
     .cp-modal{position:fixed;inset:0;background:rgba(20,24,36,.55);z-index:200;display:grid;place-items:center;padding:16px}
-    .cp-dialog{background:var(--card);border:2.5px solid var(--ink);border-radius:20px;width:min(520px,100%);max-height:92vh;overflow:auto;padding:20px 22px;box-shadow:var(--shadow)}
+    .cp-dialog{background:var(--card);border:1px solid var(--line);border-radius:18px;width:min(520px,100%);max-height:92vh;overflow:auto;padding:20px 22px;box-shadow:var(--shadow-2)}
     .cp-dialog h3{margin:0 0 12px}
-    .cp-dialog label{display:block;font-size:12.5px;font-weight:800;margin:10px 0 4px}
+    .cp-dialog label{display:block;font-size:12.5px;font-weight:600;margin:10px 0 4px}
     .cp-lv{display:flex;gap:6px;flex-wrap:wrap}
-    .cp-lv button{border:2px solid var(--ink);background:#fff;border-radius:10px;padding:6px 12px;font-weight:800;cursor:pointer;font-size:13px}
-    .cp-lv button.on{background:var(--cp-navy);color:#ffd166}
+    .cp-lv button{min-height:var(--h-sm);border:1px solid var(--line2);background:#fff;border-radius:var(--r-sm);padding:0 12px;font-weight:600;cursor:pointer;font-size:13px}
+    .cp-lv button.on{background:var(--navy,#1d2740);border-color:var(--navy,#1d2740);color:#ffd166}
     .cp-row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
     @media(max-width:900px){.cp-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.cp-grid{grid-template-columns:1fr}}
     @media(max-width:520px){.cp-hero{padding:18px 16px}.cp-kpi .v{font-size:24px}.cp-mix-row{grid-template-columns:96px 1fr 30px}.cp-item{grid-template-columns:auto 1fr}.cp-item .ops{grid-column:1/-1;justify-content:flex-start}.cp-row2{grid-template-columns:1fr}}
@@ -193,7 +193,7 @@
           <div class="cp-seg" role="tablist">${d.period.options.map(n=>`<button type="button" class="${n===d.period.days?"on":""}" onclick="cpDays(${n})">近 ${n} 天</button>`).join("")}</div>
         </div>
         <div class="cp-acts">
-          ${costButton({label:"✨ AI 经营分析",onclick:"cpAi()",cost:1,btnClass:"cp-btn gold",id:"cp-ai-btn",disabled:!!CP.aiBusy,disabledLabel:"✨ AI 正在分析…"})}
+          ${costButton({label:"AI 经营分析",attrs:'data-ic="sparkles"',onclick:"cpAi()",cost:1,btnClass:"cp-btn gold",id:"cp-ai-btn",disabled:!!CP.aiBusy,disabledLabel:"AI 正在分析…"})}
           <a class="cp-btn" href="/api/cockpit/export.xlsx?days=${d.period.days}">⬇ 导出 Excel</a>
           <button type="button" class="cp-btn" onclick="window.print()">🖨 打印 / 存 PDF</button>
           <button type="button" class="cp-btn" onclick="cpDispatch(null)">📤 下发任务</button>
@@ -250,15 +250,15 @@
   }
 
   function aiPanel(a){
-    if(!a) return `<section class="cp-panel cp-ai"><h3>✨ AI 经营分析</h3>
+    if(!a) return `<section class="cp-panel cp-ai"><h3><span>${icon("sparkles")} AI 经营分析</span></h3>
       <div class="cp-sub">AI 只读上面这些派活里的统计，帮您找出做得好的、要警惕的，并给出可以直接下发的动作。每次 1 点，失败自动退。</div>
-      <div class="cp-empty">${CP.aiBusy?"AI 正在分析…":"点页头的「✨ AI 经营分析」开始"}</div></section>`;
+      <div class="cp-empty">${CP.aiBusy?"AI 正在分析…":"点页头的「AI 经营分析」开始"}</div></section>`;
     CP.pick.actions=a.actions||[];
     const acts=(a.actions||[]).map((x,i)=>`<div class="cp-item" style="grid-template-columns:1fr auto"><div><div class="t">${esc(x.title)}</div>
       <div class="s">${x.priority==="high"?`<span class="cp-tag high">紧急</span>`:""}${x.branch?esc(x.branch)+" · ":""}${x.owner?esc(x.owner)+" · ":""}${x.due_days} 天内${x.detail?" · "+esc(x.detail):""}</div></div>
       <div class="ops"><button type="button" class="cp-mini pri" onclick="cpDispatchAi(${i})">下发</button></div></div>`).join("");
-    return `<section class="cp-panel cp-ai"><h3>✨ AI 经营分析</h3>
-      <div class="cp-sub">基于近 ${a.days} 天数据 · ${esc(when(a.created_at))} · 要重新分析，点页头的「✨ AI 经营分析」</div>
+    return `<section class="cp-panel cp-ai"><h3><span>${icon("sparkles")} AI 经营分析</span></h3>
+      <div class="cp-sub">基于近 ${a.days} 天数据 · ${esc(when(a.created_at))} · 要重新分析，点页头的「AI 经营分析」</div>
       <div class="verdict">${esc(a.verdict)}</div>
       ${a.highlights?.length?`<div class="sec">做得好</div><ul>${a.highlights.map(x=>`<li>${esc(x)}</li>`).join("")}</ul>`:""}
       ${a.risks?.length?`<div class="sec">要警惕</div><ul>${a.risks.map(x=>`<li>${esc(x)}</li>`).join("")}</ul>`:""}
@@ -298,7 +298,7 @@
     const comp=(label,v)=>`<div class="cp-comp"><span>${label}</span><div class="bar"><i style="width:${v==null?0:Math.max(0,Math.min(100,v))}%"></i></div><span>${v==null?"—":Math.round(v)}</span></div>`;
     return `${noRank}<div class="cp-stores">${rows.map((s,i)=>`<div class="cp-store ${s.needs_attention?"warn":""}">
       <div class="cp-store-top">${ring(s.score)}<div style="min-width:0;flex:1"><b style="font-size:15px">${ranked&&s.rank?`<span${s.needs_attention?` style="color:var(--cp-down)"`:""}>第 ${s.rank} 名</span> `:""}${esc(s.name)}</b>
-        <div class="sub">${s.delta==null?"上期无数据":s.delta>0?`<span style="color:var(--cp-up);font-weight:800">较上期 ↑${num(s.delta,1)}</span>`:s.delta<0?`<span style="color:var(--cp-down);font-weight:800">较上期 ↓${num(Math.abs(s.delta),1)}</span>`:"较上期持平"}${s.open_issues?` · 未闭环问题 ${s.open_issues}`:""}</div>
+        <div class="sub">${s.delta==null?"上期无数据":s.delta>0?`<span style="color:var(--cp-up);font-weight:600">较上期 ↑${num(s.delta,1)}</span>`:s.delta<0?`<span style="color:var(--cp-down);font-weight:600">较上期 ↓${num(Math.abs(s.delta),1)}</span>`:"较上期持平"}${s.open_issues?` · 未闭环问题 ${s.open_issues}`:""}</div>
         ${s.needs_attention?`<span class="cp-tag high" style="margin-top:4px">要盯一下</span>`:""}</div></div>
       ${comp("清单按时",s.checklist)}${comp("整改按时",s.action)}${comp("派活按时",s.task)}${comp("巡店问题分",s.issue)}
       ${s.reasons?.length?`<div class="sub" style="margin-top:8px;line-height:1.5">${s.reasons.map(esc).join("；")}</div>`:""}
@@ -391,7 +391,7 @@
         <label>说明（可选）</label><textarea id="cp-d-detail" rows="3" maxlength="500" placeholder="做到什么程度、注意什么">${esc(st.detail)}</textarea>
         <label>下发给</label><div class="cp-lv"><button type="button" class="${st.level==="store"?"on":""}" data-lv="store">整家门店</button><button type="button" class="${st.level==="person"?"on":""}" data-lv="person">门店里的某个人</button></div>
         <div class="cp-row2"><div><label>门店</label><select id="cp-d-branch">${bs.map(x=>`<option value="${x.id}" ${x.id===b.id?"selected":""}>${esc(x.name)}</option>`).join("")}</select></div>
-          <div>${st.level==="person"?`<label>负责人</label>${members.length?`<select id="cp-d-user">${members.map(m=>`<option value="${m.id}" ${m.id===st.assignee?"selected":""}>${esc(m.name)}（${esc(m.title_label||"")}）</option>`).join("")}</select>`:`<div class="sub" style="padding:10px 0">这家店还没绑定店员</div>`}`:`<label>&nbsp;</label><div class="sub" style="padding:10px 0">店里谁先接谁做，店长统一跟进</div>`}</div></div>
+          <div>${st.level==="person"?`<label>负责人</label>${members.length?`<select id="cp-d-user">${members.map(m=>`<option value="${m.id}" ${m.id===st.assignee?"selected":""}>${esc(personWithRole(m.name,m.title_label))}</option>`).join("")}</select>`:`<div class="sub" style="padding:10px 0">这家店还没绑定店员</div>`}`:`<label>&nbsp;</label><div class="sub" style="padding:10px 0">店里谁先接谁做，店长统一跟进</div>`}</div></div>
         <div class="cp-row2"><div><label>截止日期（当天 18:00）</label><input id="cp-d-due" type="date" value="${esc(st.due)}"></div>
           <div><label>紧急程度</label><select id="cp-d-pri"><option value="normal" ${st.priority==="normal"?"selected":""}>普通</option><option value="high" ${st.priority==="high"?"selected":""}>紧急</option><option value="low" ${st.priority==="low"?"selected":""}>不急</option></select></div></div>
         <label style="display:flex;gap:8px;align-items:center;font-weight:700"><input id="cp-d-photo" type="checkbox" style="width:auto" ${st.photo?"checked":""}> 要求拍照交差</label>

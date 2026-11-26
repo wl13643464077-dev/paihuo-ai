@@ -68,7 +68,7 @@ log = logging.getLogger("main")
 # 完整接口地图不对公网暴露；本地联调可设 CONTENTCREW_PUBLIC_API_DOCS=1 打开。
 _PUBLIC_API_DOCS = os.environ.get("CONTENTCREW_PUBLIC_API_DOCS") == "1"
 app = FastAPI(
-    title="派活 PaiHuo — 老板会派活，数字员工去干活",
+    title="派活 PaiHuo — 老板派活，店员拍照交差，AI 帮您盯着",
     docs_url="/docs" if _PUBLIC_API_DOCS else None,
     redoc_url="/redoc" if _PUBLIC_API_DOCS else None,
     openapi_url="/openapi.json" if _PUBLIC_API_DOCS else None,
@@ -143,7 +143,7 @@ async def _unhandled_exception(request, exc: Exception):
     )
 
 APP_NAME = "派活"
-APP_SLOGAN = "老板会派活，数字员工去干活"
+APP_SLOGAN = "老板派活，店员拍照交差，AI 帮您盯着"
 
 QUIESCENT = os.environ.get("CONTENTCREW_QUIESCENT") == "1"
 VALIDATION = QUIESCENT or os.environ.get("CONTENTCREW_VALIDATION") == "1"
@@ -928,7 +928,7 @@ def _is_tour() -> bool:
 def _need_boss():
     """Enforce the named super-account boundary, not merely a database role."""
     if not _is_boss():
-        raise HTTPException(403, "仅超级管理账号 boss 可访问数字员工内部资料")
+        raise HTTPException(403, "仅超级管理账号 boss 可访问AI 专家内部资料")
 
 
 _ROLE_WRITE_BINDING_FIELDS = (
@@ -1025,7 +1025,7 @@ def _boss_glance_intro(e: dict, *, internal: bool = False) -> str:
         head = f"TA干的活：帮您把关「{core}」。"
     else:
         head = (
-            f"TA干的活：{dept_display}的专职数字员工，"
+            f"TA干的活：{dept_display}的专职AI 专家，"
             f"专门处理「{plain}」相关的经营问题。"
         )
     return (
@@ -3071,7 +3071,7 @@ def dept_emp(idx: int):
             (auth.current() or {}).get("role") == "member"
             and not auth.employee_allowed(idx, e["dept_key"])
         ):
-            raise HTTPException(403, "该数字员工未分配给您，请联系企业主或您的经理开通")
+            raise HTTPException(403, "该AI 专家未分配给您，请联系企业主或您的经理开通")
     cfg = employees.get_config(idx)
     identity_where, identity_args = _employee_task_where(e)
     tasks = db.q(
@@ -3283,7 +3283,7 @@ async def task_create(body: dict):
         if not await db.arun(
             auth.employee_allowed, idx, expert["dept_key"]
         ):
-            raise HTTPException(403, "该数字员工未分配给您，请联系企业主或您的经理开通")
+            raise HTTPException(403, "该AI 专家未分配给您，请联系企业主或您的经理开通")
     else:
         await db.arun(_need_module, "content")
     if not await db.arun(employees.is_enabled, idx):
@@ -3539,7 +3539,7 @@ async def team_runs_create(body: dict):
     team = body.get("team")
     members = team.get("members") if isinstance(team, dict) else None
     if not isinstance(members, list) or not (2 <= len(members) <= 8):
-        raise HTTPException(400, "请重新选出 2～8 位数字员工后组队")
+        raise HTTPException(400, "请重新选出 2～8 位 AI 专家后组队")
     for member in members:
         idx = member.get("idx") if isinstance(member, dict) else None
         if isinstance(idx, bool) or not isinstance(idx, int):
@@ -3551,7 +3551,7 @@ async def team_runs_create(body: dict):
         dept_key = expert["dept_key"] if expert else "content"
         await db.arun(_need_module, dept_key)
         if not await db.arun(auth.employee_allowed, idx, dept_key):
-            raise HTTPException(403, "小队含未分配给您的数字员工，请重新选人")
+            raise HTTPException(403, "小队含未分配给您的AI 专家，请重新选人")
         if not await db.arun(employees.is_enabled, idx):
             raise HTTPException(409, "小队含已停用员工，请重新选人")
     try:
@@ -7664,7 +7664,7 @@ async def _execute_learning_batch_run(run_id: int, tenant_id: int) -> None:
             run_id,
             int(tenant_id),
             (
-                f"{binding['employee'].get('person') or binding['employee'].get('name') or '数字员工'}"
+                f"{binding['employee'].get('person') or binding['employee'].get('name') or 'AI 专家'}"
                 "批量证据进修"
             ),
         )
@@ -8505,7 +8505,7 @@ async def _start_single_employee_learning_run(
             run_id,
             int(tenant_id),
             (
-                f"{binding['employee'].get('person') or binding['employee'].get('name') or '数字员工'}"
+                f"{binding['employee'].get('person') or binding['employee'].get('name') or 'AI 专家'}"
                 "证据进修"
             ),
         )
@@ -8804,7 +8804,7 @@ async def employee_learn(idx: int, body: dict | None = None):
             billing.start_operation,
             "learn",
             tid=TEN(),
-            note=f"{s.get('name', '数字员工')}进修",
+            note=f"{s.get('name', 'AI 专家')}进修",
             cancel_reason="员工进修请求中断自动退回",
         )
     except billing.InsufficientPoints as e:
@@ -8815,7 +8815,7 @@ async def employee_learn(idx: int, body: dict | None = None):
         raise
 
     tid = TEN()
-    emp_name = s.get("name", "数字员工")
+    emp_name = s.get("name", "AI 专家")
 
     async def _bg():
         from . import notify
@@ -11848,7 +11848,7 @@ async def meeting_create(body: dict):
             dept_key = str(binding["employee"].get("dept_key") or "content")
             _need_module(dept_key)
             if not auth.employee_allowed(idx, dept_key):
-                raise HTTPException(403, "会议成员里有未分配给您的数字员工，请联系企业主或您的经理开通")
+                raise HTTPException(403, "会议成员里有未分配给您的AI 专家，请联系企业主或您的经理开通")
             idxs.append(idx)
             member_views.append(_meeting_member_view(idx, binding=binding))
         return idxs, member_views, bindings
@@ -11949,7 +11949,7 @@ async def meeting_suggest(body: dict):
 
     roster = await db.arun(build_roster)
     if len(roster) < 2:
-        raise HTTPException(403, "当前账号可用的数字员工不足 2 位")
+        raise HTTPException(403, "当前账号可用的AI 专家不足 2 位")
     from . import providers
     prompt = _meeting_suggest_prompt(q, roster)
     async with _free_ai_slot("meeting-suggest"):

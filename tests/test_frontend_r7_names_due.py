@@ -179,7 +179,7 @@ class R7NamesDueBrowserTests(unittest.IsolatedAsyncioTestCase):
             text = await overdue.inner_text()
             self.assertIn("👤 小李", text)
             self.assertNotIn("xiaoli", text)
-            self.assertIn("王总（老板） 派的", text)
+            self.assertIn("王总（老板）派的", text)
             self.assertIn("已逾期 3 小时", text)
             self.assertNotIn("11-24 20:44", text)
             self.assertRegex(await overdue.locator(".due-rel").get_attribute("title"),
@@ -491,7 +491,7 @@ class R7NamesDueBrowserTests(unittest.IsolatedAsyncioTestCase):
             await page.locator(".card", has_text="把冷柜清洗一遍").click()
             await page.wait_for_selector("#picker")
             detail = await page.locator(".panel").first.inner_text()
-            self.assertIn("王总（老板） 派的", detail)
+            self.assertIn("王总（老板）派的", detail)
             self.assertIn("已逾期 2 天", detail)
             self._assert_no_browser_errors(errors)
             await browser.close()

@@ -14,6 +14,54 @@ const rmb = u => "¥" + ((u||0)*7.2).toFixed(2);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 // 把值安全塞进双引号事件属性:JSON.stringify 不转义单引号,直接进 onclick='...' 会被 ' 截断→XSS;故用双引号属性+esc
 const cp = x => esc(JSON.stringify(x));
+/* ---------- 内联线性图标 ----------
+   icon(name) 返回一段 <svg>（24 视窗、1.75 线宽、颜色跟随文字、aria-hidden），不引外部资源。
+   只用在导航、中转页卡片、顶栏退出、反馈按钮这些「纯图标位」；文案里的 emoji 不在这里替换。 */
+const ICONS = {
+  sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/>',
+  clipboard:'<rect x="5" y="4.5" width="14" height="16.5" rx="2"/><path d="M9 4.5V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v.5a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1zM9 11h6M9 15h4"/>',
+  store:'<path d="M4 9.5 5.5 4h13L20 9.5M4 9.5a2.67 2.67 0 0 0 5.33 0 2.67 2.67 0 0 0 5.34 0 2.67 2.67 0 0 0 5.33 0M5.5 12v8h13v-8M10 20v-4.5h4V20"/>',
+  megaphone:'<path d="M4 10v4a1 1 0 0 0 1 1h2l8 4V5L7 9H5a1 1 0 0 0-1 1zM18.5 9.5a3.5 3.5 0 0 1 0 5M8 15l1 5h2.5"/>',
+  user:'<circle cx="12" cy="8" r="3.75"/><path d="M4.5 20.5a7.5 7.5 0 0 1 15 0"/>',
+  monitor:'<rect x="3" y="4" width="18" height="12.5" rx="2"/><path d="M8.5 20.5h7M12 16.5v4"/>',
+  building:'<path d="M5 21V5a1.5 1.5 0 0 1 1.5-1.5h7A1.5 1.5 0 0 1 15 5v16M15 10h3.5A1.5 1.5 0 0 1 20 11.5V21M3 21h18M8.5 7.5h3M8.5 11h3M8.5 14.5h3M10 21v-3"/>',
+  sliders:'<path d="M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="17" r="2"/>',
+  logout:'<path d="M14 4.5h3.5A1.5 1.5 0 0 1 19 6v12a1.5 1.5 0 0 1-1.5 1.5H14M10 8l-4 4 4 4M6 12h9"/>',
+  message:'<path d="M5.5 4.5h13A1.5 1.5 0 0 1 20 6v9a1.5 1.5 0 0 1-1.5 1.5H12l-4.5 3.5v-3.5h-2A1.5 1.5 0 0 1 4 15V6a1.5 1.5 0 0 1 1.5-1.5zM8.5 9.5h7M8.5 12.5h4.5"/>',
+  sparkles:'<path d="M10 4l1.6 4.4L16 10l-4.4 1.6L10 16l-1.6-4.4L4 10l4.4-1.6zM17.5 14.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8zM18 3.5v3M16.5 5h3"/>',
+  arrow:'<path d="M9 6l6 6-6 6"/>',
+  gauge:'<path d="M4.5 17a8.5 8.5 0 1 1 15 0M12 14l3.5-4.5"/><circle cx="12" cy="14.5" r="1.25"/>',
+  search:'<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/>',
+  checklist:'<rect x="4" y="4" width="16" height="16" rx="2.5"/><path d="M8 12.5l2.5 2.5L16 9.5"/>',
+  trophy:'<path d="M8 4h8v5a4 4 0 0 1-8 0zM8 6H5v1.5A3 3 0 0 0 8 10.5M16 6h3v1.5a3 3 0 0 1-3 3M12 13v4M8.5 20.5h7M9.5 17h5v3.5h-5z"/>',
+  toolbox:'<rect x="3.5" y="8" width="17" height="11.5" rx="2"/><path d="M9 8V6a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 6v2M3.5 13h17M10.5 13v2h3v-2"/>',
+  shield:'<path d="M12 3.5l7 2.5v5.5c0 4.2-2.9 7.4-7 9-4.1-1.6-7-4.8-7-9V6zM9 12l2.2 2.2L15 10.5"/>',
+  video:'<rect x="3.5" y="6" width="12" height="12" rx="2"/><path d="M15.5 10.5l5-2.5v8l-5-2.5"/>',
+  clock:'<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+  link:'<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+  wallet:'<path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H17v3M4 7.5V17a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7a2 2 0 0 0-2-2H6.5A2.5 2.5 0 0 1 4 7.5zM16 13.5h.5"/>',
+  users:'<circle cx="9" cy="8.5" r="3.25"/><path d="M2.5 19.5a6.5 6.5 0 0 1 13 0M15.5 5.5a3.25 3.25 0 0 1 0 6M17.5 14a6 6 0 0 1 4 5.5"/>',
+  tag:'<path d="M4 4.5h7.2l8.3 8.3a1.5 1.5 0 0 1 0 2.1l-4.6 4.6a1.5 1.5 0 0 1-2.1 0L4.5 11.2z"/><circle cx="8.5" cy="8.5" r="1.25"/>',
+  smile:'<circle cx="12" cy="12" r="8.5"/><path d="M8.5 14a4.2 4.2 0 0 0 7 0M9 9.5v.5M15 9.5v.5"/>',
+  folder:'<path d="M3.5 7A1.5 1.5 0 0 1 5 5.5h4l2 2.5h8A1.5 1.5 0 0 1 20.5 9.5V17a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 17z"/>',
+  book:'<path d="M5 5a1.5 1.5 0 0 1 1.5-1.5H19v14H6.5A1.5 1.5 0 0 0 5 19zM5 19a1.5 1.5 0 0 0 1.5 1.5H19v-3M9 8h6"/>',
+  phone:'<rect x="7" y="3" width="10" height="18" rx="2"/><path d="M11 17.5h2"/>',
+  bell:'<path d="M6.5 16.5v-6a5.5 5.5 0 0 1 11 0v6l1.5 2H5zM10 20.5a2.2 2.2 0 0 0 4 0"/>',
+  trash:'<path d="M4.5 7h15M9.5 7V5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v2M6.5 7l.8 11.6a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4L17.5 7M10 11v5M14 11v5"/>',
+  help:'<circle cx="12" cy="12" r="8.5"/><path d="M9.7 9.5a2.4 2.4 0 1 1 3.5 2.1c-.8.4-1.2 1-1.2 1.9M12 16.5v.2"/>',
+  cap:'<path d="M2.5 9.5L12 5l9.5 4.5L12 14zM6.5 11.5V16c1.5 1.5 3.3 2.2 5.5 2.2s4-.7 5.5-2.2v-4.5M21.5 9.5v5"/>',
+  usercheck:'<circle cx="9.5" cy="8" r="3.5"/><path d="M3 20a6.5 6.5 0 0 1 12-3.4M15.5 17.5l2 2 4-4.5"/>',
+  pen:'<path d="M4 20l1-4.5L16.5 4a2 2 0 0 1 2.9 0l.6.6a2 2 0 0 1 0 2.9L8.5 19zM14.5 6l3.5 3.5"/>',
+  briefcase:'<rect x="3.5" y="7.5" width="17" height="12" rx="2"/><path d="M9 7.5V6A1.5 1.5 0 0 1 10.5 4.5h3A1.5 1.5 0 0 1 15 6v1.5M3.5 12.5c2.5 1.3 5.3 2 8.5 2s6-.7 8.5-2"/>',
+  chat2:'<path d="M4 6a1.5 1.5 0 0 1 1.5-1.5h8A1.5 1.5 0 0 1 15 6v5a1.5 1.5 0 0 1-1.5 1.5H9l-3 2.5v-2.5h-.5A1.5 1.5 0 0 1 4 11zM17.5 9.5h1A1.5 1.5 0 0 1 20 11v5a1.5 1.5 0 0 1-1.5 1.5H18V20l-3-2.5h-3.5"/>',
+  network:'<circle cx="12" cy="5.5" r="2.5"/><circle cx="5.5" cy="18" r="2.5"/><circle cx="18.5" cy="18" r="2.5"/><path d="M12 8v4M12 12l-5 4M12 12l5 4"/>',
+  inbox:'<path d="M4 13.5l2.5-8h11l2.5 8v5A1.5 1.5 0 0 1 18.5 20h-13A1.5 1.5 0 0 1 4 18.5zM4 13.5h4.5l1 2.5h5l1-2.5H20"/>',
+  chart:'<path d="M4 20.5h16M7 17v-5M12 17V6.5M17 17v-8"/>',
+};
+function icon(name, cls){
+  const body = ICONS[name]; if(!body) return "";
+  return `<svg class="ic${cls?" "+cls:""}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${body}</svg>`;
+}
 /* ---------- 第七轮:人名、截止时间、点数的统一写法 ----------
    staff.js 是独立页面(不加载 app.js),那边另有一份同样的 personWithRole / dueInfo / dueHtml。 */
 /* 给人看的称呼:姓名,没填回退登录名 */
@@ -741,7 +789,7 @@ function pay402(msg){
   // 点数不足不再是死胡同:给一条可点的充值出路(root在#/team充值,老板线下收款)
   let b = $("#paybar");
   if(!b){ b = document.createElement("div"); b.id = "paybar"; document.body.appendChild(b); }
-  b.style.cssText = "position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:998;background:#fff6dc;border:2.5px solid var(--ink,#222);border-radius:13px;padding:10px 14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;box-shadow:4px 4px 0 rgba(0,0,0,.18);max-width:92vw";
+  b.style.cssText = "position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:998;background:var(--brand-soft);border:1px solid var(--line);border-radius:13px;padding:10px 14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;box-shadow:var(--shadow-1);max-width:92vw";
   b.innerHTML = `<span style="font-weight:700">💎 ${esc(msg||"点数不足")}</span>
     ${ME?.role==="member"?`<span class="sub">充值请联系老板</span>`:""}
     <a class="btn sm pri" href="#/billing" onclick="closePayBar()">看套餐 / 充值</a>
@@ -861,60 +909,59 @@ const isOwnerLike = () => !!ME && (ME.role==="owner"||ME.role==="root");
 const seesCompanyMoney = () => !!ME && (ME.role==="owner"||(ME.role==="member"&&ME.job_title==="director"));
 const canSeeBilling = () => isOwnerLike() || seesCompanyMoney() || ME?.role==="tour";
 const NAV_GROUPS = [
-  {key:"today", label:"今天", icon:"☀️", hub:"", extra:[], cards:[]},
-  {key:"dispatch", label:"派活", icon:"📋", hub:"dispatch", extra:["job","delivery"],
+  {key:"today", label:"今天", icon:"☀️", ic:"sun", hub:"", extra:[], cards:[]},
+  {key:"dispatch", label:"派活", icon:"📋", ic:"clipboard", hub:"dispatch", extra:["job","delivery"],
     title:"派活", intro:"派给店员，或者交给 AI 专家，干完会通知您。",
     // 两套「活」分两段：派给店里真人的，和交给 AI 专家的。
     // 「派给店里的人」排第一(连锁老板最常用的入口)；企业还没有门店时 hubView 把这一段挪到最后
     sections:[{key:"staff", title:"派给店里的人"},{key:"ai", title:"交给 AI 专家"}],
     cards:[
-      {route:"staff-tasks", section:"staff", icon:"🧑‍🍳", title:"派给店员", desc:"把活派给店里的人，店员拍照交差，您在手机或电脑上审核", show:()=>!!window.PH_STAFF_ADMIN?.canDispatch()},
-      {route:"new", section:"ai", icon:"✍️", title:"下达任务（内容）", desc:"说一句想发什么，图文或短视频脚本从选题到成稿自动写好", show:()=>canWork("content")},
-      {route:"experts", section:"ai", icon:"🧑‍🔧", title:"找行业专家", desc:"您这一行的专家一人一岗，店里遇到的事直接问、直接派", show:hasExperts},
-      {route:"meetings", section:"ai", icon:"🪑", title:"多位专家一起商量", desc:"大事拿不准，拉几位专家各出方案、互相挑错，最后给您结论", show:canMeet},
-      {route:"teamruns", section:"ai", icon:"🤝", title:"协同小队", desc:"一句话拉起专业团队，可逐个确认或同时开工，队长拆解并汇总结果", show:()=>!!ME&&ME.role!=="tour"&&hasExperts()},
-      {route:"tasks", section:"ai", icon:"📦", title:"交给 AI 的活", desc:"交给 AI 专家的活都在这：谁在干、卡在哪、哪些等您看", show:()=>!!ME&&ME.role!=="tour"&&hasExperts()},
-      {route:"production", section:"ai", icon:"📊", title:"AI 专家产出", desc:"每位 AI 专家这段时间干了多少活、花了多少", show:isOwnerLike},
+      {route:"staff-tasks", section:"staff", icon:"🧑‍🍳", ic:"usercheck", title:"派给店员", desc:"把活派给店里的人，店员拍照交差，您在手机或电脑上审核", show:()=>!!window.PH_STAFF_ADMIN?.canDispatch()},
+      {route:"new", section:"ai", icon:"✍️", ic:"pen", title:"下达任务（内容）", desc:"说一句想发什么，图文或短视频脚本从选题到成稿自动写好", show:()=>canWork("content")},
+      {route:"experts", section:"ai", icon:"🧑‍🔧", ic:"briefcase", title:"找行业专家", desc:"您这一行的专家一人一岗，店里遇到的事直接问、直接派", show:hasExperts},
+      {route:"meetings", section:"ai", icon:"🪑", ic:"chat2", title:"多位专家一起商量", desc:"大事拿不准，拉几位专家各出方案、互相挑错，最后给您结论", show:canMeet},
+      {route:"teamruns", section:"ai", icon:"🤝", ic:"network", title:"协同小队", desc:"一句话拉起专业团队，可逐个确认或同时开工，队长拆解并汇总结果", show:()=>!!ME&&ME.role!=="tour"&&hasExperts()},
+      {route:"tasks", section:"ai", icon:"📦", ic:"inbox", title:"交给 AI 的活", desc:"交给 AI 专家的活都在这：谁在干、卡在哪、哪些等您看", show:()=>!!ME&&ME.role!=="tour"&&hasExperts()},
+      {route:"production", section:"ai", icon:"📊", ic:"chart", title:"AI 专家产出", desc:"每位 AI 专家这段时间干了多少活、花了多少", show:isOwnerLike},
     ]},
-  {key:"store", label:"门店", icon:"🏪", hub:"store", extra:["boss"],
+  {key:"store", label:"门店", icon:"🏪", ic:"store", hub:"store", extra:["boss"],
     title:"门店", intro:"各门店的巡店、整改和店员表现，一处看全。",
     cards:[
-      {route:"cockpit", icon:"🧭", title:"数据驾驶舱", desc:"每个账号和 AI 专家做了什么、门店执行得怎样、哪些事等您拍板，一屏看完；能导出、AI 分析、一键下发", show:isOwnerLike},
-      {route:"inspections", icon:"🔍", title:"巡店", desc:"拍照上传就能巡店，问题自动记下来、派给店长整改", show:()=>!!ME&&ME.role!=="tour"},
-      {route:"checklists", icon:"✅", title:"开闭店清单", desc:"每天开店、闭店、交班要做的事，店员拍照打勾，哪家没做一眼看到", show:()=>isOwnerLike()||["director","manager"].includes(ME?.job_title)},
-      {route:"store-rank", icon:"🏆", title:"门店排行", desc:"按清单、整改、派活、巡店算分，看哪家做得好、哪家要盯", show:()=>isOwnerLike()||["director","manager"].includes(ME?.job_title)},
+      {route:"cockpit", icon:"🧭", ic:"gauge", title:"数据驾驶舱", desc:"每个账号和 AI 专家做了什么、门店执行得怎样、哪些事等您拍板，一屏看完；能导出、AI 分析、一键下发", show:isOwnerLike},
+      {route:"inspections", icon:"🔍", ic:"search", title:"巡店", desc:"拍照上传就能巡店，问题自动记下来、派给店长整改", show:()=>!!ME&&ME.role!=="tour"},
+      {route:"checklists", icon:"✅", ic:"checklist", title:"开闭店清单", desc:"每天开店、闭店、交班要做的事，店员拍照打勾，哪家没做一眼看到", show:()=>isOwnerLike()||["director","manager"].includes(ME?.job_title)},
+      {route:"store-rank", icon:"🏆", ic:"trophy", title:"门店排行", desc:"按清单、整改、派活、巡店算分，看哪家做得好、哪家要盯", show:()=>isOwnerLike()||["director","manager"].includes(ME?.job_title)},
       // 「老板看板」并进了数据驾驶舱：#/boss 进入时直接换到 #/cockpit(见 bossRedirectView)
     ]},
-  {key:"growth", label:"获客", icon:"📣", hub:"growth", extra:[],
+  {key:"growth", label:"获客", icon:"📣", ic:"megaphone", hub:"growth", extra:[],
     title:"获客", intro:"每天该发什么、发之前查一遍、定好时间自动发出去。",
     cards:[
-      {route:"tools", icon:"🧰", title:"获客工具", desc:"今日必发、私域日历、竞品盯梢、线索雷达等小工具，点一下就出结果", show:()=>canWork("content")},
-      {route:"censor", icon:"🛡️", title:"内容审查", desc:"发之前免费查一遍广告法、违禁词，避免被平台限流或罚款", show:()=>canWork("content")},
-      {route:"avatar", icon:"🎥", title:"数字人视频", desc:"上传一张照片就能开口说话，用您自己的声音出口播视频", show:()=>canWork("avatar")},
-      {route:"schedules", icon:"⏰", title:"定时发布", desc:"设好时间，内容每天自动写好、按时送到", show:()=>canWork("content")},
-      {route:"channels", icon:"🔗", title:"发布渠道", desc:"绑定公众号和企业微信群，写好的内容一键发出去", show:()=>canWork("content")&&isOwnerLike()},
+      {route:"tools", icon:"🧰", ic:"toolbox", title:"获客工具", desc:"今日必发、私域日历、竞品盯梢、线索雷达等小工具，点一下就出结果", show:()=>canWork("content")},
+      {route:"censor", icon:"🛡️", ic:"shield", title:"内容审查", desc:"发之前免费查一遍广告法、违禁词，避免被平台限流或罚款", show:()=>canWork("content")},
+      {route:"avatar", icon:"🎥", ic:"video", title:"数字人视频", desc:"上传一张照片就能开口说话，用您自己的声音出口播视频", show:()=>canWork("avatar")},
+      {route:"schedules", icon:"⏰", ic:"clock", title:"定时发布", desc:"设好时间，内容每天自动写好、按时送到", show:()=>canWork("content")},
+      {route:"channels", icon:"🔗", ic:"link", title:"发布渠道", desc:"绑定公众号和企业微信群，写好的内容一键发出去", show:()=>canWork("content")&&isOwnerLike()},
     ]},
-  {key:"mine", label:"我的", icon:"👤", hub:"mine", extra:["settings"],
+  {key:"mine", label:"我的", icon:"👤", ic:"user", hub:"mine", extra:["settings","platform","admin"],
     title:"我的", intro:"账号、团队和资料都在这里。",
     cards:[
-      {route:"billing", icon:"💎", title:"套餐", desc:"看余额、续费或升级套餐", show:canSeeBilling},
-      {route:"team", icon:"👥", title:"团队与权限", desc:"给店长、店员开账号，分配能用哪些功能", show:isOwnerLike},
-      {route:"team", icon:"👥", title:"团队分配", desc:"把同事分到对应门店和板块", show:()=>!isOwnerLike()&&!!ME?.can_allocate},
-      {route:"brand", icon:"🏷️", title:"品牌知识包", desc:"联网采集品牌资料，核对入库后所有数字员工统一使用这版品牌事实", show:()=>!!ME&&ME.role!=="tour"},
-      {route:"company", icon:"🏢", title:"企业档案", desc:"企业介绍、主营产品和店铺信息，数字员工干活都会参考", show:isOwnerLike,
-        subs:[{route:"profiles", icon:"🎭", title:"品牌人设", desc:"品牌说话的口吻和往期文章，写出来才像您自己", show:()=>canWork("content")}]},
-      {route:"assets", icon:"🗂️", title:"我的资料库", desc:"数字员工交付的成品都存在这，好内容可以存成经验反复用", show:()=>canWork("library"),
-        subs:[{route:"knowledge", icon:"📚", title:"经验库", desc:"存下来的好经验，以后所有员工干活都会带上", show:()=>canWork("library")}]},
-      {action:"location.href='/staff'", icon:"📱", title:"店员手机版", desc:"店员每天在手机上看待办、拍照交差，您也能打开看看", show:()=>!!ME&&ME.role!=="tour"},
-      {action:"fbOpen()", icon:"💬", title:"意见反馈", desc:"用得顺不顺、缺什么功能，直接告诉我们", show:()=>!!ME&&ME.role!=="tour"},
-      {route:"notifications", icon:"🔔", title:"通知记录", desc:"看过的通知都能在这里翻到，每日经营简报也在这里开关", show:()=>!!ME&&ME.role!=="tour"},
-      {route:"trash", icon:"🗑", title:"回收站", desc:"误删的任务和资料可以在这里找回", show:()=>!!isAdmin()},
+      {route:"billing", icon:"💎", ic:"wallet", title:"套餐", desc:"看余额、续费或升级套餐", show:canSeeBilling},
+      {route:"team", icon:"👥", ic:"users", title:"团队与权限", desc:"给店长、店员开账号，分配能用哪些功能", show:isOwnerLike},
+      {route:"team", icon:"👥", ic:"users", title:"团队分配", desc:"把同事分到对应门店和板块", show:()=>!isOwnerLike()&&!!ME?.can_allocate},
+      {route:"brand", icon:"🏷️", ic:"tag", title:"品牌知识包", desc:"联网采集品牌资料，核对入库后所有AI 专家统一使用这版品牌事实", show:()=>!!ME&&ME.role!=="tour"},
+      {route:"company", icon:"🏢", ic:"building", title:"企业档案", desc:"企业介绍、主营产品和店铺信息，AI 专家干活都会参考", show:isOwnerLike,
+        subs:[{route:"profiles", icon:"🎭", ic:"smile", title:"品牌人设", desc:"品牌说话的口吻和往期文章，写出来才像您自己", show:()=>canWork("content")}]},
+      {route:"assets", icon:"🗂️", ic:"folder", title:"我的资料库", desc:"AI 专家交付的成品都存在这，好内容可以存成经验反复用", show:()=>canWork("library"),
+        subs:[{route:"knowledge", icon:"📚", ic:"book", title:"经验库", desc:"存下来的好经验，以后所有员工干活都会带上", show:()=>canWork("library")}]},
+      {action:"location.href='/staff'", icon:"📱", ic:"phone", title:"店员手机版", desc:"店员每天在手机上看待办、拍照交差，您也能打开看看", show:()=>!!ME&&ME.role!=="tour"},
+      {action:"fbOpen()", icon:"💬", ic:"message", title:"意见反馈", desc:"用得顺不顺、缺什么功能，直接告诉我们", show:()=>!!ME&&ME.role!=="tour"},
+      {route:"notifications", icon:"🔔", ic:"bell", title:"通知记录", desc:"看过的通知都能在这里翻到，每日经营简报也在这里开关", show:()=>!!ME&&ME.role!=="tour"},
+      {route:"trash", icon:"🗑", ic:"trash", title:"回收站", desc:"误删的任务和资料可以在这里找回", show:()=>!!isAdmin()},
       // 引导卡只对 owner/root 展示,重看入口同样只给他们
-      {route:"guide", icon:"🧭", title:"新手引导重看", desc:"重新打开「今天」页最上面的上手卡片", show:isOwnerLike},
+      {route:"guide", icon:"🧭", ic:"help", title:"新手引导重看", desc:"重新打开「今天」页最上面的上手卡片", show:isOwnerLike},
       // 以下仅平台 root:放在最下面
-      {action:"openEmployeeLearningBatchManager()", icon:"🏭", title:"员工进修管理", desc:"平台运营：批量安排数字员工进修、审核进修结果", show:()=>!!isBoss(), rootOnly:true},
-      {route:"platform", icon:"🏦", title:"平台运营", desc:"开新企业、企业列表、充点和开通申请", show:()=>!!ME&&ME.role==="root", rootOnly:true},
-      {route:"admin", icon:"🛠", title:"后台", desc:"模型、提示词和系统设置", show:()=>!!ME&&ME.role==="root", rootOnly:true},
+      {action:"openEmployeeLearningBatchManager()", icon:"🏭", ic:"cap", title:"员工进修管理", desc:"平台运营：批量安排AI 专家进修、审核进修结果", show:()=>!!isBoss(), rootOnly:true},
+      // 「平台运营」「后台」已经是平台管理员导航上的一级入口(ROOT_NAV)，这里不再重复放卡片
     ]},
 ];
 /* 当前路由属于哪个一级入口(子页面在导航上高亮它的上级) */
@@ -946,10 +993,10 @@ function navGroupHref(group){
 /* 平台管理员(root)的一级入口：派活/门店/获客对平台方没意义，换成 工作台/企业/后台/我的。
    只换导航，不拦路由：root 直接输地址仍能打开其它页面(那时导航上不高亮任何一项)。 */
 const ROOT_NAV = [
-  {key:"today", label:"工作台", icon:"🖥️", href:"#/"},
-  {key:"platform", label:"企业", icon:"🏦", href:"#/platform"},
-  {key:"admin", label:"后台", icon:"🛠", href:"#/admin"},
-  {key:"mine", label:"我的", icon:"👤", href:"#/mine"},
+  {key:"today", label:"工作台", icon:"🖥️", ic:"monitor", href:"#/"},
+  {key:"platform", label:"企业", icon:"🏦", ic:"building", href:"#/platform"},
+  {key:"admin", label:"后台", icon:"🛠", ic:"sliders", href:"#/admin"},
+  {key:"mine", label:"我的", icon:"👤", ic:"user", href:"#/mine"},
 ];
 function rootNavOn(page){
   const p = String(page||"");
@@ -965,7 +1012,7 @@ function nav(){
   const items = isRoot ? ROOT_NAV.map(g=>({g, href:g.href}))
     : NAV_GROUPS.map(g=>({g, href:navGroupHref(g)})).filter(x=>x.href);
   const link = ({g,href},cls)=>`<a href="${href}" class="${cls} ${on===g.key?"on":""}" data-nav="${g.key}" aria-label="${esc(g.label)}${g.key==="today"&&inbox?`，${inbox} 条待处理`:""}" ${on===g.key?'aria-current="page"':""}>`
-    + `<span class="nav-ic" aria-hidden="true">${g.icon}</span><span class="nav-tx">${g.label}</span>`
+    + `<span class="nav-ic" aria-hidden="true">${icon(g.ic)}</span><span class="nav-tx">${g.label}</span>`
     + `${g.key==="today"&&inbox?`<span class="badge" aria-label="${inbox} 条待处理">${inbox}</span>`:""}</a>`;
   // 桌面:顶部导航;手机:同样的 5 个入口放进底部 Tab 栏(#tabbar),顶部只留退出
   // 右侧账号区:企业名 · 账号 · 余额(用已加载的数据,不额外请求) + 退出,紧挨着在线状态
@@ -978,7 +1025,7 @@ function nav(){
   let conn = $("#conn"); if(conn) conn.remove();
   $("#nav").innerHTML = items.map(x=>link(x,"nav-top")).join("")
     + `<span class="nav-acct${items.some(x=>x.g.key==="mine")?"":" keep-out"}">${who?`<a class="nav-who" href="#/mine" title="${who}">${who}</a>`:""}${org}`
-    + `<button type="button" class="nav-action navlogout" onclick="logout()" title="${ME?esc(ME.tenant)+" · "+esc(personName(ME)):""}">🚪 退出</button></span>`;
+    + `<button type="button" class="nav-action navlogout" onclick="logout()" title="${ME?esc(ME.tenant)+" · "+esc(personName(ME)):""}">${icon("logout")}退出</button></span>`;
   if(!conn){ conn=document.createElement("span"); conn.id="conn"; conn.className="nav-conn"; conn.setAttribute("role","status"); }
   const acct = $("#nav .nav-acct");
   acct.insertBefore(conn, acct.querySelector(".navlogout"));
@@ -990,14 +1037,14 @@ function nav(){
 /* ---------- 中转页:大卡片列出子功能,每张一句大白话,点进去就是原页面 ---------- */
 function hubCardHtml(c){
   const go = c.route ? `location.hash=${cp("#/"+c.route)}` : c.action;
-  const subs = (c.subs||[]).map(s=>`<a class="btn sm" href="#/${s.route}" onclick="event.stopPropagation()">${s.icon} ${esc(s.title)}</a>`).join("");
+  const subs = (c.subs||[]).map(s=>`<a class="btn sm" href="#/${s.route}" onclick="event.stopPropagation()">${icon(s.ic)}${esc(s.title)}</a>`).join("");
   return `<div class="hubcard ${c.rootOnly?"hub-root":""}" role="link" tabindex="0" onclick="${go}"
     onkeydown="if(event.key==='Enter'){${go}}">
-    <span class="hc-emoji" aria-hidden="true">${c.icon}</span>
+    <span class="hc-emoji" aria-hidden="true">${icon(c.ic)}</span>
     <span class="hc-body"><span class="hc-t">${esc(c.title)}</span><span class="hc-d">${esc(c.desc)}</span>
       ${c.route&&HUB_STATS[c.route]?`<span class="hc-stat" data-hub-stat="${esc(c.route)}" hidden></span>`:""}
       ${subs?`<span class="hc-subs">${subs}</span>`:""}</span>
-    <span class="hc-arrow" aria-hidden="true">→</span></div>`;
+    <span class="hc-arrow" aria-hidden="true">${icon("arrow")}</span></div>`;
 }
 /* 「最近用过」:派活/门店/获客三个中转页顶部列出最近进过的 2 个子页面,少点一次(按账号存本机) */
 const HUB_RECENT_GROUPS = ["dispatch","store","growth"];
@@ -1016,7 +1063,7 @@ function hubRecentRow(g, cards){
   const picks = (Array.isArray(saved)?saved:[]).map(r=>cards.find(c=>c.route===r)).filter(Boolean).slice(0,2);
   if(!picks.length) return "";
   return `<div class="hub-recent"><span class="sub">最近用过：</span>${picks.map(c=>
-    `<a class="btn sm" href="#/${esc(c.route)}">${c.icon} ${esc(c.title)}</a>`).join("")}</div>`;
+    `<a class="btn sm" href="#/${esc(c.route)}">${icon(c.ic)}${esc(c.title)}</a>`).join("")}</div>`;
 }
 /* 中转页卡片上的「哪里有事」小字：只用现成的数(STATE)或现成的接口，数字为 0 就不显示。
    每个函数返回一句话(或空串)；卡片先画出来，这些数再各自异步补上，谁读不到谁就不显示。 */
@@ -1090,7 +1137,7 @@ function hubView(key, top=""){
     body = normal.length?grid(normal)
       :`<div class="card"><div class="empty">您的账号还没有开通这里的功能，请联系企业主账号开通。</div></div>`;
   }
-  $("#main").innerHTML = `<div class="hubhead"><h2>${g.icon} ${esc(g.title)}</h2><div class="sub">${esc(g.intro)}</div></div>`
+  $("#main").innerHTML = `<div class="hubhead"><h2>${esc(g.title)}</h2><div class="sub">${esc(g.intro)}</div></div>`
     + hubRecentRow(g, normal)
     + top
     + body
@@ -1264,7 +1311,7 @@ async function mineHub(){
       <div class="actions"><button type="button" class="btn pri" onclick="tmMyPw()">💾 保存新密码</button></div></div>`:""}</div>`:"";
   hubView("mine", who);
   $("#main").insertAdjacentHTML("beforeend",
-    `<div class="actions" style="margin-top:18px"><button type="button" class="btn bad" onclick="logout()">🚪 退出登录</button></div>`);
+    `<div class="actions mine-logout" style="margin-top:18px"><button type="button" class="btn bad" onclick="logout()">🚪 退出登录</button></div>`);
 }
 async function logout(){
   if(ME&&ME.role==="tour"){ clearBusinessStorage(); location.href="/promo"; return; }
@@ -1287,9 +1334,9 @@ function forcedPasswordView(){
   document.title="设置新密码 · 派活";
   stopSse();
   document.body.classList.add("forced-pw");
-  $("#nav").innerHTML=`<span style="font-weight:900">🔐 账号安全升级</span>
+  $("#nav").innerHTML=`<span style="font-weight:700">🔐 账号安全升级</span>
     <span style="flex:1"></span>
-    <button type="button" class="nav-action navlogout" onclick="logout()">🚪 退出</button>`;
+    <button type="button" class="nav-action navlogout" onclick="logout()">${icon("logout")}退出</button>`;
   const bar=$("#tabbar"); if(bar) bar.innerHTML="";
   document.body.classList.remove("has-tabbar");
   // 是否还要输当前密码由服务端按会话判断(刚用密码登录的首登改密免输)。
@@ -2058,7 +2105,7 @@ async function dashboard(){
     }catch(e){ if(e?.name==="NavigationAbort") throw e; reportClientError("onboarding_card",e); }
   })();
   const [store] = await Promise.all([storeTodaySummary(), onboardingTask]);
-  const tourBanner = ME&&ME.role==="tour" ? `<div class="notice" style="background:#ece3ff;margin-top:0">👀 <b>参观模式</b>：去看看每位数字员工能帮您的店做什么。<a href="#/experts" style="text-decoration:underline;font-weight:900">看数字员工 →</a> <a href="/promo#plans" style="text-decoration:underline;font-weight:900">查看套餐</a> 或联系开通企业账号后直接派活。</div>` : "";
+  const tourBanner = ME&&ME.role==="tour" ? `<div class="notice" style="background:#ece3ff;margin-top:0">👀 <b>参观模式</b>：去看看每位 AI 专家能帮您的店做什么。<a href="#/experts" style="text-decoration:underline;font-weight:700">看AI 专家 →</a> <a href="/promo#plans" style="text-decoration:underline;font-weight:700">查看套餐</a> 或联系开通企业账号后直接派活。</div>` : "";
   // 日期用服务器给的北京日期(/api/state 的 today_text),和店员手机版同一个来源;
   // 不取浏览器本地时间(跨时区、手机时间不准时两端会对不上)。老版本后端没这个字段时才按北京时间自己算。
   const dateLabel = todayLabelCn();
@@ -2083,7 +2130,7 @@ async function dashboard(){
     const name = esc(j.title&&j.title!=="(未产出标题)"?j.title:(j.brief?.direction||`任务 #${j.id}`));
     if(j.status==="failed") rows.push(todayTodoRow("❌",`失败了：${name}`,"点数已按规则退回，去看看怎么处理","去处理",`location.hash='#/job/${Number(j.id)}'`,"blue"));
     else if(j.status==="gate_blocked") rows.push(todayTodoRow("🛡️",`审查拦下了：${name}`,"内容有风险表述，要您看一眼","去处理",`location.hash='#/job/${Number(j.id)}'`,"blue"));
-    else rows.push(todayTodoRow("👔",`等您拍板：${name}`,"数字员工做到一半，等您点头再往下做","去拍板",`location.hash='#/job/${Number(j.id)}'`));
+    else rows.push(todayTodoRow("👔",`等您拍板：${name}`,"AI 专家做到一半，等您点头再往下做","去拍板",`location.hash='#/job/${Number(j.id)}'`));
   });
   if(store?.rechecks){
     rows.push(todayTodoRow("🧾",`${store.rechecks} 条门店整改等您审核`,"店长已经整改完，要您确认是否合格","去审核","location.hash='#/inspections'"));
@@ -2212,7 +2259,7 @@ async function industryPickCard(){
   if(!list.length) return "";
   return `<div class="card" id="industry-pick" style="background:#fff1bd;border-width:3px">
     <h2 style="margin:0">🏷️ 先选您的行业</h2>
-    <div class="sub" style="margin-top:6px">选好后，您这一行的专属数字员工就会出现在「派活 → 找行业专家」里。这里只能选 1 个，之后想加行业请到套餐页或联系顾问。</div>
+    <div class="sub" style="margin-top:6px">选好后，您这一行的专属AI 专家就会出现在「派活 → 找行业专家」里。这里只能选 1 个，之后想加行业请到套餐页或联系顾问。</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
       ${list.map(x=>`<button class="btn" onclick="industryPick(${cp(String(x.key))},${cp(String(x.name||x.key))},this)">${esc(x.name||x.key)}</button>`).join("")}
     </div></div>`;
@@ -2296,7 +2343,7 @@ async function notificationHistoryReadAll(btn){
     await notificationsView(0);
   }catch(e){ toast(e.message); btn.disabled=false; }
 }
-/* 「数字员工怎么用」:原「四步用人法」收成「找专家」页顶部的一行提示,可不再提示,重看引导时恢复 */
+/* 「AI 专家怎么用」:原「四步用人法」收成「找专家」页顶部的一行提示,可不再提示,重看引导时恢复 */
 function howtoCard(){
   if(!ME || !["owner","root"].includes(ME.role)) return "";
   if(lsGet("howto_hide_"+(ME.tenant||""))) return "";
@@ -2351,7 +2398,7 @@ async function deleteJob(id){
 }
 
 /* ---------- V42:可恢复回收站 ---------- */
-const TRASH_KIND_LABEL = {job:"内容任务",task:"数字员工任务",knowledge:"知识沉淀",avatar:"数字人任务",
+const TRASH_KIND_LABEL = {job:"内容任务",task:"AI 专家任务",knowledge:"知识沉淀",avatar:"数字人任务",
   profile:"品牌人设",asset:"资产"};
 let TRASH_ITEMS=[];
 async function trashView(offset=0){
@@ -2412,7 +2459,7 @@ async function trashPurge(kind,id,btn){
 const TC_PAGE_SIZE=100;
 let TC_DATA = null, TC_DATA_Q = "", TC_STATUS = "open", TC_KIND = "all", TC_QUERY = "", TC_LOADING_MORE = false;
 let TC_REQUEST_SEQ = 0, TC_SEARCH_TIMER = null;
-const TC_KIND_LABEL = {expert:"数字员工任务",content:"内容任务",meeting:"AI会议",avatar:"数字人视频",
+const TC_KIND_LABEL = {expert:"AI 专家任务",content:"内容任务",meeting:"AI会议",avatar:"数字人视频",
   video:"图文成片",tool:"营销工具",publish:"发布任务",wechat:"公众号草稿投递"};
 function tcPill(group){ return group==="done"?"done":group==="failed"?"failed":
   group==="waiting"?"awaiting_review":group==="cancelled"?"cancelled":"running"; }
@@ -2502,8 +2549,8 @@ function tcVisibleItems(){
   });
 }
 function tcStatusCard(key,emoji,label,n,color){
-  return `<div class="topic" style="margin:0;background:${color};cursor:pointer;${TC_STATUS===key?"border-color:#111;box-shadow:4px 4px 0 #33291f55":""}" onclick="tcSetStatus(${cp(key)})">
-    <div class="sub">${emoji} ${label}</div><div style="font-size:25px;font-weight:900;margin-top:3px">${n||0}</div></div>`;
+  return `<div class="topic" style="margin:0;background:${color};cursor:pointer;${TC_STATUS===key?"border-color:#111;box-shadow:var(--shadow-1)":""}" onclick="tcSetStatus(${cp(key)})">
+    <div class="sub">${emoji} ${label}</div><div style="font-size:25px;font-weight:700;margin-top:3px">${n||0}</div></div>`;
 }
 function tcNewButton(){
   if(canWork("content")) return `<a class="btn pri" href="#/new">➕ 派一个任务</a>`;
@@ -2551,7 +2598,7 @@ function taskCenterDraw(){
 function tcRow(x){
   const assignmentState=employeeAssignmentState(x);
   return `<div class="topic" style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;margin-bottom:10px">
-    <div style="width:42px;height:42px;border:2px solid var(--ink);border-radius:12px;background:#fff6dc;display:flex;align-items:center;justify-content:center;font-size:21px;flex:none">${x.emoji}</div>
+    <div style="width:42px;height:42px;border:1px solid var(--line);border-radius:12px;background:var(--brand-soft);display:flex;align-items:center;justify-content:center;font-size:21px;flex:none">${x.emoji}</div>
     <div style="flex:1;min-width:180px">
       <div style="display:flex;gap:7px;align-items:center;flex-wrap:wrap"><span class="tag">${esc(x.kind_label)}</span>
         <span class="pill ${tcPill(x.status_group)}">${esc(x.status_label)}</span>
@@ -2776,10 +2823,10 @@ async function taskDetailView(tid){
   <div class="card" style="background:#fffaf0">
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><h2 style="margin:0;flex:1">📋 任务 #${t.id}</h2>
       <span class="pill ${tcPill(group)}">${esc(statusLabel)}</span></div>
-    <div style="font-size:18px;font-weight:900;margin-top:14px">${esc(t.brief?.direction||"未命名任务")}</div>
+    <div style="font-size:18px;font-weight:700;margin-top:14px">${esc(t.brief?.direction||"未命名任务")}</div>
     ${t.status==="done"?taskVerdictHtml(t):""}
     ${["queued","running"].includes(t.status)?taskWaitHtml(t,`<div class="steps" data-tasksteps="${t.id}">${(t.steps||[]).map((s,i)=>stepRow(s,i+1)).join("")||`<div class="step"><span class="ic">⏳</span><span class="lb">员工正在上线…</span></div>`}</div>`):""}
-    <div class="kv"><span>👤 ${esc(t.emp_name||"数字员工")}</span><span>🏢 ${esc(t.dept_name||"")}</span>
+    <div class="kv"><span>👤 ${esc(t.emp_name||"AI 专家")}</span><span>🏢 ${esc(t.dept_name||"")}</span>
       <span>发起人：${esc(t.created_by_name||"—")}</span>
       <span>🕒 ${tcFmt(t.created_at)}</span>${t.cost_usd?`<span>模型成本 ${rmb(t.cost_usd)}</span>`:""}</div>
     ${assignmentState?`<div class="notice" style="margin-top:10px"><b>${esc(assignmentState)}</b><div class="sub">本任务继续使用创建时冻结的员工姓名与岗位归属。</div></div>`:""}
@@ -2858,11 +2905,11 @@ async function taskCenterRecordView(ref){
   <div class="card" style="background:#fffaf0"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
     <h2 style="margin:0;flex:1">${{avatar:"🎥",video:"🎬",tool:"🧰",publish:"📣"}[kind]} 任务 #${t.id}</h2>
     <span class="pill ${tcPill(group)}">${esc(statusLabel)}</span></div>
-    <div style="font-size:18px;font-weight:900;margin-top:14px">${esc(t.title||"未命名任务")}</div>
+    <div style="font-size:18px;font-weight:700;margin-top:14px">${esc(t.title||"未命名任务")}</div>
     <div class="kv"><span>👤 ${esc(t.assignee||"")}</span><span>🕒 ${tcFmt(t.created_at)}</span></div>
     ${t.source?`<div class="notice violet"><b>↳ 生成来源：${esc(t.source.label)}</b></div>`:""}
     ${t.progress?`<div class="notice"><span class="${t.status==="running"?"spin":""}"></span> ${esc(t.progress)}</div>`:""}
-    ${t.params&&Object.keys(t.params).length?`<details style="margin-top:12px"><summary style="cursor:pointer;font-weight:800">查看任务参数</summary><pre style="white-space:pre-wrap;word-break:break-word;background:#f4edde;padding:12px;border-radius:12px;margin-top:8px">${esc(JSON.stringify(t.params,null,2))}</pre></details>`:""}
+    ${t.params&&Object.keys(t.params).length?`<details style="margin-top:12px"><summary style="cursor:pointer;font-weight:600">查看任务参数</summary><pre style="white-space:pre-wrap;word-break:break-word;background:#f4edde;padding:12px;border-radius:12px;margin-top:8px">${esc(JSON.stringify(t.params,null,2))}</pre></details>`:""}
     ${(t.steps||[]).length?`<h3>工作进度</h3><div class="steps">${t.steps.map((s,i)=>stepRow(s,i+1)).join("")}</div>`:""}
     ${outputUrl?`<div class="actions"><a class="btn pri" href="${esc(outputUrl)}" target="_blank" rel="noopener noreferrer">▶️ 打开交付物</a><a class="btn" href="${esc(outputUrl)}" download>⬇️ 下载</a></div>`:""}
     ${resultHtml}
@@ -2968,7 +3015,7 @@ function inspectionEmployeeTab(s,e){
 function employeeIntroTab(s,e){
   return `<div class="card" style="background:linear-gradient(120deg,#fff6dc,#fffaf0);margin-top:0">
     <h2 style="margin-top:0">🪪 ${esc(s.name)}</h2>
-    <div style="font-size:16px;line-height:1.9">${esc(e.intro||s.intro||"这是一位随时待命的数字员工。")}</div>
+    <div style="font-size:16px;line-height:1.9">${esc(e.intro||s.intro||"这是一位随时待命的AI 专家。")}</div>
   </div>`;
 }
 /* ---------- V27:老板速览 + 全文折叠(专家/单独派活共用) ---------- */
@@ -3235,11 +3282,11 @@ function renderVerdictCard(data){
   const actions=(Array.isArray(d.actions)?d.actions:[]).map(x=>String(x??"").trim()).filter(Boolean).slice(0,3);
   const extra=(Array.isArray(d.extra)?d.extra:[]).map(x=>String(x??"").trim()).filter(Boolean);
   if(!verdict&&!actions.length&&!watch&&!extra.length) return "";
-  return `<section class="verdict-card" data-verdict-card style="margin-top:10px;background:linear-gradient(120deg,#fff3d6,#ffe7c0);border:2.5px solid var(--ink);border-radius:14px;padding:14px;box-shadow:3px 3px 0 #ffd16699">
-    <div class="sub" style="font-weight:800;margin-bottom:4px">${esc(d.title||"⚡ 结论")}</div>
-    ${verdict?`<div class="vc-verdict" style="font-size:19px;font-weight:900;line-height:1.45">${esc(verdict)}</div>`:""}
-    ${actions.length?`<div style="font-weight:800;margin-top:12px">今天/本周就做这 ${actions.length} 件事</div>
-    <ol class="vc-actions" style="margin:6px 0 0;padding:0;list-style:none">${actions.map((a,i)=>`<li style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#fffdf7;border:2px solid var(--ink);border-radius:11px;padding:8px 10px;margin-top:6px">
+  return `<section class="verdict-card" data-verdict-card style="margin-top:10px;background:linear-gradient(120deg,#fff3d6,#ffe7c0);border:1px solid var(--line);border-radius:14px;padding:14px;box-shadow:3px 3px 0 #ffd16699">
+    <div class="sub" style="font-weight:600;margin-bottom:4px">${esc(d.title||"⚡ 结论")}</div>
+    ${verdict?`<div class="vc-verdict" style="font-size:19px;font-weight:700;line-height:1.45">${esc(verdict)}</div>`:""}
+    ${actions.length?`<div style="font-weight:600;margin-top:12px">今天/本周就做这 ${actions.length} 件事</div>
+    <ol class="vc-actions" style="margin:6px 0 0;padding:0;list-style:none">${actions.map((a,i)=>`<li style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#fffdf7;border:1px solid var(--line);border-radius:11px;padding:8px 10px;margin-top:6px">
       <b style="flex:none">${i+1}.</b><span class="vc-text" style="flex:1;min-width:160px">${esc(a)}</span>
       <button type="button" class="btn sm" data-text="${esc(a)}" onclick="verdictDispatch(this)" aria-label="把第 ${i+1} 条派给店员">📤 派给店员</button></li>`).join("")}</ol>`:""}
     ${watch?`<div class="vc-watch" style="margin-top:10px;background:#ffe3e3;border-radius:10px;padding:8px 10px;font-weight:700">⚠️ 要留意：${esc(watch)}</div>`:""}
@@ -3252,10 +3299,10 @@ function renderStageProgress(p){
   if(!p||!Array.isArray(p.stages)||!p.stages.length) return "";
   const cur=Number.isInteger(p.current)?p.current:-1, elapsed=Math.max(0,Number(p.elapsed_seconds)||0);
   const used=elapsed<60?"不到 1 分钟":`${Math.round(elapsed/60)} 分钟`;
-  return `<div class="stage-progress" role="status" aria-live="polite" style="margin-top:10px;background:#fffdf7;border:2.5px solid var(--ink);border-radius:13px;padding:12px 14px">
-    <div style="font-weight:900;font-size:17px">${cur<0?"⏳":"⚙️"} ${esc(p.label||"")}</div>
+  return `<div class="stage-progress" role="status" aria-live="polite" style="margin-top:10px;background:#fffdf7;border:1px solid var(--line);border-radius:13px;padding:12px 14px">
+    <div style="font-weight:700;font-size:17px">${cur<0?"⏳":"⚙️"} ${esc(p.label||"")}</div>
     <div style="display:grid;grid-template-columns:repeat(${p.stages.length},minmax(0,1fr));gap:5px;margin-top:10px">${p.stages.map((s,i)=>
-      `<div style="border:2px solid var(--ink);border-radius:9px;padding:6px 4px;text-align:center;font-size:12px;font-weight:800;background:${i<cur?"#dff6e9":i===cur?"#fff1bd":"#f2eee5"};opacity:${i>cur?".6":"1"}"${i===cur?' aria-current="step"':""}>${i<cur?"✓ ":""}${esc(s)}</div>`).join("")}</div>
+      `<div style="border:1px solid var(--line);border-radius:9px;padding:6px 4px;text-align:center;font-size:12px;font-weight:600;background:${i<cur?"#dff6e9":i===cur?"#fff1bd":"#f2eee5"};opacity:${i>cur?".6":"1"}"${i===cur?' aria-current="step"':""}>${i<cur?"✓ ":""}${esc(s)}</div>`).join("")}</div>
     <div class="sub" style="margin-top:8px">已用 ${used} · ${esc(p.hint||"")}</div>
     <div class="sub">可以先去忙别的，做完会通知您。</div></div>`;
 }
@@ -3316,7 +3363,7 @@ function refreshTaskStage(id){
   }).catch(err=>reportClientError("task_stage_refresh",err));
 }
 
-/* ---------- V51:数字员工连续多轮协作 ---------- */
+/* ---------- V51:AI 专家连续多轮协作 ---------- */
 function taskRevisionPanel(t, mode="page"){
   if(!t||!["done","failed"].includes(t.status)) return "";
   const thread=t.thread||{}, revisions=thread.revisions||[];
@@ -3346,7 +3393,7 @@ function taskRevisionPanel(t, mode="page"){
       :"当前任务状态更新中，稍后刷新即可继续。"
   );
   const canContinue=thread.can_continue===true&&employeeCanContinue(t);
-  if(!canContinue&&!thread.can_accept) return `<div class="card" style="background:#fff6dc;margin-top:12px"><b>${failedLeaf?`第 ${revision} 轮生成未成功`:`第 ${revision} 轮已交付`}</b>${timeline}
+  if(!canContinue&&!thread.can_accept) return `<div class="card" style="background:var(--brand-soft);margin-top:12px"><b>${failedLeaf?`第 ${revision} 轮生成未成功`:`第 ${revision} 轮已交付`}</b>${timeline}
     <div class="sub">${blockedMessage}</div></div>`;
   const acceptButton=thread.can_accept?`<button class="btn sm" onclick="taskAccept(${thread.thread_id||t.id},${resumeTaskId},${cp(mode)},this)">✅ 满意，结束</button>`:"";
   const evidenceRequirements=normalizeDecisionEvidenceRequirements(t.task_guide?.evidence_requirements);
@@ -3867,7 +3914,7 @@ function specResumeTab(e){
       </div>
       <div class="rz-side">
         ${bossBox("rz-boss-d")}
-        ${pl?rzSec("why","需要留意",rzList(r.cautions),'style="background:#fff6dc"'):rzSec("why","为什么推荐TA",why+cautions,'style="background:#fff6dc"')}
+        ${pl?rzSec("why","需要留意",rzList(r.cautions),'style="background:var(--brand-soft)"'):rzSec("why","为什么推荐TA",why+cautions,'style="background:var(--brand-soft)"')}
         ${pl?"":rzSec("scene","这些时候找TA",scenes)}
         ${rzSec("out",`TA 会交回 <small class="sub">${outs.length} 份文件</small>`,outHtml)}
         ${rzSec("red","TA 绝不做的事",redHtml)}
@@ -3881,7 +3928,7 @@ function specResumeTab(e){
 function specIntroTab(e){
   return `<div class="card" style="background:linear-gradient(120deg,#fff6dc,#fffaf0);margin-top:0">
     <h2 style="margin-top:0">🪪 ${esc(e.person||e.name)}${e.person?" · "+esc(e.name):""}</h2>
-    <div style="font-size:16px;line-height:1.9">${esc(e.intro||"这是一位随时待命的数字员工。")}</div>
+    <div style="font-size:16px;line-height:1.9">${esc(e.intro||"这是一位随时待命的AI 专家。")}</div>
   </div>`;
 }
 function specTaskTab(e){
@@ -4478,7 +4525,7 @@ function specShowMismatch(idx, r){
       <div style="flex:1;min-width:0"><div><b>${esc(s.name||"")}</b> <span class="sub">${esc(s.role||"")}</span></div>
         <div class="sub" style="margin-top:3px">💡 ${esc(s.why||"")}</div></div>
       <button class="btn sm pri" onclick="reassignExpert(${s.idx})">改派给TA →</button></div>`).join("");
-  box.innerHTML = `<div class="card" style="background:#fff6dc;margin-top:12px">
+  box.innerHTML = `<div class="card" style="background:var(--brand-soft);margin-top:12px">
     <b>🤔 这个活可能不太对口</b>
     <div class="sub" style="margin-top:4px">${esc(r.why||"这位专家的岗位和您要办的活不太搭，换个人可能更顺手。")}</div>
     ${sugg?`<div class="sub" style="margin-top:8px"><b>同部门这几位更合适：</b></div>${sugg}`:""}
@@ -4803,7 +4850,7 @@ async function newBrief(){
     <textarea id="b-dir" placeholder="例：${esc(BRIEF_EXAMPLES[0])}">${esc(PRE?.direction||"")}</textarea>
     ${PRE?`<div class="notice green">🔥 来自「今日必发」：${esc(PRE.why||"")}</div>`:""}
     <div class="chips" style="margin-top:4px">${BRIEF_EXAMPLES.map(x=>`<span class="chip" style="font-size:11px" onclick="$('#b-dir').value=this.textContent;scheduleBriefDraftSave()">${esc(x)}</span>`).join("")}</div>
-    <details id="b-more" style="margin-top:12px"><summary style="cursor:pointer;font-weight:800">⚙️ 更多设置 <span class="sub">内容类型、配图、平台、风格、人设、管控程度（会记住您上次的选择）</span></summary>
+    <details id="b-more" style="margin-top:12px"><summary style="cursor:pointer;font-weight:600">⚙️ 更多设置 <span class="sub">内容类型、配图、平台、风格、人设、管控程度（会记住您上次的选择）</span></summary>
     <label>内容类型 <span class="sub">（决定整个制作流程的打法）</span></label>
     <div class="chips" id="b-tpl">${META.brief_templates.map((t,i)=>`<span class="chip${i===1?" on":""}" onclick="pick(this)" title="${{蹭热点:"追当下热点，时效优先",日更选题:"从趋势里挑题，稳定日更",产品软文:"带货种草，卖点前置",观点输出:"独到观点，人设优先",教程干货:"手把手教程，信息密度高",二创改写:"对标内容二次创作"}[t]||t}">${t}</span>`).join("")}</div>
     <input id="b-tpl-c" value="${esc(PRE?.template||"")}" placeholder="✏️ 或自己输入内容类型（如：门店探访日记、老板问答）——填了就用您输入的" style="margin-top:6px">
@@ -4836,7 +4883,7 @@ async function newBrief(){
       <label style="display:flex;align-items:center"><input type="checkbox" id="b-deck" style="width:auto;margin-right:8px">启用「演绎师」：额外产出一页交互式 HTML 演绎稿（适合教程/知识类）</label>
     </details>
     </details>
-    ${pointsShort(jobPoints)?`<div class="notice" id="b-short" style="background:#fff3d6;margin-top:12px">⚠️ 点数不够本单所需 ${jobPoints} 点。${ME?.role==="member"?"点数由老板管理，请联系老板充值。":`<a href="#/billing" style="font-weight:800;text-decoration:underline">先去充值 →</a>`}（点数不够时提交会直接提示，不会扣费）</div>`:""}
+    ${pointsShort(jobPoints)?`<div class="notice" id="b-short" style="background:#fff3d6;margin-top:12px">⚠️ 点数不够本单所需 ${jobPoints} 点。${ME?.role==="member"?"点数由老板管理，请联系老板充值。":`<a href="#/billing" style="font-weight:600;text-decoration:underline">先去充值 →</a>`}（点数不够时提交会直接提示，不会扣费）</div>`:""}
     <label>③ 提交</label>
     <div class="actions" style="margin-top:6px;align-items:flex-start">${pointsAction({label:"🚀 提交，让团队开工",onclick:"submitBrief(this)",cost:jobPoints,id:"b-submit",style:"font-size:15px"})}
       <span class="sub" style="margin-top:10px">提交后可看全程直播，随时打断</span></div>
@@ -4976,7 +5023,7 @@ async function jobView(id){
         <b style="flex:1">整单进度：已完成 ${whole.completed}/${whole.total} 个工位 · 当前第 ${whole.current}/${whole.total} 步</b>
         <span class="sub">从开工至今 ${whole.elapsed}</span></div>
       <div role="progressbar" aria-label="整单进度" aria-valuemin="0" aria-valuemax="100"
-        aria-valuenow="${whole.percent}" style="height:9px;background:#eadfcd;border:1.5px solid var(--ink);border-radius:999px;overflow:hidden;margin:8px 0 6px">
+        aria-valuenow="${whole.percent}" style="height:9px;background:#eadfcd;border:1px solid var(--line);border-radius:999px;overflow:hidden;margin:8px 0 6px">
         <div style="height:100%;width:${whole.percent}%;background:${j.status==="failed"?"#e5484d":"#2f9e44"};transition:width .25s ease"></div></div>
       <div class="sub" style="font-weight:700">${esc(whole.note)}</div>
     </div>
@@ -5152,14 +5199,14 @@ const OUT_RENDER = {
   deck(r){ const o=r.output;
     const file=safeAssetUrl(o.file,"html");
     return `<p class="sub">${esc(o.summary||"")}</p>${file?`<div class="actions"><a class="btn pri" href="${esc(file)}" target="_blank" rel="noopener noreferrer">🖥️ 打开演绎稿</a></div>
-    <iframe src="${esc(file)}" sandbox referrerpolicy="no-referrer" style="width:100%;height:520px;border:2.5px solid var(--ink);border-radius:14px;margin-top:12px"></iframe>`:""}`;},
+    <iframe src="${esc(file)}" sandbox referrerpolicy="no-referrer" style="width:100%;height:520px;border:1px solid var(--line);border-radius:14px;margin-top:12px"></iframe>`:""}`;},
   publish(r,j){ const o=r.output;
     return `<h3>各平台发布包</h3>`+pubCoreCardHtml(o.core_card)+(o.versions||[]).map((v,i)=>`<div class="topic">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="tag">${esc(v.platform)}</span>
         <b style="flex:1">${esc(v.title)}</b>${pubCheckBadge(v)}
         ${v.best_time?`<span class="sub">🕐 ${esc(v.best_time)}</span>`:""}
         <button class="btn sm" onclick="copyText(${cp((v.title||"")+"\n\n"+(v.body||"")+"\n\n"+(v.tags||[]).map(t=>"#"+t).join(" "))})">📋 复制全文</button></div>
-      <div class="md" style="margin-top:8px;max-height:260px;overflow:auto;border:2px solid var(--line);border-radius:10px;padding:10px">${md(v.body)}</div>
+      <div class="md" style="margin-top:8px;max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:10px">${md(v.body)}</div>
       <div style="margin-top:6px">${(v.tags||[]).map(t=>`<span class="tag">#${esc(t)}</span>`).join("")}</div>
       ${v.checklist?.length?`<ul class="list" style="margin-top:6px">${v.checklist.map(c=>`<li>${esc(c)}</li>`).join("")}</ul>`:""}
       ${pubExtrasHtml(v)}
@@ -5178,7 +5225,7 @@ function draftLike(r){
     bodyHtml = `<textarea id="editBody" style="min-height:320px">${esc(o.body||"")}</textarea>
     <div class="sub" style="margin-top:4px">直接修改正文，点「✅ 通过」即以您改后的版本流转下游。</div>`;
   }else{
-    bodyHtml = `<div class="md" style="border:2px solid var(--line);border-radius:12px;padding:14px;max-height:430px;overflow:auto;background:#fff">${md(o.body)}</div>`;
+    bodyHtml = `<div class="md" style="border:1px solid var(--line);border-radius:12px;padding:14px;max-height:430px;overflow:auto;background:#fff">${md(o.body)}</div>`;
   }
   return `<h3>标题候选${canPick?"(选一个)":""}</h3>`+
     (o.title_candidates||[]).map((t,i)=>`<label style="display:block;margin:4px 0;font-weight:${i===tsel?800:400}">
@@ -5562,9 +5609,9 @@ function employeeDisplayIdentity(employee){
   const person=String(employee?.person||"").trim();
   const job=String(employee?.name||employee?.role||"").trim();
   return {
-    person:person||job||"未命名数字员工",
+    person:person||job||"未命位 AI 专家",
     job:job||"岗位待核",
-    label:person&&job?`${person} · ${job}`:(person||job||"未命名数字员工")
+    label:person&&job?`${person} · ${job}`:(person||job||"未命位 AI 专家")
   };
 }
 function employeeIdentityMutationFields(employee){
@@ -6039,14 +6086,14 @@ function bossDashboardDraw(){
   // 员工表只列本期有数据的人,其余收成一行「另有 N 位本期没干活」
   const bossEmpActive=e=>["tasks","completed","waiting","failed","refunded","inspection_visits"].some(k=>Number(e[k])>0);
   const activeEmployees=employees.filter(bossEmpActive), idleEmployees=employees.filter(e=>!bossEmpActive(e));
-  $("#main").innerHTML=`<div class="card" style="background:linear-gradient(120deg,#172126,#24343b);color:#fff;border-color:#172126">
-    <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap"><div style="flex:1;min-width:250px"><div class="sub" style="color:#b8c9c4">${esc(scope.industry_emoji||"")} ${esc(industryLabel)} · ${esc(scope.tenant_name||"")}</div>
-      <h2 style="margin:4px 0;color:#fff">老板看板</h2><div style="color:#d9e4df">先看风险，再看 AI 专家产出与执行效率。下面一排数字说的是交给 AI 专家的任务；派给店员的活看「先处理清单」和「派给店员」页。</div></div>
-      ${scopes.can_cross_tenant?`<div><label style="color:#d9e4df;margin-top:0">企业</label><select style="${selectStyle}" onchange="bossDashTenant(this.value)">${tenants.map(t=>`<option value="${t.id}" ${Number(t.id)===Number(tenant.id)?"selected":""}>${esc(t.name)}</option>`).join("")}</select></div>`:""}
-      <div><label style="color:#d9e4df;margin-top:0">行业</label><select style="${selectStyle}" onchange="bossDashIndustry(this.value)">${industries.map(i=>`<option value="${esc(i.key)}" ${i.key===scope.industry_key?"selected":""}>${esc(i.emoji||"")} ${esc(i.short_label||i.name)}</option>`).join("")}</select></div>
-      <div><label style="color:#d9e4df;margin-top:0">周期</label><select style="width:auto" onchange="bossDashDays(this.value)">${BOSS_DASH_PERIODS.map(x=>`<option value="${x}" ${Number(period.days)===x?"selected":""}>近${x}天</option>`).join("")}</select></div></div></div>
+  $("#main").innerHTML=`<div class="card" style="background:linear-gradient(135deg,#1d2740,#2b3a5e);color:#fff;border-color:#1d2740">
+    <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap"><div style="flex:1;min-width:250px"><div class="sub" style="color:#b9c3dc">${esc(scope.industry_emoji||"")} ${esc(industryLabel)} · ${esc(scope.tenant_name||"")}</div>
+      <h2 style="margin:4px 0;color:#fff">老板看板</h2><div style="color:#d7deef">先看风险，再看 AI 专家产出与执行效率。下面一排数字说的是交给 AI 专家的任务；派给店员的活看「先处理清单」和「派给店员」页。</div></div>
+      ${scopes.can_cross_tenant?`<div><label style="color:#d7deef;margin-top:0">企业</label><select style="${selectStyle}" onchange="bossDashTenant(this.value)">${tenants.map(t=>`<option value="${t.id}" ${Number(t.id)===Number(tenant.id)?"selected":""}>${esc(t.name)}</option>`).join("")}</select></div>`:""}
+      <div><label style="color:#d7deef;margin-top:0">行业</label><select style="${selectStyle}" onchange="bossDashIndustry(this.value)">${industries.map(i=>`<option value="${esc(i.key)}" ${i.key===scope.industry_key?"selected":""}>${esc(i.emoji||"")} ${esc(i.short_label||i.name)}</option>`).join("")}</select></div>
+      <div><label style="color:#d7deef;margin-top:0">周期</label><select style="width:auto" onchange="bossDashDays(this.value)">${BOSS_DASH_PERIODS.map(x=>`<option value="${x}" ${Number(period.days)===x?"selected":""}>近${x}天</option>`).join("")}</select></div></div></div>
   <div class="grid3" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-bottom:14px">
-    ${[["本期新建",bossDashNumber(tasks.total),"交给 AI 专家的任务，按创建时间"],["本期交付",bossDashNumber(tasks.completed),"AI 专家做完的，按完成时间"],["AI 任务完成了多少",bossDashPct(tasks.completion_rate),"这段时间交给 AI 专家的任务，现在完成了多少"],["正在执行",bossDashNumber(tasks.active),"本期新建里 AI 专家还在做的"],["失败 / 退款",`${bossDashNumber(tasks.failed)} / ${bossDashNumber(tasks.refunded)}`,"失败按终态时间，退款按结算记录"],["平均交付",bossDashDuration(eff.average_cycle_seconds),"本期完成任务周期"],isBoss()?["本期模型花费",`$${bossDashNumber(eff.cost_usd,2)}`,`点数消耗 ${bossDashNumber(eff.billing_points,1)} · tokens ${bossDashNumber(eff.tokens)}`]:["本期花费",`${bossDashNumber(eff.billing_points,1)} 点`,"这段时间派活消耗的点数"]].map(([l,v,n])=>`<div class="topic" style="margin:0"><div class="sub">${l}</div><div style="font-size:26px;font-weight:900;margin:4px 0">${v}</div><div class="sub">${n}</div></div>`).join("")}</div>
+    ${[["本期新建",bossDashNumber(tasks.total),"交给 AI 专家的任务，按创建时间"],["本期交付",bossDashNumber(tasks.completed),"AI 专家做完的，按完成时间"],["AI 任务完成了多少",bossDashPct(tasks.completion_rate),"这段时间交给 AI 专家的任务，现在完成了多少"],["正在执行",bossDashNumber(tasks.active),"本期新建里 AI 专家还在做的"],["失败 / 退款",`${bossDashNumber(tasks.failed)} / ${bossDashNumber(tasks.refunded)}`,"失败按终态时间，退款按结算记录"],["平均交付",bossDashDuration(eff.average_cycle_seconds),"本期完成任务周期"],isBoss()?["本期模型花费",`$${bossDashNumber(eff.cost_usd,2)}`,`点数消耗 ${bossDashNumber(eff.billing_points,1)} · tokens ${bossDashNumber(eff.tokens)}`]:["本期花费",`${bossDashNumber(eff.billing_points,1)} 点`,"这段时间派活消耗的点数"]].map(([l,v,n])=>`<div class="topic" style="margin:0"><div class="sub">${l}</div><div style="font-size:26px;font-weight:700;margin:4px 0">${v}</div><div class="sub">${n}</div></div>`).join("")}</div>
   <div class="row" style="align-items:stretch"><div class="card" style="flex:1;min-width:290px;margin:0"><h3 style="margin-top:0">🚨 先处理清单 <span class="sub" style="font-weight:400">（标了“到现在还没处理”的不分时间段，其余只算这段时间）</span></h3>
     ${[...(risk.staff_review_pending==null?[]:[["店员交差等您审核（到现在还没处理的）",risk.staff_review_pending,"#/staff-tasks"],["派给店员的活已逾期（到现在还没交的）",risk.staff_overdue_tasks,"#/staff-tasks"]]),["AI 任务超24小时仍在跑（到现在还没处理的）",risk.stale_active_tasks],["AI 任务等您拍板（到现在还没处理的）",risk.waiting_for_decision],["本期失败的 AI 任务",risk.failed_tasks],["本期已退款的 AI 任务",risk.refunded_tasks],["高风险巡店问题",risk.critical_inspection_issues],["逾期整改",risk.overdue_inspection_actions]].map(([l,v,to])=>{const hot=Number(v)>0,val=`<b style="color:${hot?"#b4292f":"#28734f"}">${v===null||v===undefined?"未接入":v}${to&&hot?" ›":""}</b>`;return to&&hot?`<a href="${to}" data-boss-staff-risk style="display:flex;justify-content:space-between;border-bottom:1px solid #eadfc4;padding:9px 0;color:inherit;text-decoration:none"><span>${l}</span>${val}</a>`:`<div style="display:flex;justify-content:space-between;border-bottom:1px solid #eadfc4;padding:9px 0"><span>${l}</span>${val}</div>`;}).join("")}
   </div><div class="card" style="flex:2;min-width:330px;margin:0"><h3 style="margin-top:0">🏪 巡店执行</h3>${ins.availability?`<div class="grid3" style="grid-template-columns:repeat(3,1fr)">
@@ -6623,13 +6670,13 @@ function inspectionDraw(){
   const summary=data.summary||{},industries=meta.industries||[],branchMetrics=Array.isArray(summary.branches)?summary.branches:[],regionMetrics=Array.isArray(summary.regions)?summary.regions:[],legacyVisitedBranches=branchMetrics.filter(b=>Number(b.visits||0)>0).length,visitedBranches=summary.visited_branches!==null&&summary.visited_branches!==undefined?summary.visited_branches:legacyVisitedBranches,selectedBranch=branchMetrics.find(item=>Number(item.id)===Number(INSPECTION_BRANCH_ID)),selectedRegion=INSPECTION_REGION;
   $("#main").innerHTML=`<div class="card" style="background:linear-gradient(120deg,#dff4eb,#fffaf0 70%)">
     <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap"><div style="flex:1;min-width:240px">
-      <h2 style="margin:0">🏪 巡店</h2><div class="sub" style="margin-top:5px">区域经理巡店 · 上传现场照片，巡店经理会标出可见问题、生成整改责任与期限，并持续跟踪复查。</div></div>
+      <h2 style="margin:0">🏪 巡店</h2><div class="sub" style="margin-top:5px">到店拍几张照片传上来，AI 帮您找出问题，定好谁来改、几号前改完，改完再拍照复查。</div></div>
       ${industries.length>1?`<div style="min-width:170px"><label style="margin-top:0">巡店行业</label><select onchange="inspectionSelectIndustry(this.value)">${industries.map(item=>`<option value="${esc(item.key)}" ${item.key===meta.industry_key?"selected":""}>${esc(item.emoji||"")} ${esc(item.short_label||item.name)}</option>`).join("")}</select></div>`:""}
       ${inspectionImportActionHtml()}
       ${inspectionPerm("can_manage_branches")?`<button class="btn" onclick="inspectionNewBranch()">＋ 新建门店</button>`:""}</div>
     ${meta.branch_scope?.notice?`<div class="notice" style="margin:10px 0 0">${esc(meta.branch_scope.notice)}</div>`:""}</div>
   ${detail?inspectionDetailHtml(detail):`${inspectionImportRender()}<div class="grid3" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));margin-bottom:16px">
-    ${[["已完成巡店",bossDashNumber(summary.visits)],["覆盖门店",bossDashNumber(visitedBranches)],["开放问题",bossDashNumber(summary.open_issues)],["逾期整改",bossDashNumber(summary.overdue_actions)],["已核验整改",bossDashNumber(summary.verified_actions)]].map(([l,v])=>`<div class="topic" style="margin:0"><div style="font-size:24px;font-weight:900">${v}</div><div class="sub">${l}</div></div>`).join("")}</div>
+    ${[["已完成巡店",bossDashNumber(summary.visits)],["覆盖门店",bossDashNumber(visitedBranches)],["开放问题",bossDashNumber(summary.open_issues)],["逾期整改",bossDashNumber(summary.overdue_actions)],["已核验整改",bossDashNumber(summary.verified_actions)]].map(([l,v])=>`<div class="topic" style="margin:0"><div style="font-size:24px;font-weight:700">${v}</div><div class="sub">${l}</div></div>`).join("")}</div>
   <div class="card"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><h3 style="margin:0;flex:1">🗺️ 区域汇总${selectedRegion!==null?` · ${esc(selectedRegion||"未分区")}`:""}</h3>${selectedRegion!==null?`<button class="btn sm" onclick="inspectionFilterRegion(null)">清除区域筛选</button>`:""}</div><div class="sub" style="margin:8px 0">按逾期、开放问题和低分排序，先处理风险最高的区域；点“看记录”下钻到该区域。</div>${regionMetrics.length?`<div class="dimwrap"><table class="dimtable"><thead><tr><th>区域</th><th>门店</th><th>均分</th><th>开放问题</th><th>逾期</th><th>末次巡店</th><th></th></tr></thead><tbody>${regionMetrics.map(r=>`<tr><td><b>${esc(r.region||"未分区")}</b></td><td>${bossDashNumber(r.branches)}</td><td>${bossDashNumber(r.average_score,1)}</td><td>${bossDashNumber(r.open_issues)}</td><td>${bossDashNumber(r.overdue_actions)}</td><td>${r.last_visit_at?new Date(r.last_visit_at*1000).toLocaleDateString("zh-CN"):"未巡店"}</td><td><button class="btn sm ${selectedRegion!==null&&String(selectedRegion)===String(r.region||"")?"pri":""}" onclick="inspectionFilterRegion(${cp(r.region||"")})">${selectedRegion!==null&&String(selectedRegion)===String(r.region||"")?"筛选中":"看记录"}</button></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">暂无可汇总的区域巡店数据。</div>`}</div>
   <div class="card"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><h3 style="margin:0;flex:1">⚠️ 风险优先门店</h3>${selectedBranch?`<button class="btn sm" onclick="inspectionFilterBranch(0)">清除“${esc(selectedBranch.name)}”筛选</button>`:""}</div><div class="sub" style="margin:8px 0">点击门店，只看该店巡店记录；列表按逾期、开放问题和低分排序。</div>${branchMetrics.length?`<div class="dimwrap"><table class="dimtable"><thead><tr><th>门店 / 区域</th><th>均分</th><th>开放问题</th><th>逾期</th><th>末次巡店</th><th></th></tr></thead><tbody>${branchMetrics.map(b=>`<tr><td><b>${esc(b.name)}</b><div class="sub">${esc(b.region||"未分区")}</div></td><td>${bossDashNumber(b.average_score,1)}</td><td>${bossDashNumber(b.open_issues)}</td><td>${bossDashNumber(b.overdue_actions)}</td><td>${b.last_visit_at?new Date(b.last_visit_at*1000).toLocaleDateString("zh-CN"):"未巡店"}</td><td><button class="btn sm ${Number(b.id)===Number(INSPECTION_BRANCH_ID)?"pri":""}" onclick="inspectionFilterBranch(${Number(b.id)})">${Number(b.id)===Number(INSPECTION_BRANCH_ID)?"筛选中":"看记录"}</button></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">暂无门店风险数据。</div>`}</div>
   <div class="card" style="min-width:0;overflow:hidden"><h3 style="margin-top:0">发起一次巡店</h3>
@@ -6779,8 +6826,8 @@ async function productionView(){
     <div class="sub">${showCost?"您手下每位 AI 专家干了多少活、产出什么、模型成本多少，一目了然。":"您手下每位 AI 专家干了多少活、产出了什么，一目了然；花了多少点请到「套餐与点数」查看。"}点某一行看 TA 的逐条产出。</div>
     <div style="display:flex;gap:12px;flex-wrap:wrap;margin:12px 0">
       ${[["产出身份",t.employees],["总产出",t.runs],...(showCost?[["总 tokens",ktok(t.tokens)],["模型成本",rmb(t.cost_usd)]]:[])]
-        .map(([l,v])=>`<div style="flex:1;min-width:110px;background:#fff6dc;border:2px solid var(--ink);border-radius:12px;padding:10px 14px">
-          <div style="font-size:22px;font-weight:800">${v}</div><div class="sub">${l}</div></div>`).join("")}
+        .map(([l,v])=>`<div style="flex:1;min-width:110px;background:var(--brand-soft);border:1px solid var(--line);border-radius:12px;padding:10px 14px">
+          <div style="font-size:22px;font-weight:600">${v}</div><div class="sub">${l}</div></div>`).join("")}
     </div>
     ${d.employees.length?`<div class="dimwrap"><table class="dimtable">
       <thead><tr><th>AI 专家</th><th>部门</th><th>产出数</th>${showCost?"<th>tokens</th><th>模型成本</th>":""}<th>最近</th><th></th></tr></thead>
@@ -6991,7 +7038,7 @@ async function brandView(packageId){
     </div>`;
   }).join("");
   $("#main").innerHTML=`<div class="card"><h2>🏷️ 品牌知识包</h2>
-    <div class="sub">公开资料先供您逐项审阅。<b>只有点击“确认入库”后</b>，数字员工才会以该版门店名、口号、理念、招牌和品牌调性为准；检索结果不会自动生效。</div>
+    <div class="sub">公开资料先供您逐项审阅。<b>只有点击“确认入库”后</b>，AI 专家才会以该版门店名、口号、理念、招牌和品牌调性为准；检索结果不会自动生效。</div>
     ${isAdmin()?`<div class="row" style="margin-top:16px"><div><label for="bp-name">输入品牌名，采集公开资料</label>
       <input id="bp-name" maxlength="120" placeholder="例：完整品牌名；同名品牌可加城市"></div>
       <div><label for="bp-store-hint">门店 / 城市（可选，帮助区分同名品牌）</label>
@@ -7103,9 +7150,9 @@ async function brandUploadLogo(pid,btn){
 }
 async function brandConfirm(pid,btn){
   if(brandHasUnsubmittedEdits()) return toast("还有未保存、未重抓、未补充或未上传的品牌资料，请逐项完成后再确认入库");
-  if(!await uiConfirm("确认这版品牌知识包准确并同步给全部数字员工？生效后本版锁定，后续修正要创建新版本。",{okText:"确认入库",okClass:"pri"})) return;
+  if(!await uiConfirm("确认这版品牌知识包准确并同步给全部AI 专家？生效后本版锁定，后续修正要创建新版本。",{okText:"确认入库",okClass:"pri"})) return;
   btn.disabled=true;
-  try{await api(`/brand-packages/${pid}/confirm`,{method:"POST"});toast("品牌知识包已生效，数字员工将优先使用这一版");render(true);}
+  try{await api(`/brand-packages/${pid}/confirm`,{method:"POST"});toast("品牌知识包已生效，AI 专家将优先使用这一版");render(true);}
   catch(e){toast(e.message);btn.disabled=false;}
 }
 async function companyView(){
@@ -7113,9 +7160,9 @@ async function companyView(){
   const p = c.profile || {};
   const f = (k,label,ph)=>`<label>${esc(label)}</label><input id="cp-${k}" value="${esc(p[k]||"")}" placeholder="${esc(ph)}">`;
   $("#main").innerHTML = `<div class="card"><h2>🏢 企业档案</h2>
-    <div class="sub">把企业介绍/品牌手册/产品说明/话术规范粘进来，点「提炼并同步」——AI 会压成一份企业档案，供数字员工参考。若已有<a href="#/brand">已确认的品牌知识包</a>，店名、口号、理念、招牌等品牌事实以知识包为准；本页资料只补充知识包未覆盖的部分。也会带上经验库里的相关企业知识。</div>
+    <div class="sub">把企业介绍/品牌手册/产品说明/话术规范粘进来，点「提炼并同步」——AI 会压成一份企业档案，供AI 专家参考。若已有<a href="#/brand">已确认的品牌知识包</a>，店名、口号、理念、招牌等品牌事实以知识包为准；本页资料只补充知识包未覆盖的部分。也会带上经验库里的相关企业知识。</div>
     ${c.injected?(c.filled>=(c.total_fields||7)
-      ?`<div class="notice" style="background:#e7f6ec;border-color:#8fd3a6">✅ 企业档案已生效（7/7 项齐全），正注入全部数字员工</div>`
+      ?`<div class="notice" style="background:#e7f6ec;border-color:#8fd3a6">✅ 企业档案已生效（7/7 项齐全），正注入全部AI 专家</div>`
       :`<div class="notice" style="background:#fff3d6">🟡 企业档案部分生效：已填 ${c.filled}/${c.total_fields||7} 项。员工只知道已填的部分——<b>空着的字段（如调性/禁忌）不会凭空生效</b>，建议补全后重新保存。</div>`)
       :`<div class="notice">⚠️ 还没生成档案，员工暂时不了解您的企业。填资料 → 点提炼即可。</div>`}
     <label>企业资料（可直接粘贴，或上传文档；最多 2 万字）</label>
@@ -7277,7 +7324,7 @@ async function kbOpen(id){
   }
   document.body.insertAdjacentHTML("beforeend", `<div class="overlay" id="kb-ov" onclick="if(event.target===this)this.remove()">
     <div class="panel" style="max-width:820px;width:95vw;padding:0;overflow:hidden">
-      <div style="display:flex;gap:10px;align-items:center;padding:14px 20px;border-bottom:2px solid var(--line);background:#fff6dc">
+      <div style="display:flex;gap:10px;align-items:center;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--brand-soft)">
         <h2 style="flex:1;margin:0;min-width:min(100%,220px)">📄 ${esc(k.title)}</h2>
         <button class="btn sm" onclick="copyText(${cp(k.content||"")})">📋 复制全文</button>
         <button class="btn sm" onclick="knowForm(${k.id});$('#kb-ov').remove();window.scrollTo(0,0)">✏️ 编辑</button>
@@ -7297,7 +7344,7 @@ async function knowForm(id){
       return;
     }
   }
-  $("#kform").innerHTML = `<div class="card" style="background:#fff6dc">
+  $("#kform").innerHTML = `<div class="card" style="background:var(--brand-soft)">
     <h3 style="margin-top:0">${k?"编辑沉淀":"手记一条沉淀"}</h3>
     <label>标题 *</label><input id="k-title" value="${esc(k?.title||"")}" placeholder="如：小红书晚8点发互动最高">
     <label>内容</label><textarea id="k-content" style="min-height:100px" placeholder="经验的具体内容，员工工作时会参考">${esc(k?.content||"")}</textarea>
@@ -7344,7 +7391,7 @@ async function schedulesView(selectedId){
 }
 function schedRow(s,selected=false){
   const nxt = s.next_run_at? new Date(s.next_run_at*1000).toLocaleString("zh-CN",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"}) : "—";
-  return `<div id="schedule-${s.id}" class="topic ${s.enabled?"":""}" style="${s.enabled?"":"opacity:.55;"}${selected?"border-color:#111;background:#fff1bd;box-shadow:4px 4px 0 #33291f55":""}">
+  return `<div id="schedule-${s.id}" class="topic ${s.enabled?"":""}" style="${s.enabled?"":"opacity:.55;"}${selected?"border-color:#111;background:#fff1bd;box-shadow:var(--shadow-1)":""}">
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <span class="switch ${s.enabled?"on":""}" title="启用/停用" onclick="schedToggle(${s.id},${s.enabled?0:1})"></span>
       <span class="t" style="flex:1">${esc(s.name)}</span>
@@ -7355,7 +7402,7 @@ function schedRow(s,selected=false){
       <button class="btn sm" onclick="schedRunNow(${s.id})">▶️ 立即来一单</button>
       <button class="btn sm bad" onclick="schedDel(${s.id})">🗑</button></div>
     <div class="sub" style="margin-top:6px">方向：${esc(s.brief.direction||"")} · ${(s.brief.platforms||[]).map(esc).join("/")} · ${esc(MODE_LABEL[s.mode]||s.mode)}</div>
-    ${s.last_note?`<div class="sub" style="margin-top:3px">📝 ${esc(s.last_note).replace(/工单 #(\d+)/,'任务 <a href="#/job/$1" style="text-decoration:underline;font-weight:800">#$1</a>')}</div>`:""}
+    ${s.last_note?`<div class="sub" style="margin-top:3px">📝 ${esc(s.last_note).replace(/工单 #(\d+)/,'任务 <a href="#/job/$1" style="text-decoration:underline;font-weight:600">#$1</a>')}</div>`:""}
   </div>`;
 }
 function schedForm(s){
@@ -7367,7 +7414,7 @@ function schedForm(s){
   const anyTpl = s && META.brief_templates.some(tplOn);
   const pfOn = p => s? (b.platforms||[]).includes(p) : false;
   const anyPf = s && META.platforms.some(pfOn);
-  $("#sform").innerHTML = `<div class="card" style="background:#fff6dc">
+  $("#sform").innerHTML = `<div class="card" style="background:var(--brand-soft)">
     <h3 style="margin-top:0">${s?`✏️ 编辑定时任务 #${s.id}`:"新建定时任务"}</h3>
     ${s?"":`<div class="notice" style="margin-top:6px">💡 <b>定好主题，以后每天全自动</b>：到点自动走完整个制作流程（<b>每次自动开工扣 ${META?.job_points??18}点</b>，点数不足自动暂停）。建议先跑两单手动任务，满意了再定时。</div>`}
     <label>任务名</label><input id="s-name" value="${esc(s?.name||"")}" placeholder="如：每日行业选题">
@@ -7422,7 +7469,7 @@ function schedCost(){
   el.innerHTML = `💎 该节奏 ≈ <b>${k==="weekly"?`每周 1 单 · ${pts} 点/周`
     :`${perDay===1?"1":(Math.round(perDay*10)/10)} 单/天 · ${Math.round(daily*10)/10} 点/天`}</b>
     (每单 ${pts} 点)${!(ME?.role==="member"&&!seesCompanyMoney())?` · 当前余额 ${bal} 点约可自动跑 <b>${k==="weekly"?`${Math.floor(bal/pts)} 周`:`${runway} 天`}</b>`:""}${
-    heavy?` <span style="color:#b45309;font-weight:800">⚠️ 高频节奏烧点快，点数不足会自动暂停并通知您</span>`:""}`;
+    heavy?` <span style="color:#b45309;font-weight:600">⚠️ 高频节奏烧点快，点数不足会自动暂停并通知您</span>`:""}`;
 }
 async function schedSave(id){
   const dir = $("#s-dir").value.trim();
@@ -7493,8 +7540,8 @@ async function avatarView(){
   const hgDown = isBoss() && (!meta.heygen_ready || meta.heygen_exhausted);
   const avBanner = hgDown ? `<div class="notice violet" style="margin-top:0">
     🎬 <b>${meta.heygen_ready?"HeyGen 额度已用完，需要充值":"当前未接入 HeyGen「会动」引擎"}</b> ——
-    照片对口型的 <b>可灵 / 基础版</b> 照常出片，不影响您今天拍视频。${meta.heygen_ready?` 想继续用 HeyGen，请去 <a href="https://app.heygen.com/settings?nav=Subscriptions" target="_blank" style="text-decoration:underline;font-weight:800">充值</a>。`:``}
-    <div style="margin-top:5px">💡 想<b>不烧数字人额度</b>也能出视频？<a href="#/tools" onclick="TS.tab='vars'" style="text-decoration:underline;font-weight:900">试试 🎬 图文成片(3点/条，自动配音+字幕+抓真实图，不用照片)→</a></div></div>` : "";
+    照片对口型的 <b>可灵 / 基础版</b> 照常出片，不影响您今天拍视频。${meta.heygen_ready?` 想继续用 HeyGen，请去 <a href="https://app.heygen.com/settings?nav=Subscriptions" target="_blank" style="text-decoration:underline;font-weight:600">充值</a>。`:``}
+    <div style="margin-top:5px">💡 想<b>不烧数字人额度</b>也能出视频？<a href="#/tools" onclick="TS.tab='vars'" style="text-decoration:underline;font-weight:700">试试 🎬 图文成片(3点/条，自动配音+字幕+抓真实图，不用照片)→</a></div></div>` : "";
   $("#main").innerHTML = avBanner
     +listContractNotice(jobsContract,"数字人任务")
     +listContractNotice(photosContract,"人物照片")+`
@@ -7569,7 +7616,7 @@ async function avatarView(){
         <div class="row">
           <div><select id="av-dur" onchange="avPriceSync()">${meta.durations.map(d=>`<option value="${d.s}" ${d.s===30?"selected":""}>${d.label}</option>`).join("")}</select></div>
         </div>
-        <details class="av-adv" style="margin-top:8px"><summary class="sub" style="cursor:pointer;font-weight:800">⚙️ 高级：出片方式（当前：<span id="av-engine-cur">${esc(avEngineLabel(meta.engines.find(e=>e.key===avDefaultEngine(meta))||{}))}</span>）</summary>
+        <details class="av-adv" style="margin-top:8px"><summary class="sub" style="cursor:pointer;font-weight:600">⚙️ 高级：出片方式（当前：<span id="av-engine-cur">${esc(avEngineLabel(meta.engines.find(e=>e.key===avDefaultEngine(meta))||{}))}</span>）</summary>
           <div class="row" style="margin-top:6px">
             <div><select id="av-engine" aria-label="出片方式" onchange="avEngineSync();avPriceSync();$('#av-engine-cur').textContent=this.selectedOptions[0]?.textContent||''">${meta.engines.map(e=>`<option value="${e.key}" ${e.key===avDefaultEngine(meta)?"selected":""}>${esc(avEngineLabel(e))}</option>`).join("")}</select></div>
           </div>
@@ -7596,7 +7643,7 @@ async function avatarView(){
     <div class="actions" style="align-items:flex-start">${pointsAction({label:"🛒 生成带货视频",onclick:"svSubmit(this)",cost:24,id:"sv-go"})}
       <span class="sub" style="margin-top:10px">失败自动退点 · 不写价格/联系方式，画面不加字，发布时记得勾选「AI 生成」</span></div></div>
   ${active.length?`<div class="card" style="background:#fffaf0"><h2>🎬 进行中（${active.length} 个并行）</h2>
-    ${active.map(j=>`<div style="border:2px solid var(--ink);border-radius:14px;padding:12px;margin-bottom:10px;background:#fff">
+    ${active.map(j=>`<div style="border:1px solid var(--line);border-radius:14px;padding:12px;margin-bottom:10px;background:#fff">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <b>#${j.id} ${{queued:"排队中",running:"🎥 拍摄中…"}[j.status]}</b>
         <span class="sub" style="flex:1">${esc((j.params.script||"").slice(0,42))}… · ${esc(j.params.voice_label||"")}${j.params.own_audio_name?" · 🗣本人原声":""}</span>
@@ -7610,7 +7657,7 @@ async function avatarView(){
         <span class="pill ${j.status==="done"?"done":j.status==="failed"?"failed":j.status==="cancelled"?"cancelled":"running"}">${{queued:"排队",running:"拍摄中",done:"已交付",failed:"失败",cancelled:"已取消"}[j.status]}</span>
         ${j.status==="failed"&&j.retryable?`<button class="btn sm pri" onclick="retryAvatarJob(${j.id},this)">🔁 免费重试(${j.free_retries_remaining})</button>`:""}
         ${isAdmin()?`<button class="btn sm bad" onclick="avDel(${j.id})" title="移入回收站">🗑</button>`:""}</div>
-      ${j.status==="done"&&safeAssetUrl(j.video_file)?`<video controls style="max-width:360px;width:100%;border:3px solid var(--ink);border-radius:14px;margin-top:8px" src="${esc(safeAssetUrl(j.video_file))}"></video>
+      ${j.status==="done"&&safeAssetUrl(j.video_file)?`<video controls style="max-width:360px;width:100%;border:1px solid var(--line);border-radius:14px;margin-top:8px" src="${esc(safeAssetUrl(j.video_file))}"></video>
         <div class="actions" style="margin-top:6px"><a class="btn sm pri" href="${esc(safeAssetUrl(j.video_file))}" download>⬇️ 下载成片</a>
         ${safeAssetUrl(j.audio_file)?`<a class="btn sm" href="${esc(safeAssetUrl(j.audio_file))}" target="_blank" rel="noopener noreferrer">🔊 只要配音</a>`:""}</div>
         ${meta.ai_label?`<div class="sub" style="font-size:11px">🏷 ${esc(meta.ai_label)}（发布时请保留此标识）</div>`:""}`:""}
@@ -7643,7 +7690,7 @@ function xhrUpload(url, fd, input){
   return new Promise((resolve,reject)=>{
     const xhr=new XMLHttpRequest(); xhr.open("POST", url);
     const pill=document.createElement("div");
-    pill.style.cssText="position:fixed;left:50%;transform:translateX(-50%);bottom:70px;z-index:99;background:#2b2317;color:#ffd166;border:2.5px solid #ffd166;border-radius:12px;padding:8px 16px;font-weight:800;box-shadow:3px 4px 0 rgba(0,0,0,.4)";
+    pill.style.cssText="position:fixed;left:50%;transform:translateX(-50%);bottom:70px;z-index:99;background:#2b2317;color:#ffd166;border:2.5px solid #ffd166;border-radius:12px;padding:8px 16px;font-weight:600;box-shadow:var(--shadow-1)";
     pill.textContent="上传中… 0%"; document.body.appendChild(pill);
     if(input) input.disabled=true;
     const done=()=>{ pill.remove(); if(input){ input.disabled=false; input.value=""; } };
@@ -7704,7 +7751,7 @@ async function avFromLink(btn){
     if(r.source_text){
       let box = $("#av-source");
       if(!box){ $("#av-link").closest(".card").insertAdjacentHTML("beforeend",
-        `<details id="av-source" open style="margin-top:10px"><summary style="cursor:pointer;font-weight:800">📄 提取到的原文（比对用）</summary>
+        `<details id="av-source" open style="margin-top:10px"><summary style="cursor:pointer;font-weight:600">📄 提取到的原文（比对用）</summary>
          <div class="notice" style="white-space:pre-wrap;max-height:220px;overflow:auto;font-size:12.5px" id="av-source-txt"></div></details>`); }
       $("#av-source-txt").textContent = r.source_text;
     }
@@ -7890,13 +7937,13 @@ function studioJobBlock(j){
     return `<div style="border:2px dashed #e0a100;border-radius:12px;padding:10px;margin-top:8px;background:#fffaf0">
       <b>📦 剪辑版 + 发布包</b> <span class="sub">${Number(s.broll)||0} 张证据卡</span>
       <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px;align-items:flex-start">
-        ${safeAssetUrl(s.preview)?`<video controls preload="none" playsinline poster="${esc(safeAssetUrl(s.poster))}" style="width:200px;border:3px solid var(--ink);border-radius:12px" src="${esc(safeAssetUrl(s.preview))}"></video>`:""}
-        ${[s.cover34,s.cover916].filter(u=>safeAssetUrl(u)).map(u=>`<a href="${esc(safeAssetUrl(u))}" target="_blank" rel="noopener"><img src="${esc(safeAssetUrl(u))}" style="height:200px;border-radius:10px;border:2px solid var(--ink)"></a>`).join("")}
+        ${safeAssetUrl(s.preview)?`<video controls preload="none" playsinline poster="${esc(safeAssetUrl(s.poster))}" style="width:200px;border:1px solid var(--line);border-radius:12px" src="${esc(safeAssetUrl(s.preview))}"></video>`:""}
+        ${[s.cover34,s.cover916].filter(u=>safeAssetUrl(u)).map(u=>`<a href="${esc(safeAssetUrl(u))}" target="_blank" rel="noopener"><img src="${esc(safeAssetUrl(u))}" style="height:200px;border-radius:10px;border:1px solid var(--line)"></a>`).join("")}
       </div>
       <div class="actions" style="margin-top:6px">${safeAssetUrl(s.pack)?`<a class="btn sm pri" href="${esc(safeAssetUrl(s.pack))}" download>⬇️ 下载发布包(zip)</a>`:""}
         <button class="btn sm" onclick="stRetry(${j.id},this)">🔁 用最新剪辑重剪(${AV_META?.studio?.prices?.studio_pack||3}点)</button>
         ${safeAssetUrl(s.video)?`<a class="btn sm" href="${esc(safeAssetUrl(s.video))}" download>⬇️ 只要剪辑版</a>`:""}</div>
-      <details style="margin-top:6px"><summary style="cursor:pointer;font-weight:800">📝 三平台文案 & 体检</summary>
+      <details style="margin-top:6px"><summary style="cursor:pointer;font-weight:600">📝 三平台文案 & 体检</summary>
         ${Object.entries(names).map(([k,l])=>{const x=c[k]||{}; const txt=[x.title,x.body,(x.tags||[]).map(t=>"#"+t).join(" ")].filter(Boolean).join("\n\n");
           if(!txt) return "";
           const body=[x.body,(x.tags||[]).map(t=>"#"+t).join(" ")].filter(Boolean).join("\n\n");
@@ -7918,7 +7965,7 @@ function stSemiPub(key,title,body,video,cover){
   const [platform,url]=ST_PUB_URL[key]||[key,""];
   const dl=(href)=>()=>{const a=document.createElement('a');a.href=href;a.download='';document.body.appendChild(a);a.click();a.remove();};
   const step=(n,label,hint)=>`<div class="topic" id="sp-${n}" style="margin:8px 0;display:flex;gap:10px;align-items:center;cursor:pointer">
-    <span style="font-size:20px;font-weight:900">${n}</span><div style="flex:1"><b>${label}</b><div class="sub">${hint}</div></div>
+    <span style="font-size:20px;font-weight:700">${n}</span><div style="flex:1"><b>${label}</b><div class="sub">${hint}</div></div>
     <span class="sp-ok" style="font-size:18px;opacity:.15">✅</span></div>`;
   window.__spAct={1:()=>copyText(title),2:()=>copyText(body),3:dl(video),4:dl(cover),5:()=>url&&window.open(url,'_blank')};
   document.body.insertAdjacentHTML("beforeend",`<div class="overlay" id="sp-ov" onclick="if(event.target===this)this.remove()">
@@ -7976,7 +8023,7 @@ async function adminView(){
   const metric=(key)=>fm[key]||{events:0,actors:0};
   const daily=(ADM_FUNNEL.daily||[]).slice(-14).reverse();
   $("#main").innerHTML = `
-  <div class="notice" style="margin-top:0">🛠 <b>后台</b>：数字员工的提示词、模型路由、供应商配置都收在这里，前台员工面板只留业务操作。
+  <div class="notice" style="margin-top:0">🛠 <b>后台</b>：AI 专家的提示词、模型路由、供应商配置都收在这里，前台员工面板只留业务操作。
     <div class="actions" style="margin-top:6px"><a class="btn sm pri" href="#/platform">🏦 平台运营：企业列表、充点、开通申请 →</a></div></div>
   <div class="card" id="adm-features"><h2>🛡️ 高风险功能开关</h2><div class="sub">加载中…</div></div>
   <div class="card"><h2>📈 近 30 天产品转化漏斗</h2>
@@ -7994,7 +8041,7 @@ async function adminView(){
       <span>开通→首单 <b>${Number(fc.registration_to_first_job_pct||0).toFixed(1)}%</b></span>
       <span>落地→定价 <b>${Number(fc.landing_to_pricing_pct||0).toFixed(1)}%</b></span>
     </div>
-    <details style="margin-top:12px"><summary style="cursor:pointer;font-weight:800">查看最近 14 天明细</summary>
+    <details style="margin-top:12px"><summary style="cursor:pointer;font-weight:600">查看最近 14 天明细</summary>
       <div class="dimwrap" style="margin-top:8px"><table class="dimtable"><thead><tr>
         <th>日期</th><th>落地访客</th><th>留资</th><th>开通</th><th>首单</th><th>定价访客</th>
       </tr></thead><tbody>${daily.map(row=>`<tr>
@@ -8026,7 +8073,7 @@ async function adminView(){
         <input id="adm-zhuque" type="password" placeholder="(留空不改)"></div>
     </div>
     <div class="actions"><button class="btn pri" onclick="admSaveProvider()">💾 保存供应商</button>
-      <span class="sub">所有数字员工与工具能力统一使用此 API，不依赖服务器本地模型登录态。</span></div></div>
+      <span class="sub">所有AI 专家与工具能力统一使用此 API，不依赖服务器本地模型登录态。</span></div></div>
   <div class="card"><h2>🎥 数字人引擎</h2>
     <div class="sub">HeyGen(Avatar IV)：约 $1-4/分钟，人物会动、支持本人原声，推荐；可灵：走云雾按秒计费，只对口型。配了 HeyGen key 自动切 HeyGen。</div>
     <div class="notice" style="margin-top:8px">🔑 <b>一键申请 HeyGen key</b>:
@@ -8074,7 +8121,7 @@ async function adminView(){
   <div class="card"><h2>👥 员工级配置（模型 / 提示词）</h2>
     <div class="sub">留空 = 跟随全局默认。带 🌐 的是检索型工位，模型可自由切换；无论选择 GPT、DeepSeek 还是 Claude，实时任务都会自动调用云雾工具能力。</div>
     ${Object.entries(byDept).map(([dept,list])=>`
-      <details ${dept==="内容生产部"?"open":""} style="margin-top:10px"><summary style="cursor:pointer;font-weight:900">${esc(dept)}（${list.length}人）</summary>
+      <details ${dept==="内容生产部"?"open":""} style="margin-top:10px"><summary style="cursor:pointer;font-weight:700">${esc(dept)}（${list.length}人）</summary>
       <div class="dimwrap" style="margin-top:8px"><table class="dimtable" style="min-width:900px"><thead><tr>
         <th>开关</th><th>员工</th><th>技能</th><th>文本模型</th><th>生图模型</th><th>提示词</th><th>管理</th></tr></thead><tbody>
       ${list.map(e=>`<tr style="${e.enabled?"":"opacity:.5"}">
@@ -8103,7 +8150,7 @@ async function admCnCard(){
     <div class="sub">默认还是旧通道，和以前完全一样。填好某家的 API Key 并启用后，可以把“默认模型通道”切过去：写作、速览、会议等文字工作都走这家；看图走它的看图模型（没填就还走旧通道）。模型名和接口地址以厂商最新文档为准，可随时改。</div>
     <div class="row" style="margin-top:8px"><div><label>默认模型通道</label>${sel("adm-cn-channel",d.channel_options,d.channel)}</div></div>
     ${(d.hints||[]).map(h=>`<div class="sub">💡 ${esc(h)}</div>`).join("")}
-    ${d.vendors.map(v=>`<details style="margin-top:10px"><summary style="cursor:pointer;font-weight:800">${esc(v.label)} <span class="tag">${v.ready?"可用":v.enabled?"缺 API Key":"未启用"}</span></summary>
+    ${d.vendors.map(v=>`<details style="margin-top:10px"><summary style="cursor:pointer;font-weight:600">${esc(v.label)} <span class="tag">${v.ready?"可用":v.enabled?"缺 API Key":"未启用"}</span></summary>
       <div class="row" style="margin-top:8px">
         <div><label><input type="checkbox" id="adm-cn-en-${v.id}" ${v.enabled?"checked":""}> 启用这家</label></div>
         <div><label>接口地址</label><input id="adm-cn-base-${v.id}" value="${esc(v.base_url)}" placeholder="${esc(v.default_base_url)}"></div>
@@ -8116,7 +8163,7 @@ async function admCnCard(){
       <div class="actions"><button class="btn sm" onclick="admCnTest('${v.id}','text')">🔌 保存并测试文字模型</button>
         <button class="btn sm" onclick="admCnTest('${v.id}','vision')">🔌 保存并测试看图模型</button></div>
     </details>`).join("")}
-    <details style="margin-top:10px" ${d.search.provider?"open":""}><summary style="cursor:pointer;font-weight:800">🔎 联网查资料（不再依赖服务器上的 Claude 命令行）</summary>
+    <details style="margin-top:10px" ${d.search.provider?"open":""}><summary style="cursor:pointer;font-weight:600">🔎 联网查资料（不再依赖服务器上的 Claude 命令行）</summary>
       <div class="sub" style="margin-top:6px">默认通道切到直连且选好搜索服务后，需要查实时资料的任务改为：搜索 → 安全打开网页 → 所选模型整理要点并附来源网址。</div>
       <div class="row" style="margin-top:8px">
         <div><label>搜索服务</label>${sel("adm-cn-search",d.search.options,d.search.provider)}</div>
@@ -8287,7 +8334,7 @@ async function admSkillDel(idx,i){
 async function admPrompt(idx){
   ADM_PROMPT = await api(`/admin/employees/${idx}/prompt`);
   const p = ADM_PROMPT;
-  $("#adm-prompt-box").innerHTML = `<div class="card" style="background:#fff6dc;margin-top:12px">
+  $("#adm-prompt-box").innerHTML = `<div class="card" style="background:var(--brand-soft);margin-top:12px">
     <h3 style="margin-top:0">📝 ${esc(p.name)} 的提示词</h3>
     <div style="margin:6px 0">${Object.entries(p.placeholders||{}).map(([k,v])=>`<span class="phchip">{${k}}</span><span class="sub" style="margin-right:10px">${esc(v)}</span>`).join("")}</div>
     <textarea id="adm-prompt-ta" class="promptbox">${esc(p.prompt_template||p.default_template)}</textarea>
@@ -8361,7 +8408,7 @@ function tmTitleTag(u){
   if(u.role==="root") return `<span class="tag">👑 平台管理员</span>`;
   if(u.role==="owner") return `<span class="tag" style="background:#ffe59a">⭐ 老板（主账号）</span>`;
   if(tmIsStorePerson(u)) return u.job_title==="manager"
-    ? `<span class="tag" style="background:#c9e2ff">🏪 店长</span>`
+    ? `<span class="tag" style="background:var(--wait-bg)">🏪 店长</span>`
     : `<span class="tag" style="background:#efe7d4">🧑‍🍳 店员</span>`;
   const [label,bg]=TM_TITLE_TAG[u.job_title||"staff"]||TM_TITLE_TAG.staff;
   return `<span class="tag" style="background:${bg}">${label}</span>`;
@@ -8374,8 +8421,8 @@ function tmAllocSummary(u,t){
   if(u.role!=="member") return "";
   const industries=(u.modules||[]).map(k=>esc((t.all_modules.find(m=>m.key===k)||{}).label||k)).join(" · ")||"（还没开通）";
   const emp = u.allowed_emp_idxs===null||u.allowed_emp_idxs===undefined
-    ? "行业内全部数字员工可用"
-    : u.allowed_emp_idxs.length ? `指定 ${u.allowed_emp_idxs.length} 名数字员工可用` : "不开通（不花企业点数）";
+    ? "行业内全部AI 专家可用"
+    : u.allowed_emp_idxs.length ? `指定 ${u.allowed_emp_idxs.length} 位 AI 专家可用` : "不开通（不花企业点数）";
   // 巡店负责门店:只有老板视图带门店数据;总监本来就看全部门店。
   const stores = !t.store_branches ? "" : (u.job_title==="director"
     ? "总监可看全部门店"
@@ -8407,7 +8454,7 @@ function tmBranchForm(uid, name){
   const sel = new Set((target.branch_ids||[]).map(Number));
   const box = $("#tm-allocbox")||$("#tm-modbox");
   const outside = all.some(b=>!targetMods.has(b.industry_key));
-  box.innerHTML = `<div class="card" style="background:#fff6dc">
+  box.innerHTML = `<div class="card" style="background:var(--brand-soft)">
     <b>「${esc(name)}」负责哪些门店</b>
     <div class="sub" style="margin-top:6px">店长、店员只看得到自己负责的门店：能收到这些店的活，也只能处理这些店的整改。总监不受限制。</div>
     ${all.length?`${tmBranchChecks("tm-branch",all,sel)}
@@ -8459,9 +8506,9 @@ function tmMemberRow(u,t){
   return `<div class="topic" data-member-row="${u.id}">
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       ${tmPersonHtml(u)}${isSelf?`<span class="sub">（我）</span>`:""}
-      ${canName&&!hasName?`<a href="#/team" role="button" class="sub" data-name-missing style="text-decoration:underline;font-weight:800" onclick="tmEditName(${u.id});return false" title="填了姓名，任务卡、通知里就显示「小李」「王店长」，不再是登录账号">补上姓名</a>`:""}
+      ${canName&&!hasName?`<a href="#/team" role="button" class="sub" data-name-missing style="text-decoration:underline;font-weight:600" onclick="tmEditName(${u.id});return false" title="填了姓名，任务卡、通知里就显示「小李」「王店长」，不再是登录账号">补上姓名</a>`:""}
       ${tmTitleTag(u)}
-      ${u.enabled?"":`<span class="tag" style="background:#ffb3b5">已停用</span>`}
+      ${u.enabled?"":`<span class="tag" style="background:var(--bad-bg)">已停用</span>`}
       <span style="flex:1"></span>
       ${btns.join("\n")}
     </div>
@@ -8489,7 +8536,7 @@ async function teamView(){
     const crewWord = meRole==="店长" ? "店员" : "成员";
     const storeText = list=>list.length>2?`${list.slice(0,2).join("、")} 等 ${list.length} 家`:list.join("、");
     // 改自己的密码在「我的」页(所有角色都有)，团队页只留一句指路
-    const pwCard = `<div class="sub" data-team-pw-hint style="margin:0 4px 18px">要改自己的密码，请到 <a href="#/mine" style="text-decoration:underline;font-weight:800">我的 → 修改密码</a>。</div>`;
+    const pwCard = `<div class="sub" data-team-pw-hint style="margin:0 4px 18px">要改自己的密码，请到 <a href="#/mine" style="text-decoration:underline;font-weight:600">我的 → 修改密码</a>。</div>`;
     if(!canAssign){
       $("#main").innerHTML = `
       <div class="notice" style="margin-top:0" data-team-role="${esc(meRole)}">👥 <b>我的团队</b>：您是${esc(meRole)}${myStores.length?`，负责 ${esc(storeText(myStores))}`:""}。给${crewWord}派活、审核交差在「派活 → 派给店员」里；开账号、重置密码、换门店都请找老板。</div>
@@ -8497,7 +8544,7 @@ async function teamView(){
         ${crew.length?crew.map(u=>`<div class="topic" data-crew-row style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           ${tmPersonHtml(u)}<span class="tag">${roleName(u)==="店员"?"🧑‍🍳":"👤"} ${esc(roleName(u))}</span>
           <span class="sub">${stores(u).length?`🏪 ${esc(storeText(stores(u)))}`:"还没分门店"}</span>
-          ${u.enabled?"":`<span class="tag" style="background:#ffb3b5">已停用</span>`}</div>`).join("")
+          ${u.enabled?"":`<span class="tag" style="background:var(--bad-bg)">已停用</span>`}</div>`).join("")
           :emptyState({icon:"🧑‍🍳",text:`您${myStores.length?"店里":"下面"}还没有${crewWord}账号，请老板在「团队与权限」里开一个。`})}</div>
       ${pwCard}`;
       return;
@@ -8513,8 +8560,8 @@ async function teamView(){
   }
   $("#main").innerHTML = `
   <div class="notice" style="margin-top:0">👥 <b>团队与权限</b>：给店长、店员和办公室同事开账号，定好谁管哪家店、能用哪些 AI 专家。
-    <details class="team-intro-more" style="margin-top:4px"><summary style="cursor:pointer;font-weight:800">了解更多</summary>
-      <div class="sub" style="margin-top:4px">账号的职级（总监/经理/员工）、能看的行业、能用的数字员工、密码和停用都由老板在这里定；每个数字员工用什么模型在员工面板里调。总监、经理登录后也能在自己的行业里给下级分配数字员工。${ME.role==="root"?"开客户企业、充点在「企业」页。":""}各企业的数据完全隔开。</div></details></div>
+    <details class="team-intro-more" style="margin-top:4px"><summary style="cursor:pointer;font-weight:600">了解更多</summary>
+      <div class="sub" style="margin-top:4px">账号的职级（总监/经理/员工）、能看的行业、能用的AI 专家、密码和停用都由老板在这里定；每个AI 专家用什么模型在员工面板里调。总监、经理登录后也能在自己的行业里给下级分配AI 专家。${ME.role==="root"?"开客户企业、充点在「企业」页。":""}各企业的数据完全隔开。</div></details></div>
   <div class="card"><h2>🏢 我的企业</h2>
     <div class="row" style="align-items:flex-end">
       <div style="flex:1"><label>企业名称</label><input id="tm-name" value="${esc(t.tenant.name)}"></div>
@@ -8523,13 +8570,13 @@ async function teamView(){
       <span>点数余额 ${(t.tenant.balance||0).toFixed(0)} 点</span>
       ${t.tenant.plan?`<span>套餐：${esc(t.tenant.plan)}</span>`:""}</div></div>
   <div class="card"><h2>👤 成员</h2>
-    <div class="sub" style="margin-bottom:6px">🏪 <b>店长</b>能给自己店里的人派活、审核交差；🧑‍🍳 <b>店员</b>用手机看待办、拍照交差。办公室同事按职级：🎖 总监可给经理和员工分配数字员工，📋 经理可给员工分配，👤 员工只用分给自己的。</div>
+    <div class="sub" style="margin-bottom:6px">🏪 <b>店长</b>能给自己店里的人派活、审核交差；🧑‍🍳 <b>店员</b>用手机看待办、拍照交差。办公室同事按职级：🎖 总监可给经理和员工分配AI 专家，📋 经理可给员工分配，👤 员工只用分给自己的。</div>
     <div class="actions"><button class="btn pri" onclick="tmUserForm()">➕ 新建账号</button></div>
     <div id="tm-uform"></div>
     ${t.users.map(u=>tmMemberRow(u,t)).join("")}
     <div id="tm-modbox"></div><div id="tm-allocbox"></div></div>
-  <div class="sub" data-team-pw-hint style="margin:0 4px 18px">要改自己的密码，请到 <a href="#/mine" style="text-decoration:underline;font-weight:800">我的 → 修改密码</a>。</div>
-  ${ME.role==="root"?`<div class="card" data-team-platform-link style="background:#fff6dc"><h2>🏦 平台运营（仅平台可见）</h2>
+  <div class="sub" data-team-pw-hint style="margin:0 4px 18px">要改自己的密码，请到 <a href="#/mine" style="text-decoration:underline;font-weight:600">我的 → 修改密码</a>。</div>
+  ${ME.role==="root"?`<div class="card" data-team-platform-link style="background:var(--brand-soft)"><h2>🏦 平台运营（仅平台可见）</h2>
     <div class="sub">开新企业、企业列表、充点、开套餐和开通申请都在单独一页。</div>
     <div class="actions"><a class="btn pri" href="#/platform">去平台运营 →</a></div></div>`:""}`;
   window.__modChips = modChips;
@@ -8559,7 +8606,7 @@ function platformTenantAlerts(t){
 function tmPlatformSection(t){
   const pending=(t.applies||[]).filter(a=>!a.status).length;
   return `
-  <div class="card" id="pf-tenants" style="background:#fff6dc"><h2>🏦 企业管理（仅平台可见）</h2>
+  <div class="card" id="pf-tenants" style="background:var(--brand-soft)"><h2>🏦 企业管理（仅平台可见）</h2>
     <div class="sub">每个客户企业一个独立空间：开企业 → 给主账号 → 客户登录后自己开副账号。收款您线下收，这里给 TA 充点、开套餐。</div>
     <div class="actions"><button class="btn pri" onclick="tmTenantForm()">➕ 开新企业</button>
       <a class="btn" href="#/admin">🛠 后台（模型、提示词、供应商）</a>
@@ -8570,8 +8617,8 @@ function tmPlatformSection(t){
         <b>#${x.id} ${esc(x.name)}</b><span class="tag">${x.n_users}人</span>
         <span class="tag">💎 ${(x.balance||0).toFixed(0)}点</span>
         ${x.plan?`<span class="tag">${esc(x.plan)}</span>`:""}
-        ${x.id===1?`<span class="tag">全行业</span>`:(x.industries||[]).length?`<span class="tag" style="background:#c9e2ff">${(x.industries||[]).map(k=>esc(tmIndustryShort(t,k))).join("、")}</span>`:`<span class="tag" style="background:#ffb3b5">未设行业</span>`}
-        ${x.enabled?"":`<span class="tag" style="background:#ffb3b5">已停用</span>`}
+        ${x.id===1?`<span class="tag">全行业</span>`:(x.industries||[]).length?`<span class="tag" style="background:var(--wait-bg)">${(x.industries||[]).map(k=>esc(tmIndustryShort(t,k))).join("、")}</span>`:`<span class="tag" style="background:var(--bad-bg)">未设行业</span>`}
+        ${x.enabled?"":`<span class="tag" style="background:var(--bad-bg)">已停用</span>`}
         <span style="flex:1"></span>
         ${x.id!==1?`<button class="btn sm" onclick='tmSetIndustries(${x.id},${JSON.stringify(x.industries||[])})'>🏭 行业</button>`:""}
         <button class="btn sm" onclick="tmGrant(${x.id})">💎 充点</button>
@@ -8666,9 +8713,9 @@ function tmUserForm(){
   TM_KIND="staff";
   const t=window.__TEAM||{};
   const titles=t.job_titles||[{key:"director",label:"总监"},{key:"manager",label:"经理"},{key:"staff",label:"员工"}];
-  const titleDesc={director:"可给经理和员工分配数字员工",manager:"可给员工分配数字员工",staff:"只用分给自己的数字员工"};
+  const titleDesc={director:"可给经理和员工分配AI 专家",manager:"可给员工分配AI 专家",staff:"只用分给自己的AI 专家"};
   const branches=((t.store_branches||{}).items||[]);
-  $("#tm-uform").innerHTML = `<div class="card" id="tm-create" style="background:#fff6dc">
+  $("#tm-uform").innerHTML = `<div class="card" id="tm-create" style="background:var(--brand-soft)">
     <h3 style="margin-top:0">➕ 新建账号</h3>
     <label id="tm-kind-label">这个人是</label>
     <div class="tm-kinds" role="radiogroup" aria-labelledby="tm-kind-label">${TM_KINDS.map(x=>`<button type="button" class="tm-kind" role="radio" data-k="${x.k}" aria-checked="${x.k===TM_KIND}" onclick="tmPickKind('${x.k}')"><b>${x.icon} ${x.label}</b><span class="sub">${x.desc}</span></button>`).join("")}</div>
@@ -8687,7 +8734,7 @@ function tmUserForm(){
     <div id="tm-office-part" hidden>
       <label>职级</label><div class="chips" id="tm-title">${titles.map(x=>`<span class="chip${x.key==="staff"?" on":""}" data-k="${x.key}" onclick="document.querySelectorAll('#tm-title .chip').forEach(c=>c.classList.remove('on'));this.classList.add('on')">${{director:"🎖",manager:"📋",staff:"👤"}[x.key]||""} ${esc(x.label)}<span class="sub" style="margin-left:4px">${titleDesc[x.key]||""}</span></span>`).join("")}</div>
       <label>开通行业/板块（多选）</label><div class="chips" id="tm-mods">${window.__modChips([])}</div>
-      <div class="sub" style="margin-top:4px">建好后可以点「🤝 分配数字员工」，限定 TA 能用行业里的哪几位；不限定 = 行业里的都能用。</div>
+      <div class="sub" style="margin-top:4px">建好后可以点「🤝 分配AI 专家」，限定 TA 能用行业里的哪几位；不限定 = 行业里的都能用。</div>
     </div>
     <label style="display:flex;gap:8px;align-items:center;margin-top:12px;cursor:pointer;font-weight:700">
       <input id="tm-p-auto" type="checkbox" checked style="width:auto;min-height:0;margin:0" onchange="tmTogglePw(this.checked)">
@@ -8838,10 +8885,10 @@ async function tmCopySend(){
 }
 function tmEditTitle(uid, name, cur){
   const titles=(window.__TEAM?.job_titles)||[];
-  $("#tm-modbox").innerHTML = `<div class="card" style="background:#fff6dc">
+  $("#tm-modbox").innerHTML = `<div class="card" style="background:var(--brand-soft)">
     <b>调整「${esc(name)}」的职级</b>
     <div class="chips" id="tm-title2" style="margin-top:8px">${titles.map(x=>`<span class="chip${x.key===cur?" on":""}" data-k="${x.key}" onclick="document.querySelectorAll('#tm-title2 .chip').forEach(c=>c.classList.remove('on'));this.classList.add('on')">${{director:"🎖",manager:"📋",staff:"👤"}[x.key]||""} ${esc(x.label)}</span>`).join("")}</div>
-    <div class="sub" style="margin-top:6px">总监可给经理/员工分配数字员工；经理可给员工分配；员工不管理任何人。</div>
+    <div class="sub" style="margin-top:6px">总监可给经理/员工分配AI 专家；经理可给员工分配；员工不管理任何人。</div>
     <div class="actions"><button class="btn pri" onclick="tmSaveTitle(${uid})">💾 保存</button>
       <button class="btn" onclick="$('#tm-modbox').innerHTML=''">取消</button></div></div>`;
   $("#tm-modbox").scrollIntoView({behavior:"smooth"});
@@ -8859,17 +8906,17 @@ function tmAllocForm(uid, name){
   const unrestricted = target.allowed_emp_idxs===null||target.allowed_emp_idxs===undefined;
   const box = $("#tm-allocbox")||$("#tm-modbox");
   if(!groups.length){
-    box.innerHTML = `<div class="card" style="background:#fff6dc"><b>给「${esc(name)}」分配数字员工</b>
+    box.innerHTML = `<div class="card" style="background:var(--brand-soft)"><b>给「${esc(name)}」分配AI 专家</b>
       <div class="sub" style="margin-top:6px">TA 还没开通任何行业${t.is_admin?"(先点「🧩 行业/板块」开通行业)":"(请老板先开通行业)"}；或您没有与TA重合的行业可分配。</div>
       <div class="actions" style="margin-top:8px"><button class="btn" onclick="this.closest('.card').remove()">关闭</button></div></div>`;
     box.scrollIntoView({behavior:"smooth"});
     return;
   }
-  box.innerHTML = `<div class="card" style="background:#fff6dc">
-    <b>给「${esc(name)}」分配数字员工</b>
+  box.innerHTML = `<div class="card" style="background:var(--brand-soft)">
+    <b>给「${esc(name)}」分配AI 专家</b>
     <label class="check" style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;cursor:pointer">
       <input id="tm-alloc-all" type="checkbox" ${unrestricted?"checked":""} style="width:auto;margin-top:3px" onchange="$('#tm-alloc-groups').style.display=this.checked?'none':'block'">
-      <span><b>不限定：TA 开通行业内的全部数字员工都可用</b><span class="sub" style="display:block">取消勾选则只有下面勾中的数字员工对TA可见、可派活、可拉进会议。</span></span>
+      <span><b>不限定：TA 开通行业内的全部AI 专家都可用</b><span class="sub" style="display:block">取消勾选则只有下面勾中的AI 专家对TA可见、可派活、可拉进会议。</span></span>
     </label>
     <div id="tm-alloc-groups" style="display:${unrestricted?"none":"block"};margin-top:8px">
       ${groups.map(g=>`<div class="grouphead" style="margin-top:8px"><span>${g.emoji||"🏬"}</span>${esc(g.name)}<span class="sub">（${g.employees.length}人）</span>
@@ -8885,13 +8932,13 @@ async function tmSaveAlloc(uid){
   const unrestricted = $("#tm-alloc-all")?.checked;
   const idxs = unrestricted?null:[...document.querySelectorAll(".tm-alloc-chip.on")].map(e=>Number(e.dataset.i));
   if(!unrestricted && !idxs.length && !await uiConfirm(
-    "一个数字员工都没勾：TA 将在行业里看不到任何可用员工。\n确定这样保存？",
+    "一个AI 专家都没勾：TA 将在行业里看不到任何可用员工。\n确定这样保存？",
     {title:"空名单",confirmText:"确定保存"})) return;
   try{ await api(`/team/users/${uid}`,{method:"PUT",body:{allowed_emp_idxs:idxs}});
-    toast(unrestricted?"已放开：行业内全部数字员工可用":`已分配 ${idxs.length} 名数字员工`); render(); }catch(e){ toast(e.message); }
+    toast(unrestricted?"已放开：行业内全部AI 专家可用":`已分配 ${idxs.length} 位 AI 专家`); render(); }catch(e){ toast(e.message); }
 }
 function tmEditMods(uid, name, mods){
-  $("#tm-modbox").innerHTML = `<div class="card" style="background:#fff6dc">
+  $("#tm-modbox").innerHTML = `<div class="card" style="background:var(--brand-soft)">
     <b>给「${esc(name)}」分配板块</b>
     <div class="chips" id="tm-mods2" style="margin-top:8px">${window.__modChips(mods)}</div>
     <div class="actions"><button class="btn pri" onclick="tmSaveMods(${uid})">💾 保存</button>
@@ -8916,7 +8963,7 @@ async function tmAutoLoad(){
   const box = $("#ap-auto-box"); if(!box) return;
   try{
     const c = await api("/team/apply-config");
-    box.innerHTML = `<label style="display:inline-flex;align-items:center;font-weight:800;margin:0">
+    box.innerHTML = `<label style="display:inline-flex;align-items:center;font-weight:600;margin:0">
       <input type="checkbox" id="ap-auto" style="width:auto;margin-right:6px" ${c.auto?"checked":""} onchange="tmAutoSave()">
       申请<b>自动开通</b>体验账号(竞品都是注册即试用——客户提交申请当场拿到账号密码，送</label>
       <input id="ap-trial" type="number" value="${c.trial_points}" style="width:70px;display:inline-block;margin:0 4px" onchange="tmAutoSave()">
@@ -9134,11 +9181,11 @@ function billReasonHtml(reason){
   // 流水项目里的单号变成可点链接:老板终于能从账单跳回"这笔钱买了哪单"
   // 长别名规则必须先于「工单」执行,否则「数字人工单 #7」会被错链到内容工单 #7
   return esc(reason)
-    .replace(/(?:数字人工单|成片任务)\s?#(\d+)/g,m=>m.replace(/#(\d+)/,'<a href="#/tasks" style="text-decoration:underline;font-weight:800">#$1</a>'))
-    .replace(/(^|[^人])工单\s?#(\d+)/g,'$1工单 <a href="#/job/$2" style="text-decoration:underline;font-weight:800">#$2</a>')
-    .replace(/任务#(\d+)/g,'任务<a href="#/tasks/$1" style="text-decoration:underline;font-weight:800">#$1</a>')
-    .replace(/会议#(\d+)/g,'会议<a href="#/meetings" style="text-decoration:underline;font-weight:800">#$1</a>')
-    .replace(/工具单#(\d+)/g,'工具单<a href="#/tasks" style="text-decoration:underline;font-weight:800">#$1</a>');
+    .replace(/(?:数字人工单|成片任务)\s?#(\d+)/g,m=>m.replace(/#(\d+)/,'<a href="#/tasks" style="text-decoration:underline;font-weight:600">#$1</a>'))
+    .replace(/(^|[^人])工单\s?#(\d+)/g,'$1工单 <a href="#/job/$2" style="text-decoration:underline;font-weight:600">#$2</a>')
+    .replace(/任务#(\d+)/g,'任务<a href="#/tasks/$1" style="text-decoration:underline;font-weight:600">#$1</a>')
+    .replace(/会议#(\d+)/g,'会议<a href="#/meetings" style="text-decoration:underline;font-weight:600">#$1</a>')
+    .replace(/工具单#(\d+)/g,'工具单<a href="#/tasks" style="text-decoration:underline;font-weight:600">#$1</a>');
 }
 const PURCHASE_STATUS_LABELS={
   requested:"待联系",contacted:"已联系",lost:"已结束",paid:"已到账开通",
@@ -9263,11 +9310,11 @@ function purchasePlanHtml(plan){
       :ME?.role==="tour"
         ?`<a class="btn pri sm" href="/promo#plans">了解开通方式</a>`
         :payButton+intentButton;
-  return `<div class="topic" data-purchase-plan="${esc(plan.key)}" style="text-align:center;${plan.key==="startup"?"border-color:#ef476f;border-width:3px":""}">
-    ${plan.key==="startup"?`<div style="color:#ef476f;font-weight:900;font-size:12px">🔥 最多人选</div>`:""}
+  return `<div class="topic" data-purchase-plan="${esc(plan.key)}" style="text-align:center;${plan.key==="startup"?"border-color:var(--brand-d);box-shadow:0 0 0 2px var(--brand)":""}">
+    ${plan.key==="startup"?`<div style="color:#b45309;font-weight:700;font-size:12px">🔥 最多人选</div>`:""}
     <h3 style="margin:4px 0">${esc(plan.name)}</h3>
     <div class="sub" style="text-decoration:line-through">原价 ¥${Number(plan.price)}/月</div>
-    <div style="font-size:30px;font-weight:900">¥${Number(plan.sale)}<span style="font-size:13px;font-weight:400">/月</span></div>
+    <div style="font-size:30px;font-weight:700">¥${Number(plan.sale)}<span style="font-size:13px;font-weight:400">/月</span></div>
     <div class="tag" style="margin:6px 0">${Number(plan.points)} 点/月</div>
     ${ME?.role==="owner"?`<select aria-label="${esc(plan.name)}购买周期" onchange="purchasePlanPeriodChanged(${cp(plan.key)},this.value)">${periods}</select>`:""}
     <div class="sub purchase-quote" style="margin:8px 0">${quote?`${esc(quote.period_label)}合计 <b>¥${Number(quote.price)}</b> · ${Number(quote.points)} 点`:"以服务端报价为准"}</div>
@@ -9449,7 +9496,7 @@ function billingPointsCardHtml(b){
   return `<div class="card" id="billing-points"><h2>💡 1 点能做什么</h2>
     <div class="sub">1 点 = ¥1，做一件事扣一次点；没做成会自动把点退回来。</div>
     <div class="grid3" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr));margin-top:10px">
-      ${examples.map(item=>`<div class="topic" style="text-align:center"><div style="font-size:24px;font-weight:900">${Number(item.points)} 点</div>
+      ${examples.map(item=>`<div class="topic" style="text-align:center"><div style="font-size:24px;font-weight:700">${Number(item.points)} 点</div>
         <div class="sub">${esc(item.label)}</div></div>`).join("")}</div>
     ${sample&&first?`<div class="sub" style="margin-top:10px">举个例子：${esc(sample.name)}每月 ${Number(sample.points)} 点，大约够${esc(first.label)} ${count(first)} 次${second?`，或者${esc(second.label)} ${count(second)} 次`:""}。</div>`:""}</div>`;
 }
@@ -9475,7 +9522,7 @@ function billingPriceTableHtml(prices){
     groups.get(key).items.push(p);
   });
   const OPEN=new Set(["store","expert"]);
-  const table=items=>`<div class="dimwrap"><table class="dimtable" style="min-width:min(560px,100%)"><thead><tr><th>做什么</th><th>消耗</th>${isBoss()?"<th>成本参考</th>":""}</tr></thead>
+  const table=items=>`<div class="dimwrap"><table class="dimtable price-table" style="min-width:min(560px,100%)"><thead><tr><th>做什么</th><th>消耗</th>${isBoss()?"<th>成本参考</th>":""}</tr></thead>
     <tbody>${items.map(p=>`<tr><td>${esc(p.label||p.action)}</td><td><b>${p.points} 点</b></td>${isBoss()?`<td class="sub">${esc(p.cost||"")}</td>`:""}</tr>`).join("")}</tbody></table></div>`;
   const list=[...groups.values()].sort((a,b)=>a.order-b.order);
   return `<div class="card" id="billing-prices"><h2>📋 价目表（按次消耗）</h2>
@@ -9521,7 +9568,7 @@ async function billingView(){
   const b=billingResult.value||{};
   b.log=Array.isArray(b.log)?b.log:[];
   b.prices=b.prices||{};
-  const tourBanner = ME&&ME.role==="tour" ? `<div class="notice" style="background:#ece3ff;margin-top:0">👀 <b>参观模式</b>：点击员工卡片，了解每位数字员工可以为您的业务提供什么帮助。<a href="/promo#plans" style="text-decoration:underline;font-weight:900">查看套餐</a> 或联系开通企业账号后直接派活。</div>` : "";
+  const tourBanner = ME&&ME.role==="tour" ? `<div class="notice" style="background:#ece3ff;margin-top:0">👀 <b>参观模式</b>：点击员工卡片，了解每位 AI 专家可以为您的业务提供什么帮助。<a href="/promo#plans" style="text-decoration:underline;font-weight:700">查看套餐</a> 或联系开通企业账号后直接派活。</div>` : "";
   const isRefund = l=>l.delta>0&&String(l.reason||"").startsWith("退回");
   // 只改显示:扣了又全额退回的一对流水合并成一行「没做成，未扣点」,老板不会以为被扣了钱。
   const billLog = billMergeRefundPairs(b.log);
@@ -9540,14 +9587,14 @@ async function billingView(){
     <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
       <div style="flex:1;min-width:200px"><h2 style="margin:0">💎 套餐与点数</h2>
         <div class="sub" style="margin-top:6px">我的点数账户 · 1 点 = ¥1${b.plan?` · 当前套餐 <b>${esc(b.plan)}</b>${b.plan_expires?`(至 ${new Date(b.plan_expires*1000).toLocaleDateString("zh-CN")})`:""}`:""}</div></div>
-      <div class="stat" style="background:#2b2317;color:#ffd166;border:3px solid var(--ink);border-radius:16px;padding:14px 30px;text-align:center;box-shadow:4px 4px 0 rgba(51,41,31,.25)">
-        <div style="font-size:38px;font-weight:900;line-height:1">${b.is_platform?"∞":(b.balance||0).toFixed(0)}</div>
+      <div class="stat" style="background:#2b2317;color:#ffd166;border:1px solid var(--line);border-radius:16px;padding:14px 30px;text-align:center;box-shadow:var(--shadow-1)">
+        <div style="font-size:38px;font-weight:700;line-height:1">${b.is_platform?"∞":(b.balance||0).toFixed(0)}</div>
         <div style="font-size:12px;opacity:.85">点数余额</div></div>
       ${b.is_platform?"":`<button type="button" class="btn pri" data-billing-go-plans onclick="billingGoPlans()">充点 / 升级套餐</button>`}
     </div>
     ${b.is_platform?`<div class="notice" style="margin-bottom:0">👑 您是平台方，自己用不扣点数（显示∞）。下面看到的是给客户开通/客户消耗的真实记录。客户登录自己账号时，这里就是他的余额和账单。</div>`
-      :`<div class="kv" style="margin-top:12px"><span>累计充值 <b style="color:#2f9e6e">${ptsSigned(b.recharged,"+")}</b></span>
-        <span>累计消耗 <b style="color:#e5484d">${ptsSigned(b.spent,"-")}</b></span>
+      :`<div class="kv" style="margin-top:12px"><span>累计充值 <b style="color:var(--ok)">${ptsSigned(b.recharged,"+")}</b></span>
+        <span>累计消耗 <b style="color:var(--bad)">${ptsSigned(b.spent,"-")}</b></span>
         ${(b.refunded_total||0)>0?`<span>失败退回 <b style="color:#b45309">+${(b.refunded_total||0).toFixed(0)}</b></span>`:""}
         <span>共 ${b.txn_n||0} 笔</span></div>`}</div>
   ${purchaseAdminHtml()}${wxpayAdminHtml()}
@@ -9563,15 +9610,15 @@ async function billingView(){
     ${spendActs.map(s=>`<div style="margin-top:12px">
       <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
         <b style="flex:1">${esc((b.prices[s.action]&&b.prices[s.action].label)||s.action)}</b>
-        <span class="sub">${s.n} 次</span><b style="color:#e5484d">共 ${(s.points||0).toFixed(0)} 点</b></div>
-      <div style="height:9px;background:#eadfcd;border:1.5px solid var(--ink);border-radius:999px;overflow:hidden;margin-top:5px">
+        <span class="sub">${s.n} 次</span><b style="color:var(--bad)">共 ${(s.points||0).toFixed(0)} 点</b></div>
+      <div style="height:9px;background:#eadfcd;border:1px solid var(--line);border-radius:999px;overflow:hidden;margin-top:5px">
         <div style="height:100%;width:${spendTotal?Math.max(2,Math.round((s.points||0)/spendTotal*100)):0}%;background:#ffd166"></div></div></div>`).join("")}</div>`:""}
   ${(!b.is_platform&&(b.monthly||[]).length)?`<div class="card"><h2>📅 按月对账（近半年）</h2>
     <div class="dimwrap"><table class="dimtable" style="min-width:min(420px,100%)"><thead><tr>
       <th>月份</th><th>充值</th><th>消耗</th><th>失败退回</th></tr></thead><tbody>
       ${b.monthly.map(m=>`<tr><td><b>${esc(m.ym)}</b></td>
-        <td style="color:#2f9e6e">${ptsCell(m.recharged,"+")}</td>
-        <td style="color:#e5484d">${ptsCell(m.spent,"-")}</td>
+        <td style="color:var(--ok)">${ptsCell(m.recharged,"+")}</td>
+        <td style="color:var(--bad)">${ptsCell(m.spent,"-")}</td>
         <td style="color:#b45309">${(m.refunded||0)>0?`+${(m.refunded||0).toFixed(0)}`:"—"}</td></tr>`).join("")}</tbody></table></div></div>`:""}
   <div class="card"><h2 style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">🧾 点数明细（充值 & 消耗记录）
     ${isAdmin()&&!b.is_platform?`<a class="btn sm" style="margin-left:auto" href="/api/records/export.xlsx?kind=billing">⬇️ 导出全部流水</a>`:""}</h2>
@@ -9580,11 +9627,11 @@ async function billingView(){
       <span class="tb ${BILL_TAB==="all"?"on":""}" onclick="BILL_TAB='all';render()">${billWindowLabel}</span>
       <span class="tb ${BILL_TAB==="in"?"on":""}" onclick="BILL_TAB='in';render()">💰 充值记录(${b.log.filter(l=>l.delta>0&&!isRefund(l)).length})</span>
       <span class="tb ${BILL_TAB==="out"?"on":""}" onclick="BILL_TAB='out';render()">🔻 消耗记录(${billLog.filter(l=>l.delta<0).length})</span></div>
-    ${shown.length?`<div class="dimwrap" style="margin-top:10px"><table class="dimtable" style="min-width:min(520px,100%)"><thead><tr>
+    ${shown.length?`<div class="dimwrap" style="margin-top:10px"><table class="dimtable ledger-table" style="min-width:min(520px,100%)"><thead><tr>
       <th>时间</th><th>类型</th><th>项目</th><th>点数变动</th><th>余额</th></tr></thead><tbody>
       ${shown.map(l=>`<tr>
         <td class="sub" style="white-space:nowrap">${tcFmt(l.created_at)}</td>
-        <td>${l.merged?'<span class="tag" style="background:#eceae4">未扣点</span>':isRefund(l)?'<span class="tag" style="background:#ffe3b3">退回</span>':l.delta>0?'<span class="tag" style="background:#a7ecc9">充值</span>':'<span class="tag" style="background:#ffd7d9">消耗</span>'}</td>
+        <td>${l.merged?'<span class="tag" style="background:#eceae4">未扣点</span>':isRefund(l)?'<span class="tag" style="background:var(--warn-bg)">退回</span>':l.delta>0?'<span class="tag" style="background:var(--ok-bg)">充值</span>':'<span class="tag" style="background:var(--bad-bg)">消耗</span>'}</td>
         <td>${l.merged?`${esc(l.merged)}<div class="sub" style="font-size:12px">${billReasonHtml(l.reason||"")}</div>`:billReasonHtml(l.reason||"")}</td>
         <td><b style="color:${l.merged?"var(--ink2)":l.delta<0?"#e5484d":"#2f9e6e"}">${l.delta>0?"+":""}${l.delta}</b></td>
         <td class="sub">${l.balance.toFixed(0)}</td></tr>`).join("")}</tbody></table></div>`
@@ -9614,7 +9661,7 @@ function wxpayShowOrder(order){
   wxpayClose();
   if(!order?.order_no) return toast("付款码生成失败，请稍后再试");
   const qr=order.qr_svg
-    ?`<div class="wxpay-qr" style="width:220px;max-width:70vw;margin:12px auto;border:3px solid var(--ink);border-radius:14px;padding:6px;background:#fff">${order.qr_svg}</div>`
+    ?`<div class="wxpay-qr" style="width:220px;max-width:70vw;margin:12px auto;border:1px solid var(--line);border-radius:14px;padding:6px;background:#fff">${order.qr_svg}</div>`
     :`<div class="notice" style="text-align:left">请打开微信“扫一扫”付款。二维码没显示出来时，可以把下面这串付款链接发到自己的微信里点开：
         <div style="word-break:break-all;font-family:monospace;margin-top:6px">${esc(order.code_url||"")}</div></div>`;
   document.body.insertAdjacentHTML("beforeend",`<div class="overlay" id="wxpay-overlay">
@@ -9623,7 +9670,7 @@ function wxpayShowOrder(order){
         <button class="btn sm" onclick="wxpayClose()" aria-label="关闭">✕</button></div>
       <div class="pbody" style="text-align:center">
         <b>${esc(order.plan_name)} · ${esc(order.period_label)}</b>
-        <div style="font-size:32px;font-weight:900;margin-top:4px">¥${Number(order.amount)}</div>
+        <div style="font-size:32px;font-weight:700;margin-top:4px">¥${Number(order.amount)}</div>
         <div class="sub">付款成功后自动开通，并发放 ${Number(order.points)} 点</div>
         ${qr}
         <div class="sub" id="wxpay-status" aria-live="polite">${esc(order.status_message||"")}</div>
@@ -9702,7 +9749,7 @@ function wxpayAdminHtml(){
       <th>订单</th><th>企业</th><th>金额</th><th>状态</th></tr></thead><tbody>
       ${orders.map(item=>`<tr><td><b>${esc(item.plan_name)}·${esc(item.period_label)}</b><div class="sub">${esc(item.order_no)} · ${tcFmt(item.created_at)}</div></td>
         <td>#${Number(item.tenant_id)}</td><td>¥${Number(item.amount)}</td>
-        <td>${esc(WXPAY_PAY_STATUS_LABELS[item.status]||item.status)}${item.activation_error?`<div class="sub" style="color:#e5484d">开通失败：${esc(item.activation_error)}</div>`:""}</td></tr>`).join("")}
+        <td>${esc(WXPAY_PAY_STATUS_LABELS[item.status]||item.status)}${item.activation_error?`<div class="sub" style="color:var(--bad)">开通失败：${esc(item.activation_error)}</div>`:""}</td></tr>`).join("")}
       </tbody></table></div>`:""}
   </div>`;
 }
@@ -9762,7 +9809,7 @@ const MT_PHASE_LABEL = {queued:"准备中",brainstorm:"提案中",validate:"反�
 function mtDecisionBadge(d){
   if(!d) return "";
   const cfg = {GO:["✅ GO","#a7ecc9"],NO_GO:["⛔ NO-GO","#ffc3c3"],NEED_INFO:["🔎 NEED INFO","#ffe59a"]}[d]||[d,"#efe7d4"];
-  return `<span class="tag" style="background:${cfg[1]};font-weight:900">${cfg[0]}</span>`;
+  return `<span class="tag" style="background:${cfg[1]};font-weight:700">${cfg[0]}</span>`;
 }
 function mtFlow(cur){
   const phase = cur.phase || (cur.status==="done"?"completed":"queued");
@@ -9771,8 +9818,8 @@ function mtFlow(cur){
   const stages = [["1","每人一案 · Top N≤3"],["2","失败 / 市场 / 算账"],["3","决策 · 真派活"]];
   return `<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin:12px 0">
     ${stages.map((s,i)=>{const done=i<at||(terminal&&i<=at), active=i===at&&!terminal;
-      return `<div style="border:2px solid var(--ink);border-radius:11px;padding:8px 9px;background:${done?"#dff6e9":active?"#fff1bd":"#f2eee5"};opacity:${i>at?".58":"1"}">
-        <div style="font-weight:900">${done?"✓":s[0]} · ${s[1]}</div>
+      return `<div style="border:1px solid var(--line);border-radius:11px;padding:8px 9px;background:${done?"#dff6e9":active?"#fff1bd":"#f2eee5"};opacity:${i>at?".58":"1"}">
+        <div style="font-weight:700">${done?"✓":s[0]} · ${s[1]}</div>
         ${active?`<div class="sub" style="margin-top:2px">${esc(MT_PHASE_LABEL[phase]||"进行中")}…</div>`:""}</div>`;}).join("")}
   </div>`;
 }
@@ -9835,9 +9882,9 @@ function mtBubble(m){
   const bubbleR = boss ? "14px 4px 14px 14px" : "4px 14px 14px 14px";
   const bg = host ? "#fff6dc" : boss ? "#e7f0ff" : "#fffdf7";
   return `<div style="display:flex;gap:10px;margin:11px 0;align-items:flex-start;flex-direction:${align}">
-    <div style="flex:none;width:40px;height:40px;border:2.5px solid var(--ink);border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:20px;background:${m.color}33">${m.emoji}</div>
+    <div style="flex:none;width:40px;height:40px;border:1px solid var(--line);border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:20px;background:${m.color}33">${m.emoji}</div>
     <div style="flex:1;${boss?"text-align:right":""}"><b style="font-size:13px">${esc(m.who)}</b>
-      <div class="md" style="display:inline-block;text-align:left;max-width:88%;background:${bg};border:2px solid var(--ink);border-radius:${bubbleR};padding:9px 13px;margin-top:4px;font-size:13px">${md(m.text)}</div></div></div>`;
+      <div class="md" style="display:inline-block;text-align:left;max-width:88%;background:${bg};border:1px solid var(--line);border-radius:${bubbleR};padding:9px 13px;margin-top:4px;font-size:13px">${md(m.text)}</div></div></div>`;
 }
 async function meetingsView(mid){
   if(mid && Number.isInteger(+mid) && +mid>0) MT_CUR=+mid;
@@ -9862,7 +9909,7 @@ async function meetingsView(mid){
   const pickerHtml = mtPickerHtml(pool);
   $("#main").innerHTML = `
   ${cur?`<div class="card" style="background:#fffaf0"><h2>会议 #${cur.id} ${{queued:"排队",running:"🗣 进行中…",done:"✅ 已收口",failed:"中断"}[cur.status]||cur.status}
-    ${cur.team_execute?`<span class="tag" style="background:#e7d9ff;font-weight:900">🤝 专家接力</span>`:""}
+    ${cur.team_execute?`<span class="tag" style="background:#e7d9ff;font-weight:700">🤝 专家接力</span>`:""}
     ${cur.status==="done"?`<span style="float:right"><a class="btn sm" href="/api/meetings/${cur.id}/export.pdf">⬇️ PDF</a>
     <a class="btn sm" href="/api/meetings/${cur.id}/export.docx">⬇️ Word</a></span>`:""}</h2>
     <div class="sub" style="margin-bottom:6px">议题：${esc(cur.question)}</div>
@@ -9873,7 +9920,7 @@ async function meetingsView(mid){
     ${(cur.actions||[]).length?`<div class="card" style="background:#fff;margin-top:12px"><h3 style="margin-top:0">${cur.team_execute?"🤝 专家分工 · 接力完成":"📋 已锁定行动 · 责任到人"}</h3>
       ${cur.team_execute?`<div class="sub" style="margin-bottom:6px">每一棒自动拿到前面队友的交付内容；最后一棒是队长整合，输出一份最终交付包。</div>`:""}
       ${cur.actions.map((a,i)=>`<div class="topic" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-        ${cur.team_execute?`<span class="tag" style="background:${a.team_role==="integrate"?"#e7d9ff":"#ffe59a"};font-weight:900">${a.team_role==="integrate"?"🧩 队长整合":`第 ${i+1} 棒`}</span>`:""}
+        ${cur.team_execute?`<span class="tag" style="background:${a.team_role==="integrate"?"#e7d9ff":"#ffe59a"};font-weight:700">${a.team_role==="integrate"?"🧩 队长整合":`第 ${i+1} 棒`}</span>`:""}
         <div style="flex:1;min-width:220px"><b>${esc(a.who)}</b>：${esc(a.task)}${a.acceptance?`<div class="sub">验收：${esc(a.acceptance)}</div>`:""}</div>
         ${a.task_id?mtTeamTaskPill(cur,a):
           !cur.decision?costButton({label:"🚀 派给TA",onclick:`mtAssign(${cur.id},${i},this)`,cost:1,btnClass:"btn sm pri"}):""}</div>`).join("")}
@@ -9958,10 +10005,10 @@ function mtPickerHtml(pool){
     const people = entries.reduce((sum,[,ps])=>sum+ps.length,0);
     const inner = entries.map(([g,ps])=>{
       const groupOpen = open && (top.has(g)||ps.some(p=>MT_SEL.has(p.idx)));
-      return `<details class="mt-group" ${groupOpen?"open":""} style="margin-top:6px"><summary style="cursor:pointer;font-weight:800;font-size:13px">${esc(g)}（${ps.length}）</summary>
+      return `<details class="mt-group" ${groupOpen?"open":""} style="margin-top:6px"><summary style="cursor:pointer;font-weight:600;font-size:13px">${esc(g)}（${ps.length}）</summary>
       <div class="chips" style="margin-top:6px">${ps.map(chip).join("")}</div></details>`;
     }).join("");
-    return `<details class="mt-ind" data-ind="${esc(block.key||"content")}" ${open?"open":""} style="margin-top:8px"><summary style="cursor:pointer;font-weight:900">${esc(label)}（${entries.length} 组 · ${people} 人）</summary>
+    return `<details class="mt-ind" data-ind="${esc(block.key||"content")}" ${open?"open":""} style="margin-top:8px"><summary style="cursor:pointer;font-weight:700">${esc(label)}（${entries.length} 组 · ${people} 人）</summary>
       <div style="padding-left:10px">${inner}</div></details>`;
   }).join("");
 }
@@ -9970,7 +10017,7 @@ function mtPickedHtml(pool){
   const picked = pool.filter(p=>MT_SEL.has(p.idx));
   if(!picked.length) return `<span class="sub">还没选人。点下面分组里的名字，或「🤖 自动选人」。</span>`;
   return picked.map(p=>`<span class="tag" style="font-size:13px;padding:3px 10px">${p.emoji} ${esc(p.label)}
-    <span style="cursor:pointer;font-weight:900" onclick="mtToggleIdx(${p.idx})">✕</span></span>`).join("");
+    <span style="cursor:pointer;font-weight:700" onclick="mtToggleIdx(${p.idx})">✕</span></span>`).join("");
 }
 function mtRefreshPicked(){
   const box=$("#mt-picked"); if(box) box.innerHTML=mtPickedHtml(MT_POOL);
@@ -10010,7 +10057,7 @@ function mtTeamTaskPill(cur,a){
   const t=(cur.execution_tasks||[]).find(x=>Number(x.id)===Number(a.task_id));
   const status=t?t.status:null;
   const label={queued:"⏳ 排队",running:"🏃 接力中",done:"✅ 已交付",failed:"⚠️ 失败可重试"}[status];
-  if(!label) return `<a class="tag" style="background:#a7ecc9" href="#/tasks/${a.task_id}">✅ 任务 #${a.task_id}</a>`;
+  if(!label) return `<a class="tag" style="background:var(--ok-bg)" href="#/tasks/${a.task_id}">✅ 任务 #${a.task_id}</a>`;
   const bg=status==="done"?"#a7ecc9":status==="failed"?"#ffc3c3":"#ffe59a";
   return `<a class="tag" style="background:${bg}" href="#/tasks/${a.task_id}">${label} · #${a.task_id}</a>`;
 }
@@ -10022,8 +10069,8 @@ async function mtAssign(mid, i, btn){
   try{ const r = await api("/tasks",{method:"POST",body:{emp_idx:a.idx, brief:{direction:a.task, industry:""},...employeeIdentityMutationFields(employee)}});
     const taskId=Number(r.task_id||0);
     toast(`已派给 ${a.who}`); (btn.closest(".cost-act")||btn).outerHTML=Number.isInteger(taskId)&&taskId>0
-      ?`<a class="tag" style="background:#a7ecc9" href="#/tasks/${taskId}">✅ 已派 · 看任务 #${taskId}</a>`
-      :`<span class="tag" style="background:#a7ecc9">✅ 已派，可到任务中心查看</span>`;
+      ?`<a class="tag" style="background:var(--ok-bg)" href="#/tasks/${taskId}">✅ 已派 · 看任务 #${taskId}</a>`
+      :`<span class="tag" style="background:var(--ok-bg)">✅ 已派，可到任务中心查看</span>`;
   }catch(e){ toast(e.message); restoreActionButton(btn); }
 }
 async function mtAssignAll(mid, btn){
@@ -10108,7 +10155,7 @@ async function fbSend(btn){
     toast("✅ 已收到，谢谢您的反馈!"); $("#fb-ov").remove();
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="📮 提交反馈"; }
 }
-if(!$("#fb-btn")) document.body.insertAdjacentHTML("beforeend", `<button id="fb-btn" type="button" onclick="fbOpen()" title="意见反馈" aria-label="意见反馈"><span class="fb-ic" aria-hidden="true">💬</span><span class="fb-tx">反馈</span></button>`);
+if(!$("#fb-btn")) document.body.insertAdjacentHTML("beforeend", `<button id="fb-btn" type="button" onclick="fbOpen()" title="意见反馈" aria-label="意见反馈"><span class="fb-ic" aria-hidden="true">${icon("message")}</span><span class="fb-tx">反馈</span></button>`);
 
 /* ================ V24:公众号排版 · 草稿箱 · 审查官 · 真实图库 · 发布渠道 ================ */
 
@@ -10129,7 +10176,7 @@ async function mpOpen(jobId){
         <button class="btn pri" onclick="mpDraft(this)">📮 审查并发草稿箱（1点）</button>
         <a class="btn sm" href="https://mp.weixin.qq.com/" target="_blank">↗ 公众号后台</a>
         <a class="btn sm" href="#/channels" onclick="$('#mp-ov').remove()">⚙️ 配置公众号</a></div>
-      <iframe id="mp-frame" sandbox referrerpolicy="no-referrer" style="width:100%;height:56vh;border:2px solid var(--line);border-radius:12px;background:#fff"></iframe>
+      <iframe id="mp-frame" sandbox referrerpolicy="no-referrer" style="width:100%;height:56vh;border:1px solid var(--line);border-radius:12px;background:#fff"></iframe>
     </div></div>`);
   await mpLoad();
 }
@@ -10142,7 +10189,7 @@ async function mpLoad(){
       <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${t.color};margin-right:4px"></span>${t.emoji} ${t.name}</span>`).join("");
     $("#mp-frame").srcdoc = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
       <body style="margin:0;background:#f2f2f2"><div style="max-width:414px;margin:0 auto;background:#fff;min-height:100vh;padding:20px 16px">
-      <div style="font-size:21px;font-weight:800;color:#111;line-height:1.4;margin-bottom:14px">${esc(MP_CUR.title||"")}</div>${r.html}</div></body>`;
+      <div style="font-size:21px;font-weight:600;color:#111;line-height:1.4;margin-bottom:14px">${esc(MP_CUR.title||"")}</div>${r.html}</div></body>`;
   }catch(e){ $("#mp-report").innerHTML = `<div class="notice red">${esc(e.message)}</div>`; }
 }
 async function mpCopy(btn){
@@ -10202,7 +10249,7 @@ function mpShowManualCopy(html){
   const host = $("#mp-report");
   if(!host) return toast("这个浏览器不支持一键复制，请换用电脑浏览器");
   host.innerHTML = `<div class="notice">这个浏览器不支持一键复制。请<b>长按下面的文章 → 全选 → 复制</b>，再去公众号编辑器粘贴（标题另填）。</div>
-    <div id="mp-manual-copy" contenteditable="true" style="max-height:40vh;overflow:auto;border:2px dashed var(--line);border-radius:12px;padding:12px;background:#fff;margin-top:8px;-webkit-user-select:text;user-select:text"></div>`;
+    <div id="mp-manual-copy" contenteditable="true" style="max-height:40vh;overflow:auto;border:1px solid var(--line);border-radius:12px;padding:12px;background:#fff;margin-top:8px;-webkit-user-select:text;user-select:text"></div>`;
   const box = $("#mp-manual-copy");
   box.appendChild(mpSanitizedFragment(html));
   box.scrollIntoView?.({block:"nearest"});
@@ -10382,7 +10429,7 @@ async function censorView(){
       <b>${esc(l.title||"(无标题)")}</b>
       <span class="sub" style="float:right">${new Date(l.created_at*1000).toLocaleString("zh-CN")}</span>
       <div class="sub" style="margin-top:4px">${l.kind==="pre"?`结论：${esc(l.verdict||"")} · 合规分 ${l.score??"—"} · 问题 ${(l.issues||[]).length} 条`:`评级：${esc(l.verdict||"—")}`}</div>
-      ${(l.issues||[]).length||l.report?`<details style="margin-top:6px"><summary class="sub" style="cursor:pointer;font-weight:800">📄 展开完整报告</summary>
+      ${(l.issues||[]).length||l.report?`<details style="margin-top:6px"><summary class="sub" style="cursor:pointer;font-weight:600">📄 展开完整报告</summary>
         ${(l.issues||[]).map(i=>`<div class="notice" style="margin-top:6px"><b>[${esc(i.severity||"")}] ${esc(i.type||"")}</b>：${esc(i.detail||"")}${i.suggest?`<div class="sub">改法：${esc(i.suggest)}</div>`:""}</div>`).join("")}
         ${l.report?`<div class="md" style="margin-top:6px">${md(l.report)}</div>`:""}</details>`:""}
     </div>`).join("") : `<div class="empty">还没有审查记录</div>`)
@@ -10392,7 +10439,7 @@ async function censorView(){
   <div class="card" style="background:linear-gradient(120deg,#fdecee,#fffaf0 65%)">
     <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
       ${charSVG("#e63946","🛡️","idle",92)}
-      <div style="flex:1;min-width:min(100%,240px)"><div class="sub" style="font-weight:800">🎬 内容生产 · 合规审查</div>
+      <div style="flex:1;min-width:min(100%,240px)"><div class="sub" style="font-weight:600">🎬 内容生产 · 合规审查</div>
       <h2 style="margin:2px 0 0">🛡️ 内容审查</h2><div class="sub">审查官的工作台</div>
       <div class="sub" style="margin-top:5px">内容制作流程里的质检关就是他；发布前把关（广告法/平台规范/敏感违禁），发布后复盘（数据判读/限流体检）。公众号、小红书等平台规范逐条对照，发草稿箱前会自动终审。</div></div>
       <a class="btn sm" href="#/growth">← 返回获客</a></div></div>
@@ -10522,7 +10569,7 @@ async function channelsView(){
     :`<div class="notice">⛔ ${esc(featHint("matrix_autopub"))}<div class="sub" style="margin-top:4px">交付包里每个平台都有「🪄 半自动发布」：复制标题正文 → 下载素材包 → 打开平台发布页。以前绑定的账号可以在下面删除。</div></div>`}
     <div id="mx-list" style="margin-top:10px">${(mx.accounts||[]).map(a=>`<div class="topic">
       <span style="font-size:16px">${a.emoji}</span> <b>${esc(a.name)}</b> <span class="sub">${esc(a.platform_name)}${a.nickname?` · ${esc(a.nickname)}`:""}</span>
-      <span class="tag" style="${a.status==="ok"?"background:#a7ecc9":a.status==="expired"?"background:#ffc2c5":""}">${{ok:`✅ ${a.checked_at?new Date(a.checked_at*1000).toLocaleDateString("zh-CN")+" 验证有效":"有效"}`,expired:"⚠️ 已失效",unchecked:"未验证"}[a.status]||a.status}</span>
+      <span class="tag" style="${a.status==="ok"?"background:var(--ok-bg)":a.status==="expired"?"background:var(--bad-bg)":""}">${{ok:`✅ ${a.checked_at?new Date(a.checked_at*1000).toLocaleDateString("zh-CN")+" 验证有效":"有效"}`,expired:"⚠️ 已失效",unchecked:"未验证"}[a.status]||a.status}</span>
       ${a.status==="ok"&&a.checked_at&&(Date.now()/1000-a.checked_at)>7*86400?`<span class="sub">⏰ 距上次验证已超一周，发布前建议先点「🔌 验证」</span>`:""}
       <span style="float:right"><button class="btn sm" onclick="mxCheck(${cp(a.id)},this)">🔌 验证</button>
       <button class="btn sm bad" onclick="mxDel(${cp(a.id)})">🗑</button></span></div>`).join("")||`<div class="empty">还没绑定账号</div>`}</div>
@@ -10724,7 +10771,7 @@ async function mxDel(id){
 /* ---------- 🪄 半自动发布向导(不用Cookie,四步照点) ---------- */
 function semiPub(jobId, platform, title, body, url){
   const step = (n,label,hint)=>`<div class="topic" id="sp-${n}" style="margin:8px 0;display:flex;gap:10px;align-items:center">
-    <span style="font-size:20px;font-weight:900">${n}</span>
+    <span style="font-size:20px;font-weight:700">${n}</span>
     <div style="flex:1"><b>${label}</b><div class="sub">${hint}</div></div>
     <span class="sp-ok" style="font-size:18px;opacity:.15">✅</span></div>`;
   document.body.insertAdjacentHTML("beforeend", `<div class="overlay" id="sp-ov" onclick="if(event.target===this)this.remove()">
@@ -11015,7 +11062,7 @@ async function toolsView(tab,preserveDraft=false){
   const snapshot=preserveDraft?captureFormState():null;
   $("#main").innerHTML = `<div class="card" style="background:linear-gradient(120deg,#fff6dc,#f4f9f4 65%)">
     <h2 style="margin:0">🧰 获客工具</h2>
-    <div class="sub" style="margin-top:5px">老板的日常武器库：每个工具都是「填两个空 → 点一下 → 拿走就能用」。</div>
+    <div class="sub" style="margin-top:5px">常用的小工具：填两个空，点一下，结果拿去就能用。</div>
     <div class="actions"><button class="btn sm" onclick="toolHistory(0)">🧾 查看全部工具任务</button></div></div>
   <div class="card"><div class="tabs" style="flex-wrap:wrap">${TOOL_TABS.map(([k,l])=>`<a class="tb ${TS.tab===k?"on":""}" href="#/tools/${k}">${l}</a>`).join("")}</div>
   <div style="margin-top:12px">${body}</div></div>`;
@@ -11230,7 +11277,7 @@ function leadsHtml(L, context={}){
   const bc = L.by_category||{};
   const city=context.city??TS.ldCity??"", industry=context.industry??TS.ldInd??"";
   const reportTitle="线索雷达·"+city+industry, reportMd=leadsMd(L,city,industry);
-  const iTag = i=>i==="高"?`<span class="tag" style="background:#ffc2c5">🔥 需求高</span>`:i==="中"?`<span class="tag" style="background:#ffe9ad">需求中</span>`:`<span class="tag">需求低</span>`;
+  const iTag = i=>i==="高"?`<span class="tag" style="background:var(--bad-bg)">🔥 需求高</span>`:i==="中"?`<span class="tag" style="background:var(--warn-bg)">需求中</span>`:`<span class="tag">需求低</span>`;
   return `${L.analysis_status==="degraded"?`<div class="notice" style="margin-top:0">⚠️ <b>本次为降级分析</b>：情报员深度分析未完成，以下分类与话术是按模板生成的基础版——原帖链接真实可用，但话术建议自己润色后再用，或重新侦察一次。</div>`:""}
   <div class="notice green">🧭 ${esc(L.strategy||"")}</div>
   <div class="kv">${Object.entries(bc).map(([k,v])=>`<span>${esc(k)} ${esc(v)} 条</span>`).join("")}</div>

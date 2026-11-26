@@ -70,7 +70,7 @@ def _toolbox_employee_bundle(
 
     station = registry.BY_IDX.get(idx)
     if not station:
-        raise ValueError("工具箱未找到对应数字员工")
+        raise ValueError("工具箱未找到对应AI 专家")
     config = employees.get_config(idx)
     workflow = (
         config.get("prompt_template")

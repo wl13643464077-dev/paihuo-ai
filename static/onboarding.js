@@ -18,19 +18,19 @@
     st.textContent=`
 .ph-onb{background:linear-gradient(120deg,#fff4cf,#fffaf0 72%);border-width:3px}
 .ph-onb h2{margin:0;font-size:19px}
-.ph-onb .ph-step{border:2px solid rgba(51,41,31,.18);border-radius:14px;padding:12px 14px;margin-top:12px;background:#fffdf7}
-.ph-onb .ph-step.ph-now{border-color:#33291f;box-shadow:3px 3px 0 rgba(51,41,31,.12)}
+.ph-onb .ph-step{border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin-top:12px;background:#fffdf7}
+.ph-onb .ph-step.ph-now{border-color:#33291f;box-shadow:var(--shadow-1)}
 .ph-onb .ph-step.ph-ok{opacity:.8}
-.ph-onb .ph-step-h{display:flex;align-items:center;gap:8px;font-weight:900;font-size:15px}
+.ph-onb .ph-step-h{display:flex;align-items:center;gap:8px;font-weight:700;font-size:15px}
 .ph-onb .ph-badge{display:inline-flex;align-items:center;justify-content:center;min-width:24px;height:24px;border-radius:12px;background:#ffd166;border:2px solid #33291f;font-size:13px}
 .ph-onb .ph-ok .ph-badge{background:#9ee6b0}
 .ph-onb .ph-fields{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px}
 .ph-onb .ph-fields>div{flex:1 1 220px;min-width:0}
-.ph-onb .ph-fields label{display:block;font-weight:800;font-size:13px;margin-bottom:4px}
+.ph-onb .ph-fields label{display:block;font-weight:600;font-size:13px;margin-bottom:4px}
 .ph-onb .ph-fields input{width:100%;box-sizing:border-box;min-height:44px;font-size:16px}
 .ph-onb .ph-chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
 .ph-onb .ph-chips .btn{min-height:44px}
-.ph-onb .ph-post{border:2px dashed rgba(51,41,31,.3);border-radius:12px;padding:10px 12px;margin-top:10px;background:#fff}
+.ph-onb .ph-post{border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin-top:10px;background:#fff}
 .ph-onb .ph-post-h{display:flex;align-items:center;gap:8px;justify-content:space-between;flex-wrap:wrap}
 .ph-onb .ph-post-t{white-space:pre-wrap;word-break:break-word;line-height:1.7;margin-top:6px;font-size:15px}
 .ph-onb .ph-post .btn{min-height:40px}
@@ -38,17 +38,17 @@
 .ph-onb .ph-foot{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-top:12px}
 .ph-onb .ph-link{background:none;border:none;color:#8b7355;text-decoration:underline;cursor:pointer;font-size:13px;padding:6px 0}
 .ph-onb .ph-pw{margin-top:12px;padding:10px 12px;border-radius:12px;background:#eef6ff;font-size:13.5px;line-height:1.7}
-.ph-onb .ph-pw summary{cursor:pointer;font-weight:800}
+.ph-onb .ph-pw summary{cursor:pointer;font-weight:600}
 .ph-onb-done{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px}
-.ph-onb-done .ph-grow{flex:1;min-width:180px;font-weight:800}
+.ph-onb-done .ph-grow{flex:1;min-width:180px;font-weight:600}
 .ph-onb-line{padding:8px 14px}
 .ph-onb-line .ph-grow a{color:inherit;text-decoration:underline}
-.ph-onb-line .ph-grow .ph-link{font-size:inherit;font-weight:800;color:inherit;padding:0}
+.ph-onb-line .ph-grow .ph-link{font-size:inherit;font-weight:600;color:inherit;padding:0}
 .ph-onb-line .ph-did{white-space:nowrap;font-weight:700}
-.ph-onb .ph-nostore{margin-top:8px;padding:8px 10px;border-radius:10px;background:#fff;border:2px dashed rgba(51,41,31,.3);font-size:14px;font-weight:800}
-.ph-onb .ph-nostore .ph-link{font-size:14px;font-weight:900;color:#33291f;padding:0 2px}
+.ph-onb .ph-nostore{margin-top:8px;padding:8px 10px;border-radius:10px;background:#fff;border:1px solid var(--line);font-size:14px;font-weight:600}
+.ph-onb .ph-nostore .ph-link{font-size:14px;font-weight:700;color:#33291f;padding:0 2px}
 .ph-onb .ph-next{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}
-.ph-onb .ph-next-i{display:flex;flex-direction:column;gap:2px;min-height:44px;padding:10px 12px;border:2px solid rgba(51,41,31,.18);border-radius:12px;background:#fffdf7;color:inherit;text-decoration:none}
+.ph-onb .ph-next-i{display:flex;flex-direction:column;gap:2px;min-height:44px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:#fffdf7;color:inherit;text-decoration:none}
 .ph-onb .ph-next-i.ph-ok{opacity:.65}
 .ph-x{background:none;border:none;font-size:20px;line-height:1;cursor:pointer;padding:6px 8px;color:#8b7355}
 @media (max-width:640px){
@@ -92,7 +92,7 @@
     if(st.steps.industry) return `<div class="sub" style="margin-top:4px">您的行业：<b>${h(st.industry?.name||"")}</b></div>`;
     const list=S.industries||[];
     if(!list.length) return `<div class="sub" style="margin-top:6px">正在加载行业列表…</div>`;
-    return `<div class="sub" style="margin-top:6px">选好后，您这一行的专属数字员工就会出现。只能选 1 个，之后想加请联系顾问。</div>
+    return `<div class="sub" style="margin-top:6px">选好后，您这一行的专属AI 专家就会出现。只能选 1 个，之后想加请联系顾问。</div>
       <div class="ph-chips">${list.map((x,i)=>`<button type="button" class="btn" onclick="PH_ONBOARDING.pickIndustry(${i},this)">${h(x.name||x.key)}</button>`).join("")}</div>`;
   }
   function storeForm(store){
@@ -121,7 +121,7 @@
       const bits=[s.name,s.city,s.product].filter(Boolean).map(h).join(" · ");
       return `<div class="sub" style="margin-top:4px">${bits||"已填好"} <button type="button" class="ph-link" onclick="PH_ONBOARDING.editStore()">改一下</button></div>${noStoreHint()}`;
     }
-    return `<div class="sub" style="margin-top:6px">花 1 分钟填一下，以后所有数字员工写东西都会照着您家的情况来。</div>${storeForm(s)}`;
+    return `<div class="sub" style="margin-top:6px">花 1 分钟填一下，以后所有AI 专家写东西都会照着您家的情况来。</div>${storeForm(s)}`;
   }
   function postsList(st){
     const posts=Array.isArray(st.posts)?st.posts:[];
@@ -259,7 +259,7 @@
     try{
       await api("/onboarding/store",{method:"PUT",body,routeScoped:false});
       S.editing=false;
-      say("店铺信息已保存，数字员工都记住了");
+      say("店铺信息已保存，AI 专家都记住了");
       await load(true);
       await offerFirstStore(body);
     }catch(e){ say(e.message); btn.disabled=false; btn.textContent=t; }
@@ -350,7 +350,7 @@
         <div><label>短信签名名称</label><input id="ph-sms-sign" value="${h(c.sign_name||"")}" placeholder="如：派活"></div>
         <div><label>验证码模板 Code</label><input id="ph-sms-tpl" value="${h(c.template_code||"")}" placeholder="如：SMS_123456789"></div>
       </div>
-      <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-weight:800"><input type="checkbox" id="ph-sms-en" ${c.enabled?"checked":""} style="width:auto"> 开启验证码登录</label>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-weight:600"><input type="checkbox" id="ph-sms-en" ${c.enabled?"checked":""} style="width:auto"> 开启验证码登录</label>
       <div class="actions"><button class="btn pri" onclick="PH_ONBOARDING.saveSms(this)">💾 保存短信配置</button>
         <span class="sub">当前：${c.active?"登录页已显示验证码登录":"未启用"}</span></div>`;
   }

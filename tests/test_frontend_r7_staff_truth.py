@@ -180,8 +180,9 @@ class FrontendStaffTruthTests(unittest.IsolatedAsyncioTestCase):
             pills = await page.evaluate(
                 "Object.fromEntries([1,2,3,4,5].map(i=>{const p=document.querySelector(`#sa-task-${i} .pill`);"
                 "return [i,[p.textContent.trim(), getComputedStyle(p).backgroundColor]];}))")
-            red, blue, yellow, green = ("rgb(255, 194, 197)", "rgb(201, 226, 255)",
-                                        "rgb(255, 233, 173)", "rgb(167, 236, 201)")
+            # 语义色浅底：danger / info / warn / success（index.html :root 的 --bad-bg 等）
+            red, blue, yellow, green = ("rgb(253, 236, 234)", "rgb(232, 240, 254)",
+                                        "rgb(255, 241, 214)", "rgb(228, 245, 236)")
             self.assertEqual(["已逾期", red], pills["1"])
             self.assertEqual(["被打回", red], pills["2"])
             self.assertEqual(["待做", blue], pills["3"])
