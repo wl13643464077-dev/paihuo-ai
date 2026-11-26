@@ -31,6 +31,12 @@ def today_cn(ts: float | None = None) -> str:
     return now_cn(ts).strftime("%Y-%m-%d")
 
 
+def today_text_cn(ts: float | None = None) -> str:
+    """给人看的北京日期「11 月 24 日 周二」；老板今天页和店员手机版共用这一个写法。"""
+    now = now_cn(ts)
+    return f"{now.month} 月 {now.day} 日 周{'一二三四五六日'[now.weekday()]}"
+
+
 def cn_day_index(ts: float | None = None) -> int:
     """北京时间的"第几天"整数序号,用作按日计数的键(同一天内恒定)。"""
     return int((_ts(ts) + CN_OFFSET_SECONDS) // _DAY)

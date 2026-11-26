@@ -14,6 +14,56 @@ const rmb = u => "¥" + ((u||0)*7.2).toFixed(2);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 // 把值安全塞进双引号事件属性:JSON.stringify 不转义单引号,直接进 onclick='...' 会被 ' 截断→XSS;故用双引号属性+esc
 const cp = x => esc(JSON.stringify(x));
+/* ---------- 第七轮:人名、截止时间、点数的统一写法 ----------
+   staff.js 是独立页面(不加载 app.js),那边另有一份同样的 personWithRole / dueInfo / dueHtml。 */
+/* 给人看的称呼:姓名,没填回退登录名 */
+function personName(u){ return String((u&&(u.name||u.display_name||u.username))||""); }
+/* 带角色的写法「小李（店员）」;姓名里已经带了角色(「王店长」)就不重复 */
+function personWithRole(name, role){
+  name=String(name||"").trim(); role=String(role||"").trim();
+  if(!name) return "";
+  return (!role||name.includes(role)) ? name : `${name}（${role}）`;
+}
+/* 截止时间的相对写法,「今天/明天」按北京时间算(和后端 timeutil 一致,不看浏览器时区):
+   今天 20:44 / 明天 16:44 / 后天 09:00 / 11-28 16:44;还没做完又过了点的写「已逾期 3 小时」「已逾期 2 天」。
+   open=这件事还没做完(只有没做完的才说逾期);返回 {text, full, overdue},full 是完整时间(给 title 用)。 */
+function dueInfo(ts, open, now){
+  ts=Number(ts); if(!ts||!isFinite(ts)) return null;
+  now=now==null?Date.now()/1000:Number(now);
+  const CN=8*3600, pad=n=>String(n).padStart(2,"0");
+  const d=new Date((ts+CN)*1000), n=new Date((now+CN)*1000);
+  const hm=`${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+  const md=`${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
+  const full=`${d.getUTCFullYear()}-${md} ${hm}`;
+  if(open&&ts<now){
+    const late=now-ts;
+    const text=late<3600?`已逾期 ${Math.max(1,Math.floor(late/60))} 分钟`
+      :late<86400?`已逾期 ${Math.floor(late/3600)} 小时`:`已逾期 ${Math.floor(late/86400)} 天`;
+    return {text, full, overdue:true};
+  }
+  const days=Math.floor((ts+CN)/86400)-Math.floor((now+CN)/86400);
+  const text=days===0?`今天 ${hm}`:days===1?`明天 ${hm}`:days===2?`后天 ${hm}`
+    :d.getUTCFullYear()!==n.getUTCFullYear()?full:`${md} ${hm}`;
+  return {text, full, overdue:false};
+}
+/* 任务卡上的那一小段(已转义):「截止 明天 16:44」或「已逾期 3 小时」,鼠标悬停给完整时间 */
+function dueHtml(ts, open, now){
+  const info=dueInfo(ts, open, now);
+  if(!info) return "";
+  return info.overdue
+    ? `<span class="due-rel due-over" title="原定 ${esc(info.full)} 截止">${esc(info.text)}</span>`
+    : `<span class="due-rel" title="${esc(info.full)} 截止">截止 ${esc(info.text)}</span>`;
+}
+/* 点数的写法:0 不带正负号;-0.3 四舍五入成 0 也不写成「-0」 */
+function ptsSigned(value, sign){
+  const n=Math.round(Math.abs(Number(value)||0));
+  return n===0?"0":`${sign}${n}`;
+}
+/* 表格里的点数格子:这一格没有数(0)就写「—」 */
+function ptsCell(value, sign){
+  const n=Math.round(Math.abs(Number(value)||0));
+  return n===0?"—":`${sign}${n}`;
+}
 function passwordPolicyError(value){
   const password=String(value??"");
   if(password.length<12) return "密码至少需要 12 位";
@@ -903,14 +953,14 @@ function nav(){
   // 右侧账号区:企业名 · 账号 · 余额(用已加载的数据,不额外请求) + 退出,紧挨着在线状态
   const balance = ME&&STATE&&seesCompanyMoney()&&STATE.balance!=null
     ? ` · 余额 ${Math.round(Number(STATE.balance)||0)} 点` : "";
-  const who = ME ? `${esc(ME.tenant||"")}${ME.tenant?" · ":""}${esc(ME.username||"")}${balance}` : "";
+  const who = ME ? `${esc(ME.tenant||"")}${ME.tenant?" · ":""}${esc(personName(ME))}${balance}` : "";
   // 手机顶栏不放红色「退出」(「我的」页底部有),换成企业名,点开进「我的」;没有「我的」入口的账号仍保留退出
-  const org = ME&&ME.tenant ? `<a class="nav-org" href="#/mine" title="${esc(ME.tenant)} · ${esc(ME.username||"")}">${esc(ME.tenant)}</a>` : "";
+  const org = ME&&ME.tenant ? `<a class="nav-org" href="#/mine" title="${esc(ME.tenant)} · ${esc(personName(ME))}">${esc(ME.tenant)}</a>` : "";
   // 在线圆点收进账号区:先摘下来,重画后再放回去(状态不丢)
   let conn = $("#conn"); if(conn) conn.remove();
   $("#nav").innerHTML = items.map(x=>link(x,"nav-top")).join("")
     + `<span class="nav-acct${items.some(x=>x.g.key==="mine")?"":" keep-out"}">${who?`<a class="nav-who" href="#/mine" title="${who}">${who}</a>`:""}${org}`
-    + `<button type="button" class="nav-action navlogout" onclick="logout()" title="${ME?esc(ME.tenant)+" · "+esc(ME.username):""}">🚪 退出</button></span>`;
+    + `<button type="button" class="nav-action navlogout" onclick="logout()" title="${ME?esc(ME.tenant)+" · "+esc(personName(ME)):""}">🚪 退出</button></span>`;
   if(!conn){ conn=document.createElement("span"); conn.id="conn"; conn.className="nav-conn"; conn.setAttribute("role","status"); }
   const acct = $("#nav .nav-acct");
   acct.insertBefore(conn, acct.querySelector(".navlogout"));
@@ -1065,7 +1115,7 @@ async function myStoreCard(branchId){
     const open=Number(row?.open_issues)||0, overdue=Number(row?.overdue_actions)||0;
     cells.push(`<a href="${esc(inspectionRecordHash(0,industry))}" onclick="myStoreOpen(${id},${cp(industry)})" class="${overdue?"bad":""}"><b>${open}</b><span>未闭环整改${overdue?`（逾期 ${overdue}）`:""}</span></a>`);
   }
-  const people=(b.assignees||[]).map(a=>`${esc(a.username)}（${a.job_title==="manager"?"店长":a.job_title==="director"?"总监":"店员"}）`);
+  const people=(b.assignees||[]).map(a=>esc(personWithRole(personName(a),a.job_title==="manager"?"店长":a.job_title==="director"?"总监":"店员")));
   box.innerHTML=(cells.length?`<div class="today-stats store-card-grid">${cells.join("")}</div>`:`<div class="sub">这家店今天还没有记录。</div>`)
     +(isOwnerLike()||canCreateStore()?`<div class="sub" style="margin-top:10px">负责人：${people.length?people.join("、"):`还没分人，去 <a href="#/team" style="text-decoration:underline">团队与权限</a> 给这家店分店长、店员`}</div>`:"");
 }
@@ -1109,7 +1159,7 @@ async function growthHub(){
   hubView("growth", canWork("content")?`<a class="btn pri today-post" href="#/tools/hot">🔥 今天发什么<span class="sub">每天挑好今天该发的内容，照着发就行</span></a>`:"");
 }
 async function mineHub(){
-  const who = ME?`<div class="card mine-who"><b>${esc(ME.tenant||"")}</b> · ${esc(ME.username||"")}
+  const who = ME?`<div class="card mine-who"><b>${esc(ME.tenant||"")}</b> · ${esc(personName(ME))}${ME.display_name&&ME.display_name!==ME.username?`<span class="sub">（登录账号 ${esc(ME.username||"")}）</span>`:""}
     ${ME.role!=="root"&&canSeeBilling()&&STATE?`<div class="sub" style="margin-top:4px">余额 ${Math.round(STATE.balance||0)} 点${STATE.plan?` · ${esc(STATE.plan)}`:""}</div>`:""}</div>`:"";
   hubView("mine", who);
   $("#main").insertAdjacentHTML("beforeend",
@@ -1881,6 +1931,12 @@ function todayTodoRow(icon, title, sub, btnText, onclick, cls="pri"){
     <div class="todo-tx"><b>${title}</b>${sub?`<div class="sub">${sub}</div>`:""}</div>
     <button type="button" class="btn sm ${cls}" onclick="${onclick}">${btnText}</button></div>`;
 }
+/* 今天页问候语旁的日期「11 月 24 日 周二」:优先用服务器给的;兜底也按北京时间算,不看浏览器时区 */
+function todayLabelCn(){
+  if(STATE&&STATE.today_text) return String(STATE.today_text);
+  const d=new Date(Date.now()+8*3600e3);
+  return `${d.getUTCMonth()+1} 月 ${d.getUTCDate()} 日 周${"日一二三四五六"[d.getUTCDay()]}`;
+}
 /* 今天页「去审核」:进派给店员页并只看「等审核」(一次性预设,没加载到该模块就直接进页面) */
 function staffReviewOpen(){
   if(typeof window.PH_STAFF_ADMIN?.openReview==="function") window.PH_STAFF_ADMIN.openReview();
@@ -1902,8 +1958,9 @@ async function dashboard(){
   })();
   const [store] = await Promise.all([storeTodaySummary(), onboardingTask]);
   const tourBanner = ME&&ME.role==="tour" ? `<div class="notice" style="background:#ece3ff;margin-top:0">👀 <b>参观模式</b>：去看看每位数字员工能帮您的店做什么。<a href="#/experts" style="text-decoration:underline;font-weight:900">看数字员工 →</a> <a href="/promo#plans" style="text-decoration:underline;font-weight:900">查看套餐</a> 或联系开通企业账号后直接派活。</div>` : "";
-  const d = new Date();
-  const dateLabel = `${d.getMonth()+1}月${d.getDate()}日 周${"日一二三四五六"[d.getDay()]}`;
+  // 日期用服务器给的北京日期(/api/state 的 today_text),和店员手机版同一个来源;
+  // 不取浏览器本地时间(跨时区、手机时间不准时两端会对不上)。老版本后端没这个字段时才按北京时间自己算。
+  const dateLabel = todayLabelCn();
   const money = seesCompanyMoney()
     ? `<a class="today-money" href="#/billing">余额 ${Math.round(STATE.balance||0)} 点${STATE.plan?` · ${esc(STATE.plan)}`:""} ›</a>` : "";
   const hello = `<div class="today-hello"><h2>☀️ ${ME.role==="member"?"同事好":"老板好"} <span class="sub">${dateLabel}</span></h2>${money}</div>`;
@@ -6070,7 +6127,7 @@ function inspectionBranchPickerHtml(){
   return `${controls}${state.legacy?`<div class="notice">当前服务仍使用旧 branches 兼容模式，页面仅显示最多 20 家。</div>`:""}
     <label>选择门店 *</label><select id="inspection-branch" onchange="inspectionBranchSelect(this.value)">${items.map(branch=>`<option value="${Number(branch.id)}" ${Number(branch.id)===Number(INSPECTION_CAPTURE_BRANCH_ID)?"selected":""}>${esc(branch.store_code?branch.store_code+" · ":"")}${esc(branch.name||"未命名门店")}${branch.region?` · ${esc(branch.region)}`:""}</option>`).join("")}</select>
     <div class="sub" style="margin-top:8px">搜索结果：可选择本次巡店门店，也可直接查看该店历史。</div>
-    <div class="dimwrap"><table class="dimtable"><thead><tr><th>门店</th><th>区域</th>${showAssignees?"<th>负责人</th>":""}<th>操作</th></tr></thead><tbody>${items.map(branch=>`<tr><td><b>${esc(branch.store_code||"—")}</b><div class="sub">${esc(branch.name||"未命名门店")}</div></td><td>${esc(branch.region||"未分区")}</td>${showAssignees?`<td>${(branch.assignees||[]).length?branch.assignees.map(a=>esc(a.username)).join("、"):`<span class="sub">未分配</span>`}</td>`:""}<td><div class="actions" style="margin:0;gap:6px">${canManage?`<button class="btn sm" onclick="inspectionBranchDeactivate(${Number(branch.id)},${cp(branch.name||"")})">停用</button>`:""}<button class="btn sm ${Number(branch.id)===Number(INSPECTION_CAPTURE_BRANCH_ID)?"pri":""}" onclick="inspectionBranchSelect(${Number(branch.id)})">选择巡店</button><button class="btn sm" onclick="inspectionFilterBranch(${Number(branch.id)})">看历史</button></div></td></tr>`).join("")}</tbody></table></div>
+    <div class="dimwrap"><table class="dimtable"><thead><tr><th>门店</th><th>区域</th>${showAssignees?"<th>负责人</th>":""}<th>操作</th></tr></thead><tbody>${items.map(branch=>`<tr><td><b>${esc(branch.store_code||"—")}</b><div class="sub">${esc(branch.name||"未命名门店")}</div></td><td>${esc(branch.region||"未分区")}</td>${showAssignees?`<td>${(branch.assignees||[]).length?branch.assignees.map(a=>esc(personName(a))).join("、"):`<span class="sub">未分配</span>`}</td>`:""}<td><div class="actions" style="margin:0;gap:6px">${canManage?`<button class="btn sm" onclick="inspectionBranchDeactivate(${Number(branch.id)},${cp(branch.name||"")})">停用</button>`:""}<button class="btn sm ${Number(branch.id)===Number(INSPECTION_CAPTURE_BRANCH_ID)?"pri":""}" onclick="inspectionBranchSelect(${Number(branch.id)})">选择巡店</button><button class="btn sm" onclick="inspectionFilterBranch(${Number(branch.id)})">看历史</button></div></td></tr>`).join("")}</tbody></table></div>
     ${state.page>0||(state.nextBeforeId!==null&&state.nextBeforeId!==undefined)?`<div class="actions" style="justify-content:flex-end;flex-wrap:wrap"><button class="btn sm" ${state.page>0?"":"disabled"} onclick="inspectionBranchSearchPage(-1)">← 上一页</button><span class="sub">第 ${state.page+1} 页 · 每页最多 20 家</span><button class="btn sm" ${state.nextBeforeId!==null&&state.nextBeforeId!==undefined?"":"disabled"} onclick="inspectionBranchSearchPage(1)">下一页 →</button></div>`:""}`;
 }
 async function inspectionChecklistLoad(branchId,{silent=false}={}){
@@ -6542,11 +6599,11 @@ function inspectionIssueHtml(v,issue){
   const action=issue.action||{}, evidence=issue.evidence||[],rechecks=action.rechecks||[],pending=rechecks.find(r=>r.status==="pending");
   const canStart=["open","reopened"].includes(action.status),canUpload=action.status==="in_progress"||(action.status==="awaiting_recheck"&&!pending),canReview=!!pending&&action.status==="awaiting_recheck"&&inspectionPerm("can_review"),canAssign=inspectionPerm("can_assign_actions");
   const dismissed=action.close_reason==="false_positive",people=Array.isArray(v.assignable_users)?v.assignable_users:[],assignee=people.find(p=>Number(p.id)===Number(action.assignee_user_id));
-  const assignHtml=v.can_assign&&action.id&&action.status!=="closed"?`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0"><label for="inspection-assignee-${action.id}" style="margin:0">指派给</label><select id="inspection-assignee-${action.id}" style="min-width:160px;font-size:16px" onchange="inspectionAssignTo(${v.id},${action.id},this.value,this)"><option value="">${action.assignee_user_id?"":"— 选一个人 —"}</option>${people.map(p=>`<option value="${Number(p.id)}" ${Number(p.id)===Number(action.assignee_user_id)?"selected":""}>${esc(p.label||p.username)}</option>`).join("")}</select>${people.length?"":`<span class="sub">这家门店还没有绑定店长/店员，先到团队页给成员分配门店</span>`}</div>`:"";
+  const assignHtml=v.can_assign&&action.id&&action.status!=="closed"?`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0"><label for="inspection-assignee-${action.id}" style="margin:0">指派给</label><select id="inspection-assignee-${action.id}" style="min-width:160px;font-size:16px" onchange="inspectionAssignTo(${v.id},${action.id},this.value,this)"><option value="">${action.assignee_user_id?"":"— 选一个人 —"}</option>${people.map(p=>`<option value="${Number(p.id)}" ${Number(p.id)===Number(action.assignee_user_id)?"selected":""}>${esc(p.label||personName(p))}</option>`).join("")}</select>${people.length?"":`<span class="sub">这家门店还没有绑定店长/店员，先到团队页给成员分配门店</span>`}</div>`:"";
   const dismissHtml=dismissed?`<div class="notice" style="margin:8px 0"><b>已标记为误报</b>，不算问题、不算逾期、不扣门店分。${action.dismiss_note?`<div class="sub">原因：${esc(action.dismiss_note)}</div>`:""}${inspectionPerm("can_review")?`<div class="actions" style="margin:6px 0 0"><button class="btn sm" onclick="inspectionReopenDismissed(${v.id},${action.id})">撤销误报</button></div>`:""}</div>`:"";
   return `<div class="topic" style="margin:10px 0"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="tag">${inspectionSeverity(issue.severity)}风险</span><b style="flex:1">${esc(issue.title)}</b><span class="pill ${inspectionStatusClass(action.status||issue.status)}">${esc(dismissed?"误报已作废":inspectionStatusLabel(action.status||issue.status))}</span>${issue.needs_human_check?`<span class="tag">需人工查验</span>`:""}</div>
     <div style="margin-top:7px">${esc(issue.description||"")}</div>${issue.root_cause?`<div class="sub" style="margin-top:5px">可能原因：${esc(issue.root_cause)}</div>`:""}${evidence.length?`<div class="sub" style="margin-top:6px">📷 证据：${evidence.map(e=>`照片 ${e.display_no||"—"}${e.note?` · ${esc(e.note)}`:""}`).join("、")}</div>`:""}
-    <div class="notice" style="margin:8px 0"><b>整改：</b>${esc(action.plan||"待确认")}<div class="sub">负责人 ${esc(assignee?.username||action.owner||issue.owner||"待指派")} · 截止 ${action.due_at?new Date(action.due_at*1000).toLocaleDateString("zh-CN"):"待设置"}</div></div>${assignHtml}${dismissHtml}
+    <div class="notice" style="margin:8px 0"><b>整改：</b>${esc(action.plan||"待确认")}<div class="sub">负责人 ${esc((assignee&&personName(assignee))||action.owner||issue.owner||"待指派")} · 截止 ${action.due_at?new Date(action.due_at*1000).toLocaleDateString("zh-CN"):"待设置"}</div></div>${assignHtml}${dismissHtml}
     ${rechecks.map((r,index)=>`<div class="notice ${r.status==="approved"?"green":r.status==="rejected"?"red":"violet"}" style="margin:7px 0"><b>第 ${index+1} 次复查 · ${inspectionStatusLabel(r.status)}</b><div class="sub">AI建议：${esc(inspectionStatusLabel(r.model_recommendation))}（仅供人工复核）</div>${r.note?`<div>${esc(r.note)}</div>`:""}${(r.photos||[]).length?`<div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:8px">${r.photos.map(p=>{const src=safeAssetUrl(p.url||`/files/${p.storage_key}`);return src?`<a href="${esc(src)}" target="_blank" rel="noopener"><img src="${esc(src)}" alt="复查照片 ${p.display_no}" style="width:88px;height:70px;object-fit:cover;border-radius:7px"><div class="sub">照片 ${p.display_no}</div></a>`:"";}).join("")}</div>`:""}</div>`).join("")}
     ${action.status!=="closed"?`<div class="actions">${canAssign?`<button class="btn sm" onclick="inspectionAssign(${v.id},${issue.id},${action.id},${action.version},${cp(action.owner||issue.owner||"")},${Number(action.due_at)||0},${cp(action.plan||"")})">确认 / 修改负责人与期限</button>`:""}${canStart?`<button class="btn sm" onclick="inspectionAction(${v.id},${issue.id},${action.id},${action.version},'in_progress')">① 开始整改</button>`:""}
       ${canUpload?`<label class="btn sm" style="cursor:pointer">② 提交复查照片<input type="file" accept="image/*" capture="environment" style="display:none" onchange="inspectionRecheck(${v.id},${issue.id},${action.id},${action.version},this.files[0])"></label>`:""}
@@ -8257,28 +8314,44 @@ async function tmSaveBranches(uid){
   try{ await api(`/team/users/${uid}/branches`,{method:"PUT",body:{branch_ids:ids,open_industries:true}});
     toast(ids.length?`已分配 ${ids.length} 家门店`:"已清空负责门店"); render(); }catch(e){ toast(e.message); }
 }
+/* 成员的称呼:「小李（xiaoli）」= 姓名（登录名）;没填姓名只有登录名 */
+function tmPersonHtml(u){
+  const real=String(u.display_name||"").trim();
+  return real&&real!==u.username
+    ? `<b>${esc(real)}</b><span class="sub" title="登录账号">（${esc(u.username)}）</span>`
+    : `<b>${esc(u.username)}</b>`;
+}
 function tmMemberRow(u,t){
   const isSelf = ME && Number(ME.id)===Number(u.id);
   const btns = [];
+  // 弹层标题、确认框里称呼 TA 用姓名(没填就是登录名)
+  const who = personName(u);
+  const hasName = !!String(u.display_name||"").trim();
+  // 改姓名:老板(主账号)能改本企业所有人的,包括自己;平台 root 账号的行只有平台自己能改
+  const canName = t.is_admin && (u.role!=="root" || ME?.role==="root");
+  const rename = canName ? `<button class="btn sm" onclick="tmEditName(${u.id})">✏️ 改姓名</button>` : "";
   if(t.is_admin && u.role==="member"){
-    const mods=`<button class="btn sm" onclick="tmEditMods(${u.id},${cp(u.username)},${cp(u.modules)})">🧩 行业/板块</button>`;
-    const title=`<button class="btn sm" onclick="tmEditTitle(${u.id},${cp(u.username)},${cp(u.job_title||"staff")})">🎖 职级</button>`;
-    const alloc=`<button class="btn sm" onclick="tmAllocForm(${u.id},${cp(u.username)})">🤝 分配 AI 专家</button>`;
-    const stores=t.store_branches && u.job_title!=="director" ? `<button class="btn sm" onclick="tmBranchForm(${u.id},${cp(u.username)})">🏪 负责门店</button>` : "";
+    const mods=`<button class="btn sm" onclick="tmEditMods(${u.id},${cp(who)},${cp(u.modules)})">🧩 行业/板块</button>`;
+    const title=`<button class="btn sm" onclick="tmEditTitle(${u.id},${cp(who)},${cp(u.job_title||"staff")})">🎖 职级</button>`;
+    const alloc=`<button class="btn sm" onclick="tmAllocForm(${u.id},${cp(who)})">🤝 分配 AI 专家</button>`;
+    const stores=t.store_branches && u.job_title!=="director" ? `<button class="btn sm" onclick="tmBranchForm(${u.id},${cp(who)})">🏪 负责门店</button>` : "";
     const reset=`<button class="btn sm" onclick="tmResetPw(${u.id})">🔑 重置密码</button>`;
     const toggle=`<button class="btn sm" onclick="tmToggle(${u.id},${u.enabled?0:1})">${u.enabled?"⏸ 停用":"▶️ 启用"}</button>`;
-    const del=`<button class="btn sm bad" onclick="tmDel(${u.id},${cp(u.username)})" aria-label="删除 ${esc(u.username)}">🗑${tmIsStorePerson(u)?" 删除账号":""}</button>`;
+    const del=`<button class="btn sm bad" onclick="tmDel(${u.id},${cp(who)})" aria-label="删除 ${esc(who)}">🗑${tmIsStorePerson(u)?" 删除账号":""}</button>`;
     if(tmIsStorePerson(u)){
       // 店长/店员常用的只有这三个；其余收进「⋯ 更多」，手机上一行放得下
       btns.push(stores, reset, toggle,
-        `<details class="tm-row-more"><summary class="btn sm">⋯ 更多</summary><div class="tm-row-more-box">${mods}${title}${alloc}${del}</div></details>`);
-    }else btns.push(mods, title, alloc, stores, reset, toggle, del);
+        `<details class="tm-row-more"><summary class="btn sm">⋯ 更多</summary><div class="tm-row-more-box">${rename}${mods}${title}${alloc}${del}</div></details>`);
+    }else btns.push(rename, mods, title, alloc, stores, reset, toggle, del);
   }else if(!t.is_admin && u.role==="member" && !isSelf){
-    btns.push(`<button class="btn sm pri" onclick="tmAllocForm(${u.id},${cp(u.username)})">🤝 分配 AI 专家</button>`);
+    btns.push(`<button class="btn sm pri" onclick="tmAllocForm(${u.id},${cp(who)})">🤝 分配 AI 专家</button>`);
+  }else if(rename){
+    btns.push(rename);   // 老板自己这一行:只有改姓名
   }
-  return `<div class="topic">
+  return `<div class="topic" data-member-row="${u.id}">
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <b>${esc(u.username)}</b>${isSelf?`<span class="sub">（我）</span>`:""}
+      ${tmPersonHtml(u)}${isSelf?`<span class="sub">（我）</span>`:""}
+      ${canName&&!hasName?`<a href="#/team" role="button" class="sub" data-name-missing style="text-decoration:underline;font-weight:800" onclick="tmEditName(${u.id});return false" title="填了姓名，任务卡、通知里就显示「小李」「王店长」，不再是登录账号">补上姓名</a>`:""}
       ${tmTitleTag(u)}
       ${u.enabled?"":`<span class="tag" style="background:#ffb3b5">已停用</span>`}
       <span style="flex:1"></span>
@@ -8316,7 +8389,7 @@ async function teamView(){
       <div class="notice" style="margin-top:0" data-team-role="${esc(meRole)}">👥 <b>我的团队</b>：您是${esc(meRole)}${myStores.length?`，负责 ${esc(storeText(myStores))}`:""}。给${crewWord}派活、审核交差在「派活 → 派给店员」里；开账号、重置密码、换门店都请找老板。</div>
       <div class="card" id="tm-crew"><h2>🧑‍🍳 您负责的${crewWord}（${crew.length} 人）</h2>
         ${crew.length?crew.map(u=>`<div class="topic" data-crew-row style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <b>${esc(u.username)}</b><span class="tag">${roleName(u)==="店员"?"🧑‍🍳":"👤"} ${esc(roleName(u))}</span>
+          ${tmPersonHtml(u)}<span class="tag">${roleName(u)==="店员"?"🧑‍🍳":"👤"} ${esc(roleName(u))}</span>
           <span class="sub">${stores(u).length?`🏪 ${esc(storeText(stores(u)))}`:"还没分门店"}</span>
           ${u.enabled?"":`<span class="tag" style="background:#ffb3b5">已停用</span>`}</div>`).join("")
           :emptyState({icon:"🧑‍🍳",text:`您${myStores.length?"店里":"下面"}还没有${crewWord}账号，请老板在「团队与权限」里开一个。`})}</div>
@@ -8456,8 +8529,7 @@ async function platformTodayView(){
   const t=await api("/team");
   window.__TEAM=t;
   const {customers,expiring,lowBalance,pending}=platformTenantAlerts(t);
-  const d=new Date();
-  const dateLabel=`${d.getMonth()+1}月${d.getDate()}日 周${"日一二三四五六"[d.getDay()]}`;
+  const dateLabel=todayLabelCn();
   const names=list=>{const n=list.map(x=>x.name);return esc(n.length>3?`${n.slice(0,3).join("、")} 等 ${n.length} 家`:n.join("、"));};
   const rows=[];
   if(pending.length) rows.push(todayTodoRow("📝",`${pending.length} 条开通申请待处理`,"客户在登录页申请了账号，一键开通后把话术发给 TA","去处理","platformGo('applies')"));
@@ -8496,7 +8568,10 @@ function tmUserForm(){
     <h3 style="margin-top:0">➕ 新建账号</h3>
     <label id="tm-kind-label">这个人是</label>
     <div class="tm-kinds" role="radiogroup" aria-labelledby="tm-kind-label">${TM_KINDS.map(x=>`<button type="button" class="tm-kind" role="radio" data-k="${x.k}" aria-checked="${x.k===TM_KIND}" onclick="tmPickKind('${x.k}')"><b>${x.icon} ${x.label}</b><span class="sub">${x.desc}</span></button>`).join("")}</div>
-    <div style="margin-top:10px"><label for="tm-u">登录账号</label>
+    <div style="margin-top:10px"><label for="tm-dn">姓名 <span class="sub" style="font-weight:400">选填，建议填上：任务卡、通知里就显示这个名字，大家一眼认得</span></label>
+      <input id="tm-dn" maxlength="20" autocomplete="off" placeholder="如：小李、王店长" aria-describedby="tm-dn-err" ${enterSubmit("tmUserCreate()")}>
+      <div class="field-err" id="tm-dn-err" role="alert"></div></div>
+    <div style="margin-top:10px"><label for="tm-u">登录账号 <span class="sub" style="font-weight:400">TA 登录时输的，用字母、数字或手机号</span></label>
       <input id="tm-u" maxlength="40" autocomplete="off" autocapitalize="off" placeholder="比如：xiaoli 或手机号" aria-describedby="tm-u-err" ${enterSubmit("tmUserCreate()")}>
       <div class="field-err" id="tm-u-err" role="alert"></div></div>
     <div id="tm-store-part">
@@ -8521,7 +8596,36 @@ function tmUserForm(){
     <div class="actions"><button type="button" class="btn pri" id="tm-create-ok" onclick="tmUserCreate()">创建账号</button>
       <button type="button" class="btn" onclick="$('#tm-uform').innerHTML=''">取消</button></div></div>`;
   tmPickKind(TM_KIND);
-  setTimeout(()=>$("#tm-u")?.focus(),30);
+  setTimeout(()=>$("#tm-dn")?.focus(),30);
+}
+/* 姓名的前端校验,和后端同一条规则:最多 20 个字,不能有引号、尖括号等符号;空 = 不填 */
+function tmDisplayNameError(value){
+  const name=String(value||"").trim().replace(/\s+/g," ");
+  if(!name) return "";
+  if(name.length>20) return "姓名最多 20 个字";
+  if(/[<>&"'\\]/.test(name)) return "姓名不能有引号、尖括号等符号";
+  return "";
+}
+/* 改姓名 / 补上姓名:留空保存 = 清掉姓名,各处回退显示登录账号 */
+async function tmEditName(uid){
+  const u=((window.__TEAM||{}).users||[]).find(x=>Number(x.id)===Number(uid));
+  if(!u) return;
+  const old=String(u.display_name||"").trim();
+  const value=await uiPrompt({
+    title:old?"改姓名":"补上姓名",
+    message:`登录账号「${u.username}」不变。填了姓名，任务卡、通知、驾驶舱里就显示这个名字。`,
+    label:"姓名",value:old,placeholder:"如：小李、王店长",confirmText:"保存",required:false,
+    validate:v=>tmDisplayNameError(v)
+  });
+  if(value===null) return;
+  const name=String(value||"").trim().replace(/\s+/g," ");
+  if(name===old) return;
+  try{
+    await api(`/team/users/${uid}`,{method:"PUT",body:{display_name:name}});
+    toast(name?`已保存，以后各处显示「${name}」`:"已清掉姓名，各处显示登录账号");
+    if(ME&&Number(ME.id)===Number(uid)) ME=null;   // 改的是自己:顶栏的称呼跟着换
+    render();
+  }catch(e){ toast(e.message); }
 }
 function tmPickKind(kind){
   TM_KIND=TM_KINDS.some(x=>x.k===kind)?kind:"staff";
@@ -8544,16 +8648,19 @@ function tmFieldErr(id,text){
 async function tmUserCreate(){
   if(TM_CREATE_BUSY) return;
   const username=($("#tm-u")?.value||"").trim();
+  const displayName=($("#tm-dn")?.value||"").trim().replace(/\s+/g," ");
   const auto=$("#tm-p-auto")?.checked!==false;
   const password=auto?"":($("#tm-p")?.value||"");
   // 一次把所有没填对的地方都标出来,不是只报第一个。
   const userErr=!username?"请填写登录账号"
     :/[\s'"<>&\\]/.test(username)?"登录账号不能有空格、引号、尖括号等符号":"";
   const pwErr=auto?"":(passwordPolicyError(password)||"");
-  tmFieldErr("tm-u",userErr); tmFieldErr("tm-p",pwErr);
+  const nameErr=tmDisplayNameError(displayName);
+  tmFieldErr("tm-dn",nameErr); tmFieldErr("tm-u",userErr); tmFieldErr("tm-p",pwErr);
   $("#tm-create-err").textContent="";
-  if(userErr||pwErr){ $(userErr?"#tm-u":"#tm-p").focus(); return; }
+  if(nameErr||userErr||pwErr){ $(nameErr?"#tm-dn":userErr?"#tm-u":"#tm-p").focus(); return; }
   const kind=TM_KIND, body={username};
+  if(displayName) body.display_name=displayName;
   if(password) body.password=password;
   if(kind==="office"){
     body.modules=[...document.querySelectorAll("#tm-mods .on")].map(e=>e.dataset.k);
@@ -8574,10 +8681,11 @@ async function tmUserCreate(){
     await render();
     markSetupChanged({staff:true});   // 上手卡「开店员账号」立刻打勾
     tmShowSendCard({username:r.username||username, password:r.initial_password||password,
-      kind, stores:(r.branch_ids||body.branch_ids||[]).length});
+      name:r.display_name||displayName||"", kind, stores:(r.branch_ids||body.branch_ids||[]).length});
   }catch(e){
     const err=$("#tm-create-err"); if(err) err.textContent=e.message; else toast(e.message);
-    if(/用户名|账号/.test(e.message||"")) tmFieldErr("tm-u",e.message);
+    if(/姓名/.test(e.message||"")) tmFieldErr("tm-dn",e.message);
+    else if(/用户名|账号/.test(e.message||"")) tmFieldErr("tm-u",e.message);
   }finally{
     TM_CREATE_BUSY=false;
     const btn=$("#tm-create-ok"); if(btn){ btn.disabled=false; btn.textContent="创建账号"; }
@@ -8588,7 +8696,9 @@ function tmSendText(o){
   const name=String((window.__TEAM&&window.__TEAM.tenant&&window.__TEAM.tenant.name)||"").trim();
   const brand=name?`【${name}】`:"";
   const use=o.kind==="manager"?"用来给店员派活、审核交差":"用来看每天的活、拍照交差";
-  return [store?`${brand}给您开了派活账号，${use}：`:`${brand}给您开了派活账号，电脑上打开就能用：`,
+  // 称呼用姓名(「小李，……」);没填姓名就不带称呼
+  const hi=String(o.name||"").trim()?`${String(o.name).trim()}，`:"";
+  return [store?`${hi}${brand}给您开了派活账号，${use}：`:`${hi}${brand}给您开了派活账号，电脑上打开就能用：`,
     `账号：${o.username}`, `初始密码：${o.password}`,
     store?`手机打开：${location.origin}/staff`:`电脑打开：${location.origin}`,
     "第一次登录会让您改一个自己好记的密码。"].join("\n");
@@ -8598,7 +8708,7 @@ function tmShowSendCard(o){
   const box=$("#tm-uform"); if(!box) return;
   const store=o.kind!=="office";
   box.innerHTML=`<div class="card tm-sendcard" id="tm-sendcard" role="status">
-    <h3 style="margin-top:0">✅ 账号建好了，把下面这段发给 TA</h3>
+    <h3 style="margin-top:0">✅ 账号建好了，把下面这段发给${String(o.name||"").trim()?esc(String(o.name).trim()):" TA"}</h3>
     <pre id="tm-send-text">${esc(tmSendText(o))}</pre>
     <div class="actions" style="margin-top:0"><button type="button" class="btn pri" id="tm-send-copy" onclick="tmCopySend()">📋 复制</button>
       <button type="button" class="btn" onclick="$('#tm-uform').innerHTML=''">我发好了</button></div>
@@ -9319,8 +9429,8 @@ async function billingView(){
         <div style="font-size:12px;opacity:.85">点数余额</div></div>
     </div>
     ${b.is_platform?`<div class="notice" style="margin-bottom:0">👑 您是平台方，自己用不扣点数（显示∞）。下面看到的是给客户开通/客户消耗的真实记录。客户登录自己账号时，这里就是他的余额和账单。</div>`
-      :`<div class="kv" style="margin-top:12px"><span>累计充值 <b style="color:#2f9e6e">+${(b.recharged||0).toFixed(0)}</b></span>
-        <span>累计消耗 <b style="color:#e5484d">-${(b.spent||0).toFixed(0)}</b></span>
+      :`<div class="kv" style="margin-top:12px"><span>累计充值 <b style="color:#2f9e6e">${ptsSigned(b.recharged,"+")}</b></span>
+        <span>累计消耗 <b style="color:#e5484d">${ptsSigned(b.spent,"-")}</b></span>
         ${(b.refunded_total||0)>0?`<span>失败退回 <b style="color:#b45309">+${(b.refunded_total||0).toFixed(0)}</b></span>`:""}
         <span>共 ${b.txn_n||0} 笔</span></div>`}</div>
   ${purchaseOwnHtml()}${purchaseAdminHtml()}${wxpayAdminHtml()}
@@ -9337,8 +9447,8 @@ async function billingView(){
     <div class="dimwrap"><table class="dimtable" style="min-width:min(420px,100%)"><thead><tr>
       <th>月份</th><th>充值</th><th>消耗</th><th>失败退回</th></tr></thead><tbody>
       ${b.monthly.map(m=>`<tr><td><b>${esc(m.ym)}</b></td>
-        <td style="color:#2f9e6e">+${(m.recharged||0).toFixed(0)}</td>
-        <td style="color:#e5484d">-${(m.spent||0).toFixed(0)}</td>
+        <td style="color:#2f9e6e">${ptsCell(m.recharged,"+")}</td>
+        <td style="color:#e5484d">${ptsCell(m.spent,"-")}</td>
         <td style="color:#b45309">${(m.refunded||0)>0?`+${(m.refunded||0).toFixed(0)}`:"—"}</td></tr>`).join("")}</tbody></table></div></div>`:""}
   <div class="card"><h2 style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">🧾 点数明细（充值 & 消耗记录）
     ${isAdmin()&&!b.is_platform?`<a class="btn sm" style="margin-left:auto" href="/api/records/export.xlsx?kind=billing">⬇️ 导出全部流水</a>`:""}</h2>

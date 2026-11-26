@@ -39,7 +39,7 @@ import logging
 import time
 from datetime import datetime
 
-from . import checklist, db, notify, obs, timeutil
+from . import checklist, db, notify, obs, people, timeutil
 
 log = logging.getLogger("reminders")
 
@@ -256,9 +256,7 @@ def _user_name(tid: int, uid: int | None, cache: dict) -> str:
         return "还没指派"
     key = ("name", uid)
     if key not in cache:
-        row = db.one("SELECT username FROM users WHERE id=? AND tenant_id=?",
-                     (int(uid), int(tid)))
-        cache[key] = str((row or {}).get("username") or f"账号{uid}")
+        cache[key] = people.name_of(tid, uid) or f"账号{uid}"
     return cache[key]
 
 

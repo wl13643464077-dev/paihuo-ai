@@ -139,7 +139,7 @@ class StaffPermissionRevocationTests(StaffTaskBase):
         self._as(22)
         ok = self.client.post(f"/api/staff/tasks/{task_id}/nudge")
         self.assertEqual(200, ok.status_code)
-        self.assertTrue(ok.json()["message"].startswith("店长 renmin-dz 催您："))
+        self.assertTrue(ok.json()["message"].startswith("renmin-dz（店长） 催您："))
         again = self.client.post(f"/api/staff/tasks/{task_id}/nudge")
         self.assertEqual(429, again.status_code)
         self.assertIn("刚催过", again.json()["detail"])

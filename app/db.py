@@ -42,7 +42,8 @@ _generation_switching = threading.Event()
 # The offline v2 bundle independently used 58–60 for branch access, payments
 # and staff tasks. Merge those additions at 62–64 without rewriting either
 # lineage's existing ledger rows or skipping DDL based on an ambiguous number.
-LATEST_SCHEMA_VERSION = 64
+# v65 adds users.display_name (nullable 姓名; additive column only).
+LATEST_SCHEMA_VERSION = 65
 MIGRATION_LOCK_SUFFIX = ".migration.lock"
 
 SCHEMA = """
@@ -2254,6 +2255,7 @@ def _validate_migrated_database(c) -> None:
         "users": {
             "id", "tenant_id", "username", "password_hash", "role",
             "modules_json", "enabled", "must_change_password", "phone",
+            "display_name",
         },
         "job": {
             "id", "brief_json", "mode", "status", "current_idx", "tenant_id",
@@ -3100,6 +3102,7 @@ def _initialize_anchor_locked(path: str):
           job_title TEXT NOT NULL DEFAULT 'staff',  -- member职级:director/manager/staff
           allowed_emp_idxs_json TEXT,           -- NULL=行业内全部;JSON数组=数字员工白名单
           phone TEXT,                           -- v64:企业微信群 @提醒/短信用,可空
+          display_name TEXT,                    -- v65:姓名(小李/王店长),可空=显示登录名
           enabled INTEGER NOT NULL DEFAULT 1,
           must_change_password INTEGER NOT NULL DEFAULT 0,
           created_at REAL, updated_at REAL
@@ -4095,6 +4098,9 @@ def _initialize_anchor_locked(path: str):
             "TEXT NOT NULL DEFAULT ''",
         )
         _add_column(_conn, "users", "phone", "TEXT")
+        # v65:账号姓名(给人看的称呼)。只加一个可空列，不回填、不建索引；
+        # 没填的账号各处回退显示登录名。与 v64 一样赶在下面的迁移后校验之前加好。
+        _add_column(_conn, "users", "display_name", "TEXT")
         _execute_migration_script(_conn, """
         CREATE INDEX IF NOT EXISTS idx_users_tenant_phone
           ON users(tenant_id,phone);
@@ -4658,6 +4664,12 @@ def _initialize_anchor_locked(path: str):
         _conn.execute(
             "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
             "VALUES(64,'staff-task-loop',?)",
+            (time.time(),),
+        )
+        # v65:users.display_name(账号姓名，可空)。仅补缺失列，无数据回填。
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(65,'user-display-name',?)",
             (time.time(),),
         )
         _conn.execute(f"PRAGMA user_version={LATEST_SCHEMA_VERSION}")

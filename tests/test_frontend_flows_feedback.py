@@ -573,7 +573,7 @@ class FrontendFlowsFeedbackTests(unittest.IsolatedAsyncioTestCase):
             await browser.close()
 
     def test_team_and_tenant_forms_submit_on_enter(self):
-        for call, count in (('enterSubmit("tmMyPw()")', 4), ('enterSubmit("tmUserCreate()")', 2),
+        for call, count in (('enterSubmit("tmMyPw()")', 4), ('enterSubmit("tmUserCreate()")', 3),
                             ('enterSubmit("tmTenantCreate()")', 3)):
             self.assertEqual(count, APP_JS.count(call), call)
 

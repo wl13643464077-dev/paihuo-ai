@@ -7,6 +7,49 @@
   const $ = s=>document.querySelector(s);
   const esc = v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   const main = ()=>$("#main");
+  /* ---------- 人名与截止时间的统一写法(和 app.js 里的 personWithRole / dueInfo / dueHtml 同一套规则；
+     本页是独立页面，不加载 app.js，所以这里另有一份) ---------- */
+  /* 「小李（店员）」；姓名里已经带了角色(「王店长」)就不重复 */
+  function personWithRole(name, role){
+    name = String(name||"").trim(); role = String(role||"").trim();
+    if(!name) return "";
+    return (!role||name.includes(role)) ? name : `${name}（${role}）`;
+  }
+  /* 截止时间的相对写法，「今天/明天」按北京时间算(不看手机时区)：
+     今天 20:44 / 明天 16:44 / 后天 09:00 / 11-28 16:44；还没做完又过了点的写「已逾期 3 小时」「已逾期 2 天」。
+     open=这件事还没做完；返回 {text, full, overdue}，full 是完整时间。 */
+  function dueInfo(ts, open, now){
+    ts = Number(ts); if(!ts||!isFinite(ts)) return null;
+    now = now==null ? Date.now()/1000 : Number(now);
+    const CN = 8*3600, pad = n=>String(n).padStart(2,"0");
+    const d = new Date((ts+CN)*1000), n = new Date((now+CN)*1000);
+    const hm = `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+    const md = `${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
+    const full = `${d.getUTCFullYear()}-${md} ${hm}`;
+    if(open && ts<now){
+      const late = now-ts;
+      const text = late<3600 ? `已逾期 ${Math.max(1,Math.floor(late/60))} 分钟`
+        : late<86400 ? `已逾期 ${Math.floor(late/3600)} 小时` : `已逾期 ${Math.floor(late/86400)} 天`;
+      return {text, full, overdue:true};
+    }
+    const days = Math.floor((ts+CN)/86400)-Math.floor((now+CN)/86400);
+    const text = days===0 ? `今天 ${hm}` : days===1 ? `明天 ${hm}` : days===2 ? `后天 ${hm}`
+      : d.getUTCFullYear()!==n.getUTCFullYear() ? full : `${md} ${hm}`;
+    return {text, full, overdue:false};
+  }
+  /* 卡片/详情里的那一小段(已转义)：「截止 明天 16:44」或「⏰ 已逾期 3 小时」；title 给完整时间(长按/悬停可见) */
+  function dueHtml(ts, open, now){
+    const info = dueInfo(ts, open, now);
+    if(!info) return "";
+    return info.overdue
+      ? `<span class="due-rel due-over" title="原定 ${esc(info.full)} 截止">⏰ ${esc(info.text)}</span>`
+      : `<span class="due-rel" title="${esc(info.full)} 截止">截止 ${esc(info.text)}</span>`;
+  }
+  /* 详情页的截止时间：it 没有时间戳(老接口)时退回后端给的文字 */
+  function dueDetail(it, open){
+    if(it.due_at) return dueHtml(it.due_at, open);
+    return it.due_text ? esc(`截止 ${it.due_text}`) : "";
+  }
   const URGENCY = {overdue:"已逾期", today:"今天要做完", later:"", waiting:"已交，等店长或老板看",
     done:"已完成", submitted:"已交，等店长或老板看", awaiting_recheck:"已交复查，等审核", missed:"已错过",
     approved:"✅ 已通过"};
@@ -103,7 +146,10 @@
   function msg(text, kind="err"){ return `<div class="msg ${kind}" role="${kind==="err"?"alert":"status"}">${esc(text)}</div>`; }
   function back(){ return `<button type="button" class="back" data-go="">← 回我的待办</button>`; }
   function dueLine(it){
-    if(!it.due_text || it.urgency==="approved") return "";   // 已通过的活不用再提截止时间
+    if((!it.due_at && !it.due_text) || it.urgency==="approved") return "";   // 已通过的活不用再提截止时间
+    // 还没做完的(逾期/今天/之后)才会写「已逾期 3 小时」；已交、已完成的只写原定时间
+    const open = ["overdue","today","later"].includes(it.urgency);
+    if(it.due_at) return dueHtml(it.due_at, open);
     return (it.urgency==="overdue"?"⏰ 已过截止 ":"截止 ")+esc(it.due_text);
   }
   function tag(it){
@@ -123,7 +169,7 @@
       <div class="t">${KIND_ICON[it.kind]||"📌"} ${esc(it.title)}</div>
       <div class="m">${tag(it)}${sub}${esc(extra)}</div></button>`;
   }
-  /* 打回原因前写上是谁打回的：「店长 laowang 打回：……」；老数据没有审核人时不写名字 */
+  /* 打回原因前写上是谁打回的：「老王（店长） 打回：……」(reviewer_label 由后端按姓名+身份算好)；老数据没有审核人时不写名字 */
   function rejectLine(t, fallback){
     return t.reviewer_label ? `${t.reviewer_label} 打回：${t.review_note}` : `${fallback}：${t.review_note}`;
   }
@@ -158,7 +204,7 @@
     const names = (t.branches||[]).map(b=>b.name).filter(Boolean);
     $("#today").textContent = `今天 ${t.date_text||""}` + (names.length ? " · "+names.slice(0,2).join("、")+(names.length>2?` 等 ${names.length} 家`:"") : "");
     const u = t.user || {};
-    $("#who").textContent = [u.name, u.role_label].filter(Boolean).join(" · ");
+    $("#who").textContent = personWithRole(u.name, u.role_label) || u.role_label || "";
     // 浏览器标签：店长看到「派活 · 店长」，店员看到「派活 · 店员」，其他人「派活 · 门店」
     document.title = "派活 · " + (["店长","店员"].includes(u.role_label) ? u.role_label : "门店");
   }
@@ -204,7 +250,7 @@
     const key = "task:"+t.id;
     const rejected = t.status==="todo" && t.review_note && t.reviewed_at;
     let body = `${back()}<div class="panel"><div class="t" style="font-size:20px;font-weight:900">${esc(t.title)}</div>
-      <p class="sub">${[t.branch_name, (t.dispatcher_label||t.created_by_name)?`${t.dispatcher_label||t.created_by_name} 派的`:"", t.due_text?`截止 ${t.due_text}`:""].filter(Boolean).map(esc).join(" · ")}</p>
+      <p class="sub">${[esc(t.branch_name||""), (t.dispatcher_label||t.created_by_name)?esc(`${t.dispatcher_label||t.created_by_name} 派的`):"", dueDetail(t, t.status==="todo")].filter(Boolean).join(" · ")}</p>
       ${t.detail?`<p>${esc(t.detail)}</p>`:""}
       ${rejected?msg(rejectLine(t, "上次被打回"),"info"):""}</div>`;
     if(t.status==="todo" && t.can_submit!==false){
@@ -361,7 +407,7 @@
     S.current = a;
     const canSubmit = ["open","in_progress","reopened"].includes(a.status);
     main().innerHTML = `${back()}<div class="panel"><div class="t" style="font-size:20px;font-weight:900">🔧 ${esc(a.title)}</div>
-      <p class="sub">${[a.branch_name, a.due_text?`截止 ${a.due_text}`:""].filter(Boolean).map(esc).join(" · ")}</p>
+      <p class="sub">${[esc(a.branch_name||""), dueDetail(a, canSubmit)].filter(Boolean).join(" · ")}</p>
       ${a.plan?`<p><b>怎么改：</b>${esc(a.plan)}</p>`:""}
       ${a.hint?`<p class="sub">${esc(a.hint)}</p>`:""}</div>
       <div id="err"></div>
@@ -413,7 +459,7 @@
   function fillWho(){
     const b = (S.meta.branches||[]).find(x=>String(x.id)===$("#d-branch").value) || {members:[]};
     $("#d-who").innerHTML = `<option value="">先不指定（店里谁有空谁做）</option>`
-      + b.members.map(u=>`<option value="${u.id}">${esc(u.name)}（${esc(u.title_label)}）</option>`).join("");
+      + b.members.map(u=>`<option value="${u.id}">${esc(personWithRole(u.name, u.title_label))}</option>`).join("");
   }
   function cnLocalToTs(v){
     const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(v||"");
@@ -468,7 +514,7 @@
     const who = t.assignee_name ? `交给 ${t.assignee_name}` : "还没指定人";
     const by = t.dispatcher_label||t.created_by_name;
     let body = `${back()}<div class="panel"><div class="t" style="font-size:20px;font-weight:900">${esc(t.title)}</div>
-      <p class="sub">${[t.branch_name, who, by?`${by} 派的`:"", t.due_text?`截止 ${t.due_text}`:""].filter(Boolean).map(esc).join(" · ")}</p>
+      <p class="sub">${[esc(t.branch_name||""), esc(who), by?esc(`${by} 派的`):"", dueDetail(t, t.status==="todo")].filter(Boolean).join(" · ")}</p>
       ${t.detail?`<p>${esc(t.detail)}</p>`:""}</div>`;
     const reviewable = t.status==="submitted" && t.can_manage && String(t.assignee_user_id)!==String(meId);
     if(reviewable){

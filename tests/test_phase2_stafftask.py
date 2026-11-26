@@ -321,7 +321,7 @@ class TodoTests(StaffTaskBase):
                                   create=True, new=lambda tid, uid: actions):
             todo = stafftask.todo_for_user(2, 23, now=now)
         self.assertEqual((2, 23, "2026-09-25"), calls["checklist"])
-        self.assertEqual("9 月 25 日", todo["date_text"])
+        self.assertEqual("9 月 25 日 周五", todo["date_text"])
         self.assertEqual(["人民路店"], [b["name"] for b in todo["branches"]])
         order = [(i["kind"], i["id"]) for i in todo["items"]]
         self.assertEqual([
@@ -461,10 +461,10 @@ class StoreTasksTests(StaffTaskBase):
         by_boss = self.create(20, assignee_user_id=23)
         by_manager = self.create(22, assignee_user_id=23)
         by_director = self.create(21, assignee_user_id=23)
-        self.assertEqual("老板 boss", stafftask.get_task(2, self.u(23), by_boss["id"])["dispatcher_label"])
-        self.assertEqual("店长 renmin-dz",
+        self.assertEqual("boss（老板）", stafftask.get_task(2, self.u(23), by_boss["id"])["dispatcher_label"])
+        self.assertEqual("renmin-dz（店长）",
                          stafftask.get_task(2, self.u(23), by_manager["id"])["dispatcher_label"])
-        self.assertEqual("总监 zongjian",
+        self.assertEqual("zongjian（总监）",
                          stafftask.get_task(2, self.u(23), by_director["id"])["dispatcher_label"])
         system = stafftask.create_task(2, None, title="系统派的", branch_id=self.a,
                                        assignee_user_id=23, now=NOW)
@@ -512,14 +512,14 @@ class RejectedFirstAndReviewerTests(StaffTaskBase):
         for task_id, reviewer in ((by_manager, 22), (by_boss, 20)):
             self.submit(23, task_id)
             stafftask.review_task(2, self.u(reviewer), task_id, approve=False, note="重拍")
-        self.assertEqual("店长 renmin-dz",
+        self.assertEqual("renmin-dz（店长）",
                          stafftask.get_task(2, self.u(23), by_manager)["reviewer_label"])
-        self.assertEqual("老板 boss", stafftask.get_task(2, self.u(23), by_boss)["reviewer_label"])
+        self.assertEqual("boss（老板）", stafftask.get_task(2, self.u(23), by_boss)["reviewer_label"])
         # 重交后审核卡(列表)也带上「上次是谁打回的」
         self.submit(23, by_manager, now=NOW + 300)
         review = [r for r in stafftask.todo_for_user(2, 20, now=NOW + 400)["reviews"]
                   if r["id"] == by_manager][0]
-        self.assertEqual("店长 renmin-dz", review["reviewer_label"])
+        self.assertEqual("renmin-dz（店长）", review["reviewer_label"])
         # 老数据没有审核人：不写名字
         db.execute("UPDATE staff_task SET reviewed_by=NULL WHERE id=?", (by_boss,))
         old = stafftask.get_task(2, self.u(23), by_boss)
@@ -544,7 +544,7 @@ class NudgeTests(StaffTaskBase):
     def test_manager_nudges_assignee_only_and_rate_limited(self):
         task = self.create(20, assignee_user_id=23, due_at=_cn(2026, 9, 22, 18))
         got = stafftask.nudge_task(2, self.u(22), task["id"], now=NOW)
-        self.assertEqual("店长 renmin-dz 催您：把冷柜清洗一遍（截止 09-22 18:00）", got["message"])
+        self.assertEqual("renmin-dz（店长） 催您：把冷柜清洗一遍（截止 09-22 18:00）", got["message"])
         self.assertEqual(timeutil.format_cn(NOW, "%H:%M"), got["nudged_text"])
         mine = self.nudges(23)
         self.assertEqual(1, len(mine))
@@ -569,7 +569,7 @@ class NudgeTests(StaffTaskBase):
         self.assertEqual(1, len(self.nudges(23)))
         # 过了 30 分钟可以再催；老板催的写「老板」
         again = stafftask.nudge_task(2, self.u(20), task["id"], now=NOW + 1800)
-        self.assertTrue(again["message"].startswith("老板 boss 催您："))
+        self.assertTrue(again["message"].startswith("boss（老板） 催您："))
         self.assertEqual(2, len(self.nudges(23)))
 
     def test_only_managers_of_that_store_can_nudge(self):

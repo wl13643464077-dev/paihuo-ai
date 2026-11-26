@@ -630,8 +630,8 @@ class SchemaV63MigrationTests(unittest.TestCase):
 
     def test_fresh_database_has_v63_pay_order_contract(self):
         db.conn()
-        self.assertEqual(64, db.LATEST_SCHEMA_VERSION)
-        self.assertEqual(64, db.one("PRAGMA user_version")["user_version"])
+        self.assertEqual(65, db.LATEST_SCHEMA_VERSION)
+        self.assertEqual(65, db.one("PRAGMA user_version")["user_version"])
         self.assertEqual(
             "wxpay-native-pay-order",
             db.one("SELECT name FROM schema_version WHERE version=63")["name"],
@@ -673,7 +673,7 @@ class SchemaV63MigrationTests(unittest.TestCase):
             "PRAGMA user_version=62",
         )
         db.conn()
-        self.assertEqual(64, db.one("PRAGMA user_version")["user_version"])
+        self.assertEqual(65, db.one("PRAGMA user_version")["user_version"])
         self.assertEqual(1, db.one("SELECT COUNT(*) n FROM schema_version WHERE version=63")["n"])
         self.assertEqual(0, db.one("SELECT COUNT(*) n FROM pay_order")["n"])
         self.assertEqual(5, db.one("SELECT balance FROM tenants WHERE id=2")["balance"])
