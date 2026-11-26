@@ -891,6 +891,64 @@ def review_pending_count(tid: int, actor_user: Mapping[str, Any] | None) -> int:
         return 0
 
 
+def attention_counts(
+    tid: int,
+    actor_user: Mapping[str, Any] | None,
+    *,
+    industry_key: str | None = None,
+    now: float | None = None,
+) -> dict:
+    """老板/店长首页和看板用：当前账号管得着的店员任务，到现在还没了结的有几件。
+
+    - doing：店员在做(待做，含被打回要重做)
+    - overdue：其中过了截止时间还没交的
+    - review_pending：已交差、等当前账号审核的(口径与 review_pending_count 一致)
+
+    可见范围沿用 _can_view + _can_manage(与列表、审核同一套权限)；不能派活的账号
+    (店员、参观账号等)全是 0 且 available=False。industry_key 给了就只算该行业门店的活(不挂门店的活也算)。
+    任何异常都按 0 处理，不影响首页。
+    """
+    result = {"available": False, "doing": 0, "overdue": 0, "review_pending": 0}
+    try:
+        tid = int(tid)
+        actor = _actor(tid, actor_user)
+        if not can_dispatch(actor):
+            return result
+        result["available"] = True
+        ts = time.time() if now is None else float(now)
+        rows = db.q(
+            "SELECT id,tenant_id,branch_id,assignee_user_id,created_by,status,due_at "
+            "FROM staff_task WHERE tenant_id=? AND status IN ('todo','rejected','submitted') "
+            "AND deleted_at IS NULL ORDER BY id DESC LIMIT 2000",
+            (tid,),
+        )
+        uid = int(actor["id"])
+        all_branches = sees_all_branches(actor)
+        wanted = str(industry_key or "").strip()
+        allowed: dict[Any, bool] = {}   # 同一家店只查一次权限
+        for row in rows:
+            key = row.get("branch_id")
+            if key not in allowed:
+                ok = _can_view(actor, row) and _can_manage(actor, row)
+                if ok and wanted and key is not None:
+                    ok = str(_branch(tid, int(key), active_only=False)
+                             .get("industry_key") or "") == wanted
+                allowed[key] = ok
+            if not allowed[key]:
+                continue
+            if row["status"] == "submitted":
+                if int(row.get("assignee_user_id") or 0) == uid and not all_branches:
+                    continue   # 自己交的活不能自己审
+                result["review_pending"] += 1
+                continue
+            result["doing"] += 1
+            if row.get("due_at") is not None and float(row["due_at"]) < ts:
+                result["overdue"] += 1
+        return result
+    except Exception:
+        return {"available": False, "doing": 0, "overdue": 0, "review_pending": 0}
+
+
 def _clear_submitted_notice(tid: int, task_id: int) -> None:
     """这件交差已经处理(通过/打回/取消)：把「等您审核」的通知收掉。失败不影响主流程。"""
     try:

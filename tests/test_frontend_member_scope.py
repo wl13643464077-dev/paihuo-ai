@@ -89,7 +89,7 @@ class FrontendMemberScopeTests(unittest.IsolatedAsyncioTestCase):
             await page.wait_for_function("document.querySelector('#main')?.textContent.trim().length > 0")
             cards = await page.evaluate(
                 "[...document.querySelectorAll('#main .hubcard .hc-t')].map(x=>x.textContent)")
-            for hidden in ("找行业专家", "多位专家一起商量", "协同小队", "派出去的活", "下达任务(内容)"):
+            for hidden in ("找行业专家", "多位专家一起商量", "协同小队", "派出去的活", "下达任务（内容）"):
                 self.assertNotIn(hidden, cards)
             # 直接打开这些页面:一打开就说清楚,不给整张表
             for hash_, title in (("#/new", "下达任务"), ("#/meetings", "多位专家一起商量"),

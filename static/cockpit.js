@@ -291,9 +291,12 @@
   function storeCards(rows){
     if(!rows.length) return noStoreEmptyState("还没有门店。建好门店后，这里会显示每家店的执行情况。");
     CP.pick.stores=rows;
+    // 有分数的店不足 2 家不排名次，避免给唯一一家(哪怕分很低)的店挂「No.1」
+    const scored=rows.filter(s=>s.score!=null).length, ranked=scored>=2;
+    const noRank=ranked?"":`<div class="sub" data-cp-norank style="margin-bottom:8px">${scored===1?"只有 1 家店有记录，暂不排名。":"这段时间各店都还没有记录，暂不排名。"}</div>`;
     const comp=(label,v)=>`<div class="cp-comp"><span>${label}</span><div class="bar"><i style="width:${v==null?0:Math.max(0,Math.min(100,v))}%"></i></div><span>${v==null?"—":Math.round(v)}</span></div>`;
-    return `<div class="cp-stores">${rows.map((s,i)=>`<div class="cp-store ${s.needs_attention?"warn":""}">
-      <div class="cp-store-top">${ring(s.score)}<div style="min-width:0;flex:1"><b style="font-size:15px">${s.rank?`No.${s.rank} `:""}${esc(s.name)}</b>
+    return `${noRank}<div class="cp-stores">${rows.map((s,i)=>`<div class="cp-store ${s.needs_attention?"warn":""}">
+      <div class="cp-store-top">${ring(s.score)}<div style="min-width:0;flex:1"><b style="font-size:15px">${ranked&&s.rank?`<span${s.needs_attention?` style="color:var(--cp-down)"`:""}>第 ${s.rank} 名</span> `:""}${esc(s.name)}</b>
         <div class="sub">${s.delta==null?"上期无数据":s.delta>0?`<span style="color:var(--cp-up);font-weight:800">较上期 ↑${num(s.delta,1)}</span>`:s.delta<0?`<span style="color:var(--cp-down);font-weight:800">较上期 ↓${num(Math.abs(s.delta),1)}</span>`:"较上期持平"}${s.open_issues?` · 未闭环问题 ${s.open_issues}`:""}</div>
         ${s.needs_attention?`<span class="cp-tag high" style="margin-top:4px">要盯一下</span>`:""}</div></div>
       ${comp("清单按时",s.checklist)}${comp("整改按时",s.action)}${comp("派活按时",s.task)}${comp("巡店问题分",s.issue)}

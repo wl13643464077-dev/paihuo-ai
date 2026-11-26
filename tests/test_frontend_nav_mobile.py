@@ -252,7 +252,7 @@ class FrontendNavMobileTests(unittest.IsolatedAsyncioTestCase):
             # 页面同时加载了真实的 onboarding.js：首位是上手卡(替身 ob-hook 或真实 ph-onb)
             self.assertIn(info["first"], {"ob-hook", "ph-onb"})
             self.assertEqual(
-                ["等您拍板:国庆新品推文", "失败了:秋季上新", "2 条门店整改等您审核", "巡店报告出来了"],
+                ["等您拍板：国庆新品推文", "失败了：秋季上新", "2 条门店整改等您审核", "巡店报告出来了"],
                 info["rows"],
             )
             self.assertEqual(["0", "4", "1"], info["stats"])

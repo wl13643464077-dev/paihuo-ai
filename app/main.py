@@ -2412,6 +2412,8 @@ def state(limit: int | None = None, offset: int = 0):
               "notifications": notifications,
               # 「今天」页待办：当前账号能审核的店员交差件数(不能审核的账号恒为 0)
               "staff_review_count": stafftask.review_pending_count(TEN(), auth.current()),
+              # 同一套权限口径：店员在做 / 逾期未交 / 等审核 各几件(管不着的账号全是 0)
+              "staff_task_counts": stafftask.attention_counts(TEN(), auth.current()),
               "balance": ten_row.get("balance") or 0,
               "plan": ten_row.get("plan") or "",
               "setup": setup, "trio": trio}

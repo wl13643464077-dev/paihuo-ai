@@ -894,6 +894,65 @@ class TodayReviewTests(NotificationTests):
         stafftask.cancel_task(2, self.u(20), third["id"])
         self.assertEqual(0, self.count(20))
 
+    def test_attention_counts_cover_doing_overdue_and_review_within_scope(self):
+        """今天页/老板看板用的三个数：店员在做、逾期未交、等审核，权限口径与列表一致。"""
+        counts = lambda uid, tid=2, **kw: stafftask.attention_counts(
+            tid, self.u(uid), now=kw.pop("now", NOW + 3600), **kw)
+        zero = {"doing": 0, "overdue": 0, "review_pending": 0}
+        self.assertEqual({"available": True, **zero}, counts(20))
+        late = self.create(20, assignee_user_id=23, due_at=NOW + 600)         # 人民路店，会逾期
+        self.create(20, assignee_user_id=23, due_at=NOW + 86400)              # 人民路店，没到期
+        self.create(20, assignee_user_id=23)                                  # 没设截止
+        waiting = self.create(20, branch_id=self.b, assignee_user_id=24)      # 中山路店
+        self.submit(24, waiting["id"])
+        boss = counts(20)
+        self.assertEqual({"available": True, "doing": 3, "overdue": 1, "review_pending": 1}, boss)
+        self.assertEqual(boss, counts(21))                                    # 总监同老板
+        self.assertEqual({"available": True, "doing": 3, "overdue": 1, "review_pending": 0},
+                         counts(22))                                          # 人民路店店长
+        self.assertEqual({"available": True, "doing": 0, "overdue": 0, "review_pending": 1},
+                         counts(25))                                          # 中山路店店长
+        # 还没过截止时间时不算逾期
+        self.assertEqual(0, counts(20, now=NOW + 60)["overdue"])
+        # 店员、没开行业板块的成员、别的企业、没登录：一律 0 且标明管不着
+        for uid, tid in ((23, 2), (24, 2), (27, 2), (30, 3), (30, 2)):
+            got = stafftask.attention_counts(tid, self.u(uid), now=NOW + 3600)
+            self.assertEqual(zero, {k: got[k] for k in zero}, (uid, tid))
+        self.assertFalse(counts(23)["available"])
+        self.assertFalse(stafftask.attention_counts(2, None)["available"])
+        # 和首页已有的「等审核」口径对得上
+        for uid in (20, 21, 22, 25):
+            self.assertEqual(self.count(uid), counts(uid)["review_pending"])
+        # 按行业筛：别的行业的门店不算
+        self.assertEqual(boss, counts(20, industry_key="restaurant"))
+        self.assertEqual({"available": True, **zero}, counts(20, industry_key="auto"))
+        # 交差后不再算逾期；被打回又回到在做且仍逾期；通过、取消后都不算
+        self.submit(23, late["id"], now=NOW + 7200)
+        self.assertEqual((2, 0, 2), tuple(counts(20, now=NOW + 7300)[k]
+                                          for k in ("doing", "overdue", "review_pending")))
+        stafftask.review_task(2, self.u(20), late["id"], approve=False, note="重拍")
+        self.assertEqual(1, counts(20, now=NOW + 7300)["overdue"])
+        stafftask.cancel_task(2, self.u(20), late["id"])
+        self.assertEqual((2, 0, 1), tuple(counts(20, now=NOW + 7300)[k]
+                                          for k in ("doing", "overdue", "review_pending")))
+
+    def test_boss_dashboard_risk_rows_use_staff_task_counts(self):
+        from app import bossdashboard
+        scope = {"tenant_id": 2, "industry_key": "restaurant"}
+        risk = lambda actor: bossdashboard._staff_task_risk(actor, scope, NOW + 3600)
+        self.create(20, assignee_user_id=23, due_at=NOW + 600)
+        waiting = self.create(20, branch_id=self.b, assignee_user_id=24)
+        self.submit(24, waiting["id"])
+        self.assertEqual({"staff_review_pending": 1, "staff_overdue_tasks": 1},
+                         risk({"id": 20, "tenant_id": 2}))
+        self.assertEqual({"staff_review_pending": 0, "staff_overdue_tasks": 1},
+                         risk({"id": 22, "tenant_id": 2}))
+        # 跨企业查看、管不着店员的活的账号：给 None(前端不显示)，不伪装成 0
+        hidden = {"staff_review_pending": None, "staff_overdue_tasks": None}
+        self.assertEqual(hidden, risk({"id": 30, "tenant_id": 3}))
+        self.assertEqual(hidden, risk({"id": 23, "tenant_id": 2}))
+        self.assertEqual(hidden, risk(None))
+
     def test_review_clears_only_that_tasks_submitted_notice(self):
         kinds = lambda uid: [n["kind"] for n in self.unread(uid)]
         first = self.create(20, assignee_user_id=23)

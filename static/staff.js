@@ -135,7 +135,7 @@
   }
 
   /* ---------- 店长:本店在做的活(谁、做什么、什么时候前、到哪一步了) ---------- */
-  const STORE_STATE = {submitted:["waiting","等您审核"], rejected:["overdue","被打回"],
+  const STORE_STATE = {submitted:["today","等您审核"], rejected:["overdue","被打回"],
     overdue:["overdue","已逾期"], today:["today","今天要做完"], later:["later","在做"]};
   function storeTag(it){
     const [cls, text] = STORE_STATE[it.store_state] || STORE_STATE.later;

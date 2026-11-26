@@ -280,7 +280,7 @@
       (t.dispatcher_label||t.created_by_name)?`${t.dispatcher_label||t.created_by_name} 派的`:"", t.remind_count?`已催 ${t.remind_count} 次`:""].filter(Boolean);
     return `<div class="sa-task ${t.overdue?"sa-over":""} ${String(SA.focus)===String(t.id)?"sa-focus":""}" id="sa-task-${t.id}">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <span class="pill ${t.status==="approved"?"done":t.status==="cancelled"?"cancelled":t.status==="submitted"?"awaiting_review":"running"}">${h(t.overdue?"逾期":STATUS[t.status]||t.status)}</span>
+        <span class="pill ${t.status==="approved"?"done":t.status==="cancelled"?"cancelled":t.status==="submitted"?"awaiting_review":(t.overdue||rejected||t.status==="rejected")?"failed":"running"}">${h(t.overdue?"已逾期":rejected?"被打回":STATUS[t.status]||t.status)}</span>
         <b style="flex:1;min-width:160px">${h(t.title)}</b>
         ${t.require_photo?`<span class="sub">📷 要照片</span>`:""}</div>
       <div class="sub" style="margin-top:4px">${meta.map(h).join(" · ")}</div>

@@ -41,6 +41,8 @@
       .ck-rank.warn{background:#fff1f1}
       .ck-rank-no{flex:none;width:42px;height:42px;border-radius:50%;border:2.5px solid var(--ink);display:flex;align-items:center;justify-content:center;font-weight:900;font-size:18px;background:#fff}
       .ck-rank-no.top{background:#ffd166}
+      .ck-rank-no.warn{background:#fff;border-color:var(--bad);color:var(--bad)}
+      .ck-rank-no.none{background:#f3ede0;color:var(--ink2);border-color:rgba(51,41,31,.35)}
       .ck-rank-body{flex:1;min-width:0}
       .ck-rank-score{font-size:26px;font-weight:900;line-height:1}
       .ck-delta{font-size:13px;font-weight:800;margin-left:6px}
@@ -230,14 +232,20 @@
   function ckRenderRank(){
     const r = CK.rank || {stores:[]};
     const stores = r.stores||[];
+    // 有分数的店不足 2 家就谈不上排名：不发名次牌，只说明原因
+    const scored = stores.filter(s=>s.score!=null).length, ranked = scored>=2;
+    const noRank = stores.length && !ranked ? `<div class="notice" data-ck-norank>${scored===1?"只有 1 家店有记录，暂不排名。":"这段时间各店都还没有记录，暂不排名。"}等有 2 家以上的店有清单、整改、派活或巡店记录，再给各店排名次。</div>` : "";
     const cards = stores.map(s=>{
+      // 金牌只给排在前三、又没被标「要盯一下」的店；要盯的店名次照写，但用警示样式
+      const no = ranked && s.rank ? s.rank : "—";
+      const noCls = !ranked||!s.rank ? "none" : s.needs_attention ? "warn" : s.rank<=3 ? "top" : "";
       const d = s.delta;
       const delta = d==null ? "" : d>0 ? `<span class="ck-delta up">↑${d}</span>` : d<0 ? `<span class="ck-delta down">↓${Math.abs(d)}</span>` : `<span class="ck-delta">持平</span>`;
-      const move = s.rank_change ? `<span class="sub">（名次${s.rank_change>0?"上升":"下降"} ${Math.abs(s.rank_change)}）</span>` : "";
+      const move = ranked && s.rank_change ? `<span class="sub">（名次${s.rank_change>0?"上升":"下降"} ${Math.abs(s.rank_change)}）</span>` : "";
       const parts = ["checklist","action","task","issue"].map(k=>s.components?.[k]).filter(Boolean).map(ckPart).join("");
       const why = (s.reasons||[]).length ? `<ul class="ck-why">${s.reasons.map(x=>`<li>${esc(x)}</li>`).join("")}</ul>` : "";
       return `<div class="card ck-rank ${s.needs_attention?"warn":""}">
-        <div class="ck-rank-no ${s.rank&&s.rank<=3?"top":""}">${s.rank||"—"}</div>
+        <div class="ck-rank-no ${noCls}">${no}</div>
         <div class="ck-rank-body">
           <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline;flex-wrap:wrap">
             <b style="font-size:17px">${esc(s.branch_name)}</b>
@@ -246,7 +254,7 @@
           ${why}<div class="ck-parts">${parts}</div></div></div>`;
     }).join("");
     $("#ck-rank").innerHTML = `<details class="notice"><summary>分数怎么算的？</summary><div style="margin-top:6px">${esc(r.formula||"")}</div></details>`
-      + (cards || `<div class="card">${noStoreEmptyState("还没有门店，建好门店后这里会给各店排名。")}</div>`);
+      + noRank + (cards || `<div class="card">${noStoreEmptyState("还没有门店，建好门店后这里会给各店排名。")}</div>`);
   }
 
   routes["checklists"] = checklistsView;
