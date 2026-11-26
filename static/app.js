@@ -5935,7 +5935,11 @@ function bossCarryInspectionIndustry(value){
 }
 /* 老板看板已并进数据驾驶舱：旧地址 #/boss(收藏、通知里的旧链接)进来直接换成 #/cockpit，不留历史。
    bossDashboardView 及其接口保留(别处仍可复用)，只是不再有入口。 */
-async function bossRedirectView(){ location.replace("#/cockpit"); }
+/* 平台管理员例外：驾驶舱只看当前企业，跨企业切换只有老板看板有，所以 root 仍进老板看板。 */
+async function bossRedirectView(){
+  if(ME?.role==="root") return bossDashboardView();
+  location.replace("#/cockpit");
+}
 async function bossDashboardView(){
   const request={seq:++BOSS_DASH_REQUEST_SEQ,scope:bossDashboardScopeSnapshot()};
   BOSS_EMPLOYEE_REQUEST_SEQ++;
@@ -8573,6 +8577,7 @@ async function platformTodayView(){
         <button type="button" class="btn pri" onclick="platformGo('new')">➕ 开新企业</button>
         <button type="button" class="btn" onclick="platformGo('tenants')">🏦 企业列表</button>
         <a class="btn" href="#/admin">🛠 后台</a>
+        <a class="btn" href="#/boss">📈 各企业看板</a>
       </div></div>`;
 }
 async function tmRename(){ try{ await api("/team/tenant",{method:"PUT",body:{name:$("#tm-name").value.trim()}}); toast("已保存"); ME=null; render(); }catch(e){ toast(e.message); } }
