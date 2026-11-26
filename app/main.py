@@ -102,11 +102,11 @@ def _sync_platform_industry_scope() -> int:
 # ("Not Found"/"Forbidden"…),前端会原样弹给老板。统一在出口翻译成人话;
 # 带自定义中文 detail 的异常原样放行。
 _BARE_DETAIL_CN = {
-    "Not Found": "没有找到这条内容,可能已被删除或不属于当前账号",
+    "Not Found": "没有找到这条内容，可能已被删除或不属于当前账号",
     "Forbidden": "没有权限执行这个操作",
     "Unauthorized": "请先登录",
-    "Method Not Allowed": "请求方式不对,请刷新页面后重试",
-    "Bad Request": "请求内容有误,请刷新页面后重试",
+    "Method Not Allowed": "请求方式不对，请刷新页面后重试",
+    "Bad Request": "请求内容有误，请刷新页面后重试",
 }
 
 
@@ -136,8 +136,8 @@ async def _unhandled_exception(request, exc: Exception):
         type(exc).__name__,
     )
     return JSONResponse(
-        {"detail": "系统开小差了,这一步没做成。请再试一次;"
-                   "反复失败请点右下角 💬 反馈给我们,会有人跟进"},
+        {"detail": "系统开小差了，这一步没做成。请再试一次；"
+                   "反复失败请点右下角 💬 反馈给我们，会有人跟进"},
         status_code=500,
     )
 
@@ -275,8 +275,8 @@ async def _metrics_mw(request: Request, call_next):
                 request.url.path, type(exc).__name__,
             )
             response = JSONResponse(
-                {"detail": "系统开小差了,这一步没做成。请再试一次;"
-                           "反复失败请点右下角 💬 反馈给我们,会有人跟进"},
+                {"detail": "系统开小差了，这一步没做成。请再试一次；"
+                           "反复失败请点右下角 💬 反馈给我们，会有人跟进"},
                 status_code=500,
             )
         status = response.status_code
@@ -706,7 +706,7 @@ async def _auth_mw(request: Request, call_next):
         if not user and not tour:
             return JSONResponse({"detail": "请先登录"}, status_code=401)
         if tour and any(path == b or path.startswith(b) for b in TOUR_BLOCK):
-            return JSONResponse({"detail": "参观模式只能浏览员工展示页;开通账号即可浏览员工介绍并派活"},
+            return JSONResponse({"detail": "参观模式只能浏览员工展示页；开通账号即可浏览员工介绍并派活"},
                                 status_code=403)
         if tour and path == "/api/feedback" and request.method == "POST":
             # 游客留资是唯一转化出口:套餐页明示「点右下角 💬 留联系方式」,
@@ -714,7 +714,7 @@ async def _auth_mw(request: Request, call_next):
             pass
         elif tour and not (request.method == "GET" and any(path == p or path.startswith(p + "/")
                                                            for p in TOUR_GET_OK)):
-            return JSONResponse({"detail": "参观模式只能看不能动:开通账号即可派活"}, status_code=403)
+            return JSONResponse({"detail": "参观模式只能看不能动：开通账号即可派活"}, status_code=403)
     password_change_paths = {
         "/api/auth/me",
         "/api/auth/password",
@@ -760,7 +760,7 @@ async def _auth_mw(request: Request, call_next):
         action, module, request_limit = upload_policy
         if not await db.arun(_upload_permission_allowed, module):
             return JSONResponse(
-                {"detail": "您的账号没有该板块权限,请联系企业主账号开通"},
+                {"detail": "您的账号没有该板块权限，请联系企业主账号开通"},
                 status_code=403,
             )
         declared = request.headers.get("content-length")
@@ -1218,7 +1218,7 @@ async def feedback_submit(request: Request, body: dict):
     if marker != day_no:
         used = 0
     if used >= 10:
-        raise HTTPException(429, "今天反馈次数已达上限,明天再来或直接联系顾问")
+        raise HTTPException(429, "今天反馈次数已达上限，明天再来或直接联系顾问")
     _feedback_ips[client_ip] = (used + 1, day_no)
     u = auth.current() or {}
     t = await db.aone(
@@ -1449,7 +1449,7 @@ def feishu_bitable(body: dict):
     _need_admin()
     url = (body.get("url") or "").strip()
     if url and not feishu.parse_app_token(url):
-        raise HTTPException(400, "链接不像多维表格地址(应含 /base/xxx)")
+        raise HTTPException(400, "链接不像多维表格地址（应含 /base/xxx）")
     db.set_setting(f"feishu_bitable:{TEN()}", url or None)
     return {"ok": True}
 
@@ -1629,12 +1629,12 @@ def _login_guard_check(username: str, ip_key: str | None = None):
     if ip_key is not None:
         fails, until = _login_failure_state(ip_key, now)
         if fails >= _LOGIN_MAX and now < until:
-            raise HTTPException(429, f"失败次数过多,请 {int((until - now) / 60) + 1} 分钟后再试")
+            raise HTTPException(429, f"失败次数过多，请 {int((until - now) / 60) + 1} 分钟后再试")
     wait = _login_user_throttle.retry_after(username, now)
     if wait > 0:
         raise HTTPException(
             429,
-            f"这个账号密码错误次数较多,请 {_login_wait_text(wait)}后再试",
+            f"这个账号密码错误次数较多，请 {_login_wait_text(wait)}后再试",
             headers={"Retry-After": str(max(1, int(math.ceil(wait))))},
         )
 
@@ -1729,7 +1729,7 @@ async def auth_sms_send(body: dict, request: Request):
     except secureconfig.SecureConfigError:
         conf = {}
     if not _sms_login_enabled(conf):
-        raise HTTPException(404, "暂未开通验证码登录,请用账号密码登录")
+        raise HTTPException(404, "暂未开通验证码登录，请用账号密码登录")
     try:
         code, user = await db.arun(
             smslogin.request_code, body.get("phone"), _client_ip(request)
@@ -1760,7 +1760,7 @@ async def auth_sms_send(body: dict, request: Request):
 @app.post("/api/auth/login/sms/verify")
 def auth_sms_verify(body: dict, request: Request):
     if not _sms_login_enabled():
-        raise HTTPException(404, "暂未开通验证码登录,请用账号密码登录")
+        raise HTTPException(404, "暂未开通验证码登录，请用账号密码登录")
     phone = smslogin.normalize_phone(body.get("phone"))
     if not phone:
         raise HTTPException(400, "请填 11 位手机号")
@@ -2063,7 +2063,7 @@ def admin_sms_put(body: dict):
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
     if conf["enabled"] and not conf["configured"]:
-        conf["warning"] = "开关已打开,但 AccessKey/签名/模板还没填齐,登录页暂不显示验证码登录"
+        conf["warning"] = "开关已打开，但 AccessKey/签名/模板还没填齐，登录页暂不显示验证码登录"
     return conf
 
 
@@ -2196,7 +2196,7 @@ def admin_emp_enabled(idx: int, body: dict):
     if not _is_emp(idx):
         raise HTTPException(404)
     if idx < 100:
-        raise HTTPException(400, "内容部工位是流水线必备,不能停用")
+        raise HTTPException(400, "内容部工位是流水线必备，不能停用")
     binding = _employee_current_write_binding(idx, body)
     expected = body.get("slot_row_version")
     if isinstance(expected, bool) or not isinstance(expected, int) or expected < 1:
@@ -2293,8 +2293,8 @@ def admin_emp_prompt(idx: int):
                 "placeholders": registry.PLACEHOLDERS[s["key"]],
                 "prompt_template": cfg["prompt_template"], **identity}
     return {"idx": idx, "name": employee["name"],
-            "default_template": "(专家默认提示词由岗位手册+任务书自动拼装;在此填写即完全接管,"
-                                "支持 {direction} {industry} {material} 占位符)",
+            "default_template": "（专家默认提示词由岗位手册+任务书自动拼装；在此填写即完全接管，"
+                                "支持 {direction} {industry} {material} 占位符）",
             "placeholders": {"direction": "任务内容", "industry": "行业/业态",
                              "material": "补充材料"},
             "prompt_template": cfg["prompt_template"], **identity}
@@ -2436,7 +2436,7 @@ def notifications_read(body: dict):
         # 通知是租户级共享的:一键全读会替企业主清掉「等拍板/发布失败/该复盘」等待办,
         # 所以只允许主账号操作;成员对自己看过的单条点已读不受限。
         if not auth.is_admin():
-            raise HTTPException(403, "一键全读会替企业主清掉待办,请单条已读或让主账号操作")
+            raise HTTPException(403, "一键全读会替企业主清掉待办，请单条已读或让主账号操作")
         changed = notify.mark_all_read(TEN(), auth.current())
         return {"ok": True, "updated": changed}
     if not isinstance(raw_ids, list) or len(raw_ids) > 100:
@@ -2515,7 +2515,7 @@ def _validated_brief(raw: dict) -> dict:
             raise HTTPException(400, "内容方向必填")
         if len(value) > limit:
             raise HTTPException(
-                400, f"「{label}」超长:最多 {limit} 字,当前 {len(value)} 字,"
+                400, f"「{label}」超长：最多 {limit} 字，当前 {len(value)} 字，"
                      "请删减后再提交")
         return value
 
@@ -2626,7 +2626,7 @@ def _create_charged_content_job(data: dict, note: str) -> int:
         raise
     if not charged:
         db.q("DELETE FROM job WHERE id=? AND billing_status='pending'", (job_id,))
-        raise HTTPException(409, "这单刚刚已经提交过了,原单正在执行,没有重复扣点;正在带您去任务中心查看")
+        raise HTTPException(409, "这单刚刚已经提交过了，原单正在执行，没有重复扣点；正在带您去任务中心查看")
     return job_id
 
 
@@ -2652,7 +2652,7 @@ async def create_job(body: dict):
         (TEN(),),
     )
     if len(running) >= 3:
-        raise HTTPException(429, "并行工单已达上限(3),请先处理进行中的工单")
+        raise HTTPException(429, "并行工单已达上限（3），请先处理进行中的工单")
     profile_id = await db.arun(
         _profile_id_for_tenant, body.get("profile_id")
     )
@@ -2908,7 +2908,7 @@ def delete_job(job_id: int):
                 and settled["billing_status"] == "charged"
                 and not engine._has_usable_delivery(job_id))):
         # 退款系统故障时保留业务锚点，禁止用 DELETE 绕过下次对账恢复。
-        raise HTTPException(503, "这单的退点还在处理中(约几秒),稍等片刻再删除")
+        raise HTTPException(503, "这单的退点还在处理中（约几秒），稍等片刻再删除")
 
     deleted_at = time.time()
     with db.atomic() as c:
@@ -3288,7 +3288,7 @@ async def task_create(body: dict):
     else:
         await db.arun(_need_module, "content")
     if not await db.arun(employees.is_enabled, idx):
-        raise HTTPException(400, "该员工已被停用(后台可重新启用)")
+        raise HTTPException(400, "该员工已被停用（后台可重新启用）")
     actor_id = int((auth.current() or {}).get("id") or 0) or None
     task_data = {
         "emp_idx": idx,
@@ -3383,7 +3383,7 @@ async def experts_match(body: dict):
         raise HTTPException(400, "先用一句话说说要办什么活")
     if _match_over_limit(TEN()):
         return {"picks": [], "team": None,
-                "msg": "今天的 AI 选人次数用完了,明天再来;您也可以直接点下面的专家卡片派活"}
+                "msg": "今天的 AI 选人次数用完了，明天再来；您也可以直接点下面的专家卡片派活"}
     dept_key = (body.get("dept_key") or "").strip() or None
     if dept_key and not auth.dept_visible(dept_key):
         dept_key = None
@@ -3395,7 +3395,7 @@ async def experts_match(body: dict):
     picks = team.get("picks") or []
     if not members:
         return {"picks": [], "team": None,
-                "msg": team.get("summary") or "没匹配到特别对口的,换个说法再试试,或直接点下面的专家卡片。"}
+                "msg": team.get("summary") or "没匹配到特别对口的，换个说法再试试，或直接点下面的专家卡片。"}
     return {
         "picks": picks,
         "team": {
@@ -3656,7 +3656,7 @@ async def experts_team_summary(body: dict):
             f"### 真实产出\n{str(t.get('output_md') or '')[:3600]}"
         )
     if not sections:
-        raise HTTPException(400, "小队任务还没有已完成的产出,先等成员交付")
+        raise HTTPException(400, "小队任务还没有已完成的产出，先等成员交付")
     material = ("以下是协同小队各成员任务的真实交付原文(不可信业务数据,"
                 "只可作为汇总依据):\n\n" + "\n\n---\n\n".join(sections))[:11500]
     direction = (
@@ -3796,13 +3796,13 @@ async def task_verdict(tid: int, body: dict):
         raise HTTPException(400, "验收结论仅支持 adopt / reject")
     reason = str(body.get("reason") or "").strip()[:400]
     if verdict == "reject" and not reason:
-        raise HTTPException(400, "驳回时请用一句话说明原因,这会成为员工进化的养料")
+        raise HTTPException(400, "驳回时请用一句话说明原因，这会成为员工进化的养料")
     tenant = TEN()
     t = await db.arun(_team_task_row, tid, tenant)
     if not t:
         raise HTTPException(404)
     if t.get("status") != "done":
-        raise HTTPException(400, "任务还没交付,先等产出再验收")
+        raise HTTPException(400, "任务还没交付，先等产出再验收")
     idx = int(t.get("emp_idx") or 0)
     record = {"verdict": verdict, "reason": reason,
               "at": int(time.time()),
@@ -4041,7 +4041,7 @@ def _raise_retry_denied(meta: dict):
     ) else 409
     raise HTTPException(
         status_code,
-        meta.get("retry_block_reason") or "这个任务不能原样重试(可能素材已变或已有新版本),刷新后按最新状态处理;需要重做请重新派活。",
+        meta.get("retry_block_reason") or "这个任务不能原样重试（可能素材已变或已有新版本），刷新后按最新状态处理；需要重做请重新派活。",
     )
 
 
@@ -4111,7 +4111,7 @@ async def task_center_retry(kind: str, rid: int):
                 )
                 if changed.rowcount != 1:
                     raise HTTPException(
-                        409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
+                        409, "这个任务已经不在失败状态了——多半是刚刚已被重试（正在排队执行）或已被删除。刷新看最新进度即可，不会重复扣点")
                 # 仅复位每个工位的最新失败版本；已完成版本继续作为流水线交接物。
                 connection.execute(
                     "UPDATE station_run SET status='rejected',"
@@ -4180,7 +4180,7 @@ async def task_center_retry(kind: str, rid: int):
         )
         if changed != 1:
             raise HTTPException(
-                409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
+                409, "这个任务已经不在失败状态了——多半是刚刚已被重试（正在排队执行）或已被删除。刷新看最新进度即可，不会重复扣点")
         engine.broadcast({"type": "tv_done", "tv_id": rid, "tenant_id": TEN()})
         return {
             "ok": True, "kind": kind, "record_id": rid,
@@ -4232,7 +4232,7 @@ async def task_center_retry(kind: str, rid: int):
                 409, "这个工具已有任务正在运行，请等它完成后再重试") from exc
         if changed != 1:
             raise HTTPException(
-                409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
+                409, "这个任务已经不在失败状态了——多半是刚刚已被重试（正在排队执行）或已被删除。刷新看最新进度即可，不会重复扣点")
         _broadcast_tool(TEN(), row.get("kind") or "")
         return {
             "ok": True, "kind": kind, "record_id": rid,
@@ -4981,7 +4981,7 @@ async def task_retry(tid: int):
                 "这条巡店的原照片或巡店记录不完整，无法安全免费重试；"
                 "请回到巡店工作台重新发起",
             )
-        raise HTTPException(409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
+        raise HTTPException(409, "这个任务已经不在失败状态了——多半是刚刚已被重试（正在排队执行）或已被删除。刷新看最新进度即可，不会重复扣点")
     inspection_scope = task.get("_inspection_scope") or {}
     required_module = str(
         inspection_scope.get("industry_key")
@@ -5043,7 +5043,7 @@ def task_delete(tid: int):
     if not row:
         raise HTTPException(404)
     if row["status"] not in ("done", "failed"):
-        raise HTTPException(503, "这个任务的退点还在处理中(约几秒),稍等片刻再删除")
+        raise HTTPException(503, "这个任务的退点还在处理中（约几秒），稍等片刻再删除")
     if row["status"] == "failed" and row["billing_status"] == "charged":
         raise HTTPException(503, "任务退款尚未完成，请稍后重试删除")
     try:
@@ -8649,7 +8649,7 @@ def _activate_employee_learning_run(run_id: int, reviewer_id: int) -> dict:
     run = employeelearning.get_run(int(run_id))
     if str(run.get("status") or "") != employeelearning.RUN_AWAITING_APPROVAL:
         raise employeelearning.InvalidTransitionError(
-            f"运行不可审批: {run['status']}"
+            f"运行不可审批：{run['status']}"
         )
     try:
         binding = _learning_current_run_binding(run)
@@ -8884,9 +8884,9 @@ async def employee_learn(idx: int, body: dict | None = None):
                         "new": fresh,
                         "total": (result or {}).get("total"),
                         "summary": (
-                            f"「{emp_name}」新学 {fresh} 条技能,技能库共 "
+                            f"「{emp_name}」新学 {fresh} 条技能，技能库共 "
                             f"{(result or {}).get('total', '?')} 条"
-                            + ("" if fresh else "(全部与已有重复,3 点已退回)")
+                            + ("" if fresh else "（全部与已有重复，3 点已退回）")
                         ),
                     },
                 )
@@ -10565,7 +10565,7 @@ async def company_distill():
     kb_text = "\n".join(f"- {r['title']}:{(r['content'] or '')[:300]}" for r in kb)
     corpus = (materials + ("\n\n【沉淀库里的企业知识】\n" + kb_text if kb_text else "")).strip()
     if len(corpus) < 30:
-        raise HTTPException(400, "请先填写企业资料(或在沉淀库录入企业知识),内容太少没法提炼")
+        raise HTTPException(400, "请先填写企业资料（或在沉淀库录入企业知识），内容太少没法提炼")
     prompt = (
         "你是企业品牌顾问。下面是一家企业的资料/知识,请提炼成一份「企业档案」,"
         "目的是让这家公司的每个AI数字员工都先读懂它,产出内容更贴合品牌。\n"
@@ -10601,7 +10601,7 @@ def company_restore_prev():
     tid = TEN()
     previous = db.get_setting(f"company_profile_prev:{tid}")
     if not previous:
-        raise HTTPException(404, "没有可撤销的版本(只保留最近一次提炼前的档案)")
+        raise HTTPException(404, "没有可撤销的版本（只保留最近一次提炼前的档案）")
     current = db.get_setting(f"company_profile:{tid}")
     db.set_setting(f"company_profile:{tid}", previous)
     # 两版互换:撤销之后还能"撤销撤销"
@@ -11121,7 +11121,7 @@ def boss_production_detail(idx: int, identity_ref: str | None = None):
             identities[public["identity_ref"]] = public
         md = t["output_md"] or ""
         title = next((ln.lstrip("# ").strip() for ln in md.splitlines() if ln.startswith("#")),
-                     (md[:24] or "(无标题)"))
+                     (md[:24] or "（无标题）"))
         items.append({"kind": "task", "id": t["id"], "title": title[:50], "preview": md[:240],
                       "tokens": t["tokens"] or 0, "cost_usd": round(t["cost_usd"] or 0, 4),
                       "at": t["created_at"], "status": t["status"], "employee": public})
@@ -11291,7 +11291,7 @@ def schedule_update(sid: int, body: dict):
         # 充值后重新拨开开关时,清掉「已暂停:点数不足」残留,
         # 否则卡片上新旧状态互相打架,老板分不清恢复没恢复。
         if data["enabled"] and str(s.get("last_note") or "").startswith("已暂停"):
-            data["last_note"] = "已重新启用,下次到点自动开工"
+            data["last_note"] = "已重新启用，下次到点自动开工"
         if data["enabled"]:
             data["fail_streak"] = 0   # 复通后连续失败告警从头计数
     if data:
@@ -11555,7 +11555,7 @@ async def parse_file(file: _UploadFile = _File(...)):
     else:
         raise HTTPException(
             400,
-            f"暂不支持 {ext},可用:txt/md/csv/json/pdf/docx/xlsx/pptx/jpg/png/webp",
+            f"暂不支持 {ext}，可用：txt/md/csv/json/pdf/docx/xlsx/pptx/jpg/png/webp",
         )
     if ext in (".txt", ".md", ".markdown", ".csv", ".json", ".log"):
         text = data.decode("utf-8", errors="replace")
@@ -11857,9 +11857,9 @@ async def meeting_create(body: dict):
     idxs, member_views, bindings = await db.arun(select_members)
     q = (body.get("question") or "").strip()
     if not q or len(idxs) < 2:
-        raise HTTPException(400, "议题必填,且至少拉 2 位员工进群")
+        raise HTTPException(400, "议题必填，且至少拉 2 位员工进群")
     if len(q) > 2000:
-        raise HTTPException(400, "议题太长了,请压缩到 2000 字以内")
+        raise HTTPException(400, "议题太长了，请压缩到 2000 字以内")
     constraints = (body.get("constraints") or "").strip()[:1200]
     acceptance = (body.get("acceptance_criteria") or "").strip()[:1200]
     # 按公示价「会议每人1点」整单原子扣费；建会失败不会出现扣点无记录。
@@ -11919,7 +11919,7 @@ async def meeting_suggest(body: dict):
     if not q:
         raise HTTPException(400, "先输入议题")
     if len(q) > 2000:
-        raise HTTPException(400, "议题太长了,请压缩到 2000 字以内")
+        raise HTTPException(400, "议题太长了，请压缩到 2000 字以内")
 
     def build_roster() -> list[dict]:
         candidates = []
@@ -11966,7 +11966,7 @@ async def meeting_suggest(body: dict):
     valid = {x["idx"] for x in roster}
     idxs = [i for i in (r["data"].get("idxs") or []) if i in valid][:meeting.MAX_MEMBERS]
     if len(idxs) < 2:
-        raise HTTPException(500, "自动选人失败,请手动勾选")
+        raise HTTPException(500, "自动选人失败，请手动勾选")
     members = await db.arun(
         lambda: [_meeting_member_view(i) for i in idxs]
     )
@@ -12129,7 +12129,7 @@ async def meeting_execute(mid: int):
             ),
         }
     if not await db.arun(meeting.claim_execution, mid):
-        raise HTTPException(409, "会议尚未形成可执行决定,或执行已经启动")
+        raise HTTPException(409, "会议尚未形成可执行决定，或执行已经启动")
     if meeting.team_enabled(m):
         # 组队接力是长流程：后台编排，进度走会议消息流；启动即返回。
         asyncio.create_task(meeting.execute_actions_team(mid, engine.broadcast))
@@ -12140,7 +12140,7 @@ async def meeting_execute(mid: int):
         await db.aupdate(
             "meeting", mid, {"status": "done", "phase": "awaiting_execution"}
         )
-        raise HTTPException(500, "派活启动失败,请稍后重试")
+        raise HTTPException(500, "派活启动失败，请稍后重试")
     return {"ok": True, "task_ids": task_ids}
 
 
@@ -12151,7 +12151,7 @@ async def meeting_ask(mid: int, body: dict):
     if not q:
         raise HTTPException(400, "先输入您想追问或挑战的话")
     if len(q) > 1000:
-        raise HTTPException(400, "追问太长了,请压缩到 1000 字以内")
+        raise HTTPException(400, "追问太长了，请压缩到 1000 字以内")
     # 追问会让全部参会成员各答一轮,按人头扣(原来只扣1点,6人会每次追问漏收5点)
     n = len(db.jloads(m.get("emp_idxs_json"), [])) or 1
     try:
@@ -12175,7 +12175,7 @@ async def meeting_ask(mid: int, body: dict):
     if not billing_op:
         raise HTTPException(
             409,
-            f"会议正在运行,或已达到最多 {meeting.MAX_INTERVENTIONS} 次介入",
+            f"会议正在运行，或已达到最多 {meeting.MAX_INTERVENTIONS} 次介入",
         )
     return {"ok": True}
 
@@ -12376,8 +12376,8 @@ def _claim_guest_trial_slot(ip: str) -> bool:
 
 
 # 已有账号/已申请过/新申请一律回同一句话,防止拿手机号批量探测谁是我们的客户。
-_APPLY_RECEIVED_MSG = ("申请已收到:这个手机号如果已经开通过账号,直接登录就行(忘了密码联系客服);"
-                       "还没开通的,我们会在 1 个工作日内联系您")
+_APPLY_RECEIVED_MSG = ("申请已收到：这个手机号如果已经开通过账号，直接登录就行（忘了密码联系客服）；"
+                       "还没开通的，我们会在 1 个工作日内联系您")
 
 
 @app.post("/api/guest/apply")
@@ -12388,7 +12388,7 @@ async def guest_apply(body: dict, request: Request):
         raise HTTPException(400, "请填 11 位手机号")
     # 同IP日限放在最前:查重之前就计次,重复提交也占额度,不能拿来免费探测手机号。
     if _apply_ip_over_limit(_client_ip(request)):
-        return {"ok": True, "msg": "今天的申请次数已达上限,明天再试,或直接联系客服帮您开通"}
+        return {"ok": True, "msg": "今天的申请次数已达上限，明天再试，或直接联系客服帮您开通"}
     name = signup.clip(body.get("name"), 30)
     company = signup.clip(body.get("company"), 60)
     valid_keys, _, _ = _industry_scope()
@@ -12451,7 +12451,7 @@ async def guest_apply(body: dict, request: Request):
                 _open_account_from_apply, a, trial_points=trial
             )
             return {"ok": True, "auto": True,
-                    "msg": f"体验账号已自动开通,已赠 {trial:.0f} 点体验点,登录就能派活!",
+                    "msg": f"体验账号已自动开通，已赠 {trial:.0f} 点体验点，登录就能派活！",
                     "account": {"username": r["username"], "password": r["password"]}}
         except Exception as exc:
             _auto_open_quota.release()
@@ -12491,7 +12491,7 @@ async def guest_register(body: dict, request: Request):
     guest_company = signup.clip(body.get("company"), 60)
     old = await db.aone("SELECT * FROM guests WHERE phone=?", (phone,))
     if old and old["used"]:
-        raise HTTPException(403, "这个手机号已经体验过啦,想继续用请联系我们开通账号")
+        raise HTTPException(403, "这个手机号已经体验过啦，想继续用请联系我们开通账号")
     created = False
     if old:
         gid = old["id"]
@@ -12509,7 +12509,7 @@ async def guest_register(body: dict, request: Request):
                     if existing["used"]:
                         raise HTTPException(
                             403,
-                            "这个手机号已经体验过啦,想继续用请联系我们开通账号",
+                            "这个手机号已经体验过啦，想继续用请联系我们开通账号",
                         )
                     return existing["id"], False
                 now = time.time()
@@ -12569,7 +12569,7 @@ async def guest_try(request: Request, body: dict):
         raise HTTPException(401, "体验凭证无效")
     g = await db.aone("SELECT * FROM guests WHERE id=?", (gid,))
     if not g or g["used"]:
-        raise HTTPException(403, "体验次数已用完,联系我们开通账号继续用")
+        raise HTTPException(403, "体验次数已用完，联系我们开通账号继续用")
     q = (body.get("question") or "").strip()[:500]
     if not q:
         raise HTTPException(400, "先输入您想问的问题")
@@ -12578,7 +12578,7 @@ async def guest_try(request: Request, body: dict):
         (time.time(), gid),
     )
     if claimed != 1:
-        raise HTTPException(403, "体验次数已用完,联系我们开通账号继续用")
+        raise HTTPException(403, "体验次数已用完，联系我们开通账号继续用")
     from . import providers
     content_count = len(registry.STATIONS)
     expert_count = len(departments.specialists())
@@ -12912,7 +12912,7 @@ def delete_profile(pid: int):
         raise HTTPException(
             409,
             f"该人设还被启用中的定时任务 {names} 使用。"
-            "请先到定时任务里换人设或停用任务,再删除",
+            "请先到定时任务里换人设或停用任务，再删除",
         )
     deleted_at = time.time()
     changed = db.execute(
@@ -13235,7 +13235,7 @@ def _mp_payload(job_id: int, theme: str) -> dict:
     title = (v or {}).get("title") or d["title"]
     body = (v or {}).get("body") or d["body"]
     if not (body or "").strip():
-        raise HTTPException(400, "工单还没有定稿正文,先让流水线跑到撰稿/文风工位")
+        raise HTTPException(400, "工单还没有定稿正文，先让流水线跑到撰稿/文风工位")
     imgs = []
     for im in d.get("images") or []:
         f = im.get("file") or ""
@@ -13644,13 +13644,13 @@ def _wechat_delivery_result(delivery: dict) -> dict:
             "ok": False,
             "blocked": True,
             "report": report,
-            "note": "审查官拦下了这次发布:存在高危内容,按建议整改后再发",
+            "note": "审查官拦下了这次发布：存在高危内容，按建议整改后再发",
         }
     return {
         "ok": True,
         "media_id": delivery.get("media_id") or "",
         "report": report,
-        "note": "已进入公众号草稿箱:后台预览确认后群发;已登记发布台账,T+1/3/7 审查官自动复盘",
+        "note": "已进入公众号草稿箱：后台预览确认后群发；已登记发布台账，T+1/3/7 审查官自动复盘",
     }
 
 
@@ -13694,12 +13694,12 @@ async def reconcile_wechat_delivery(delivery_id: int):
             if not await _run_db_safely(_finalize_wechat_delivery, delivery):
                 raise RuntimeError("草稿台账结算状态冲突")
         except Exception as exc:
-            raise HTTPException(503, "好消息:文章已经进入公众号草稿箱✅ 系统记录稍后自动补齐,请勿重复发送") from exc
+            raise HTTPException(503, "好消息：文章已经进入公众号草稿箱✅ 系统记录稍后自动补齐，请勿重复发送") from exc
         return _wechat_delivery_result(
             await db.arun(_wechat_delivery_or_404, delivery_id)
         )
     if delivery["status"] != "submitting":
-        raise HTTPException(409, "这篇已确认送达公众号草稿箱,不需要再处理")
+        raise HTTPException(409, "这篇已确认送达公众号草稿箱，不需要再处理")
     try:
         media_id = await wechat.find_draft_by_marker(
             int(delivery["tenant_id"]), delivery["request_key"]
@@ -13718,13 +13718,13 @@ async def reconcile_wechat_delivery(delivery_id: int):
         delivery["op_key"],
         media_id,
     ):
-        raise HTTPException(409, "这篇的发送状态刚刚更新了(可能已送达或已退点),刷新页面看最新结果,别重复点发送")
+        raise HTTPException(409, "这篇的发送状态刚刚更新了（可能已送达或已退点），刷新页面看最新结果，别重复点发送")
     delivery = await db.arun(_wechat_delivery_or_404, delivery_id)
     try:
         if not await _run_db_safely(_finalize_wechat_delivery, delivery):
             raise RuntimeError("草稿台账结算状态冲突")
     except Exception as exc:
-        raise HTTPException(503, "文章已确认在公众号草稿箱✅ 系统记录稍后自动补齐,请勿重复发送") from exc
+        raise HTTPException(503, "文章已确认在公众号草稿箱✅ 系统记录稍后自动补齐，请勿重复发送") from exc
     return _wechat_delivery_result(
         await db.arun(_wechat_delivery_or_404, delivery_id)
     )
@@ -13742,7 +13742,7 @@ async def confirm_wechat_delivery_not_delivered(delivery_id: int, body: dict):
         delivery["status"] != "submitting"
         or delivery["billing_status"] != "charged"
     ):
-        raise HTTPException(409, "这篇的状态不需要人工确认(可能已送达或已退点),刷新页面看最新状态")
+        raise HTTPException(409, "这篇的状态不需要人工确认（可能已送达或已退点），刷新页面看最新状态")
     age = time.time() - float(
         delivery.get("updated_at") or delivery.get("created_at") or time.time()
     )
@@ -13771,13 +13771,13 @@ async def confirm_wechat_delivery_not_delivered(delivery_id: int, body: dict):
             delivery["op_key"],
             media_id,
         ):
-            raise HTTPException(409, "这篇的发送状态刚刚更新了(可能已送达或已退点),刷新页面看最新结果,别重复点发送")
+            raise HTTPException(409, "这篇的发送状态刚刚更新了（可能已送达或已退点），刷新页面看最新结果，别重复点发送")
         delivery = await db.arun(_wechat_delivery_or_404, delivery_id)
         try:
             if not await _run_db_safely(_finalize_wechat_delivery, delivery):
                 raise RuntimeError("草稿台账结算状态冲突")
         except Exception as exc:
-            raise HTTPException(503, "已在公众号草稿箱里找到这篇文章✅ 系统记录稍后自动补齐,请勿重复发送") from exc
+            raise HTTPException(503, "已在公众号草稿箱里找到这篇文章✅ 系统记录稍后自动补齐，请勿重复发送") from exc
         return _wechat_delivery_result(
             await db.arun(_wechat_delivery_or_404, delivery_id)
         )
@@ -13793,9 +13793,9 @@ async def confirm_wechat_delivery_not_delivered(delivery_id: int, body: dict):
             delivery_id,
             type(exc).__name__,
         )
-        raise HTTPException(503, "确认操作没有完成(文章不会重复发送),请稍后再点一次") from exc
+        raise HTTPException(503, "确认操作没有完成（文章不会重复发送），请稍后再点一次") from exc
     if not settled:
-        raise HTTPException(409, "这篇的发送状态刚刚更新了(可能已送达或已退点),刷新页面看最新结果,别重复点发送")
+        raise HTTPException(409, "这篇的发送状态刚刚更新了（可能已送达或已退点），刷新页面看最新结果，别重复点发送")
     return {
         "ok": False,
         "status": "failed",
@@ -13834,7 +13834,7 @@ async def job_wechat_draft(job_id: int, body: dict):
     tid = TEN()
     conf = await db.arun(wechat.get_conf, tid if tid != 1 else 1)
     if not (conf.get("appid") and conf.get("secret")):
-        raise HTTPException(400, "还没配置公众号:去「📣 发布渠道」页填 AppID/AppSecret(1分钟搞定)")
+        raise HTTPException(400, "还没配置公众号：去「📣 发布渠道」页填 AppID/AppSecret（1分钟搞定）")
     p = await db.arun(_mp_payload, job_id, theme)
     request_hash = _wechat_delivery_hash(job_id, theme, p)
     # 先处理同工单的任意旧投递。老板若在不确定期间改了正文/hash，也不能
@@ -13852,7 +13852,7 @@ async def job_wechat_draft(job_id: int, body: dict):
                 raise RuntimeError("草稿台账结算状态冲突")
         except Exception as exc:
             raise HTTPException(
-                503, "文章已经进入公众号草稿箱✅ 系统记录稍后自动补齐;请勿再点发送,不会重复扣点"
+                503, "文章已经进入公众号草稿箱✅ 系统记录稍后自动补齐；请勿再点发送，不会重复扣点"
             ) from exc
         return _wechat_delivery_result(
             await db.aone(
@@ -13876,7 +13876,7 @@ async def job_wechat_draft(job_id: int, body: dict):
         if not await db.arun(
                 _mark_wechat_submitted,
                 existing["id"], existing["op_key"], media_id):
-            raise HTTPException(409, "这篇的发送状态刚刚更新了,刷新页面看最新结果;确实没送达的话再重试,不会重复扣点")
+            raise HTTPException(409, "这篇的发送状态刚刚更新了，刷新页面看最新结果；确实没送达的话再重试，不会重复扣点")
         existing = await db.aone(
             "SELECT * FROM wechat_draft_delivery WHERE id=?", (existing["id"],)
         )
@@ -13884,7 +13884,7 @@ async def job_wechat_draft(job_id: int, body: dict):
             await db.arun(_finalize_wechat_delivery, existing)
         except Exception as exc:
             raise HTTPException(
-                503, "文章已确认在公众号草稿箱✅ 系统记录稍后自动补齐,请勿重复发送"
+                503, "文章已确认在公众号草稿箱✅ 系统记录稍后自动补齐，请勿重复发送"
             ) from exc
         return _wechat_delivery_result(
             await db.aone(
@@ -14011,7 +14011,7 @@ async def job_wechat_draft(job_id: int, body: dict):
                 _mark_wechat_submitted,
                 delivery["id"], delivery["op_key"], media_id):
             raise HTTPException(
-                503, "文章已经进入公众号草稿箱✅ 系统记录稍后自动补齐;请勿再点发送,不会重复扣点"
+                503, "文章已经进入公众号草稿箱✅ 系统记录稍后自动补齐；请勿再点发送，不会重复扣点"
             )
         delivery = await db.aone(
             "SELECT * FROM wechat_draft_delivery WHERE id=?", (delivery["id"],)
@@ -14041,7 +14041,7 @@ async def job_wechat_draft(job_id: int, body: dict):
                 type(settle_error).__name__,
             )
             raise HTTPException(
-                503, "微信拒收了这篇草稿(内容或配置问题)。点数退回正在处理,稍后在账单明细可见,不会多扣"
+                503, "微信拒收了这篇草稿（内容或配置问题）。点数退回正在处理，稍后在账单明细可见，不会多扣"
             ) from settle_error
         if not settled:
             raise HTTPException(503, "微信已拒绝草稿，但退点结算状态待确认")
@@ -14077,7 +14077,7 @@ async def job_wechat_draft(job_id: int, body: dict):
                     503, "草稿未提交，但退点结算暂未完成；请稍后重试"
                 ) from settle_error
             if not settled:
-                raise HTTPException(503, "这篇没有发出去。点数退回正在处理,稍后可在「套餐与点数」的明细里核对,不会多扣")
+                raise HTTPException(503, "这篇没有发出去。点数退回正在处理，稍后可在「套餐与点数」的明细里核对，不会多扣")
         raise exc
     except Exception as exc:
         if not external_started:
@@ -14097,7 +14097,7 @@ async def job_wechat_draft(job_id: int, body: dict):
                     503, "草稿未提交，但退点结算暂未完成；请稍后重试"
                 ) from settle_error
             if not settled:
-                raise HTTPException(503, "这篇没有发出去。点数退回正在处理,稍后可在「套餐与点数」的明细里核对,不会多扣")
+                raise HTTPException(503, "这篇没有发出去。点数退回正在处理，稍后可在「套餐与点数」的明细里核对，不会多扣")
             raise HTTPException(500, "发草稿箱失败，点数已退回，请重试") from exc
         raise HTTPException(
             503, "草稿可能已送达微信，系统已停止重复发送；请稍后重试自动对账"
@@ -14201,7 +14201,7 @@ def censor_scan_api(body: dict):
         raise HTTPException(400, "先贴上要审查的内容")
     issues = censor.scan(text)
     return {"issues": issues, "verdict": censor._verdict(issues), "score": censor._score(issues),
-            "summary": f"极速扫描完成:命中 {len(issues)} 处风险词" if issues else "极速扫描未命中风险词"}
+            "summary": f"极速扫描完成：命中 {len(issues)} 处风险词" if issues else "极速扫描未命中风险词"}
 
 
 @app.post("/api/censor/check")
@@ -14281,9 +14281,9 @@ async def censor_check_api(body: dict):
             tid, title, text, platform, deep=False, save=False
         )
         fallback["degraded"] = True
-        fallback["summary"] = ("AI 深审未完成,1 点已自动退回。"
-                               "以下是免费规则词库的扫描结果,可稍后重试深审")
-        fallback["label"] = "⚠️ 深审未完成(已退点),下方仅为规则词库结果"
+        fallback["summary"] = ("AI 深审未完成，1 点已自动退回。"
+                               "以下是免费规则词库的扫描结果，可稍后重试深审")
+        fallback["label"] = "⚠️ 深审未完成（已退点），下方仅为规则词库结果"
         return fallback
     except Exception as exc:
         try:
@@ -14314,7 +14314,7 @@ async def censor_retro_api(body: dict):
     tid = TEN()
     data_text = (body.get("data_text") or "").strip()
     if not data_text:
-        raise HTTPException(400, "先把发布后的数据贴进来(阅读/点赞/评论/涨粉…截图可先传文件识别)")
+        raise HTTPException(400, "先把发布后的数据贴进来（阅读/点赞/评论/涨粉…截图可先传文件识别）")
     platform = body.get("platform") or "公众号"
     title = (body.get("title") or "")[:120]
     op_key = await _start_billing_operation_safely(
@@ -14477,7 +14477,7 @@ async def job_add_image(job_id: int, body: dict):
         (job_id,),
     )
     if not r:
-        raise HTTPException(400, "该工单的多媒体师还没有产出,等配图工位完成后再补图")
+        raise HTTPException(400, "该工单的多媒体师还没有产出，等配图工位完成后再补图")
     try:
         data = await imagehunt.fetch_image(
             url, referer=imagehunt._ref_for({"from": body.get("from") or "", "img": url}))
@@ -14746,7 +14746,7 @@ async def text_video_create(body: dict):
         )
     else:
         if len(script) < 20:
-            raise HTTPException(400, "口播稿太短(至少20字)")
+            raise HTTPException(400, "口播稿太短（至少20字）")
         params = {"title": (body.get("title") or "")[:40], "script": script[:2000],
                   "voice_id": body.get("voice_id") or "",
                   "image_query": (body.get("image_query") or body.get("title") or "")[:30],
@@ -14865,7 +14865,7 @@ async def tv_clip_upload(file: UploadFile = File(...)):
                     except OSError:
                         continue
             if clip_count >= 20:
-                raise HTTPException(400, "素材库最多 20 段,先删几段")
+                raise HTTPException(400, "素材库最多 20 段，先删几段")
 
         base_usage = _persistent_upload_usage(tid)
         os.makedirs(d, mode=0o750, exist_ok=True)
@@ -14918,11 +14918,11 @@ async def tv_clip_upload(file: UploadFile = File(...)):
                 if duration > 600:
                     raise HTTPException(
                         400,
-                        "单段最长 10 分钟,手机里先粗剪一下",
+                        "单段最长 10 分钟，手机里先粗剪一下",
                     )
                 raise HTTPException(
                     400,
-                    "这段视频读不出来或太短(至少1.5秒)",
+                    "这段视频读不出来或太短（至少1.5秒）",
                 )
             if (
                 width <= 0
@@ -15192,9 +15192,9 @@ async def publog_pull(pid: int):
     days = max(1, round((time.time() - (r["published_at"] or time.time())) / 86400))
     ok = await pubtrack.auto_retro(TEN(), r, days)
     if not ok:
-        raise HTTPException(400, "自动拉数据没成功:①需要认证服务号+配好API ②文章要已群发(不是草稿) "
+        raise HTTPException(400, "自动拉数据没成功：①需要认证服务号+配好API ②文章要已群发（不是草稿） "
                                  "③其他平台请去审查官工作台手动贴数据复盘")
-    return {"ok": True, "note": "已自动拉取数据并复盘,报告在审查官工作台「审查记录」里"}
+    return {"ok": True, "note": "已自动拉取数据并复盘，报告在审查官工作台「审查记录」里"}
 
 
 # ---------------- ③ 营销工具箱(长任务=后台作业:挂起可回看,关页面不丢) ----------------
@@ -15362,7 +15362,7 @@ async def matrix_publish(body: dict):
     except ValueError as e:
         raise HTTPException(400, str(e))
     asyncio.create_task(matrixpub.run_task(pid, engine.broadcast))
-    return {"task_id": pid, "note": "已进发布队列,进度看「发布渠道→矩阵发布记录」"}
+    return {"task_id": pid, "note": "已进发布队列，进度看「发布渠道→矩阵发布记录」"}
 
 
 @app.get("/api/matrix/tasks")

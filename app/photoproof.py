@@ -74,7 +74,7 @@ def _render(data: bytes, text: str) -> tuple[bytes, int, int]:
     if not data:
         raise PhotoError("没有收到照片，请重新拍一张")
     if len(data) > MAX_UPLOAD_BYTES:
-        raise PhotoError("照片太大了(超过 12MB)，请重新拍一张")
+        raise PhotoError("照片太大了（超过 12MB），请重新拍一张")
     with _RENDER_SLOTS:
         return _render_locked(data, text)
 

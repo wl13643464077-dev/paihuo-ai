@@ -158,7 +158,7 @@ def _process(data: bytes) -> bytes:
     """PIL 校验尺寸 + 占位图检测 + 统一转 JPG(webp 也转成公众号能收的格式),超宽压到 1280."""
     im = _decode_image(data)
     if im.width < MIN_W or im.height < MIN_H:
-        raise ValueError(f"图太小({im.width}x{im.height})")
+        raise ValueError(f"图太小（{im.width}x{im.height}）")
     # 防盗链占位图/纯图标检测:真实照片色彩丰富(64×64 采样通常 >3000 色,灰度方差 >30),
     # 占位图是"白底+图标+一行字"(实测 ~870 色/方差 17),双指标其一不达标就拒收
     small = im.convert("RGB").resize((64, 64))
@@ -168,7 +168,7 @@ def _process(data: bytes) -> bytes:
     mean = sum(g) / len(g)
     std = (sum((x - mean) ** 2 for x in g) / len(g)) ** 0.5
     if ncolors < 1000 or std < 22:
-        raise ValueError(f"疑似防盗链占位图/图标(色彩{ncolors}/方差{std:.0f}),弃用")
+        raise ValueError(f"疑似防盗链占位图/图标（色彩{ncolors}/方差{std:.0f}），弃用")
     if im.mode not in ("RGB", "L"):
         im = im.convert("RGB")
     if im.width > 1280:

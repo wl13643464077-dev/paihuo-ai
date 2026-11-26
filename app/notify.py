@@ -27,8 +27,8 @@ def get_webhook(tid: int) -> str:
 def set_webhook(tid: int, url: str):
     url = (url or "").strip()
     if url and not _WEBHOOK_RE.match(url):
-        raise ValueError("这不是企业微信群机器人的 Webhook 地址(应形如 "
-                         "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx)")
+        raise ValueError("这不是企业微信群机器人的 Webhook 地址（应形如 "
+                         "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx）")
     db.set_setting(f"wechat_webhook:{tid}", url or None)
 
 
@@ -47,7 +47,7 @@ def build_msg(kind: str, payload: dict) -> str:
     title = (p.get("title") or "")[:40]
     if kind == "awaiting":
         return (f"**📥 派活 · 等您拍板**\n工单 #{p.get('job_id')} 《{title}》\n"
-                f"工位:{p.get('station', '')}\n"
+                f"工位：{p.get('station', '')}\n"
                 f"[去拍板]({base}/#/job/{p.get('job_id')})")
     if kind == "done":
         return (f"**📦 派活 · 交付完成**\n工单 #{p.get('job_id')} 《{title}》已出交付包\n"
@@ -60,51 +60,51 @@ def build_msg(kind: str, payload: dict) -> str:
                 f"[看工单]({base}/#/job/{p.get('job_id')})")
     if kind == "retro_due":
         return (f"**📊 派活 · 该复盘了**\n《{title}》({p.get('platform', '')})发布已满 "
-                f"{p.get('day', '')} 天\n把后台数据丢给审查官,看看表现和限流风险\n"
+                f"{p.get('day', '')} 天\n把后台数据丢给审查官，看看表现和限流风险\n"
                 f"[一键复盘]({base}/#/censor)")
     if kind == "schedule_paused":
-        return (f"**⏸️ 派活 · 定时任务已暂停**\n「{title}」因点数不足自动暂停,"
-                f"内容会断更!\n充值后请到定时任务页重新打开开关\n"
+        return (f"**⏸️ 派活 · 定时任务已暂停**\n「{title}」因点数不足自动暂停，"
+                f"内容会断更！\n充值后请到定时任务页重新打开开关\n"
                 f"[去充值]({base}/#/billing) · [看定时任务]({base}/#/schedules)")
     if kind == "schedule_failed":
         return (f"**⚠️ 派活 · 定时任务连续失败**\n「{title}」已连续 "
-                f"{int(p.get('streak') or 0)} 次到点开工失败(系统会每 10 分钟"
-                f"自动重试),日更可能断更,建议点开看看\n"
+                f"{int(p.get('streak') or 0)} 次到点开工失败（系统会每 10 分钟"
+                f"自动重试），日更可能断更，建议点开看看\n"
                 f"[看定时任务]({base}/#/schedules)")
     if kind == "learn_done":
         fresh = int(p.get("new") or 0)
-        return (f"**🎓 派活 · 员工进修完成**\n「{title}」新学 {fresh} 条技能,"
+        return (f"**🎓 派活 · 员工进修完成**\n「{title}」新学 {fresh} 条技能，"
                 f"技能库共 {p.get('total', '?')} 条"
-                + ("" if fresh else "\n本次内容与已有技能全部重复,3 点已自动退回,建议隔几天再进修")
+                + ("" if fresh else "\n本次内容与已有技能全部重复，3 点已自动退回，建议隔几天再进修")
                 + f"\n[看员工技能]({base}/#/)")
     if kind == "learn_failed":
-        return (f"**🎓 派活 · 员工进修失败**\n「{title}」本次进修没成功,"
-                f"3 点已自动退回,可稍后重试\n[回办公室]({base}/#/)")
+        return (f"**🎓 派活 · 员工进修失败**\n「{title}」本次进修没成功，"
+                f"3 点已自动退回，可稍后重试\n[回办公室]({base}/#/)")
     if kind == "daily_digest":
         # 老板昨日经营简报:完成/花销/风险/余额,一条看全,不用登录翻后台
-        lines = [f"**📋 派活 · 昨日经营简报({p.get('date', '')})**",
-                 f"✅ 完成:内容工单 {int(p.get('jobs_done') or 0)} 单 · "
+        lines = [f"**📋 派活 · 昨日经营简报（{p.get('date', '')}）**",
+                 f"✅ 完成：内容工单 {int(p.get('jobs_done') or 0)} 单 · "
                  f"专家任务 {int(p.get('tasks_done') or 0)} 件",
-                 f"💎 花销:消耗 {float(p.get('spent') or 0):.0f} 点"
+                 f"💎 花销：消耗 {float(p.get('spent') or 0):.0f} 点"
                  + (f" · 失败退回 {int(p.get('refunds') or 0)} 笔" if p.get("refunds") else "")]
         if p.get("paused"):
-            lines.append(f"⏸️ 风险:{int(p['paused'])} 个定时任务因点数不足暂停,内容断更中")
-        balance_line = f"💰 余额:{float(p.get('balance') or 0):.0f} 点"
+            lines.append(f"⏸️ 风险：{int(p['paused'])} 个定时任务因点数不足暂停，内容断更中")
+        balance_line = f"💰 余额：{float(p.get('balance') or 0):.0f} 点"
         if p.get("days_left") is not None:
-            balance_line += f",按近 7 天日均消耗约可再跑 {int(p['days_left'])} 天"
+            balance_line += f"，按近 7 天日均消耗约可再跑 {int(p['days_left'])} 天"
         lines.append(balance_line)
         if p.get("plan_days_left") is not None and int(p["plan_days_left"]) <= 7:
             expire_days = int(p["plan_days_left"])
-            lines.append("⏰ 套餐:" + ("已到期,请尽快续费"
+            lines.append("⏰ 套餐：" + ("已到期，请尽快续费"
                          if expire_days < 0
-                         else f"还有 {expire_days} 天到期,记得续费"))
+                         else f"还有 {expire_days} 天到期，记得续费"))
         # 第 2 期老板早报:门店清单/逾期/排行/等老板处理(有门店才有)
         for line in (p.get("store_lines") or [])[:20]:
             lines.append(str(line)[:200])
         lines.append(f"[看账单明细]({base}/#/billing)"
                      + (f" · [去处理定时任务]({base}/#/schedules)" if p.get("paused") else "")
                      + (f" · [看门店清单]({base}/#/checklists)" if p.get("store_lines") else ""))
-        lines.append(f"📣 今天发什么?[点这里,照着发就行]({base}/#/tools/hot)")
+        lines.append(f"📣 今天发什么？[点这里，照着发就行]({base}/#/tools/hot)")
         return "\n".join(lines)
     if kind in REMIND_KINDS:
         # 提醒/升级:企微群里用 text 消息发(才能 @ 手机号),这里只给 markdown 兜底
@@ -136,7 +136,7 @@ def build_msg(kind: str, payload: dict) -> str:
         return (f"**📰 派活 · {p.get('report_name', '报告出炉')}**\n{(p.get('summary') or '')[:180]}\n"
                 f"[查看]({base}/{p.get('link') or '#/knowledge'})")
     if kind == "video":
-        return (f"**🎬 派活 · 视频成片**\n《{title}》已出片,可下载发布\n"
+        return (f"**🎬 派活 · 视频成片**\n《{title}》已出片，可下载发布\n"
                 f"[查看]({base}{p.get('file', '')})")
     if kind == "avatar_done":
         head = "🎬 派活 · 数字人出片了" if p.get("ok", True) else "⚠️ 派活 · 数字人没做成"
@@ -146,16 +146,16 @@ def build_msg(kind: str, payload: dict) -> str:
         # 派给店员的活:群里只报事,不带照片;链接进老板端/店员手机版都能看
         heads = {
             "staff_task_assigned": "📌 派活 · 新活派给店员",
-            "staff_task_submitted": "📷 派活 · 店员交差了,等审核",
+            "staff_task_submitted": "📷 派活 · 店员交差了，等审核",
             "staff_task_reviewed": "✅ 派活 · 交差已审核",
         }
         return (f"**{heads[kind]}**\n{(p.get('summary') or title)[:120]}"
-                + (f"\n截止:{p.get('due')}" if p.get("due") else "")
+                + (f"\n截止：{p.get('due')}" if p.get("due") else "")
                 + f"\n[去看看]({base}/#/staff-tasks/{int(p.get('task_id') or 0)})")
     if kind == "pub":
         if p.get("ok"):
             return (f"**🚀 派活 · 矩阵发布成功**\n《{title}》已发到{p.get('platform', '')},"
-                    f"台账已登记,T+1/3/7 自动复盘\n[看发布记录]({base}/#/channels)")
+                    f"台账已登记，T+1/3/7 自动复盘\n[看发布记录]({base}/#/channels)")
         return (f"**🚀 派活 · 矩阵发布失败**\n《{title}》({p.get('platform', '')})\n"
                 f"{p.get('why', '')}\n👉 {p.get('fix', '')}\n[去处理]({base}/#/channels)")
     return f"**派活**\n{json.dumps(p, ensure_ascii=False)[:300]}"
@@ -174,16 +174,16 @@ def _inbox_item(kind: str, payload: dict) -> tuple[str, str, str]:
         "task_outcome": p.get("report_name") or "派出去的任务有结果了",
         "meeting_outcome": p.get("report_name") or "会议有结果了",
         "video": "视频成片已交付",
-        "avatar_done": "数字人视频出片了" if p.get("ok", True) else "数字人视频没做成(已退点)",
+        "avatar_done": "数字人视频出片了" if p.get("ok", True) else "数字人视频没做成（已退点）",
         "pub": "矩阵发布成功" if p.get("ok") else "矩阵发布失败",
         "learn_done": "员工进修完成",
-        "learn_failed": "员工进修失败(已退点)",
-        "daily_digest": f"昨日经营简报({p.get('date', '')})",
+        "learn_failed": "员工进修失败（已退点）",
+        "daily_digest": f"昨日经营简报（{p.get('date', '')}）",
         # 第 2 期:派给店员的活/开闭店清单/巡店整改 快到期、到期、逾期升级
         "staff_remind": p.get("headline") or "有事快到截止时间了",
         "staff_escalate": p.get("headline") or "有事超时没做完",
-        "schedule_failed": "定时任务连续失败,可能断更",
-        "schedule_paused": "定时任务因点数不足已暂停,内容会断更",
+        "schedule_failed": "定时任务连续失败，可能断更",
+        "schedule_paused": "定时任务因点数不足已暂停，内容会断更",
         "purchase_requested": "有新的套餐购买申请",
         "purchase_contacted": "套餐申请已联系",
         "purchase_lost": "套餐申请已结束",
@@ -817,8 +817,8 @@ async def push_async(tid: int, kind: str, payload: dict):
 
 async def test_send(tid: int) -> dict:
     ok = await asyncio.to_thread(send_sync, tid, "report",
-                                 {"report_name": "通知测试", "summary": "看到这条说明打通了!以后等拍板/交付/复盘提醒都会推到这里。",
+                                 {"report_name": "通知测试", "summary": "看到这条说明打通了！以后等拍板/交付/复盘提醒都会推到这里。",
                                   "link": "#/"})
     if not ok:
-        raise ValueError("发送失败:检查 Webhook 地址是否完整、机器人是否还在群里")
-    return {"ok": True, "note": "已发送测试消息,去群里看"}
+        raise ValueError("发送失败：检查 Webhook 地址是否完整、机器人是否还在群里")
+    return {"ok": True, "note": "已发送测试消息，去群里看"}

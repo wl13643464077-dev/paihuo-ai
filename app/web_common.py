@@ -279,7 +279,7 @@ def _display_dept_name(dept_key, fallback="") -> str:
 
 def _need_module(module: str):
     if not auth.allowed(module):
-        raise HTTPException(403, "您的账号没有该板块权限,请联系企业主账号开通")
+        raise HTTPException(403, "您的账号没有该板块权限，请联系企业主账号开通")
 
 
 def TEN() -> int:

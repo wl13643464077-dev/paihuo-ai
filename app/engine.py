@@ -382,7 +382,7 @@ class Engine:
                     db.update("station_run", r["id"], {"status": "queued"})
                 else:
                     db.update("station_run", r["id"], {"status": "rejected",
-                                                       "review_comment": "服务重启,自动重跑"})
+                                                       "review_comment": "服务重启，自动重跑"})
             running = [j["id"] for j in db.q(
                 "SELECT id FROM job WHERE status IN ('running')")]
             # 兼容旧版本“先标失败、来不及退款”的窗口；CAS 保证多次启动也只退一次。
@@ -485,7 +485,7 @@ class Engine:
                         job_id,
                         providers.public_failure_message(
                             e,
-                            "内容流水线执行失败。未产出可用正文时整单点数自动退回(账单可查)；可复制 Brief 重新开单",
+                            "内容流水线执行失败。未产出可用正文时整单点数自动退回（账单可查）；可复制 Brief 重新开单",
                         ),
                     )
                 except Exception as settle_exc:
@@ -886,7 +886,7 @@ class Engine:
                 return False
             if status != "cancelled" and status not in JOB_WORKING_STATUSES:
                 outcome["invalid"] = (
-                    f"工单{status_cn(status)},不能取消；请新建工单")
+                    f"工单{status_cn(status)}，不能取消；请新建工单")
                 return False
 
             latest = c.execute(
@@ -965,7 +965,7 @@ class Engine:
             if not current:
                 raise ValueError("工单不存在")
             if current["status"] != "cancelled":
-                raise ValueError("工单状态刚刚更新了(可能已被他人操作或已推进),刷新页面按最新状态处理")
+                raise ValueError("工单状态刚刚更新了（可能已被他人操作或已推进），刷新页面按最新状态处理")
         self.touch(job_id)
         return bool(refunded or outcome["refunded"])
 
@@ -1272,7 +1272,7 @@ class Engine:
                     parts.append(f"经验:{tip}")
                 now = time.time()
                 title_text = f"《{title}》交付复盘"
-                content_text = "\n".join(parts) or "(复盘官未产出要点)"
+                content_text = "\n".join(parts) or "（复盘官未产出要点）"
                 if existing:
                     c.execute(
                         "UPDATE knowledge SET title=?,content=?,updated_at=? "
@@ -1472,9 +1472,9 @@ class Engine:
         t0 = time.time()
         last_err = None
         if revision_note:
-            progress("start", f"v{version} 携带老板意见重做:{revision_note[:120]}")
+            progress("start", f"v{version} 携带老板意见重做：{revision_note[:120]}")
         else:
-            progress("start", f"v{version} 开始执行(岗位:{cfg['name']} / Skill:{cfg['skill']})")
+            progress("start", f"v{version} 开始执行（岗位：{cfg['name']} / Skill:{cfg['skill']}）")
         for attempt in range(MAX_RETRY + 1):
             before = await db.aone(
                 "SELECT status,billing_status FROM job WHERE id=?", (job_id,))
@@ -1588,7 +1588,7 @@ class Engine:
                     )
                     return "deleted" if not jnow else "cancelled"
                 if jnow and jnow["status"] == "paused":
-                    progress("error", "⏸ 老板按下打断,本工位停工(恢复后自动重跑)")
+                    progress("error", "⏸ 老板按下打断，本工位停工（恢复后自动重跑）")
                     await db.aexecute(
                         "UPDATE station_run SET status='interrupted',steps_json=?,"
                         "review_comment='老板打断',updated_at=? "
@@ -1610,7 +1610,7 @@ class Engine:
                     attempt + 1,
                     type(e).__name__,
                 )
-        progress("error", f"重试 {MAX_RETRY} 次后仍失败,工位挂起等老板处理")
+        progress("error", f"重试 {MAX_RETRY} 次后仍失败，工位挂起等老板处理")
 
         def _fail_tx(steps_snapshot=json.dumps(steps, ensure_ascii=False)):
             with db.atomic() as c:
@@ -1800,7 +1800,7 @@ class Engine:
             if action in ("approve", "edit"):
                 if run["status"] != "awaiting_review":
                     raise ValueError(
-                        f"该工位{status_cn(run['status'])},现在不需要审批；请刷新页面看最新状态")
+                        f"该工位{status_cn(run['status'])}，现在不需要审批；请刷新页面看最新状态")
                 edits = payload.get("edits") or {}
                 if not isinstance(out, dict):
                     out = {}
@@ -1832,7 +1832,7 @@ class Engine:
                     ),
                 )
                 if changed.rowcount != 1:
-                    raise ValueError("这个工位的状态刚刚更新了(可能已自动推进或被他人操作),刷新页面看最新状态")
+                    raise ValueError("这个工位的状态刚刚更新了（可能已自动推进或被他人操作），刷新页面看最新状态")
                 self._finalize_station_tx(
                     c,
                     job_id,
@@ -1845,7 +1845,7 @@ class Engine:
             elif action == "reject":
                 if run["status"] != "awaiting_review":
                     raise ValueError(
-                        f"该工位{status_cn(run['status'])},现在不能打回；请刷新页面看最新状态")
+                        f"该工位{status_cn(run['status'])}，现在不能打回；请刷新页面看最新状态")
                 comment = (payload.get("comment") or "").strip()
                 if not comment:
                     raise ValueError("打回必须填写修改意见")
@@ -1857,13 +1857,13 @@ class Engine:
                     (comment, rerun_reviewer, now, run["id"]),
                 )
                 if changed.rowcount != 1:
-                    raise ValueError("这个工位的状态刚刚更新了(可能已自动推进或被他人操作),刷新页面看最新状态")
+                    raise ValueError("这个工位的状态刚刚更新了（可能已自动推进或被他人操作），刷新页面看最新状态")
                 self._mark_downstream_stale_tx(c, job_id, idx)
                 target_idx = idx
             else:  # rerun：仅允许仍在进行中的整单重跑已交付/待审批工位。
                 if run["status"] not in ("done", "awaiting_review"):
                     raise ValueError(
-                        f"该工位{status_cn(run['status'])},不能重跑；失败的工单请重新开单")
+                        f"该工位{status_cn(run['status'])}，不能重跑；失败的工单请重新开单")
                 comment = (payload.get("comment") or "").strip()
                 self._check_rerun_quota(c, job_id, idx)
                 changed = c.execute(
@@ -1873,7 +1873,7 @@ class Engine:
                     (comment or "老板要求重跑", rerun_reviewer, now, run["id"]),
                 )
                 if changed.rowcount != 1:
-                    raise ValueError("这个工位的状态刚刚更新了(可能已自动推进或被他人操作),刷新页面看最新状态")
+                    raise ValueError("这个工位的状态刚刚更新了（可能已自动推进或被他人操作），刷新页面看最新状态")
                 self._mark_downstream_stale_tx(c, job_id, idx)
                 target_idx = idx
 
@@ -1911,7 +1911,7 @@ class Engine:
                 raise ValueError("工单不存在")
             if (job["billing_status"] != "charged"
                     or job["status"] not in JOB_EXECUTABLE_STATUSES):
-                raise ValueError(f"工单{status_cn(job['status'])},不需要打断")
+                raise ValueError(f"工单{status_cn(job['status'])}，不需要打断")
             now = time.time()
             changed = c.execute(
                 "UPDATE job SET status='paused',updated_at=? "
@@ -1919,7 +1919,7 @@ class Engine:
                 (now, job_id, job["status"]),
             )
             if changed.rowcount != 1:
-                raise ValueError("工单状态刚刚更新了(可能已被他人操作或已推进),刷新页面按最新状态处理")
+                raise ValueError("工单状态刚刚更新了（可能已被他人操作或已推进），刷新页面按最新状态处理")
             c.execute(
                 "UPDATE station_run SET status='interrupted',"
                 "review_comment=CASE WHEN skill_id=? THEN review_comment "
@@ -1961,7 +1961,7 @@ class Engine:
                 (now, job_id),
             )
             if changed.rowcount != 1:
-                raise ValueError("工单状态刚刚更新了(可能已被他人操作或已推进),刷新页面按最新状态处理")
+                raise ValueError("工单状态刚刚更新了（可能已被他人操作或已推进），刷新页面按最新状态处理")
         self.notify(job_id)
         self.touch(job_id)
 
@@ -2001,7 +2001,7 @@ class Engine:
             else:
                 raise ValueError("未知动作")
             if changed.rowcount != 1:
-                raise ValueError("工单状态刚刚更新了(可能已被他人操作或已推进),刷新页面按最新状态处理")
+                raise ValueError("工单状态刚刚更新了（可能已被他人操作或已推进），刷新页面按最新状态处理")
         self.notify(job_id)
         self.touch(job_id)
 

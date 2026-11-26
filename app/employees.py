@@ -1245,7 +1245,7 @@ async def learn(
             raise RuntimeError("员工岗位配置已更新，请刷新后重试")
         existing = active_config["skills"]
         prompt = learning_prompt_bundle(active_employee, existing)
-        progress("start", "去全网进修:检索岗位最新方法论与平台规则…")
+        progress("start", "去全网进修：检索岗位最新方法论与平台规则…")
         from . import providers
         r = await providers.call_text_json(
             idx,
@@ -1277,7 +1277,7 @@ async def learn(
             time.time(),
             expected_revision=active_config["config_revision"],
         )
-        progress("done", f"进修完成:新学 {len(fresh)} 条技能,技能库共 {len(merged)} 条 "
+        progress("done", f"进修完成：新学 {len(fresh)} 条技能，技能库共 {len(merged)} 条 "
                          f"· ${r['cost_usd']:.3f}")
         broadcast({"type": "employee_update", "idx": idx})
         return {"new": len(fresh), "total": len(merged), "cost_usd": r["cost_usd"]}

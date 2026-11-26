@@ -23,7 +23,7 @@ class ImageFetchSecurityCase(unittest.IsolatedAsyncioTestCase):
 
         async def guard(url):
             if "127.0.0.1" in url:
-                raise ValueError("这个地址指向内网/本机,已拒绝访问")
+                raise ValueError("这个地址指向内网/本机，已拒绝访问")
 
         async with httpx.AsyncClient(
             transport=httpx.MockTransport(handler),

@@ -61,14 +61,14 @@ def asset_library_lock(_tid: int | None = None):
     return _ASSET_STORE_LOCK
 
 VOICES = [
-    {"id": "male-qn-qingse", "label": "青涩男声(阳光少年)"},
-    {"id": "male-qn-jingying", "label": "精英男声(干练商务)"},
-    {"id": "presenter_male", "label": "主持男声(播音腔)"},
-    {"id": "female-shaonv", "label": "少女音(活泼)"},
-    {"id": "female-yujie", "label": "御姐音(沉稳)"},
-    {"id": "presenter_female", "label": "主持女声(播音腔)"},
-    {"id": "audiobook_male_1", "label": "有声书男声(讲述感)"},
-    {"id": "audiobook_female_1", "label": "有声书女声(温柔)"},
+    {"id": "male-qn-qingse", "label": "青涩男声（阳光少年）"},
+    {"id": "male-qn-jingying", "label": "精英男声（干练商务）"},
+    {"id": "presenter_male", "label": "主持男声（播音腔）"},
+    {"id": "female-shaonv", "label": "少女音（活泼）"},
+    {"id": "female-yujie", "label": "御姐音（沉稳）"},
+    {"id": "presenter_female", "label": "主持女声（播音腔）"},
+    {"id": "audiobook_male_1", "label": "有声书男声（讲述感）"},
+    {"id": "audiobook_female_1", "label": "有声书女声（温柔）"},
 ]
 
 
@@ -399,14 +399,14 @@ async def hg_upload_talking_photo(photo_path: str, tenant_id=None, job_id=None,
                     photo_path, tenant_id, job_id, _retry=False
                 )
             raise providers.ProviderError(
-                "HeyGen 照片槽位已满,且没有可安全回收的旧数字人"
-                "(其余槽位仍被进行中的任务占用)。请稍后重试,"
+                "HeyGen 照片槽位已满，且没有可安全回收的旧数字人"
+                "（其余槽位仍被进行中的任务占用）。请稍后重试，"
                 "或到 app.heygen.com 手动删除不再需要的照片数字人"
             )
         if "credit" in blob or "insufficient" in blob:
             # 真·余额不足才标记耗尽,走可灵兜底
             await db.aset_setting("heygen_exhausted", "1")
-            raise providers.ProviderError("HeyGen 余额不足,请充值")
+            raise providers.ProviderError("HeyGen 余额不足，请充值")
         raise providers.ProviderError("HeyGen 照片上传失败，请稍后重试")
 
 
@@ -437,7 +437,7 @@ async def hg_voice_id() -> str:
             lang = (v.get("language") or "").lower()
             if "chinese" in lang or "zh" in lang or "mandarin" in lang:
                 return v.get("voice_id")
-    raise providers.ProviderError("HeyGen 没找到中文音色,请在管理后台设置 heygen_voice_id")
+    raise providers.ProviderError("HeyGen 没找到中文音色，请在管理后台设置 heygen_voice_id")
 
 
 async def hg_generate(talking_photo_id: str, script: str, audio_asset_id: str = None,
@@ -480,8 +480,8 @@ async def hg_poll(video_id: str, progress, timeout: int = 1800, job_id: int = No
             if st == "failed":
                 raise providers.ProviderError("HeyGen 生成失败，请稍后重试")
             safe_state = st if st in {"pending", "waiting", "processing"} else "排队"
-            progress("tool", f"HeyGen 渲染中({safe_state})…已等 {int(time.time() - t0)}s")
-    raise providers.ProviderError("HeyGen 渲染超时(30分钟)")
+            progress("tool", f"HeyGen 渲染中（{safe_state}）…已等 {int(time.time() - t0)}s")
+    raise providers.ProviderError("HeyGen 渲染超时（30分钟）")
 
 
 def _probe_media_bytes(data: bytes) -> dict:
@@ -2198,7 +2198,7 @@ async def clone_voice(sample_path: str, label: str, save: bool = True) -> dict:
         if (d2.get("base_resp") or {}).get("status_code") != 0:
             msg = (d2.get("base_resp") or {}).get("status_msg", "")
             if "duration too short" in msg:
-                raise providers.ProviderError("录音太短:克隆需要至少 10 秒(建议 30 秒-1 分钟)")
+                raise providers.ProviderError("录音太短：克隆需要至少 10 秒（建议 30 秒-1 分钟）")
             raise providers.ProviderError("声音克隆失败，请稍后重试")
     label = re.sub(r"\s+", "", label)[:12] or "我的声音"
     voice = {
@@ -2266,8 +2266,8 @@ async def kling_poll(task_id: str, progress, timeout: int = 1500, job_id: int = 
             if st in ("failed", "error"):
                 raise providers.ProviderError("数字人生成失败，请稍后重试")
             safe_state = st if st in {"submitted", "processing"} else "排队"
-            progress("tool", f"数字人渲染中({safe_state})…已等 {int(time.time() - t0)}s")
-    raise providers.ProviderError("数字人渲染超时(25分钟)")
+            progress("tool", f"数字人渲染中（{safe_state}）…已等 {int(time.time() - t0)}s")
+    raise providers.ProviderError("数字人渲染超时（25分钟）")
 
 
 async def _sales_video_url(p: dict, j: dict, job_id: int, photo_path: str, progress) -> str:
@@ -2451,7 +2451,7 @@ async def run_job(job_id: int, broadcast):
                 if picked == "heygen":
                     # 明确点了就再试一次(可能已充值)
                     await db.aset_setting("heygen_exhausted", None)
-                    progress("start", "尝试 HeyGen(若仍提示额度用完,请充值或改基础版/可灵)…")
+                    progress("start", "尝试 HeyGen（若仍提示额度用完，请充值或改基础版/可灵）…")
                 else:
                     eng = "kling"
         if eng == "heygen" and p.get("domestic_only"):
@@ -2486,7 +2486,7 @@ async def run_job(job_id: int, broadcast):
                     {"audio_file": f"/files/avatar-public/{own_audio}"},
                 )
             else:
-                progress("start", f"配音中(音色:{p.get('voice_label', '')})…")
+                progress("start", f"配音中（音色：{p.get('voice_label', '')}）…")
                 audio_url = await tts(p["script"], p["voice_id"])
                 pub = await asyncio.to_thread(
                     save_public,
@@ -2503,13 +2503,13 @@ async def run_job(job_id: int, broadcast):
             url = await runninghub.synth(photo_path, audio_path, progress)
         elif eng == "heygen":
             try:
-                progress("start", "HeyGen 引擎:上传数字人照片…")
+                progress("start", "HeyGen 引擎：上传数字人照片…")
                 tp_id = await hg_upload_talking_photo(
                     photo_path, tenant_id=j.get("tenant_id"), job_id=job_id
                 )
                 audio_asset = None
                 if own_audio:
-                    progress("start", "上传您的原声录音(成片就是您本人的声音)…")
+                    progress("start", "上传您的原声录音（成片就是您本人的声音）…")
                     audio_path = await cap_for_job(
                         await db.arun(
                             asset_path,
@@ -2525,7 +2525,7 @@ async def run_job(job_id: int, broadcast):
                         {"audio_file": f"/files/avatar-public/{own_audio}"},
                     )
                 else:
-                    progress("start", f"海螺配音中(音色:{p.get('voice_label', '')})…")
+                    progress("start", f"海螺配音中（音色：{p.get('voice_label', '')}）…")
                     audio_url = await tts(p["script"], p["voice_id"])
                     pub = await asyncio.to_thread(
                         save_public,
@@ -2542,9 +2542,9 @@ async def run_job(job_id: int, broadcast):
                         os.path.join(PUBLIC_DIR, pub["name"])
                     )
                     audio_asset = await hg_upload_audio(audio_path)
-                progress("start", "提交 HeyGen 数字人(Avatar IV 动作引擎,会动会说)…")
+                progress("start", "提交 HeyGen 数字人（Avatar IV 动作引擎，会动会说）…")
                 vid = await hg_generate(tp_id, p["script"], audio_asset_id=audio_asset)
-                progress("tool", f"任务已受理 video_id={vid[:16]}…,开始渲染")
+                progress("tool", f"任务已受理 video_id={vid[:16]}…，开始渲染")
                 url = await hg_poll(vid, progress, job_id=job_id)
             except providers.ProviderError as e:
                 if own_audio:
@@ -2573,7 +2573,7 @@ async def run_job(job_id: int, broadcast):
                 )
             else:
                 # 系统/克隆音色配音(海螺返回 https URL)
-                progress("start", f"海螺配音中(音色:{p.get('voice_label', p.get('voice_id'))})…")
+                progress("start", f"海螺配音中（音色：{p.get('voice_label', p.get('voice_id'))}）…")
                 audio_url = await tts(p["script"], p["voice_id"])
                 pub = await asyncio.to_thread(
                     save_public,
@@ -2595,12 +2595,12 @@ async def run_job(job_id: int, broadcast):
             # 给可灵的是带过期时间的签名链接，过期后照片/声音不再能被外部下载
             photo_url = await db.arun(signed_public_url, p["photo_name"])
             # 2) 提交可灵数字人
-            progress("start", "提交可灵数字人任务(照片+配音→对口型)…")
+            progress("start", "提交可灵数字人任务（照片+配音→对口型）…")
             tid = await kling_avatar(photo_url, audio_url, p.get("prompt", ""))
-            progress("tool", f"任务已受理 task_id={tid[:18]}…,开始渲染")
+            progress("tool", f"任务已受理 task_id={tid[:18]}…，开始渲染")
             url = await kling_poll(tid, progress, job_id=job_id)
         # 3) 下载成片
-        progress("fetch", "渲染完成,回收成片…")
+        progress("fetch", "渲染完成，回收成片…")
         out = os.path.join(OUT_DIR, f"avatar_{job_id}.mp4")
         try:
             await netfetch.download_public_media(
@@ -2651,7 +2651,7 @@ async def run_job(job_id: int, broadcast):
                 ),
             },
         )
-        progress("done", "🎬 数字人视频交付!")
+        progress("done", "🎬 数字人视频交付！")
         if p.get("studio"):
             from . import storestudio
             await storestudio.run_after_delivery(
@@ -2761,7 +2761,7 @@ def resume_pending(broadcast):
             try:
                 settle_failure(
                     r["id"],
-                    "服务重启中断,已自动退点,请重新生成",
+                    "服务重启中断，已自动退点，请重新生成",
                     terminal_status="failed",
                 )
             except Exception as exc:
@@ -2836,10 +2836,10 @@ def stamp_video_label(path: str, label: str) -> bool:
 # ---------------- 肖像/声音授权声明(第 3 期) ----------------
 CONSENT_VERSION = "2026-09-v1"
 CONSENT_TEXT = "我确认本人或已取得肖像/声音权利人的书面授权，同意用于生成数字人视频"
-OVERSEAS_TEXT = "HeyGen 是境外服务商:选择它时，照片和声音将传输至境外服务商处理"
-CONSENT_MISSING = "请先勾选肖像/声音授权声明:确认是本人，或已取得权利人的书面授权"
+OVERSEAS_TEXT = "HeyGen 是境外服务商：选择它时，照片和声音将传输至境外服务商处理"
+CONSENT_MISSING = "请先勾选肖像/声音授权声明：确认是本人，或已取得权利人的书面授权"
 OVERSEAS_MISSING = ("HeyGen 是境外服务商，照片和声音会传输至境外处理。"
-                    "请勾选同意，或改选可灵/基础版(国内服务商)")
+                    "请勾选同意，或改选可灵/基础版（国内服务商）")
 
 
 class ConsentRequired(ValueError):

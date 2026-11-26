@@ -185,7 +185,7 @@ def staff_task_assign(task_id: int, body: dict):
 async def _read_photo(upload) -> bytes:
     data = await upload.read(photoproof.MAX_UPLOAD_BYTES + 1)
     if len(data) > photoproof.MAX_UPLOAD_BYTES:
-        raise HTTPException(413, "照片太大了(超过 12MB)，请重新拍一张")
+        raise HTTPException(413, "照片太大了（超过 12MB），请重新拍一张")
     return data
 
 

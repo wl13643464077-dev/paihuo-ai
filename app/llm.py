@@ -663,7 +663,7 @@ async def call(prompt: str, model: str = DEFAULT_MODEL, web: bool = False,
     """
     if not provider_env or not provider_env.get("ANTHROPIC_BASE_URL") or not (
             provider_env.get("ANTHROPIC_AUTH_TOKEN") or provider_env.get("ANTHROPIC_API_KEY")):
-        raise LLMError("工具执行器必须显式传入云雾 API 地址与凭据,禁止使用本地 Claude 登录态")
+        raise LLMError("工具执行器必须显式传入云雾 API 地址与凭据，禁止使用本地 Claude 登录态")
     if not CLAUDE or not os.path.isfile(CLAUDE) or not os.access(CLAUDE, os.X_OK):
         raise LLMError(
             "云雾能力网关执行器未安装或不可执行；"
@@ -770,7 +770,7 @@ async def call(prompt: str, model: str = DEFAULT_MODEL, web: bool = False,
                     raise LLMError(_STABLE_RUNNER_ERROR)
             except asyncio.TimeoutError:
                 await _terminate()
-                raise LLMError(f"LLM 调用超时(>{timeout}s)")
+                raise LLMError(f"LLM 调用超时（>{timeout}s）")
             except asyncio.CancelledError:
                 await _terminate()
                 raise

@@ -28,20 +28,20 @@ API = "https://api.weixin.qq.com/cgi-bin"
 SERVER_IP = os.environ.get("PAIHUO_PUBLIC_EGRESS_IP", "").strip()
 
 ERR_HINTS = {
-    40013: "AppID 不对,回公众号后台「设置与开发→基本配置」重新复制",
-    40125: "AppSecret 不对或已重置,重新生成后粘贴进来",
-    41004: "AppSecret 缺失,请在配置里填上",
-    40001: "AppSecret 错误或已失效,重新生成后再试",
+    40013: "AppID 不对，回公众号后台「设置与开发→基本配置」重新复制",
+    40125: "AppSecret 不对或已重置，重新生成后粘贴进来",
+    41004: "AppSecret 缺失，请在配置里填上",
+    40001: "AppSecret 错误或已失效，重新生成后再试",
     40164: (
         "服务器 IP 不在公众号白名单：去「基本配置→IP白名单」添加部署服务器的"
         + (f"出口 IP {SERVER_IP}" if SERVER_IP
-           else "出口 IP(平台未配置该 IP 的展示,请点右下角 💬 联系平台顾问索取)")
+           else "出口 IP（平台未配置该 IP 的展示，请点右下角 💬 联系平台顾问索取）")
         + " 再试"
     ),
-    48001: "该公众号没有草稿箱接口权限:未认证的个人订阅号不支持,需要完成微信认证",
-    45009: "接口调用次数超限,明天再试或去后台清空配额",
-    45110: "草稿箱已满(上限比较高,一般是没清理),去公众号后台删些旧草稿",
-    40007: "封面素材无效,换一张 PNG/JPG 封面再试",
+    48001: "该公众号没有草稿箱接口权限：未认证的个人订阅号不支持，需要完成微信认证",
+    45009: "接口调用次数超限，明天再试或去后台清空配额",
+    45110: "草稿箱已满（上限比较高，一般是没清理），去公众号后台删些旧草稿",
+    40007: "封面素材无效，换一张 PNG/JPG 封面再试",
 }
 
 
@@ -90,7 +90,7 @@ async def token(tid: int, force: bool = False) -> str:
     if not (conf.get("appid") and conf.get("secret")):
         raise WeChatError(
             0,
-            "还没配置公众号 AppID/AppSecret(发布渠道页配置)",
+            "还没配置公众号 AppID/AppSecret（发布渠道页配置）",
             public=True,
         )
     cache = db.jloads(
@@ -123,7 +123,7 @@ async def token(tid: int, force: bool = False) -> str:
 async def test_conn(tid: int) -> dict:
     """连通性测试:强制取一次新 token."""
     await token(tid, force=True)
-    return {"ok": True, "note": "连接成功,可以一键发草稿箱了"}
+    return {"ok": True, "note": "连接成功，可以一键发草稿箱了"}
 
 
 # ---------------- 图片上传 ----------------
