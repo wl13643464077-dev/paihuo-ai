@@ -165,7 +165,7 @@ class LinkgrabPageEvidenceCase(unittest.IsolatedAsyncioTestCase):
                 linkgrab,
                 "_guard_url",
                 new=AsyncMock(
-                    side_effect=[(), ValueError("这个地址指向内网/本机,已拒绝访问")]
+                    side_effect=[(), ValueError("这个地址指向内网/本机，已拒绝访问")]
                 ),
             ):
                 with self.assertRaisesRegex(ValueError, "内网/本机"):

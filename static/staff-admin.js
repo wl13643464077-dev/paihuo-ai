@@ -98,13 +98,13 @@
           <option value="">请选择门店</option>${branches.map(x=>`<option value="${x.id}" ${String(x.id)===String(d.branch_id)?"selected":""}>${h(x.name)}</option>`).join("")}</select>
           ${fe.branch?`<div class="field-err" role="alert">${h(fe.branch)}</div>`:""}</div>
         <div><label>派给谁</label><select ${d.sent?"disabled":""} onchange="PH_STAFF_ADMIN._set(${i},'assignee_user_id',this.value)">
-          <option value="">先不指定(店里谁有空谁做)</option>${(b?b.members:[]).map(u=>`<option value="${u.id}" ${String(u.id)===String(d.assignee_user_id)?"selected":""}>${h(u.name)}（${h(u.title_label)}）</option>`).join("")}</select></div>
+          <option value="">先不指定（店里谁有空谁做）</option>${(b?b.members:[]).map(u=>`<option value="${u.id}" ${String(u.id)===String(d.assignee_user_id)?"selected":""}>${h(u.name)}（${h(u.title_label)}）</option>`).join("")}</select></div>
         <div><label>截止时间</label><input type="datetime-local" value="${tsToLocal(d.due_at)}" ${d.sent?"disabled":""}
           onchange="PH_STAFF_ADMIN._set(${i},'due_at',this.value)"></div>
         <div><label>&nbsp;</label><label style="display:flex;gap:6px;align-items:center;min-height:42px;font-size:15px">
           <input type="checkbox" style="width:auto;min-height:0" ${d.require_photo?"checked":""} ${d.sent?"disabled":""}
             onchange="PH_STAFF_ADMIN._set(${i},'require_photo',this.checked)"> 要拍照交差</label></div>
-        <div style="grid-column:1/-1"><label>说明(可不填)</label><input maxlength="1000" value="${h(d.detail)}" ${d.sent?"disabled":""}
+        <div style="grid-column:1/-1"><label>说明（可不填）</label><input maxlength="1000" value="${h(d.detail)}" ${d.sent?"disabled":""}
           oninput="PH_STAFF_ADMIN._set(${i},'detail',this.value)"></div>
       </div>
       ${(d.hints||[]).map(x=>`<div class="sa-hint">⚠️ ${h(x)}</div>`).join("")}
@@ -134,7 +134,7 @@
     const waiting = SA.drafts.filter(d=>!d.sent).length;
     box.innerHTML = SA.drafts.length ? SA.drafts.map(draftHtml).join("")
       + `<div class="actions" style="margin-top:10px">
-          ${waiting?`<button type="button" class="btn pri" onclick="PH_STAFF_ADMIN._sendAll()" ${SA.sending?"disabled":""}>📤 ${SA.sending?"正在派…":`确认派出去(${waiting} 件)`}</button>`:""}
+          ${waiting?`<button type="button" class="btn pri" onclick="PH_STAFF_ADMIN._sendAll()" ${SA.sending?"disabled":""}>📤 ${SA.sending?"正在派…":`确认派出去（${waiting} 件）`}</button>`:""}
           <button type="button" class="btn" onclick="PH_STAFF_ADMIN._add()">➕ 再加一件</button>
           <button type="button" class="btn" onclick="PH_STAFF_ADMIN._clear()">清空</button></div>` : "";
   }
@@ -204,7 +204,7 @@
         hints:d.hints||[]}));
       SA.drafts = SA.drafts.filter(d=>!d.sent).concat(drafts);
       SA.oneText = "";
-      toast(drafts.length ? `拆出 ${drafts.length} 件,看一眼再派` : "没拆出任务,换个说法试试");
+      toast(drafts.length ? `拆出 ${drafts.length} 件，看一眼再派` : "没拆出任务，换个说法试试");
     }catch(e){ SA.oneText = text; toast(e.message); }
     SA.parsing = false; draw();
   }
@@ -214,10 +214,10 @@
     const a = t.ai_check;
     // 没开 AI 验照片就什么都不说(开关就在「等您审核」标题旁边)，不在每件活下面重复一遍
     if(!a){ return t.status==="submitted"&&(t.photos||[]).length&&SA.meta?.ai_check_enabled ? `<div class="sa-ai none">AI 还没看完，可以先直接看照片</div>` : ""; }
-    if(a.error||!a.verdict) return `<div class="sa-ai none">🤖 ${h(a.reason||"AI 这次没看成,请直接看照片")}</div>`;
-    const label = {pass:"像是做好了", doubt:"拿不准,建议细看", fail:"像是没做好"}[a.verdict]||"";
-    return `<div class="sa-ai ${h(a.verdict)}">🤖 AI 建议:${h(label)}${a.reason?`。${h(a.reason)}`:""}
-      <span class="sub">(把握 ${Math.round((a.confidence||0)*100)}%,只是建议,您说了算)</span></div>`;
+    if(a.error||!a.verdict) return `<div class="sa-ai none">🤖 ${h(a.reason||"AI 这次没看成，请直接看照片")}</div>`;
+    const label = {pass:"像是做好了", doubt:"拿不准，建议细看", fail:"像是没做好"}[a.verdict]||"";
+    return `<div class="sa-ai ${h(a.verdict)}">🤖 AI 建议：${h(label)}${a.reason?`。${h(a.reason)}`:""}
+      <span class="sub">（把握 ${Math.round((a.confidence||0)*100)}%，只是建议，您说了算）</span></div>`;
   }
   function photosHtml(list){
     return (list||[]).length ? `<div class="sa-photos">${list.map((p,i)=>`<a href="${h(p.url)}" onclick="return PH_STAFF_ADMIN._view(this,${i})" aria-label="看大图 第 ${i+1} 张"><img src="${h(p.url)}" alt="交差照片" loading="lazy"></a>`).join("")}</div>` : "";
@@ -288,7 +288,7 @@
       ${rejected?`<div class="sa-hint">↩️ ${h(rejectLine(t, "打回过"))}</div>`:""}
       ${t.status==="submitted"&&t.review_note&&t.reviewed_at?`<div class="sa-hint">↩️ ${h(rejectLine(t, "上次打回"))}${t.submit_count>1?`（第 ${t.submit_count} 次交）`:"（重交）"}</div>`:""}
       ${t.status==="submitted"?`${t.submit_note?`<div style="margin-top:6px">📝 ${h(t.submit_note)}</div>`:""}${photosHtml(t.photos)}${aiHtml(t)}`:""}
-      ${t.status==="approved"&&(t.photos||[]).length?`<details style="margin-top:6px"><summary class="sub">看交差照片(${t.photos.length})</summary>${photosHtml(t.photos)}</details>`:""}
+      ${t.status==="approved"&&(t.photos||[]).length?`<details style="margin-top:6px"><summary class="sub">看交差照片（${t.photos.length}）</summary>${photosHtml(t.photos)}</details>`:""}
       <div class="actions" style="margin-top:8px">
         ${t.status==="submitted"?`<button type="button" class="btn sm pri" onclick="PH_STAFF_ADMIN._review(${t.id},true)">👍 通过</button>
           <button type="button" class="btn sm bad" onclick="PH_STAFF_ADMIN._review(${t.id},false)">↩️ 打回重做</button>`:""}
@@ -334,7 +334,7 @@
     const ended = all.filter(t=>["approved","cancelled","rejected"].includes(t.status));
     let html = `<h3 style="margin-top:18px">⏳ 店员在做（${doing.length}）${filterNote()}</h3>`
       + (doing.length ? doing.map(taskHtml).join("") : `<div class="sub">暂时没有</div>`);
-    if(ended.length) html += `<details style="margin-top:16px" ${SA.filter.status&&!["submitted","todo"].includes(SA.filter.status)?"open":""}><summary><b>已结束(${ended.length})</b></summary>${ended.map(taskHtml).join("")}</details>`;
+    if(ended.length) html += `<details style="margin-top:16px" ${SA.filter.status&&!["submitted","todo"].includes(SA.filter.status)?"open":""}><summary><b>已结束（${ended.length}）</b></summary>${ended.map(taskHtml).join("")}</details>`;
     if(SA.list&&SA.list.next_before_id) html += `<div class="actions"><button type="button" class="btn" onclick="PH_STAFF_ADMIN._more()">加载更多</button></div>`;
     return html;
   }
@@ -352,7 +352,7 @@
       : `<div class="card sa-one" id="sa-dispatch">
         ${noStaffHint()}
         <h3 style="margin-top:0">🗣️ 一句话派活</h3>
-        <textarea id="sa-one" maxlength="500" placeholder="比如:人民路店明天中午前把冷柜清一遍,拍照给我">${h(SA.oneText||"")}</textarea>
+        <textarea id="sa-one" maxlength="500" placeholder="比如：人民路店明天中午前把冷柜清一遍，拍照给我">${h(SA.oneText||"")}</textarea>
         <div class="actions">
           ${price&&typeof costButton==="function"
             ?costButton({label:"✨ 拆成任务",onclick:"PH_STAFF_ADMIN._parse()",cost:price,disabled:SA.parsing||!m.branches.length,disabledLabel:SA.parsing?"AI 正在拆…":""})
@@ -360,11 +360,11 @@
           <button type="button" class="btn" onclick="PH_STAFF_ADMIN._add()" ${!m.branches.length?"disabled":""}>✍️ 手动派一件</button>
           <a class="btn" href="/staff" target="_blank" rel="noopener">📱 看店员手机版</a>
         </div>
-        <div class="sub">AI 只帮您填表,门店和人对不上时会留空让您选,确认后才会派出去。</div>
+        <div class="sub">AI 只帮您填表，门店和人对不上时会留空让您选，确认后才会派出去。</div>
         <div id="sa-drafts"></div>
       </div>`;
     main.innerHTML = `<div class="hubhead"><h2>🧑‍🍳 派给店员</h2>
-        <div class="sub">把活派给店里的真人,店员用手机拍照交差,您(或店长)看照片定通过还是打回。</div></div>
+        <div class="sub">把活派给店里的真人，店员用手机拍照交差，您（或店长）看照片定通过还是打回。</div></div>
       ${!m.branches.length?`<div class="card">${noStoreEmptyState("还没有可以派活的门店。建好门店，再到「我的 → 团队与权限」给店员分配门店。")}</div>`:""}
       ${reviewFirst?reviewCard:""}
       ${dispatchCard}
@@ -433,9 +433,9 @@
   async function review(id, approve){
     let note = "";
     if(!approve){
-      note = await uiPrompt({title:"打回重做", message:"写一句哪里不行,店员手机上会看到", multiline:true,
-        placeholder:"比如:冷柜底层没擦干净,再拍一张近照", confirmText:"打回", danger:true,
-        requiredMessage:"写一句原因,店员才知道哪里要重做"});
+      note = await uiPrompt({title:"打回重做", message:"写一句哪里不行，店员手机上会看到", multiline:true,
+        placeholder:"比如：冷柜底层没擦干净，再拍一张近照", confirmText:"打回", danger:true,
+        requiredMessage:"写一句原因，店员才知道哪里要重做"});
       if(note===null) return;
     }
     try{
@@ -483,7 +483,7 @@
         cancelled:"取消", reminded:"提醒", nudged:"催办", escalated:"升级提醒", ai_checked:"AI 看照片", commented:"留言"};
       box.innerHTML = `<ol class="sa-events">${(t.events||[]).map(e=>`<li>${h(new Date((e.created_at||0)*1000).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai",hour12:false}))}
         · <b>${h(e.actor_name||"系统")}</b> ${h(label[e.kind]||e.kind)}${e.note?`:${h(e.note)}`:""}</li>`).join("")}</ol>`
-        + ((t.earlier_photos||[]).length?`<details><summary class="sub">打回前交的照片(${t.earlier_photos.length})</summary>${photosHtml(t.earlier_photos)}</details>`:"");
+        + ((t.earlier_photos||[]).length?`<details><summary class="sub">打回前交的照片（${t.earlier_photos.length}）</summary>${photosHtml(t.earlier_photos)}</details>`:"");
     }catch(e){ toast(e.message); }
   }
   async function aiToggle(on){

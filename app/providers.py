@@ -456,14 +456,14 @@ def _api_text_model(model: str) -> str:
     CLI 接收，因此经云雾 OpenAI 兼容 API 调用同一个 Claude 模型。
     """
     if not text_model_available(model):
-        raise ProviderError(f"文本模型不可用:{str(model)[:80] or '(空)'}")
+        raise ProviderError(f"文本模型不可用：{str(model)[:80] or '（空）'}")
     return AGENT_MODEL if model == CLAUDE_LOCAL else model
 
 
 def _api_vision_model(model: str) -> str:
     """视觉 HTTP 边界二次验能力，文本模型在读凭据前即拒绝。"""
     if not vision_model_available(model):
-        raise ProviderError(f"视觉模型不可用:{str(model)[:80] or '(空)'}")
+        raise ProviderError(f"视觉模型不可用：{str(model)[:80] or '（空）'}")
     return model
 
 
@@ -513,7 +513,7 @@ async def chat(prompt: str, model: str = DEFAULT_TEXT, timeout: int = 600,
         )
     base, key = await db.arun(yunwu_conf)
     if not key:
-        raise ProviderError("未配置云雾API key(管理后台→供应商)")
+        raise ProviderError("未配置云雾API key（管理后台→供应商）")
     progress = progress or (lambda *a: None)
     last_error = None
     retry_cost = 0.0
@@ -780,7 +780,7 @@ async def _chat_content(*, model: str, content: list[dict], timeout: int,
         }
     base, key = await db.arun(yunwu_conf)
     if not key:
-        raise ProviderError("未配置云雾API key(管理后台→供应商)")
+        raise ProviderError("未配置云雾API key（管理后台→供应商）")
     try:
         async with httpx.AsyncClient(timeout=timeout) as cli:
             response = await cli.post(
@@ -927,7 +927,7 @@ async def image(prompt: str, model: str = DEFAULT_IMAGE, size: str = "1024x1536"
                 timeout: int = 300) -> bytes:
     """云雾生图,返回图片二进制(PNG/JPEG)."""
     if not image_model_available(model):
-        raise ProviderError(f"生图模型不可用:{str(model)[:80] or '(空)'}")
+        raise ProviderError(f"生图模型不可用：{str(model)[:80] or '（空）'}")
     max_bytes = 20 * 1024 * 1024
     base, key = await db.arun(yunwu_conf)
     if not key:
@@ -1002,7 +1002,7 @@ async def _image_edit(*, model: str, prompt: str, image_bytes: bytes,
     ``extra_images`` 用于多参考图合成（如老板人像 + 门店照片），按 OpenAI
     ``image[]`` 多文件字段一并上传；为空时与单图请求完全一致。"""
     if not image_model_available(model):
-        raise ProviderError(f"生图模型不可用:{str(model)[:80] or '(空)'}")
+        raise ProviderError(f"生图模型不可用：{str(model)[:80] or '（空）'}")
     base, key = await db.arun(yunwu_conf)
     if not key:
         raise ProviderError("未配置云雾API key")
@@ -1458,7 +1458,7 @@ async def call_text(idx: int | None, prompt: str, web: bool = False,
         """经云雾 Anthropic 兼容通道驱动 Claude Code 的受控联网工具."""
         base, key = await legacy_credentials()
         if not key:
-            raise ProviderError("未配置云雾API key,无法启动联网能力网关")
+            raise ProviderError("未配置云雾API key，无法启动联网能力网关")
         if web_tools:
             return await _call_websearch_gateway(
                 agent_prompt,
@@ -1542,7 +1542,7 @@ async def call_text(idx: int | None, prompt: str, web: bool = False,
 如果证据包明确标为待核验,如实保留该标记。严格遵守原任务要求的输出格式。"""
 
     if not direct and not legacy_conf[1]:
-        raise ProviderError("未配置云雾API key,所有数字员工已禁止回退本地 Claude 登录态")
+        raise ProviderError("未配置云雾API key，所有数字员工已禁止回退本地 Claude 登录态")
 
     async def generate(private_system: str) -> dict:
         if model == CLAUDE_LOCAL:
@@ -1726,7 +1726,7 @@ async def call_web_json(prompt: str, timeout: int = 600, retries: int = 1,
             )
     base, key = await db.arun(yunwu_conf)
     if not key:
-        raise ProviderError("未配置云雾API key,无法启动联网能力网关")
+        raise ProviderError("未配置云雾API key，无法启动联网能力网关")
     last = None
     p = prompt
     total_cost = 0.0

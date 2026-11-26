@@ -14,7 +14,7 @@ class PublicLabelTests(unittest.TestCase):
                 self.assertNotIn(word, label, action)
         self.assertEqual("数字人视频·基础版",
                          billing.public_label("avatar_basic", billing.DEFAULT_PRICES["avatar_basic"]["label"]))
-        self.assertEqual("AI 带货短片(15秒)",
+        self.assertEqual("AI 带货短片（15秒）",
                          billing.public_label("avatar_sales", billing.DEFAULT_PRICES["avatar_sales"]["label"]))
 
     def test_price_table_itself_is_unchanged(self):

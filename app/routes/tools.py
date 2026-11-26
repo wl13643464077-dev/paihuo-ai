@@ -377,7 +377,7 @@ async def _tool_worker(jid: int):
                         "report_name": (
                             f"{TOOL_KINDS.get(kind, kind)}跑完了"
                         ),
-                        "summary": "结果已经摆在工具箱里,回来就能看",
+                        "summary": "结果已经摆在工具箱里，回来就能看",
                         "link": "#/tools",
                     },
                 )
@@ -436,7 +436,7 @@ def _tool_require_idle(kind: str):
     if db.one("SELECT id FROM tool_job WHERE tenant_id=? AND kind=? "
               "AND status IN ('pending_charge','running')",
               (TEN(), kind)):
-        raise HTTPException(429, "这个工具已有一个任务在后台跑,等它完事再派新的")
+        raise HTTPException(429, "这个工具已有一个任务在后台跑，等它完事再派新的")
 
 
 def _tool_enqueue_record(kind: str, params: dict, note: str = "") -> dict:
@@ -489,7 +489,7 @@ def _tool_enqueue_record(kind: str, params: dict, note: str = "") -> dict:
         raise
     if not charged:
         raise RuntimeError("工具任务计费状态冲突")
-    return {"job_id": jid, "note": "已挂到后台跑:您随便去忙别的,回工具箱就能看到;跑完还会推微信"}
+    return {"job_id": jid, "note": "已挂到后台跑：您随便去忙别的，回工具箱就能看到；跑完还会推微信"}
 
 
 def _tool_enqueue(kind: str, params: dict, note: str = "") -> dict:
@@ -769,7 +769,7 @@ async def _store_tool_image_safely(data: bytes, tid: int) -> tuple[str, str]:
 @router.post("/api/tools/menu-copy")
 async def menu_copy_api(file: _UploadFile = _File(...), want: str = Form("")):
     await db.arun(_need_module, "content")
-    raw = await _read_limited(file, 8 * 1024 * 1024, "图片太大(≤8MB)")
+    raw = await _read_limited(file, 8 * 1024 * 1024, "图片太大（≤8MB）")
     op_key = await _start_billing_operation_safely(
         _start_billed_operation,
         "menu_copy",
@@ -799,13 +799,13 @@ async def menu_copy_api(file: _UploadFile = _File(...), want: str = Form("")):
             op_key,
             "识图失败自动退回",
         )
-        raise HTTPException(500, "识图失败,点数已退回,换张清晰的图试试")
+        raise HTTPException(500, "识图失败，点数已退回，换张清晰的图试试")
 
 
 @router.post("/api/tools/product-shot")
 async def product_shot_api(file: _UploadFile = _File(...), scene: str = Form("")):
     await db.arun(_need_module, "content")
-    raw = await _read_limited(file, 8 * 1024 * 1024, "图片太大(≤8MB)")
+    raw = await _read_limited(file, 8 * 1024 * 1024, "图片太大（≤8MB）")
     op_key = await _start_billing_operation_safely(
         _start_billed_operation,
         "product_shot",
@@ -847,7 +847,7 @@ async def photo_factory_api(file: _UploadFile = _File(...), scene: str = Form(""
     与失败原因分开说清,老板不用猜"钱花在哪了"。
     """
     await db.arun(_need_module, "content")
-    raw = await _read_limited(file, 8 * 1024 * 1024, "图片太大(≤8MB)")
+    raw = await _read_limited(file, 8 * 1024 * 1024, "图片太大（≤8MB）")
     mime = file.content_type if (file.content_type or "").startswith("image/") else "image/jpeg"
     b64 = await asyncio.to_thread(_tool_image_base64, raw)
 
@@ -872,7 +872,7 @@ async def photo_factory_api(file: _UploadFile = _File(...), scene: str = Form(""
         )
         if isinstance(exc, HTTPException) and exc.status_code == 402:
             raise HTTPException(
-                402, "拍照工厂一次需 3 点(出图2+文案1),当前余额不足。请充值后再试"
+                402, "拍照工厂一次需 3 点（出图2+文案1），当前余额不足。请充值后再试"
             ) from exc
         raise
 
@@ -902,7 +902,7 @@ async def photo_factory_api(file: _UploadFile = _File(...), scene: str = Form(""
                 "商品图生成或保存失败自动退回",
             )
             await asyncio.to_thread(_remove_tool_image, path)
-            return {"error": "美化没成功,这条腿的 2 点已退回;可换张更清晰的图重试"}
+            return {"error": "美化没成功，这条腿的 2 点已退回；可换张更清晰的图重试"}
 
     async def _copy_leg(op_key):
         try:
@@ -926,12 +926,12 @@ async def photo_factory_api(file: _UploadFile = _File(...), scene: str = Form(""
                 op_key,
                 "识图失败自动退回",
             )
-            return {"error": "文案没写成,这条腿的 1 点已退回;可换张更清晰的图重试"}
+            return {"error": "文案没写成，这条腿的 1 点已退回；可换张更清晰的图重试"}
 
     shot_result, copy_result = await asyncio.gather(
         _shot_leg(shot_op), _copy_leg(copy_op))
     if shot_result.get("error") and copy_result.get("error"):
-        raise HTTPException(500, "图和文案都没成功,3 点已全部退回;换张清晰的图再试")
+        raise HTTPException(500, "图和文案都没成功，3 点已全部退回；换张清晰的图再试")
     return {
         "file": shot_result.get("file") or "",
         "image_error": shot_result.get("error") or "",
@@ -945,7 +945,7 @@ async def variants_api(body: dict):
     await db.arun(_need_module, "content")
     script = (body.get("script") or "").strip()
     if len(script) < 30:
-        raise HTTPException(400, "先贴一篇口播稿(至少30字)")
+        raise HTTPException(400, "先贴一篇口播稿（至少30字）")
     await _preflight_user_video_brand("", script[:2500])
     op_key = await _start_billing_operation_safely(
         _start_billed_operation,
@@ -972,4 +972,4 @@ async def variants_api(body: dict):
             op_key,
             "裂变失败自动退回",
         )
-        raise HTTPException(500, "裂变失败,点数已退回,请重试")
+        raise HTTPException(500, "裂变失败，点数已退回，请重试")

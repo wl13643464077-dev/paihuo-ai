@@ -60,7 +60,7 @@ class MemberBalanceTests(StaffTaskBase):
     def test_insufficient_points_message_hides_balance_for_members(self):
         from app import main
 
-        exc = HTTPException(402, "点数不足:本次需 18 点,余额 5 点。请充值或升级套餐")
+        exc = HTTPException(402, "点数不足：本次需 18 点，余额 5 点。请充值或升级套餐")
         self._as(23)
         body = json.loads(asyncio.run(main._friendly_http_exception(None, exc)).body)
         self.assertNotIn("余额", body["detail"])

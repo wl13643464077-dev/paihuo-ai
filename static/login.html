@@ -108,20 +108,20 @@ button:active{transform:translateY(1px);box-shadow:2px 2px 0 rgba(51,41,31,.2)}
     <div class="ok" id="sms-ok" role="status" aria-live="polite" style="margin-top:0"></div>
     <div class="alt" id="alt-entries">
       <button onclick="toggleApply()">📝 申请开通账号</button>
-      <button class="tour" onclick="goTour(this)">👀 游客参观(只看不用)</button>
+      <button class="tour" onclick="goTour(this)" title="只看不用：参观模式不留资料、不扣点数">👀 游客参观</button>
     </div>
   </div>
   <div class="card applycard" id="applycard">
     <b style="font-size:15px">📝 申请开通账号</b>
-    <div style="font-size:12.5px;color:#8b7355;margin-top:4px">符合体验条件会即时开通；其他申请转人工审核,我们会在 1 个工作日内反馈</div>
+    <div style="font-size:12.5px;color:#8b7355;margin-top:4px">符合体验条件会即时开通；其他申请转人工审核，我们会在 1 个工作日内反馈</div>
     <div class="purchase-choice" id="purchase-choice" role="status"></div>
     <label>手机号 *</label><input id="a-phone" placeholder="11 位手机号">
-    <label>怎么称呼您</label><input id="a-name" placeholder="如:王老板">
-    <label>店名 / 企业名</label><input id="a-co" placeholder="如:王记火锅 / 小美美甲工作室" maxlength="60">
+    <label>怎么称呼您</label><input id="a-name" placeholder="如：王老板">
+    <label>店名 / 企业名</label><input id="a-co" placeholder="如：王记火锅 / 小美美甲工作室" maxlength="60">
     <label for="a-ind">您做哪一行</label>
     <select id="a-ind" onchange="industryChanged()"><option value="">请选择您的行业</option><option value="other">其他</option></select>
-    <input id="a-ind-text" placeholder="写一下您做什么生意,如:奶茶店 / 健身房" maxlength="30" style="display:none;margin-top:8px">
-    <label>想用派活做什么(选填)</label><textarea id="a-note" placeholder="如:想让数字员工帮我做内容和新店选址"></textarea>
+    <input id="a-ind-text" placeholder="写一下您做什么生意，如：奶茶店 / 健身房" maxlength="30" style="display:none;margin-top:8px">
+    <label>想用派活做什么（选填）</label><textarea id="a-note" placeholder="如：想让数字员工帮我做内容和新店选址"></textarea>
     <button onclick="applyGo(this)">提 交 申 请</button>
     <div class="err" id="a-err" role="status" aria-live="polite"></div><div class="ok" id="a-ok" role="status" aria-live="polite"></div>
   </div>
@@ -184,13 +184,13 @@ function errText(detail, fallback){
   if(Array.isArray(detail)&&detail.length){
     const first=detail[0]||{};
     const field=Array.isArray(first.loc)?first.loc.filter(x=>x!=="body").join("."):"";
-    return "填写的内容格式不对"+(field?"("+field+")":"")+",请检查后再提交";
+    return "填写的内容格式不对"+(field?"（"+field+"）":"")+"，请检查后再提交";
   }
   if(detail&&typeof detail==="object"){
     const text=detail.message||detail.msg||detail.detail;
     if(typeof text==="string"&&text) return text;
   }
-  return fallback||"操作失败,请稍后再试";
+  return fallback||"操作失败，请稍后再试";
 }
 function industryChanged(){
   const sel=document.getElementById("a-ind"), other=document.getElementById("a-ind-text");
@@ -227,7 +227,7 @@ async function go(){
     if(!r.ok){ const j = await r.json().catch(()=>({})); err.textContent = errText(j.detail,'登录失败'); return; }
     leaving=true;
     location.href = afterLogin();
-  }catch(e){ err.textContent = '网络异常,稍后再试'; }
+  }catch(e){ err.textContent = '网络异常，稍后再试'; }
   finally{ if(!leaving){ _b.disabled=false; _b.textContent=_t; } }
 }
 // 第 1 期:短信验证码登录。后台没配置/没打开时接口回 enabled:false,页面保持只有密码登录。
@@ -268,7 +268,7 @@ async function smsSend(){
     const r=await fetch('/api/auth/login/sms/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone})});
     const j=await r.json().catch(()=>({}));
     if(!r.ok){
-      err.textContent=errText(j.detail,'获取验证码失败,稍后再试');
+      err.textContent=errText(j.detail,'获取验证码失败，稍后再试');
       const wait=Number(r.headers.get('Retry-After')||0);
       if(r.status===429&&wait>0&&wait<=120) smsCountdown(wait); else btn.disabled=false;
       return;
@@ -276,7 +276,7 @@ async function smsSend(){
     ok.textContent=j.msg||'验证码已发送';
     smsCountdown(j.cooldown||60);
     document.getElementById('sms-code').focus();
-  }catch(e){ err.textContent='网络异常,稍后再试'; btn.disabled=false; }
+  }catch(e){ err.textContent='网络异常，稍后再试'; btn.disabled=false; }
 }
 async function smsLogin(){
   const err=document.getElementById('err'); err.textContent='';
@@ -291,7 +291,7 @@ async function smsLogin(){
     const r=await fetch('/api/auth/login/sms/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone,code})});
     if(!r.ok){ const j=await r.json().catch(()=>({})); err.textContent=errText(j.detail,'登录失败'); return; }
     location.href = afterLogin();
-  }catch(e){ err.textContent='网络异常,稍后再试'; }
+  }catch(e){ err.textContent='网络异常，稍后再试'; }
   finally{ btn.disabled=false; btn.textContent=t; }
 }
 function toggleApply(){
@@ -321,14 +321,14 @@ async function applyGo(btn){
         parts.forEach(([text,bold])=>{ const el=document.createElement(bold?'b':'span'); el.textContent=String(text??''); div.appendChild(el); });
         ok.appendChild(div); };
       line([['🎉 ' + (j.msg||'体验账号已开通')]]);
-      line([['账号:'],[j.account.username,true],[' 初始密码:'],[j.account.password,true]]);
-      line([['👉 已帮您填进上面登录框,截图保存好密码,点「登录」开工!']]);
+      line([['账号：'],[j.account.username,true],[' 初始密码：'],[j.account.password,true]]);
+      line([['👉 已帮您填进上面登录框，截图保存好密码，点「登录」开工！']]);
       if(document.getElementById('pw-pane').style.display==='none') switchMode('pw');
       document.getElementById('u').value = j.account.username;
       document.getElementById('p').value = j.account.password;
       document.getElementById('u').scrollIntoView({behavior:'smooth',block:'center'});
     } else {
-      ok.textContent = '✅ ' + (j.msg||'申请已收到,我们会尽快联系您');
+      ok.textContent = '✅ ' + (j.msg||'申请已收到，我们会尽快联系您');
     }
     btn.textContent = '已 提 交';
   }catch(e){ err.textContent = e.message; btn.disabled=false; btn.textContent='提 交 申 请'; }
@@ -337,9 +337,9 @@ async function goTour(btn){
   btn.disabled = true; btn.textContent = '开门中…';
   try{
     const r = await fetch('/api/guest/tour',{method:'POST'});
-    if(!r.ok) throw new Error('进入失败,稍后再试');
+    if(!r.ok) throw new Error('进入失败，稍后再试');
     location.href = '/';
-  }catch(e){ document.getElementById('err').textContent = e.message; btn.disabled=false; btn.textContent='👀 游客参观(只看不用)'; }
+  }catch(e){ document.getElementById('err').textContent = e.message; btn.disabled=false; btn.textContent='👀 游客参观'; }
 }
 </script>
 </body>

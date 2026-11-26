@@ -144,7 +144,7 @@ PUBLIC_LABELS = {
     "avatar_basic": "数字人视频·基础版",
     "avatar_video": "数字人口播视频（30 秒内）",
     "avatar_video_60": "数字人口播视频（31–60 秒）",
-    "avatar_sales": "AI 带货短片(15秒)",
+    "avatar_sales": "AI 带货短片（15秒）",
     "text_video": "图文一键转成视频",
     "studio_scene": "老板进店场景照（每张）",
     "studio_topics": "72 小时行业热点选题",
@@ -327,7 +327,7 @@ def _spend(
         if cur.rowcount == 0:
             r = c.execute("SELECT balance FROM tenants WHERE id=?", (tid,)).fetchone()
             bal = (r[0] if r else 0) or 0
-            raise InsufficientPoints(f"点数不足:本次需 {pts:.0f} 点,余额 {bal:.0f} 点。请充值或升级套餐")
+            raise InsufficientPoints(f"点数不足：本次需 {pts:.0f} 点，余额 {bal:.0f} 点。请充值或升级套餐")
         newbal = c.execute("SELECT balance FROM tenants WHERE id=?", (tid,)).fetchone()[0]
         c.execute(
             "INSERT INTO billing_log"
@@ -360,7 +360,7 @@ def charge_if_claimed(action: str, tid: int, claim, note: str = "",
             row = c.execute("SELECT balance FROM tenants WHERE id=?", (tid,)).fetchone()
             bal = (row[0] if row else 0) or 0
             raise InsufficientPoints(
-                f"点数不足:本次需 {amount:.0f} 点,余额 {bal:.0f} 点。请充值或升级套餐")
+                f"点数不足：本次需 {amount:.0f} 点，余额 {bal:.0f} 点。请充值或升级套餐")
         newbal = c.execute("SELECT balance FROM tenants WHERE id=?", (tid,)).fetchone()[0]
         c.execute(
             "INSERT INTO billing_log"
@@ -466,7 +466,7 @@ def start_operation_if_claimed(action: str, tid: int, claim, note: str = "",
                 ).fetchone()
                 balance_now = (row[0] if row else 0) or 0
                 raise InsufficientPoints(
-                    f"点数不足:本次需 {points:.0f} 点,余额 "
+                    f"点数不足：本次需 {points:.0f} 点，余额 "
                     f"{balance_now:.0f} 点。请充值或升级套餐"
                 )
             new_balance = c.execute(
@@ -538,7 +538,7 @@ def fail_operation_if_claimed(op_key: str, reason: str, claim) -> bool:
                     (points, now, tid),
                 )
                 if tenant.rowcount != 1:
-                    raise RuntimeError(f"退款租户不存在:{tid}")
+                    raise RuntimeError(f"退款租户不存在：{tid}")
                 new_balance = c.execute(
                     "SELECT balance FROM tenants WHERE id=?", (tid,)
                 ).fetchone()[0]
@@ -692,7 +692,7 @@ def refund_amount_if_claimed(
             (amount, now, tid),
         )
         if cur.rowcount != 1:
-            raise RuntimeError(f"退款租户不存在:{tid}")
+            raise RuntimeError(f"退款租户不存在：{tid}")
         newbal = c.execute("SELECT balance FROM tenants WHERE id=?", (tid,)).fetchone()[0]
         c.execute(
             "INSERT INTO billing_log"

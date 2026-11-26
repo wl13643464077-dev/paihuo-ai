@@ -273,7 +273,7 @@ class SweepFixCase(unittest.IsolatedAsyncioTestCase):
         row = db.one("SELECT enabled,last_note,next_run_at FROM schedule "
                      "WHERE id=?", (sid,))
         self.assertEqual(1, row["enabled"])
-        self.assertEqual("已重新启用,下次到点自动开工", row["last_note"])
+        self.assertEqual("已重新启用，下次到点自动开工", row["last_note"])
         self.assertTrue(row["next_run_at"])
 
     async def test_company_get_reports_filled_field_count(self):

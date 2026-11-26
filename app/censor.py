@@ -118,7 +118,7 @@ def scan(text: str) -> list:
                 ctx = scan_text[max(0, m.start() - 12):m.end() + 12].replace("\n", " ")
                 issues.append({
                     "type": cat, "severity": "高" if hard else "中", "word": w, "hard": hard,
-                    "detail": f"命中「{w}」:…{ctx}…",
+                    "detail": f"命中「{w}」：…{ctx}…",
                     "suggest": SUGGESTIONS.get(w, "删除或改为客观描述"),
                 })
                 break   # 同一个词只报一次
@@ -202,7 +202,7 @@ async def check(tid: int, title: str, body: str, platform: str = "公众号",
                 # 否则「审查通过」就是卖假安全感——后半段恰恰是导流/承诺高发区。
                 issues.append({
                     "type": "覆盖范围", "severity": "低",
-                    "detail": f"正文共 {len(body)} 字,AI 深审覆盖前 4500 字;"
+                    "detail": f"正文共 {len(body)} 字，AI 深审覆盖前 4500 字；"
                               "其余部分仅规则词库扫描。建议将卖点/导流段落前移或分段送审",
                     "suggest": "重点段落放前 4500 字内,或拆两次送审",
                 })
@@ -217,7 +217,7 @@ async def check(tid: int, title: str, body: str, platform: str = "公众号",
                 raise providers.ProviderError("AI 深度终审未完成，请稍后重试") from e
             summary = "AI 深审未完成，以下为规则库扫描结果"
             issues.append({"type": "审查异常", "severity": "低",
-                           "detail": "AI 深审未完成,本次仅规则库扫描", "suggest": "可稍后重试深审"})
+                           "detail": "AI 深审未完成，本次仅规则库扫描", "suggest": "可稍后重试深审"})
     else:
         summary = "极速扫描(规则词库)完成" if issues else "极速扫描未命中风险词"
     verdict = _verdict(issues)

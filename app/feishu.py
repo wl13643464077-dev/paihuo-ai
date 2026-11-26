@@ -98,7 +98,7 @@ def parse_app_token(url: str) -> str:
 async def _token(cli) -> str:
     app_id, secret = await db.arun(conf)
     if not app_id or not secret:
-        raise ValueError("平台未配置飞书应用(管理后台→飞书集成)")
+        raise ValueError("平台未配置飞书应用（管理后台→飞书集成）")
     data = await _request_json(
         cli,
         "post",

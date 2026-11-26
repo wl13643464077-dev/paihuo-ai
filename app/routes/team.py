@@ -23,7 +23,7 @@ def _clean_username(raw: str) -> str:
     从源头挡住 XSS/注入),限 40 字。"""
     name = (raw or "").strip()
     if not name or len(name) > 40 or _re_uname.search(r"[\s'\"<>&\\\x00-\x1f]", name):
-        raise HTTPException(400, "用户名不能含空格/引号/尖括号等特殊字符,且不超过40字")
+        raise HTTPException(400, "用户名不能含空格/引号/尖括号等特殊字符，且不超过40字")
     return name
 
 
@@ -190,9 +190,9 @@ def _open_account_from_apply(a: dict, trial_points: float = 0) -> dict:
     return {"tenant_id": tid, "tenant_name": tname[:30], "username": username,
             "password": password, "industry": industry_key or "",
             "notice": (f"【派活 PaiHuo】您的企业账号已开通\n"
-                       f"网址:https://paihuo.ai\n账号:{username}\n初始密码:{password}\n"
-                       + (f"已赠送 {trial_points:.0f} 点体验点数,登录就能派活。\n" if trial_points > 0 else "")
-                       + "登录后可在首页把密码改成您好记的。有任何问题随时联系我们,祝生意兴隆!")}
+                       f"网址：https://paihuo.ai\n账号：{username}\n初始密码：{password}\n"
+                       + (f"已赠送 {trial_points:.0f} 点体验点数，登录就能派活。\n" if trial_points > 0 else "")
+                       + "登录后可在首页把密码改成您好记的。有任何问题随时联系我们，祝生意兴隆！")}
 
 
 @router.post("/api/team/applies/{aid}/approve")
@@ -203,7 +203,7 @@ def team_apply_approve(aid: int):
     if not a:
         raise HTTPException(404)
     if a.get("username"):
-        raise HTTPException(400, f"这条申请已开通过,账号「{a['username']}」;"
+        raise HTTPException(400, f"这条申请已开通过，账号「{a['username']}」；"
                                  f"忘了密码就去该企业的成员列表重置")
     return _open_account_from_apply(a)
 

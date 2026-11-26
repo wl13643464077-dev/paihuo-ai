@@ -807,14 +807,14 @@ async def _describe_clips(clips: list, progress) -> list:
         got = llm.extract_json(result["text"]).get("descs") or []
         for i, dsc in enumerate(got[:len(descs)]):
             descs[i] = str(dsc)[:30]
-        progress("看完素材:" + ";".join(
+        progress("看完素材：" + ";".join(
             f"片段{i + 1}={d}" for i, d in enumerate(descs) if d
         ))
     except Exception as exc:
         log.warning(
             "clip vision failed error_type=%s", type(exc).__name__
         )
-        progress("素材视觉识别没成功,改用轮换分配画面")
+        progress("素材视觉识别没成功，改用轮换分配画面")
     return descs
 
 
@@ -906,11 +906,11 @@ async def build_from_clips(tvid: int, tid: int, title: str, script: str, clips: 
         c.update(probe_clip(c["path"]))
     clips = [c for c in clips if c["dur"] >= 1.5]
     if not clips:
-        raise ValueError("片段都太短或无法读取(每段至少1.5秒)")
-    progress(f"素材 {len(clips)} 段视频,口播 {len(sents)} 句;先看看每段拍了什么…")
+        raise ValueError("片段都太短或无法读取（每段至少1.5秒）")
+    progress(f"素材 {len(clips)} 段视频，口播 {len(sents)} 句；先看看每段拍了什么…")
     descs = await _describe_clips(clips, progress)
     mapping = await _assign_clips(sents, descs)
-    progress("画面分配好了,逐句配音…")
+    progress("画面分配好了，逐句配音…")
     with tempfile.TemporaryDirectory() as td:
         sem = asyncio.Semaphore(4)
 
@@ -962,7 +962,7 @@ async def build_from_clips(tvid: int, tid: int, title: str, script: str, clips: 
             segs.append(out)
             lens.append(dur + XFADE)
             if (i + 1) % 3 == 0 or i == len(sents) - 1:
-                progress(f"剪辑 {i + 1}/{len(sents)}(画面:片段{ci + 1}{('·' + descs[ci]) if descs[ci] else ''})")
+                progress(f"剪辑 {i + 1}/{len(sents)}（画面：片段{ci + 1}{('·' + descs[ci]) if descs[ci] else ''}）")
         await _append_ending(td, title_file, end_text, segs, lens)   # 结尾关注卡
         final_dir = os.path.join(ASSET_DIR, out_rel_dir)
         os.makedirs(final_dir, exist_ok=True)
@@ -970,7 +970,7 @@ async def build_from_clips(tvid: int, tid: int, title: str, script: str, clips: 
         final = os.path.join(final_dir, name)
         done = False
         if len(segs) > 1:
-            progress("拼装:叠化转场 + 轻音乐铺底…")
+            progress("拼装：叠化转场 + 轻音乐铺底…")
             try:
                 base, fgraph, vlabel, _f, total_len = _xfade_cmd(segs, lens, final, bgm_mood=bgm)
                 cmd = base + ["-filter_complex", fgraph,
@@ -1011,7 +1011,7 @@ async def build_from_clips(tvid: int, tid: int, title: str, script: str, clips: 
                 )
                 raise ValueError("拼装失败")
         final_duration = await asyncio.to_thread(_probe_dur, final)
-        progress(f"混剪完成:{final_duration:.0f} 秒(转场/字幕/BGM/调色已配)")
+        progress(f"混剪完成：{final_duration:.0f} 秒（转场/字幕/BGM/调色已配）")
         return f"/files/{out_rel_dir}/{name}"
 
 
@@ -1191,7 +1191,7 @@ async def build(tvid: int, tid: int, title: str, script: str, images: list,
     sents = split_sentences(script)
     if not sents:
         raise ValueError("口播稿是空的")
-    progress(f"口播稿共 {len(sents)} 句,逐句配音…")
+    progress(f"口播稿共 {len(sents)} 句，逐句配音…")
     with tempfile.TemporaryDirectory() as td:
         # ① 逐句 TTS(并行4路)
         sem = asyncio.Semaphore(4)
@@ -1209,7 +1209,7 @@ async def build(tvid: int, tid: int, title: str, script: str, images: list,
                 )
                 return p
         audios = await asyncio.gather(*(_one(i, s) for i, s in enumerate(sents)))
-        progress("配音完成,开始逐句合成画面…")
+        progress("配音完成，开始逐句合成画面…")
         # ② 每句一段视频
         title_file = os.path.join(td, "title.txt")
         with open(title_file, "w", encoding="utf-8") as f:
@@ -1240,7 +1240,7 @@ async def build(tvid: int, tid: int, title: str, script: str, images: list,
             segs.append(out)
             lens.append(dur + XFADE)
             if (i + 1) % 3 == 0 or i == len(sents) - 1:
-                progress(f"画面合成 {i + 1}/{len(sents)}(运镜:推近/横移/拉远轮换)")
+                progress(f"画面合成 {i + 1}/{len(sents)}（运镜：推近/横移/拉远轮换）")
         await _append_ending(td, title_file, end_text, segs, lens)   # 结尾关注卡
         # ③ 拼装:段间叠化转场 + 轻音乐铺底;失败回退硬切拼接
         final_dir = os.path.join(ASSET_DIR, out_rel_dir)
@@ -1249,7 +1249,7 @@ async def build(tvid: int, tid: int, title: str, script: str, images: list,
         final = os.path.join(final_dir, name)
         done = False
         if len(segs) > 1:
-            progress("拼装:叠化转场 + 轻音乐铺底…")
+            progress("拼装：叠化转场 + 轻音乐铺底…")
             try:
                 base, fgraph, vlabel, _f, total_len = _xfade_cmd(segs, lens, final, bgm_mood=bgm)
                 cmd = base + ["-filter_complex", fgraph,
@@ -1267,7 +1267,7 @@ async def build(tvid: int, tid: int, title: str, script: str, images: list,
                 done = r.returncode == 0 and _render_output_ok(final)
                 if not done:
                     log.warning("xfade assembly failed returncode=%s", r.returncode)
-                    progress("叠化拼装失败,回退简单拼接")
+                    progress("叠化拼装失败，回退简单拼接")
             except _Cancelled:
                 raise
             except Exception as exc:
@@ -1300,7 +1300,7 @@ async def build(tvid: int, tid: int, title: str, script: str, images: list,
                     )
                     raise ValueError("拼装失败")
         final_duration = await asyncio.to_thread(_probe_dur, final)
-        progress(f"成片完成:{final_duration:.0f} 秒(含转场/运镜/BGM)")
+        progress(f"成片完成：{final_duration:.0f} 秒（含转场/运镜/BGM）")
         return f"/files/{out_rel_dir}/{name}"
 
 
@@ -1661,7 +1661,7 @@ async def run_job(tvid: int, broadcast=None):
             await db.arun(
                 _steps_append,
                 tvid,
-                "排队中:前面还有别的成片在合成,轮到自动开工…",
+                "排队中：前面还有别的成片在合成，轮到自动开工…",
                 ("queued",),
             )
         async with _BUILD_SEM:
@@ -1776,7 +1776,7 @@ async def _run_job_inner(tvid: int, row: dict, p: dict, tid: int, broadcast):
         except (ValueError, TypeError):
             active_brand = None
         title = (p.get("title") or "").strip()[:40] or confirmed_store_name or "未命名视频"
-        progress("开工:整理口播稿…")
+        progress("开工：整理口播稿…")
         await checkpoint()
         if p.get("topic") and not p.get("script"):
             r = await _call_textvideo_employee(
@@ -1807,7 +1807,7 @@ async def _run_job_inner(tvid: int, row: dict, p: dict, tid: int, broadcast):
                 if owned:
                     clips.append({"path": owned})
             if not clips:
-                raise ValueError("没有可用的视频片段,先在混剪页上传")
+                raise ValueError("没有可用的视频片段，先在混剪页上传")
             await checkpoint()
             out_dir = "tv"
             file = await build_from_clips(tvid, tid, title, script, clips,
@@ -1828,7 +1828,7 @@ async def _run_job_inner(tvid: int, row: dict, p: dict, tid: int, broadcast):
                     continue
                 images.append(lp)
             if not images and p.get("image_query"):
-                progress(f"没有现成配图,按「{p['image_query']}」全网抓图…")
+                progress(f"没有现成配图，按「{p['image_query']}」全网抓图…")
                 from . import imagehunt
                 try:
                     cands = await imagehunt.search(p["image_query"], 12, tenant_id=tid)
@@ -1976,7 +1976,7 @@ def resume_pending(broadcast):
         try:
             settle_failure(
                 row["id"],
-                "服务重启中断,已自动退点,请重新生成",
+                "服务重启中断，已自动退点，请重新生成",
                 terminal_status="failed",
             )
         except Exception as exc:
