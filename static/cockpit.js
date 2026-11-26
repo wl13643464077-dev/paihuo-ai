@@ -1,11 +1,12 @@
 /* 老板数据驾驶舱（#/cockpit）：一屏看清每个账号用派活做了什么、门店执行、等老板拍板的事。
    数据全部来自 /api/cockpit/summary（派活自己的业务表），不接外部数据、不做估算。
+   原「老板看板」(#/boss) 已并进这里：AI 专家明细表、AI 任务卡了一天的提醒都在本页。
    导出 Excel / 打印 PDF、AI 经营分析、下发给门店或具体的人（复用「派给店员」）、追踪下发结果。
    依赖 app.js 全局：routes / api / esc / toast / $ / ME / isOwnerLike。 */
 (function(){
   "use strict";
-  const CP = {days:7, data:null, meta:null, aiBusy:false, pick:{}, peopleAll:false, prefFor:null};
-  // 周期和老板看板一样:7/30/90 天,默认 7 天;按账号记住上次选的(旧版存过的 60 天按 90 天恢复)
+  const CP = {days:7, data:null, meta:null, aiBusy:false, pick:{}, peopleAll:false, aiAll:false, prefFor:null};
+  // 周期:7/30/90 天,默认 7 天;按账号记住上次选的(旧版存过的 60 天按 90 天恢复)
   function loadDaysPref(){
     let who=""; try{ who=String((typeof ME!=="undefined"&&ME&&(ME.username||ME.id))||""); }catch(_){}
     if(CP.prefFor===who) return;
@@ -229,7 +230,7 @@
       <div class="cp-grid">
         <section class="cp-panel"><h3>下发追踪 <span class="cp-tag">${d.tracking.length} 件</span></h3>
           <div class="cp-sub">从驾驶舱下发出去的事，店员在派活里拍照交差，状态实时更新</div>${trackTable(d.tracking)}</section>
-        <section class="cp-panel"><h3>AI 专家产出</h3><div class="cp-sub">本期交付最多的 AI 专家</div>${aiEmployees(d.ai_employees)}
+        <section class="cp-panel" data-cp-ai-employees><h3>AI 专家产出 <a class="cp-mini" href="#/production">看全部产出</a></h3><div class="cp-sub">本期交付最多的 AI 专家；点「看明细」看每位干了什么、效率怎么样</div>${aiEmployees(d.ai_employees)}
           <h3 style="margin-top:16px">内容发布</h3><div class="cp-sub">发布台账里本期登记的发布</div>${content(d.content)}</section>
       </div>
       <div class="cp-foot">${esc(d.notes||"")}</div>
@@ -313,10 +314,29 @@
       </tbody></table></div><div style="margin-top:8px"><a class="cp-mini" href="#/staff-tasks">在「派给店员」里查看照片和验收</a></div>`;
   }
 
+  // 用时写成大白话：不到 1 小时说分钟，不到 2 天说小时，再长说天
+  function span(sec){
+    if(sec==null) return "—";
+    const v=Number(sec)||0;
+    if(v<3600) return `${Math.max(1,Math.round(v/60))} 分钟`;
+    if(v<172800) return `${num(v/3600,1)} 小时`;
+    return `${num(v/86400,1)} 天`;
+  }
+  /* AI 专家产出：上面是交付最多的几位(柱状)，「看明细」展开每位专家的
+     新建/交付/平均用时/等您确认/失败/退款(原老板看板「AI 专家干了什么、效率怎么样」表) */
   function aiEmployees(rows){
     if(!rows.length) return `<div class="cp-empty">本期还没有 AI 专家交付</div>`;
-    const max=Math.max(1,...rows.map(r=>r.count));
-    return `<div class="cp-mix">${rows.map(r=>`<div class="cp-mix-row" style="grid-template-columns:150px 1fr 36px"><span title="${esc(r.dept)}"><b>${esc(r.name)}</b><div class="sub" style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(r.dept)}</div></span><div class="bar"><i style="width:${(r.count/max*100).toFixed(1)}%;background:#7c5cd6"></i></div><b>${num(r.count)}</b></div>`).join("")}</div>`;
+    const top=rows.filter(r=>r.count>0).slice(0,8);
+    const max=Math.max(1,...top.map(r=>r.count));
+    const bars=top.length?`<div class="cp-mix">${top.map(r=>`<div class="cp-mix-row" style="grid-template-columns:150px 1fr 36px"><span title="${esc(r.dept)}"><b>${esc(r.name)}</b><div class="sub" style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(r.dept)}</div></span><div class="bar"><i style="width:${(r.count/max*100).toFixed(1)}%;background:#7c5cd6"></i></div><b>${num(r.count)}</b></div>`).join("")}</div>`
+      :`<div class="cp-empty">本期还没有 AI 专家交付</div>`;
+    const hot=(v)=>`<td class="n" style="color:${v?"var(--cp-down)":"inherit"}">${num(v||0)}</td>`;
+    const table=CP.aiAll?`<div class="cp-table-wrap" data-cp-ai-table style="margin-top:10px"><table class="cp-table" style="min-width:520px"><thead><tr><th>AI 专家</th><th style="text-align:right">本期新建</th><th style="text-align:right">本期交付</th><th style="text-align:right">平均用时</th><th style="text-align:right">等您确认</th><th style="text-align:right">失败</th><th style="text-align:right">退款</th></tr></thead><tbody>
+      ${rows.map(r=>`<tr><td><b>${esc(r.name)}</b>${r.dept?`<div class="sub">${esc(r.dept)}</div>`:""}</td>
+        <td class="n">${num(r.created||0)}</td><td class="n">${num(r.count||0)}</td><td class="n">${esc(span(r.avg_cycle_seconds))}</td>
+        ${hot(r.waiting)}${hot(r.failed)}${hot(r.refunded)}</tr>`).join("")}</tbody></table></div>
+      <div class="cp-sub" style="margin:8px 0 0">新建、交付、失败、退款只算这段时间；「等您确认」是到现在还没处理的。</div>`:"";
+    return `${bars}${table}<div style="text-align:center;margin-top:8px"><button type="button" class="cp-mini" data-cp-ai-all aria-expanded="${CP.aiAll?"true":"false"}" onclick="cpAiAll()">${CP.aiAll?"收起明细":`看明细（${rows.length} 位专家）`}</button></div>`;
   }
   function content(c){
     const entries=Object.entries(c.platforms||{});
@@ -328,6 +348,7 @@
   window.cpDays = n => { CP.days=n; try{ uiPrefSet("cockpit_days",n); }catch(_){} view(); };
   window.cpReload = () => view();
   window.cpPeopleAll = () => { CP.peopleAll=!CP.peopleAll; draw(); };
+  window.cpAiAll = () => { CP.aiAll=!CP.aiAll; draw(); };
   window.cpAi = async () => {
     if(CP.aiBusy) return;
     CP.aiBusy=true; draw();

@@ -613,10 +613,12 @@ class FrontendNavMobileTests(unittest.IsolatedAsyncioTestCase):
             "/api/boss/dashboard/summary": summary,
         }
         async with async_playwright() as playwright:
-            browser, page, errors = await self._open(playwright, hash_="#/boss", api_overrides=overrides)
+            browser, page, errors = await self._open(playwright, hash_="#/mine", api_overrides=overrides)
             page.on("request", lambda r: summary_days.append(r.url.split("days=")[1].split("&")[0])
                     if "/api/boss/dashboard/summary" in r.url else None)
-            await page.evaluate("render()")
+            # 老板看板已并进数据驾驶舱、不再有入口(#/boss 会跳 #/cockpit)；视图函数还保留，这里直接调用它
+            await page.wait_for_selector("#main .hubhead")
+            await page.evaluate("void bossDashboardView()")
             await page.wait_for_selector("[data-boss-idle]")
             info = await page.evaluate(
                 """() => ({

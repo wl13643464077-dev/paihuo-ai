@@ -796,7 +796,7 @@ function charSVG(color, emoji, state, size=100){
 const routes = {"":todayView,"platform":platformView,"new":newBrief,"job":jobView,"profiles":profilesView,"assets":assetsView,
   "delivery":deliveryView,"knowledge":knowledgeView,"schedules":schedulesView,"settings":settingsView,
   "avatar":avatarView,"admin":adminView,"team":teamView,"billing":billingView,"meetings":meetingsView,
-  "tasks":tasksView,"teamruns":teamRunsView,"company":companyView,"brand":brandView,"production":productionView,"boss":bossDashboardView,
+  "tasks":tasksView,"teamruns":teamRunsView,"company":companyView,"brand":brandView,"production":productionView,"boss":bossRedirectView,
   "inspections":inspectionView,"censor":censorView,
   "channels":channelsView,"tools":toolsView,"trash":trashView,"guide":guideReset,
   "notifications":notificationsView,
@@ -814,24 +814,26 @@ const NAV_GROUPS = [
   {key:"today", label:"今天", icon:"☀️", hub:"", extra:[], cards:[]},
   {key:"dispatch", label:"派活", icon:"📋", hub:"dispatch", extra:["job","delivery"],
     title:"派活", intro:"派给店员，或者交给 AI 专家，干完会通知您。",
-    // 「派给店员」排第一(连锁老板最常用的入口)；企业还没有门店时 hubView 把它挪到最后
+    // 两套「活」分两段：派给店里真人的，和交给 AI 专家的。
+    // 「派给店里的人」排第一(连锁老板最常用的入口)；企业还没有门店时 hubView 把这一段挪到最后
+    sections:[{key:"staff", title:"派给店里的人"},{key:"ai", title:"交给 AI 专家"}],
     cards:[
-      {route:"staff-tasks", icon:"🧑‍🍳", title:"派给店员", desc:"把活派给店里的人，店员拍照交差，您在手机或电脑上审核", show:()=>!!window.PH_STAFF_ADMIN?.canDispatch()},
-      {route:"new", icon:"✍️", title:"下达任务（内容）", desc:"说一句想发什么，图文或短视频脚本从选题到成稿自动写好", show:()=>canWork("content")},
-      {route:"experts", icon:"🧑‍🔧", title:"找行业专家", desc:"您这一行的专家一人一岗，店里遇到的事直接问、直接派", show:hasExperts},
-      {route:"meetings", icon:"🪑", title:"多位专家一起商量", desc:"大事拿不准，拉几位专家各出方案、互相挑错，最后给您结论", show:canMeet},
-      {route:"tasks", icon:"📦", title:"派出去的活", desc:"所有派出去的活都在这：谁在干、卡在哪、哪些等您看", show:()=>!!ME&&ME.role!=="tour"&&hasExperts()},
-      {route:"teamruns", icon:"🤝", title:"协同小队", desc:"一句话拉起专业团队，可逐个确认或同时开工，队长拆解并汇总结果", show:()=>!!ME&&ME.role!=="tour"&&hasExperts()},
-      {route:"production", icon:"📊", title:"AI 专家产出", desc:"每位 AI 专家这段时间干了多少活、花了多少", show:isOwnerLike},
+      {route:"staff-tasks", section:"staff", icon:"🧑‍🍳", title:"派给店员", desc:"把活派给店里的人，店员拍照交差，您在手机或电脑上审核", show:()=>!!window.PH_STAFF_ADMIN?.canDispatch()},
+      {route:"new", section:"ai", icon:"✍️", title:"下达任务（内容）", desc:"说一句想发什么，图文或短视频脚本从选题到成稿自动写好", show:()=>canWork("content")},
+      {route:"experts", section:"ai", icon:"🧑‍🔧", title:"找行业专家", desc:"您这一行的专家一人一岗，店里遇到的事直接问、直接派", show:hasExperts},
+      {route:"meetings", section:"ai", icon:"🪑", title:"多位专家一起商量", desc:"大事拿不准，拉几位专家各出方案、互相挑错，最后给您结论", show:canMeet},
+      {route:"teamruns", section:"ai", icon:"🤝", title:"协同小队", desc:"一句话拉起专业团队，可逐个确认或同时开工，队长拆解并汇总结果", show:()=>!!ME&&ME.role!=="tour"&&hasExperts()},
+      {route:"tasks", section:"ai", icon:"📦", title:"交给 AI 的活", desc:"交给 AI 专家的活都在这：谁在干、卡在哪、哪些等您看", show:()=>!!ME&&ME.role!=="tour"&&hasExperts()},
+      {route:"production", section:"ai", icon:"📊", title:"AI 专家产出", desc:"每位 AI 专家这段时间干了多少活、花了多少", show:isOwnerLike},
     ]},
-  {key:"store", label:"门店", icon:"🏪", hub:"store", extra:[],
+  {key:"store", label:"门店", icon:"🏪", hub:"store", extra:["boss"],
     title:"门店", intro:"各门店的巡店、整改和店员表现，一处看全。",
     cards:[
-      {route:"cockpit", icon:"🧭", title:"数据驾驶舱", desc:"每个账号用派活做了什么、门店执行得怎样、哪些事等您拍板，一屏看完；能导出、AI 分析、一键下发", show:isOwnerLike},
+      {route:"cockpit", icon:"🧭", title:"数据驾驶舱", desc:"每个账号和 AI 专家做了什么、门店执行得怎样、哪些事等您拍板，一屏看完；能导出、AI 分析、一键下发", show:isOwnerLike},
       {route:"inspections", icon:"🔍", title:"巡店", desc:"拍照上传就能巡店，问题自动记下来、派给店长整改", show:()=>!!ME&&ME.role!=="tour"},
       {route:"checklists", icon:"✅", title:"开闭店清单", desc:"每天开店、闭店、交班要做的事，店员拍照打勾，哪家没做一眼看到", show:()=>isOwnerLike()||["director","manager"].includes(ME?.job_title)},
       {route:"store-rank", icon:"🏆", title:"门店排行", desc:"按清单、整改、派活、巡店算分，看哪家做得好、哪家要盯", show:()=>isOwnerLike()||["director","manager"].includes(ME?.job_title)},
-      {route:"boss", icon:"📈", title:"老板看板", desc:"各店得分、没整改完的问题、谁拖了后腿，一眼看清", show:isOwnerLike},
+      // 「老板看板」并进了数据驾驶舱：#/boss 进入时直接换到 #/cockpit(见 bossRedirectView)
     ]},
   {key:"growth", label:"获客", icon:"📣", hub:"growth", extra:[],
     title:"获客", intro:"每天该发什么、发之前查一遍、定好时间自动发出去。",
@@ -891,11 +893,27 @@ function navGroupHref(group){
   if(cards.length===1 && cards[0].route && group.key!=="mine") return "#/"+cards[0].route;
   return "#/"+group.hub;
 }
+/* 平台管理员(root)的一级入口：派活/门店/获客对平台方没意义，换成 工作台/企业/后台/我的。
+   只换导航，不拦路由：root 直接输地址仍能打开其它页面(那时导航上不高亮任何一项)。 */
+const ROOT_NAV = [
+  {key:"today", label:"工作台", icon:"🖥️", href:"#/"},
+  {key:"platform", label:"企业", icon:"🏦", href:"#/platform"},
+  {key:"admin", label:"后台", icon:"🛠", href:"#/admin"},
+  {key:"mine", label:"我的", icon:"👤", href:"#/mine"},
+];
+function rootNavOn(page){
+  const p = String(page||"");
+  if(!p) return "today";
+  if(p==="platform"||p==="admin") return p;
+  return navGroupOf(p)==="mine" ? "mine" : "";
+}
 function nav(){
   const cur = location.hash.replace("#/","").split("/")[0];
-  const on = navGroupOf(cur);
+  const isRoot = ME?.role==="root";
+  const on = isRoot ? rootNavOn(cur) : navGroupOf(cur);
   const inbox = (STATE?.inbox?.length||0)+(STATE?.notifications?.length||0);
-  const items = NAV_GROUPS.map(g=>({g, href:navGroupHref(g)})).filter(x=>x.href);
+  const items = isRoot ? ROOT_NAV.map(g=>({g, href:g.href}))
+    : NAV_GROUPS.map(g=>({g, href:navGroupHref(g)})).filter(x=>x.href);
   const link = ({g,href},cls)=>`<a href="${href}" class="${cls} ${on===g.key?"on":""}" data-nav="${g.key}" aria-label="${esc(g.label)}${g.key==="today"&&inbox?`，${inbox} 条待处理`:""}" ${on===g.key?'aria-current="page"':""}>`
     + `<span class="nav-ic" aria-hidden="true">${g.icon}</span><span class="nav-tx">${g.label}</span>`
     + `${g.key==="today"&&inbox?`<span class="badge" aria-label="${inbox} 条待处理">${inbox}</span>`:""}</a>`;
@@ -927,6 +945,7 @@ function hubCardHtml(c){
     onkeydown="if(event.key==='Enter'){${go}}">
     <span class="hc-emoji" aria-hidden="true">${c.icon}</span>
     <span class="hc-body"><span class="hc-t">${esc(c.title)}</span><span class="hc-d">${esc(c.desc)}</span>
+      ${c.route&&HUB_STATS[c.route]?`<span class="hc-stat" data-hub-stat="${esc(c.route)}" hidden></span>`:""}
       ${subs?`<span class="hc-subs">${subs}</span>`:""}</span>
     <span class="hc-arrow" aria-hidden="true">→</span></div>`;
 }
@@ -949,19 +968,84 @@ function hubRecentRow(g, cards){
   return `<div class="hub-recent"><span class="sub">最近用过：</span>${picks.map(c=>
     `<a class="btn sm" href="#/${esc(c.route)}">${c.icon} ${esc(c.title)}</a>`).join("")}</div>`;
 }
+/* 中转页卡片上的「哪里有事」小字：只用现成的数(STATE)或现成的接口，数字为 0 就不显示。
+   每个函数返回一句话(或空串)；卡片先画出来，这些数再各自异步补上，谁读不到谁就不显示。 */
+const hubStatJoin = parts => parts.filter(Boolean).join(" · ");
+// 这些数只是锦上添花：8 秒读不到就算了，不让顶部进度条一直转
+const HUB_STAT_API = {timeout:8000};
+const HUB_STATS = {
+  "staff-tasks": async()=>{
+    const c=STATE?.staff_task_counts||{}, review=Number(c.review_pending)||0, overdue=Number(c.overdue)||0;
+    return hubStatJoin([review?`${review} 件等审核`:"", overdue?`${overdue} 件逾期`:""]);
+  },
+  "new": async()=>{
+    const n=(STATE?.inbox||[]).length;
+    return n?`${n} 篇等您处理`:"";
+  },
+  "tasks": async()=>{
+    const d=await api(`/task-center?${new URLSearchParams({limit:"1",offset:"0",q:"",status:"waiting",kind:"all"})}`,HUB_STAT_API);
+    const waiting=Number(d?.counts?.waiting)||0, failed=Number(d?.counts?.failed)||0;
+    return hubStatJoin([waiting?`${waiting} 件等您处理`:"", failed?`${failed} 件失败`:""]);
+  },
+  "checklists": async()=>{
+    const d=await api("/checklist/runs",HUB_STAT_API);
+    let done=0, total=0;
+    (Array.isArray(d?.stores)?d.stores:[]).forEach(st=>{
+      total+=Number(st.items_total!=null?st.items_total:st.total)||0;
+      done+=Number(st.items_done!=null?st.items_done:st.done)||0;
+    });
+    return total?`今天 ${done}/${total} 项`:"";
+  },
+  "inspections": async()=>{
+    const s=await storeTodaySummary();
+    if(!s) return "";
+    return hubStatJoin([s.open?`${s.open} 个问题没整改完`:"", s.overdue?`${s.overdue} 条整改逾期`:"", s.rechecks?`${s.rechecks} 条等您复查`:""]);
+  },
+  "schedules": async()=>{
+    const rows=await api("/schedules",HUB_STAT_API);
+    const start=new Date(); start.setHours(0,0,0,0);
+    const t0=start.getTime()/1000, t1=t0+86400, today=t=>Number(t)>=t0&&Number(t)<t1;
+    const n=(Array.isArray(rows)?rows:[]).filter(r=>r&&r.enabled&&(today(r.next_run_at)||today(r.last_run_at))).length;
+    return n?`今天 ${n} 条`:"";
+  },
+};
+/* 逾期、失败这类要老板马上看的，小字标红(用现成的 .bad 色) */
+const HUB_STAT_HOT = /逾期|失败/;
+function hubFillStats(){
+  const hash=location.hash;
+  document.querySelectorAll("#main [data-hub-stat]").forEach(el=>{
+    const fn=HUB_STATS[el.dataset.hubStat];
+    if(!fn||!ME||ME.role==="tour") return;
+    // 不 await：卡片已经画好，数字各自回来各自补；读不到(没权限/网络抖/切页中止)就保持不显示
+    Promise.resolve().then(fn).then(text=>{
+      if(!text||location.hash!==hash||!el.isConnected) return;
+      el.textContent=text; el.classList.toggle("hot",HUB_STAT_HOT.test(text)); el.hidden=false;
+    }).catch(()=>{});
+  });
+}
 function hubView(key, top=""){
   const g = NAV_GROUPS.find(x=>x.key===key);
   const cards = navVisibleCards(g);
-  if(g.key==="dispatch" && cards[0]?.route==="staff-tasks" && !STATE?.setup?.store){
-    cards.push(cards.shift());   // 还没有门店：先用 AI 专家，「派给店员」放最后
-  }
   const normal = cards.filter(c=>!c.rootOnly), root = cards.filter(c=>c.rootOnly);
+  const grid = list=>`<div class="hubgrid">${list.map(hubCardHtml).join("")}</div>`;
+  let body;
+  if(g.sections && normal.length){
+    // 分段的中转页(派活)：每段一个小标题；这一段一张卡都看不到就整段不出现
+    const sections = g.sections.map(sec=>({...sec, cards:normal.filter(c=>c.section===sec.key)})).filter(sec=>sec.cards.length);
+    if(g.key==="dispatch" && sections[0]?.key==="staff" && sections.length>1 && !STATE?.setup?.store){
+      sections.push(sections.shift());   // 还没有门店：先用 AI 专家，「派给店里的人」放最后
+    }
+    body = sections.map(sec=>`<h3 class="hub-section" data-hub-section="${esc(sec.key)}">${esc(sec.title)}</h3>${grid(sec.cards)}`).join("");
+  }else{
+    body = normal.length?grid(normal)
+      :`<div class="card"><div class="empty">您的账号还没有开通这里的功能，请联系企业主账号开通。</div></div>`;
+  }
   $("#main").innerHTML = `<div class="hubhead"><h2>${g.icon} ${esc(g.title)}</h2><div class="sub">${esc(g.intro)}</div></div>`
     + hubRecentRow(g, normal)
     + top
-    + (normal.length?`<div class="hubgrid">${normal.map(hubCardHtml).join("")}</div>`
-      :`<div class="card"><div class="empty">您的账号还没有开通这里的功能，请联系企业主账号开通。</div></div>`)
-    + (root.length?`<h3 class="hub-section">平台运营（仅平台账号可见）</h3><div class="hubgrid">${root.map(hubCardHtml).join("")}</div>`:"");
+    + body
+    + (root.length?`<h3 class="hub-section">平台运营（仅平台账号可见）</h3>${grid(root)}`:"");
+  hubFillStats();
 }
 async function dispatchHub(){ hubView("dispatch"); }
 async function storeHub(){
@@ -1108,9 +1192,26 @@ function openStoreImport(){
 async function growthHub(){
   hubView("growth", canWork("content")?`<a class="btn pri today-post" href="#/tools/hot">🔥 今天发什么<span class="sub">每天挑好今天该发的内容，照着发就行</span></a>`:"");
 }
+/* 「我的」页账号卡片下的「修改密码」：点按钮展开表单(当前密码 + 新密码)，保存成功后自动收起 */
+function minePwToggle(open){
+  const box=$("#mine-pw-form"), btn=$("[data-mine-pw-toggle]");
+  if(!box) return;
+  const show = open===undefined ? box.hidden : !!open;
+  box.hidden=!show;
+  if(btn){ btn.setAttribute("aria-expanded",show?"true":"false"); btn.textContent=show?"收起":"🔑 修改密码"; }
+  if(show) setTimeout(()=>$("#tm-old")?.focus(),30);
+}
 async function mineHub(){
-  const who = ME?`<div class="card mine-who"><b>${esc(ME.tenant||"")}</b> · ${esc(ME.username||"")}
-    ${ME.role!=="root"&&canSeeBilling()&&STATE?`<div class="sub" style="margin-top:4px">余额 ${Math.round(STATE.balance||0)} 点${STATE.plan?` · ${esc(STATE.plan)}`:""}</div>`:""}</div>`:"";
+  // 参观模式没有自己的账号密码，不给改密码入口
+  const canPw = !!ME && ME.role!=="tour";
+  const who = ME?`<div class="card mine-who"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <div style="flex:1;min-width:0"><b>${esc(ME.tenant||"")}</b> · ${esc(ME.username||"")}
+    ${ME.role!=="root"&&canSeeBilling()&&STATE?`<div class="sub" style="margin-top:4px">余额 ${Math.round(STATE.balance||0)} 点${STATE.plan?` · ${esc(STATE.plan)}`:""}</div>`:""}</div>
+    ${canPw?`<button type="button" class="btn sm" data-mine-pw-toggle aria-expanded="false" aria-controls="mine-pw-form" onclick="minePwToggle()">🔑 修改密码</button>`:""}</div>
+    ${canPw?`<div id="mine-pw-form" hidden style="margin-top:12px">
+      <div class="row"><div><label>当前密码</label><input id="tm-old" type="password" autocomplete="current-password" ${enterSubmit("tmMyPw()")}></div>
+        <div><label>新密码（至少 12 位，至少两类字符）</label><input id="tm-new" type="password" autocomplete="new-password" ${enterSubmit("tmMyPw()")}></div></div>
+      <div class="actions"><button type="button" class="btn pri" onclick="tmMyPw()">💾 保存新密码</button></div></div>`:""}</div>`:"";
   hubView("mine", who);
   $("#main").insertAdjacentHTML("beforeend",
     `<div class="actions" style="margin-top:18px"><button type="button" class="btn bad" onclick="logout()">🚪 退出登录</button></div>`);
@@ -1195,9 +1296,9 @@ async function forcedPasswordChange(){
   }catch(e){ if(errBox) showErr(e.message); else toast(e.message); }
   finally{ FORCED_PW_BUSY=false; }
 }
-const ROUTE_LABELS={"":"今天",tasks:"派出去的活",teamruns:"协同小队",brand:"品牌知识包",new:"下达任务",avatar:"数字人视频",meetings:"多位专家一起商量",
+const ROUTE_LABELS={"":"今天",tasks:"交给 AI 的活",teamruns:"协同小队",brand:"品牌知识包",new:"下达任务",avatar:"数字人视频",meetings:"多位专家一起商量",
     tools:"获客工具",channels:"发布渠道",schedules:"定时发布",profiles:"品牌人设",
-    assets:"资料库",knowledge:"经验库",production:"AI 专家产出",boss:"老板看板",cockpit:"数据驾驶舱",
+    assets:"资料库",knowledge:"经验库",production:"AI 专家产出",boss:"数据驾驶舱",cockpit:"数据驾驶舱",
     inspections:"巡店",censor:"内容审查",company:"企业档案",
     billing:"套餐与点数",team:"团队与权限",admin:"后台",platform:"平台运营",job:"任务详情",delivery:"交付中心",
     trash:"回收站",notifications:"通知记录",dispatch:"派活",store:"门店",growth:"获客",
@@ -2352,7 +2453,7 @@ function tcNewButton(){
   if(canWork("avatar")) return `<a class="btn pri" href="#/avatar">➕ 新建数字人任务</a>`;
   return `<a class="btn pri" href="#/experts">➕ 去找行业专家派活</a>`;
 }
-/* 「派出去的活」只列交给 AI 专家的任务；派给店员的活在另一页，这里给个明显入口(带上在做/等审核件数) */
+/* 「交给 AI 的活」只列交给 AI 专家的任务；派给店员的活在另一页，这里给个明显入口(带上在做/等审核件数) */
 function tcStaffCanSee(){ return !!window.PH_STAFF_ADMIN?.canDispatch?.(); }
 function tcStaffEntry(){
   if(!tcStaffCanSee()) return "";
@@ -2367,7 +2468,7 @@ function taskCenterDraw(){
   const hasMore = d.has_more===true || (d.has_more===undefined && d.truncated===true);
   $("#main").innerHTML = `<div class="card" style="background:linear-gradient(120deg,#fff2bd,#fffaf0 65%)">
     <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-      <div style="flex:1;min-width:240px"><h2 style="font-size:22px;margin:0">📦 派出去的活</h2>
+      <div style="flex:1;min-width:240px"><h2 style="font-size:22px;margin:0">📦 交给 AI 的活</h2>
         <div class="sub" style="margin-top:5px">这里是您交给 AI 专家的活。先看谁正在干、卡在哪里，再点开任务或追到它的生成来源。</div></div>
       ${tcNewButton()}</div>${tcStaffEntry()}</div>
   <div class="grid3 tc-stats" style="grid-template-columns:repeat(auto-fit,minmax(145px,1fr));margin-bottom:18px">
@@ -2802,7 +2903,7 @@ function drawModal(){
 function inspectionEmployeeTab(s,e){
   return `<div class="card" style="background:linear-gradient(120deg,#e8f6ef,#fffaf0);margin-top:0">
     <h2 style="margin-top:0">🏪 用照片开始一次真正的巡店</h2>
-    <p>选择行业和门店，上传1～8张现场照片。${esc(s.name)}会标出可见问题与照片证据，形成整改负责人、期限和复查记录，最后汇总到老板看板。</p>
+    <p>选择行业和门店，上传1～8张现场照片。${esc(s.name)}会标出可见问题与照片证据，形成整改负责人、期限和复查记录，最后汇总到数据驾驶舱。</p>
     <div class="notice">巡店不能用普通文字派活代替：必须有当次门店照片，问题才会和真实证据绑定。</div>
     <div class="actions"><button class="btn pri" onclick="closeModal();location.hash='#/inspections'">📷 打开巡店工作台</button></div>
   </div>`;
@@ -5056,7 +5157,7 @@ const featHint = k => (FEAT && FEAT[k] && FEAT[k].hint) || "该功能已被平�
 
 /* ---------- 交付包 ---------- */
 async function deliveryView(id){
-  // 不带任务编号直接打开「交付中心」：没有可看的交付包，回到「派出去的活」挑一个任务
+  // 不带任务编号直接打开「交付中心」：没有可看的交付包，回到「交给 AI 的活」挑一个任务
   if(!/^\d+$/.test(String(id??""))||Number(id)<=0){ location.replace("#/tasks"); return; }
   const [d, TVS, MX] = await Promise.all([api(`/jobs/${id}/delivery`),
     api(`/text-video?job_id=${id}`).catch(optionalResult([])),
@@ -5832,6 +5933,9 @@ function bossCarryInspectionIndustry(value){
   const selected=String(value||"");if(!selected)return;
   inspectionResetScope(selected);
 }
+/* 老板看板已并进数据驾驶舱：旧地址 #/boss(收藏、通知里的旧链接)进来直接换成 #/cockpit，不留历史。
+   bossDashboardView 及其接口保留(别处仍可复用)，只是不再有入口。 */
+async function bossRedirectView(){ location.replace("#/cockpit"); }
 async function bossDashboardView(){
   const request={seq:++BOSS_DASH_REQUEST_SEQ,scope:bossDashboardScopeSnapshot()};
   BOSS_EMPLOYEE_REQUEST_SEQ++;
@@ -8307,10 +8411,8 @@ async function teamView(){
     const crew = myStores.length ? managed.filter(u=>stores(u).some(n=>myStores.includes(n))) : managed;
     const crewWord = meRole==="店长" ? "店员" : "成员";
     const storeText = list=>list.length>2?`${list.slice(0,2).join("、")} 等 ${list.length} 家`:list.join("、");
-    const pwCard = `<div class="card"><h2>🔑 修改密码</h2>
-      <div class="row"><div><label>当前密码</label><input id="tm-old" type="password" autocomplete="current-password" ${enterSubmit("tmMyPw()")}></div>
-        <div><label>新密码（至少 12 位，至少两类字符）</label><input id="tm-new" type="password" autocomplete="new-password" ${enterSubmit("tmMyPw()")}></div></div>
-      <div class="actions"><button class="btn pri" onclick="tmMyPw()">💾 保存新密码</button></div></div>`;
+    // 改自己的密码在「我的」页(所有角色都有)，团队页只留一句指路
+    const pwCard = `<div class="sub" data-team-pw-hint style="margin:0 4px 18px">要改自己的密码，请到 <a href="#/mine" style="text-decoration:underline;font-weight:800">我的 → 修改密码</a>。</div>`;
     if(!canAssign){
       $("#main").innerHTML = `
       <div class="notice" style="margin-top:0" data-team-role="${esc(meRole)}">👥 <b>我的团队</b>：您是${esc(meRole)}${myStores.length?`，负责 ${esc(storeText(myStores))}`:""}。给${crewWord}派活、审核交差在「派活 → 派给店员」里；开账号、重置密码、换门店都请找老板。</div>
@@ -8335,7 +8437,7 @@ async function teamView(){
   $("#main").innerHTML = `
   <div class="notice" style="margin-top:0">👥 <b>团队与权限</b>：给店长、店员和办公室同事开账号，定好谁管哪家店、能用哪些 AI 专家。
     <details class="team-intro-more" style="margin-top:4px"><summary style="cursor:pointer;font-weight:800">了解更多</summary>
-      <div class="sub" style="margin-top:4px">账号的职级（总监/经理/员工）、能看的行业、能用的数字员工、密码和停用都由老板在这里定；每个数字员工用什么模型在员工面板里调。总监、经理登录后也能在自己的行业里给下级分配数字员工。${ME.role==="root"?"开客户企业、充点在「我的 → 平台运营」。":""}各企业的数据完全隔开。</div></details></div>
+      <div class="sub" style="margin-top:4px">账号的职级（总监/经理/员工）、能看的行业、能用的数字员工、密码和停用都由老板在这里定；每个数字员工用什么模型在员工面板里调。总监、经理登录后也能在自己的行业里给下级分配数字员工。${ME.role==="root"?"开客户企业、充点在「企业」页。":""}各企业的数据完全隔开。</div></details></div>
   <div class="card"><h2>🏢 我的企业</h2>
     <div class="row" style="align-items:flex-end">
       <div style="flex:1"><label>企业名称</label><input id="tm-name" value="${esc(t.tenant.name)}"></div>
@@ -8349,10 +8451,7 @@ async function teamView(){
     <div id="tm-uform"></div>
     ${t.users.map(u=>tmMemberRow(u,t)).join("")}
     <div id="tm-modbox"></div><div id="tm-allocbox"></div></div>
-  <div class="card"><h2>🔑 修改密码</h2>
-    <div class="row"><div><label>当前密码</label><input id="tm-old" type="password" autocomplete="current-password" ${enterSubmit("tmMyPw()")}></div>
-      <div><label>新密码（至少 12 位，至少两类字符）</label><input id="tm-new" type="password" autocomplete="new-password" ${enterSubmit("tmMyPw()")}></div></div>
-    <div class="actions"><button class="btn pri" onclick="tmMyPw()">💾 保存新密码</button></div></div>
+  <div class="sub" data-team-pw-hint style="margin:0 4px 18px">要改自己的密码，请到 <a href="#/mine" style="text-decoration:underline;font-weight:800">我的 → 修改密码</a>。</div>
   ${ME.role==="root"?`<div class="card" data-team-platform-link style="background:#fff6dc"><h2>🏦 平台运营（仅平台可见）</h2>
     <div class="sub">开新企业、企业列表、充点、开套餐和开通申请都在单独一页。</div>
     <div class="actions"><a class="btn pri" href="#/platform">去平台运营 →</a></div></div>`:""}`;
@@ -8744,6 +8843,7 @@ async function tmDel(uid,name){ if(!await uiConfirm(`删除账号「${name}」�
   title:"删除账号",confirmText:"删除"
 })) return;
   try{ await api(`/team/users/${uid}`,{method:"DELETE"}); toast("已删除"); render(); }catch(e){ toast(e.message); } }
+/* 改自己的密码：表单在「我的」页账号卡片下(minePwToggle 展开)，所有角色都能用 */
 async function tmMyPw(){
   const password=$("#tm-new").value, passwordError=passwordPolicyError(password);
   if(passwordError) return toast(passwordError);
@@ -8751,6 +8851,7 @@ async function tmMyPw(){
     // 服务端已给这台设备补发新会话，不用重新登录；其他设备上的旧登录会失效。
     toast("密码已修改，其他设备需要用新密码重新登录");
     $("#tm-old").value=""; $("#tm-new").value="";
+    minePwToggle(false);
   }catch(e){ toast(e.message); }
 }
 let TM_INDS = [];
@@ -8879,6 +8980,12 @@ async function tmTenantToggle(tid,en){
 
 /* ---------- V8:套餐与点数 ---------- */
 let BILL_TAB="all";
+/* 套餐页底部「账单明细」折叠区(按月对账 + 点数明细)：默认收起，点开后切页签、刷新都保持展开 */
+let BILL_LEDGER_OPEN=false;
+function billingGoPlans(){
+  const box=document.getElementById("billing-plans");
+  if(box) box.scrollIntoView({behavior:"smooth",block:"start"});
+}
 /* 点数明细的显示合并:一笔「退回:X · 原因」和它之前那笔同名、同额的「X」扣点配成一对,
    合成一行 delta=0 的「没做成，未扣点」。只动显示,不碰扣点/退点逻辑和服务端统计。
    log 按时间倒序(新的在前),所以退回行在前、对应的扣点行在后。 */
@@ -9135,14 +9242,18 @@ async function purchaseSubmit(plan,period){
 function purchaseOwnHtml(){
   const items=PURCHASE_CONTEXT.own?.items||[];
   if(ME?.role!=="owner") return "";
-  return `<div class="card" id="purchase-own"><h2>🧭 我的购买申请</h2>
-    <div class="sub">从申请、联系到到账开通，每一步都能在这里追踪。</div>
-    ${items.length?items.map(item=>`<div class="topic" style="margin-top:10px">
+  const rows=items.length?items.map(item=>`<div class="topic" style="margin-top:10px">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><b style="flex:1">${esc(item.plan_name)} · ${esc(item.period_label)}</b>
         <span class="tag" style="background:${PURCHASE_STATUS_COLORS[item.status]||"#eee"}">${esc(PURCHASE_STATUS_LABELS[item.status]||item.status)}</span></div>
       <div class="sub" style="margin-top:6px">报价 ¥${Number(item.price)} · ${Number(item.points)} 点 · 申请于 ${tcFmt(item.created_at)}</div>
       <div class="sub">${item.status==="requested"?"平台尚未确认联系，请保持联系方式畅通。":item.status==="contacted"?"平台已联系，确认线下到账后才会开通。":item.status==="paid"?"套餐与点数已开通，可在本页上方核对余额。":"本次申请已结束，如仍有需要可重新申请。"}</div>
-    </div>`).join(""):`<div class="empty" style="padding:24px">还没有购买申请。选择下面的套餐即可提交。</div>`}</div>`;
+    </div>`).join(""):"";
+  // 没有申请时整块收成一行，不占一屏
+  if(!items.length) return `<div class="card" id="purchase-own" data-purchase-own-empty style="padding:13px 17px"><b>🧭 我的购买申请</b>
+    <span class="sub">还没有购买申请。在上面选好套餐提交后，进度会显示在这里。</span></div>`;
+  return `<div class="card" id="purchase-own"><h2>🧭 我的购买申请</h2>
+    <div class="sub">从申请、联系到到账开通，每一步都能在这里追踪。</div>
+    ${rows}</div>`;
 }
 function purchaseAdminHtml(){
   if(ME?.role!=="root") return "";
@@ -9230,7 +9341,7 @@ function billingPointsCardHtml(b){
 function billingPlansCardHtml(){
   const plans=PURCHASE_CONTEXT.catalog?.plans||PLAN_REFERENCE.plans||[];
   const payLine=ME?.role==="member"?"充值、续费请找<b>老板</b>操作。"
-    :ME?.role==="root"?"在上方购买线索中核对客户申请和线下到账；也可在「我的 → 平台运营」人工开通。"
+    :ME?.role==="root"?"在上方购买线索中核对客户申请和线下到账；也可在「企业」页人工开通。"
     :wxpayOnline()?"选好套餐后可以直接微信扫码付款，付完自动开通；也可以提交购买申请，由平台联系。"
     :"选择套餐后提交购买申请，平台联系并确认线下到账后才会开通，不会在页面内自动扣款。";
   return `<div class="card" id="billing-plans"><h2>📦 套餐（月/季/年）</h2>
@@ -9317,14 +9428,21 @@ async function billingView(){
       <div class="stat" style="background:#2b2317;color:#ffd166;border:3px solid var(--ink);border-radius:16px;padding:14px 30px;text-align:center;box-shadow:4px 4px 0 rgba(51,41,31,.25)">
         <div style="font-size:38px;font-weight:900;line-height:1">${b.is_platform?"∞":(b.balance||0).toFixed(0)}</div>
         <div style="font-size:12px;opacity:.85">点数余额</div></div>
+      ${b.is_platform?"":`<button type="button" class="btn pri" data-billing-go-plans onclick="billingGoPlans()">充点 / 升级套餐</button>`}
     </div>
     ${b.is_platform?`<div class="notice" style="margin-bottom:0">👑 您是平台方，自己用不扣点数（显示∞）。下面看到的是给客户开通/客户消耗的真实记录。客户登录自己账号时，这里就是他的余额和账单。</div>`
       :`<div class="kv" style="margin-top:12px"><span>累计充值 <b style="color:#2f9e6e">+${(b.recharged||0).toFixed(0)}</b></span>
         <span>累计消耗 <b style="color:#e5484d">-${(b.spent||0).toFixed(0)}</b></span>
         ${(b.refunded_total||0)>0?`<span>失败退回 <b style="color:#b45309">+${(b.refunded_total||0).toFixed(0)}</b></span>`:""}
         <span>共 ${b.txn_n||0} 笔</span></div>`}</div>
-  ${purchaseOwnHtml()}${purchaseAdminHtml()}${wxpayAdminHtml()}
+  ${purchaseAdminHtml()}${wxpayAdminHtml()}
+  ${billingPlansCardHtml()}
   ${b.is_platform?"":billingPointsCardHtml(b)}
+  ${billingPriceTableHtml(b.prices)}
+  ${purchaseOwnHtml()}
+  <details class="billing-ledger" id="billing-ledger" ${BILL_LEDGER_OPEN?"open":""} ontoggle="BILL_LEDGER_OPEN=this.open">
+  <summary class="card" data-billing-ledger-toggle style="cursor:pointer;padding:13px 17px"><b>🧾 账单明细</b>
+    <span class="sub">${b.is_platform?"给客户开通、客户消耗的记录":`按月对账、每一笔充值和消耗 · 共 ${b.txn_n||b.log.length} 笔`} · 点开查看</span></summary>
   ${spendActs.length?`<div class="card"><h2>💸 近30天花在哪</h2>
     <div class="sub">按功能统计最近 30 天实际消耗的点数，帮您看清钱被哪类动作花掉了。</div>
     ${spendActs.map(s=>`<div style="margin-top:12px">
@@ -9356,8 +9474,7 @@ async function billingView(){
         <td><b style="color:${l.merged?"var(--ink2)":l.delta<0?"#e5484d":"#2f9e6e"}">${l.delta>0?"+":""}${l.delta}</b></td>
         <td class="sub">${l.balance.toFixed(0)}</td></tr>`).join("")}</tbody></table></div>`
       :`<div class="empty" style="padding:26px">${b.is_platform?"平台自用不产生账单":BILL_TAB==="in"?"还没有充值记录":BILL_TAB==="out"?"还没有消耗记录":"暂无点数变动记录"}</div>`}</div>
-  ${billingPriceTableHtml(b.prices)}
-  ${billingPlansCardHtml()}
+  </details>
 `;
   enhanceResponsiveTables($("#main"));
 }

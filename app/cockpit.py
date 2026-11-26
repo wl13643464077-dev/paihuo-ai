@@ -27,6 +27,10 @@ IDLE_DAYS = 7
 DONE = ("done", "completed", "success", "succeed")
 WAITING = ("awaiting_review", "gate_blocked", "awaiting_execution", "paused", "blocked")
 FAILED = ("failed", "error")
+# AI 任务「还在跑」的状态；超过 STALE_AFTER_S 没动静的要提醒老板(原老板看板的口径)
+ACTIVE = ("queued", "running", "brainstorm", "validate", "execute", "executing",
+          "pending_charge", "processing", "submitting", "submitted")
+STALE_AFTER_S = 24 * 60 * 60
 ROLE_LABELS = {"owner": "老板", "root": "老板", "director": "总监",
                "manager": "店长", "staff": "店员"}
 SEVERITY_LABELS = {"critical": "严重", "high": "高", "medium": "中", "low": "低"}
@@ -245,6 +249,17 @@ def _todo(tid: int, now: float, branches: dict[int, str], users: dict[int, dict]
                       "label": "AI 专家等您确认", "title": _brief_title(r["brief_json"]) or f"任务 #{r['id']}",
                       "branch_id": None, "branch": "", "who": r["employee_name_snapshot"] or "AI 专家",
                       "since": r["updated_at"], "route": f"#/tasks/{r['id']}", "dispatchable": False})
+    # 原老板看板「先处理清单」里的一项：AI 任务跑了一天还没动静，多半卡住了
+    for r in db.q(f"SELECT id,brief_json,employee_name_snapshot,updated_at,created_at FROM task "
+                  f"WHERE tenant_id=? AND deleted_at IS NULL AND LOWER(status) IN ({_in(ACTIVE)}) "
+                  "AND COALESCE(updated_at,created_at,0)<? ORDER BY updated_at LIMIT 20",
+                  (tid, now - STALE_AFTER_S)):
+        items.append({"key": f"task_stale:{r['id']}", "type": "stale", "level": "mid",
+                      "label": "AI 任务超过 24 小时还在跑",
+                      "title": _brief_title(r["brief_json"]) or f"任务 #{r['id']}",
+                      "branch_id": None, "branch": "", "who": r["employee_name_snapshot"] or "AI 专家",
+                      "since": r["updated_at"] or r["created_at"], "route": f"#/tasks/{r['id']}",
+                      "dispatchable": False})
     rank = {"high": 0, "mid": 1, "normal": 2}
     items.sort(key=lambda x: (rank.get(x["level"], 3), float(x["since"] or 0)))
     return items
@@ -367,15 +382,33 @@ def _trend(tid: int, days: int, now: float) -> list[dict]:
 
 
 def _ai_employees(tid: int, s: float, e: float) -> list[dict]:
+    """每位 AI 专家本期干了什么、效率怎么样(原老板看板的专家明细并到这里)。
+
+    count=本期交付(按完成时间)；created=本期新建；failed/refunded=本期失败/退款；
+    waiting=到现在还等老板确认的(不分时间段)；avg_cycle_seconds=本期交付的平均用时。
+    交付多的排前面；本期什么都没发生的专家不列。
+    """
     depts = {str(d.get("key")): str(d.get("name") or d.get("key")) for d in departments.list_depts()}
+    term = "COALESCE(terminal_at,updated_at)"
+    done_in = f"LOWER(status) IN ({_in(DONE)}) AND {term}>=? AND {term}<?"
     rows = db.q(
-        "SELECT employee_name_snapshot AS name, employee_dept_key AS dept, COUNT(*) AS n "
-        "FROM task WHERE tenant_id=? AND deleted_at IS NULL "
-        f"AND LOWER(status) IN ({_in(DONE)}) "
-        "AND COALESCE(terminal_at,updated_at)>=? AND COALESCE(terminal_at,updated_at)<? "
-        "AND employee_name_snapshot!='' GROUP BY employee_name_snapshot, employee_dept_key "
-        "ORDER BY n DESC LIMIT 8", (tid, s, e))
-    return [{"name": r["name"], "dept": depts.get(str(r["dept"] or ""), ""), "count": int(r["n"])}
+        "SELECT employee_name_snapshot AS name, employee_dept_key AS dept, "
+        f"SUM(CASE WHEN {done_in} THEN 1 ELSE 0 END) AS n, "
+        "SUM(CASE WHEN created_at>=? AND created_at<? THEN 1 ELSE 0 END) AS created, "
+        f"SUM(CASE WHEN LOWER(status) IN ({_in(WAITING)}) THEN 1 ELSE 0 END) AS waiting, "
+        f"SUM(CASE WHEN LOWER(status) IN ({_in(FAILED)}) AND {term}>=? AND {term}<? "
+        "THEN 1 ELSE 0 END) AS failed, "
+        "SUM(CASE WHEN refunded_at>=? AND refunded_at<? THEN 1 ELSE 0 END) AS refunded, "
+        f"AVG(CASE WHEN {done_in} AND {term}>=created_at THEN {term}-created_at END) AS cycle "
+        "FROM task WHERE tenant_id=? AND deleted_at IS NULL AND employee_name_snapshot!='' "
+        "GROUP BY employee_name_snapshot, employee_dept_key "
+        "HAVING n>0 OR created>0 OR waiting>0 OR failed>0 OR refunded>0 "
+        "ORDER BY n DESC, created DESC, name LIMIT 50",
+        (s, e, s, e, s, e, s, e, s, e, tid))
+    return [{"name": r["name"], "dept": depts.get(str(r["dept"] or ""), ""), "count": int(r["n"] or 0),
+             "created": int(r["created"] or 0), "waiting": int(r["waiting"] or 0),
+             "failed": int(r["failed"] or 0), "refunded": int(r["refunded"] or 0),
+             "avg_cycle_seconds": (round(float(r["cycle"])) if r["cycle"] is not None else None)}
             for r in rows]
 
 
@@ -599,8 +632,11 @@ def export_xlsx(data: Mapping[str, Any]) -> bytes:
             _fmt_ts(t["created_at"])] for t in data["tracking"]])
     sheet("每日趋势", ["日期", "AI交付", "店员交差", "清单完成"],
           [[d["day"], d["ai"], d["staff"], d["checklist"]] for d in data["trend"]])
-    sheet("AI专家", ["AI 专家", "部门", "交付件数"],
-          [[a["name"], a["dept"], a["count"]] for a in data["ai_employees"]])
+    sheet("AI专家", ["AI 专家", "部门", "本期交付", "本期新建", "等您确认", "本期失败", "本期退款", "平均用时(分钟)"],
+          [[a["name"], a["dept"], a["count"], a.get("created", 0), a.get("waiting", 0),
+            a.get("failed", 0), a.get("refunded", 0),
+            (round(a["avg_cycle_seconds"] / 60, 1) if a.get("avg_cycle_seconds") is not None else "")]
+           for a in data["ai_employees"]])
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -632,7 +668,8 @@ def build_ai_prompt(data: Mapping[str, Any]) -> str:
                  for p in data["people"][:30]],
         "门店": [{"门店": s["name"], "综合分": s["score"], "较上期": s["delta"], "原因": s["reasons"],
                 "未闭环问题": s["open_issues"]} for s in data["stores"][:20]],
-        "AI员工交付": data["ai_employees"],
+        "AI员工交付": [{"name": a["name"], "dept": a["dept"], "count": a["count"]}
+                   for a in data["ai_employees"] if a.get("count")][:8],
         "工作构成": {m["label"]: m["count"] for m in data["mix"]},
         "已发布内容": data["content"],
     }

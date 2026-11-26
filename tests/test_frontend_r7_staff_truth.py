@@ -85,7 +85,10 @@ class FrontendStaffTruthTests(unittest.IsolatedAsyncioTestCase):
         }
         async with async_playwright() as playwright:
             browser, page, errors = await self._open(
-                playwright, width=1280, height=900, hash_="#/boss", api_overrides=overrides)
+                playwright, width=1280, height=900, hash_="#/mine", api_overrides=overrides)
+            # 老板看板已并进数据驾驶舱、不再有入口(#/boss 会跳 #/cockpit)；视图函数还保留，这里直接调用它
+            await page.wait_for_selector("#main .hubhead")
+            await page.evaluate("void bossDashboardView()")
             await page.wait_for_selector("[data-boss-staff-risk]")
             rows = await page.evaluate(
                 "[...document.querySelectorAll('[data-boss-staff-risk]')].map(a=>"
@@ -100,7 +103,7 @@ class FrontendStaffTruthTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("派给店员的活看「先处理清单」", text)
             # 管不着店员的活时(接口给 None)不显示这两行，也不伪装成 0
             summary["risk_metrics"].update(staff_review_pending=None, staff_overdue_tasks=None)
-            await page.evaluate("render()")
+            await page.evaluate("void bossDashboardView()")
             await page.wait_for_function(
                 "document.querySelector('#main')?.innerText.includes('先处理清单')"
                 " && !document.querySelector('[data-boss-staff-risk]')")
