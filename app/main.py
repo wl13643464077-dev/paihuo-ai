@@ -32,6 +32,7 @@ from . import (analyzer, assetfiles, auth, billing, bossdashboard, brand_media, 
 from . import instancelock, resume, retention, timeutil  # 单进程锁 / 数据保留期 / 北京时间
 from . import wxpay  # 微信支付 APIv3(默认关闭)
 from . import photoproof  # 店员现场照片(压缩+水印+落盘)
+from . import people  # 账号显示名(姓名，没填回退登录名)
 from . import api_staff, stafftask  # 第 2 期:派给店员的任务(路由模块 + 服务层)
 from . import api_checklist, reminders  # 第2期:开闭店清单/门店排行路由 + 提醒升级循环
 from . import features  # 第3期:高风险功能开关 + AI 生成内容标识
@@ -1808,6 +1809,9 @@ def auth_me(request: Request = None):
     mods = [m["key"] for m in auth.all_modules()] if u["role"] in ("root", "owner") \
         else u["modules"]
     return {"id": u["id"], "username": u["username"], "role": u["role"],
+            # name=给人看的称呼(姓名，没填回退登录名)；display_name=填的姓名(可空)
+            "name": people.display_name(u),
+            "display_name": str(u.get("display_name") or "").strip(),
             "tenant": (t or {}).get("name", ""), "modules": mods,
             "all_modules": auth.all_modules(),
             "job_title": auth.job_title(),
@@ -2416,6 +2420,10 @@ def state(limit: int | None = None, offset: int = 0):
               "staff_task_counts": stafftask.attention_counts(TEN(), auth.current()),
               "balance": ten_row.get("balance") or 0,
               "plan": ten_row.get("plan") or "",
+              # 北京时间的「今天」：今天页问候语旁的日期用它，不用浏览器本地时间，
+              # 和店员手机版(/api/staff/todo 的 date_text)同一个来源、同一个写法。
+              "today": timeutil.today_cn(),
+              "today_text": timeutil.today_text_cn(),
               "setup": setup, "trio": trio}
     if not auth.can_see_balance():
         # 店长、店员、办公室同事不看企业余额:不下发数字,只给「点数够不够」
@@ -2683,18 +2691,9 @@ def _job_or_404(job_id: int) -> dict:
 
 
 def _tenant_username(uid) -> str | None:
-    """按当前租户查用户名做展示;跨租户/已删除账号一律返回 None,不泄露别家用户。"""
-    try:
-        uid = int(uid or 0)
-    except (TypeError, ValueError):
-        return None
-    if uid <= 0:
-        return None
-    row = db.one(
-        "SELECT username FROM users WHERE id=? AND tenant_id=?",
-        (uid, TEN()),
-    )
-    return row["username"] if row else None
+    """按当前租户查人名做展示(姓名，没填回退登录名);跨租户/已删除账号一律返回 None,
+    不泄露别家用户。"""
+    return people.name_of(TEN(), uid)
 
 
 def _notify_member_review(job: dict, idx: int, action) -> None:
@@ -2710,7 +2709,7 @@ def _notify_member_review(job: dict, idx: int, action) -> None:
     from . import notify
     notify.push(int(job.get("tenant_id") or TEN()), "member_reviewed", {
         "job_id": int(job["id"]),
-        "user": u.get("username") or "",
+        "user": people.display_name(u),
         "station": station.get("name") or f"{idx + 1}",
         "approved": action != "reject",
         "title": engine._job_title(job["id"]),
@@ -2847,7 +2846,7 @@ def gate_action(job_id: int, body: dict):
         from . import notify
         notify.push(int(job.get("tenant_id") or TEN()), "member_reviewed", {
             "job_id": int(job_id),
-            "user": u.get("username") or "",
+            "user": people.display_name(u),
             "station": "审查关卡",
             "approved": action == "override",
             "title": engine._job_title(job_id),

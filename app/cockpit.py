@@ -15,7 +15,7 @@ import json
 import time
 from typing import Any, Callable, Mapping
 
-from . import db, departments, storerank, timeutil
+from . import db, departments, people, storerank, timeutil
 
 PERIODS = (7, 30, 90)
 DEFAULT_DAYS = 7
@@ -274,12 +274,13 @@ def _users(tid: int) -> dict[int, dict]:
     for r in db.q("SELECT user_id,branch_id FROM user_branch WHERE tenant_id=?", (tid,)):
         if int(r["branch_id"]) in branch_names:
             bind.setdefault(int(r["user_id"]), []).append(branch_names[int(r["branch_id"])])
-    for r in db.q("SELECT id,username,role,job_title,enabled,created_at FROM users "
+    for r in db.q("SELECT id,username,display_name,role,job_title,enabled,created_at FROM users "
                   "WHERE tenant_id=? ORDER BY id", (tid,)):
         role = str(r.get("role") or "")
         level = role if role in ("owner", "root") else str(r.get("job_title") or "staff")
         out[int(r["id"])] = {
-            "id": int(r["id"]), "name": str(r.get("username") or ""),
+            "id": int(r["id"]), "name": people.display_name(r),
+            "username": str(r.get("username") or ""),
             "role": level, "role_label": ROLE_LABELS.get(level, "店员"),
             "enabled": int(r.get("enabled") or 0) == 1,
             "branches": bind.get(int(r["id"]), []),

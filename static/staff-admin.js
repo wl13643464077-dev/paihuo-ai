@@ -49,6 +49,11 @@
 .sa-ai.pass{background:#d3f9d8}.sa-ai.doubt{background:#fff1bd}.sa-ai.fail{background:#ffe3e3}.sa-ai.none{background:#f1f3f5}
 .sa-events{margin:8px 0 0 18px;font-size:13px}
 .sa-one textarea{width:100%;box-sizing:border-box;min-height:74px;font-size:16px}
+.sa-more .tm-row-more-box{left:0;right:auto;min-width:210px}
+.sa-more .tm-row-more-box label{font-weight:800;font-size:13px;margin:0}
+.sa-more .tm-row-more-box select{width:100%;min-height:44px;font-size:15px}
+.sa-more .tm-row-more-box .btn{min-height:44px}
+.sa-task .due-over{color:#c92a2a;font-weight:800}
 `;
     document.head.appendChild(st);
   }
@@ -98,7 +103,7 @@
           <option value="">请选择门店</option>${branches.map(x=>`<option value="${x.id}" ${String(x.id)===String(d.branch_id)?"selected":""}>${h(x.name)}</option>`).join("")}</select>
           ${fe.branch?`<div class="field-err" role="alert">${h(fe.branch)}</div>`:""}</div>
         <div><label>派给谁</label><select ${d.sent?"disabled":""} onchange="PH_STAFF_ADMIN._set(${i},'assignee_user_id',this.value)">
-          <option value="">先不指定（店里谁有空谁做）</option>${(b?b.members:[]).map(u=>`<option value="${u.id}" ${String(u.id)===String(d.assignee_user_id)?"selected":""}>${h(u.name)}（${h(u.title_label)}）</option>`).join("")}</select></div>
+          <option value="">先不指定（店里谁有空谁做）</option>${(b?b.members:[]).map(u=>`<option value="${u.id}" ${String(u.id)===String(d.assignee_user_id)?"selected":""}>${h(who(u.name, u.title_label))}</option>`).join("")}</select></div>
         <div><label>截止时间</label><input type="datetime-local" value="${tsToLocal(d.due_at)}" ${d.sent?"disabled":""}
           onchange="PH_STAFF_ADMIN._set(${i},'due_at',this.value)"></div>
         <div><label>&nbsp;</label><label style="display:flex;gap:6px;align-items:center;min-height:42px;font-size:15px">
@@ -252,11 +257,32 @@
     return false;
   }
   function closeViewer(){ document.getElementById("sa-viewer")?.remove(); }
+  /* 「小李（店员）」；姓名里已带角色(「王店长」)就不重复。app.js 有同名公共函数就用它 */
+  function who(name, role){
+    if(typeof personWithRole==="function") return personWithRole(name, role);
+    name = String(name||"").trim(); role = String(role||"").trim();
+    return !name ? "" : (!role||name.includes(role)) ? name : `${name}（${role}）`;
+  }
+  /* 截止时间(已转义的 HTML)：「截止 明天 16:44」/「已逾期 3 小时」，悬停给完整时间；open=这件还没做完 */
+  function dueLine(t){
+    if(typeof dueHtml==="function" && t.due_at) return dueHtml(t.due_at, t.status==="todo");
+    return t.due_text ? h(`截止 ${t.due_text}`) : "";
+  }
+  /* 「⋯ 更多」里的改派：一个带文字标签的下拉，选了就改派 */
   function reassignHtml(t){
     const b = branchOf(t.branch_id);
     if(!b || !t.can_manage_hint) return "";
-    return `<select onchange="PH_STAFF_ADMIN._assign(${t.id},this.value)" aria-label="改派" style="min-height:36px;font-size:14px;max-width:190px">
-      <option value="">${t.assignee_name?"改派给…":"指派给…"}</option>${b.members.filter(u=>u.id!==t.assignee_user_id).map(u=>`<option value="${u.id}">${h(u.name)}（${h(u.title_label)}）</option>`).join("")}</select>`;
+    const label = t.assignee_name ? "改派给谁" : "指派给谁";
+    return `<label for="sa-assign-${t.id}">${label}</label>
+      <select id="sa-assign-${t.id}" onchange="PH_STAFF_ADMIN._assign(${t.id},this.value)">
+      <option value="">请选择</option>${b.members.filter(u=>u.id!==t.assignee_user_id).map(u=>`<option value="${u.id}">${h(who(u.name, u.title_label))}</option>`).join("")}</select>`;
+  }
+  /* 次要操作收进「⋯ 更多」：原生 details/summary，键盘 Tab 能到、回车/空格能开，手机上是一列大按钮 */
+  function moreHtml(t, inner){
+    inner = (inner||[]).filter(Boolean);
+    if(!inner.length) return "";
+    return `<details class="tm-row-more sa-more" data-sa-more="${t.id}"><summary class="btn sm" aria-label="「${h(t.title)}」的更多操作">⋯ 更多</summary>
+      <div class="tm-row-more-box">${inner.join("")}</div></details>`;
   }
   /* 打回原因前写上是谁打回的(reviewer_label 由后端按身份算好)；老数据没有审核人时不写名字 */
   function rejectLine(t, fallback){
@@ -272,18 +298,23 @@
     if(!["todo","rejected"].includes(t.status) || !t.assignee_user_id || (u && String(u.id)===String(t.assignee_user_id))) return "";
     const last = Number(t.last_nudged_at)||0;
     if(last && Date.now()/1000-last < NUDGE_GAP) return `<span class="sub" title="30 分钟后可以再催">🔔 已催 · ${h(hhmm(last))}</span>`;
-    return `<button type="button" class="btn sm" onclick="PH_STAFF_ADMIN._nudge(${t.id})" title="给 ${h(t.assignee_name||"店员")} 发一条通知">🔔 催一下</button>`;
+    // 逾期的活，「催一下」是这张卡上最该点的，用主按钮
+    return `<button type="button" class="btn sm${t.overdue?" pri":""}" onclick="PH_STAFF_ADMIN._nudge(${t.id})" title="给 ${h(t.assignee_name||"店员")} 发一条通知">🔔 催一下</button>`;
   }
   function taskHtml(t){
     const rejected = t.status==="todo" && t.review_note && t.reviewed_at;
-    const meta = [t.branch_name, t.assignee_name?`👤 ${t.assignee_name}`:"👤 还没指定人", t.due_text?`截止 ${t.due_text}`:"",
-      (t.dispatcher_label||t.created_by_name)?`${t.dispatcher_label||t.created_by_name} 派的`:"", t.remind_count?`已催 ${t.remind_count} 次`:""].filter(Boolean);
+    // meta 每一段都是已转义的 HTML(截止时间那段带 title)
+    const meta = [h(t.branch_name), h(t.assignee_name?`👤 ${t.assignee_name}`:"👤 还没指定人"), dueLine(t),
+      (t.dispatcher_label||t.created_by_name)?h(`${t.dispatcher_label||t.created_by_name} 派的`):"", t.remind_count?h(`已催 ${t.remind_count} 次`):""].filter(Boolean);
+    const cancelBtn = ["todo","submitted"].includes(t.status)?`<button type="button" class="btn sm" onclick="PH_STAFF_ADMIN._cancel(${t.id})">取消这件</button>`:"";
+    const eventsBtn = `<button type="button" class="btn sm" onclick="PH_STAFF_ADMIN._events(${t.id})">🕘 经过</button>`;
+    const open = ["todo","submitted"].includes(t.status);
     return `<div class="sa-task ${t.overdue?"sa-over":""} ${String(SA.focus)===String(t.id)?"sa-focus":""}" id="sa-task-${t.id}">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <span class="pill ${t.status==="approved"?"done":t.status==="cancelled"?"cancelled":t.status==="submitted"?"awaiting_review":(t.overdue||rejected||t.status==="rejected")?"failed":"running"}">${h(t.overdue?"已逾期":rejected?"被打回":STATUS[t.status]||t.status)}</span>
         <b style="flex:1;min-width:160px">${h(t.title)}</b>
         ${t.require_photo?`<span class="sub">📷 要照片</span>`:""}</div>
-      <div class="sub" style="margin-top:4px">${meta.map(h).join(" · ")}</div>
+      <div class="sub" style="margin-top:4px">${meta.join(" · ")}</div>
       ${t.detail?`<div style="margin-top:4px">${h(t.detail)}</div>`:""}
       ${rejected?`<div class="sa-hint">↩️ ${h(rejectLine(t, "打回过"))}</div>`:""}
       ${t.status==="submitted"&&t.review_note&&t.reviewed_at?`<div class="sa-hint">↩️ ${h(rejectLine(t, "上次打回"))}${t.submit_count>1?`（第 ${t.submit_count} 次交）`:"（重交）"}</div>`:""}
@@ -292,10 +323,8 @@
       <div class="actions" style="margin-top:8px">
         ${t.status==="submitted"?`<button type="button" class="btn sm pri" onclick="PH_STAFF_ADMIN._review(${t.id},true)">👍 通过</button>
           <button type="button" class="btn sm bad" onclick="PH_STAFF_ADMIN._review(${t.id},false)">↩️ 打回重做</button>`:""}
-        ${t.status==="todo"?reassignHtml(t):""}
         ${nudgeHtml(t)}
-        ${["todo","submitted"].includes(t.status)?`<button type="button" class="btn sm" onclick="PH_STAFF_ADMIN._cancel(${t.id})">取消这件</button>`:""}
-        <button type="button" class="btn sm" onclick="PH_STAFF_ADMIN._events(${t.id})">🕘 经过</button>
+        ${open?moreHtml(t, [t.status==="todo"?reassignHtml(t):"", cancelBtn, eventsBtn]):eventsBtn}
       </div>
       <div id="sa-ev-${t.id}"></div>
     </div>`;
@@ -473,6 +502,22 @@
     if(!uid) return;
     try{ await api(`/staff/tasks/${id}/assign`, {method:"POST", body:{assignee_user_id:+uid}}); toast("已改派"); await loadList(); draw(); }
     catch(e){ toast(e.message); draw(); }
+  }
+  /* 「⋯ 更多」：点了里面的按钮、点到外面、按 Esc 都收起来(Esc 后焦点回到「更多」) */
+  function closeMore(except){
+    document.querySelectorAll("details.sa-more[open]").forEach(d=>{ if(d!==except) d.removeAttribute("open"); });
+  }
+  if(!window.__phSaMoreBound){
+    window.__phSaMoreBound = true;
+    document.addEventListener("click", e=>{
+      const inside = e.target.closest && e.target.closest("details.sa-more");
+      closeMore(inside && !e.target.closest(".tm-row-more-box .btn") ? inside : null);
+    });
+    document.addEventListener("keydown", e=>{
+      if(e.key!=="Escape") return;
+      const d = document.activeElement && document.activeElement.closest && document.activeElement.closest("details.sa-more[open]");
+      if(d){ d.removeAttribute("open"); d.querySelector("summary")?.focus(); }
+    });
   }
   async function events(id){
     const box = document.getElementById("sa-ev-"+id); if(!box) return;

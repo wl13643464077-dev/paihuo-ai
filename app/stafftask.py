@@ -34,7 +34,7 @@ import time
 from datetime import datetime
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-from . import billing, db, timeutil
+from . import billing, db, people, timeutil
 
 # ---------------- 常量 ----------------
 MAX_TITLE = 60
@@ -194,8 +194,8 @@ def _load_user(tid: int, uid: Any) -> dict | None:
     except (TypeError, ValueError):
         return None
     row = db.one(
-        "SELECT u.id,u.tenant_id,u.username,u.role,u.job_title,u.modules_json,"
-        "u.enabled FROM users u JOIN tenants t ON t.id=u.tenant_id "
+        "SELECT u.id,u.tenant_id,u.username,u.display_name,u.role,u.job_title,"
+        "u.modules_json,u.enabled FROM users u JOIN tenants t ON t.id=u.tenant_id "
         "WHERE u.id=? AND t.enabled=1",
         (uid,),
     )
@@ -322,8 +322,8 @@ def _check_assignee(
 def branch_members(tid: int, branch: Mapping[str, Any]) -> list[dict]:
     """这家店能接活的人：绑定了这家店的成员(店长在前)。"""
     rows = db.q(
-        "SELECT u.id,u.username,u.role,u.job_title,u.modules_json,u.enabled "
-        "FROM user_branch ub JOIN users u ON u.id=ub.user_id "
+        "SELECT u.id,u.username,u.display_name,u.role,u.job_title,u.modules_json,"
+        "u.enabled FROM user_branch ub JOIN users u ON u.id=ub.user_id "
         "WHERE ub.tenant_id=? AND ub.branch_id=? AND u.tenant_id=? "
         "AND u.enabled=1 ORDER BY u.id",
         (int(tid), int(branch["id"]), int(tid)),
@@ -338,7 +338,9 @@ def branch_members(tid: int, branch: Mapping[str, Any]) -> list[dict]:
             continue
         members.append({
             "id": int(row["id"]),
-            "name": str(row.get("username") or ""),
+            # name=给人看的姓名(没填回退登录名)；username=登录名
+            "name": people.display_name(row),
+            "username": str(row.get("username") or ""),
             "job_title": _member_title(row) if row.get("role") == "member"
             else str(row.get("role") or ""),
             "title_label": role_label(row),
@@ -551,7 +553,7 @@ def _submit_counts(tid: int, ids: Sequence[int]) -> dict[int, int]:
 
 
 def _person_label(roles: Mapping[int, str], names: Mapping[int, str], uid: Any) -> str:
-    """「店长 laowang」：身份 + 账号名；账号查不到时返回空串。"""
+    """「小李（店长）」：姓名 + 身份(姓名里已带身份就不重复)；账号查不到时返回空串。"""
     try:
         key = int(uid or 0)
     except (TypeError, ValueError):
@@ -559,7 +561,7 @@ def _person_label(roles: Mapping[int, str], names: Mapping[int, str], uid: Any) 
     name = names.get(key)
     if not key or not name:
         return ""
-    return " ".join(x for x in (roles.get(key, ""), name) if x)
+    return people.with_role(name, roles.get(key, ""))
 
 
 def _last_nudges(tid: int, ids: Sequence[int]) -> dict[int, float]:
@@ -592,7 +594,8 @@ def _public(
     user_ids = []
     for r in rows:
         user_ids += [r.get("assignee_user_id"), r.get("created_by"), r.get("reviewed_by")]
-    user_names = _names(tid, "users", user_ids, "username")
+    # 人名一律是显示名(姓名，没填回退登录名)；登录名另给 *_username
+    user_names, login_names = people.names_and_logins(tid, user_ids)
     # 派活人、审核人的身份(老板/总监/店长)：同一条规则，后端算好，前端不猜
     dispatcher_roles = _role_labels(
         tid, [x for r in rows for x in (r.get("created_by"), r.get("reviewed_by"))])
@@ -627,6 +630,7 @@ def _public(
             "branch_name": branch_names.get(int(r.get("branch_id") or 0), ""),
             "assignee_user_id": r.get("assignee_user_id"),
             "assignee_name": user_names.get(int(r.get("assignee_user_id") or 0), ""),
+            "assignee_username": login_names.get(int(r.get("assignee_user_id") or 0), ""),
             "status": status,
             "status_label": STATUS_LABELS.get(status, status),
             "priority": r.get("priority") or "normal",
@@ -639,11 +643,9 @@ def _public(
             "overdue": status == "todo" and due_at is not None and float(due_at) < now,
             "created_by": r.get("created_by"),
             "created_by_name": user_names.get(int(r.get("created_by") or 0), ""),
-            # 「老板 wangji」/「店长 laowang」：店员一眼知道是谁派的
-            "dispatcher_label": " ".join(x for x in (
-                dispatcher_roles.get(int(r.get("created_by") or 0), ""),
-                user_names.get(int(r.get("created_by") or 0), ""),
-            ) if x) if user_names.get(int(r.get("created_by") or 0)) else "",
+            # 「王总（老板）」/「老王（店长）」：店员一眼知道是谁派的
+            "dispatcher_label": _person_label(
+                dispatcher_roles, user_names, r.get("created_by")),
             "created_at": r.get("created_at"),
             "submitted_at": r.get("submitted_at"),
             "submit_note": r.get("submit_note") or "",
@@ -651,7 +653,7 @@ def _public(
             "reviewed_by": r.get("reviewed_by"),
             "reviewed_by_name": user_names.get(int(r.get("reviewed_by") or 0), ""),
             "review_note": r.get("review_note") or "",
-            # 「店长 laowang」：打回原因前写上是谁打回的；审核人账号查不到(老数据)时为空
+            # 「老王（店长）」：打回原因前写上是谁打回的；审核人账号查不到(老数据)时为空
             "reviewer_label": _person_label(
                 dispatcher_roles, user_names, r.get("reviewed_by")),
             # 上次「催一下」的时间(没催过是 None)
@@ -744,7 +746,8 @@ def _can_manage(actor: Mapping[str, Any], row: Mapping[str, Any]) -> bool:
 
 def list_events(tid: int, task_id: int) -> list[dict]:
     rows = db.q(
-        "SELECT e.id,e.kind,e.note,e.actor_user_id,e.created_at,u.username "
+        "SELECT e.id,e.kind,e.note,e.actor_user_id,e.created_at,"
+        f"{people.name_sql('u')} AS actor_label "
         "FROM staff_task_event e LEFT JOIN users u ON u.id=e.actor_user_id "
         "AND u.tenant_id=e.tenant_id WHERE e.tenant_id=? AND e.task_id=? "
         "ORDER BY e.id",
@@ -755,7 +758,7 @@ def list_events(tid: int, task_id: int) -> list[dict]:
         "kind": r.get("kind") or "",
         "note": r.get("note") or "",
         "actor_user_id": r.get("actor_user_id"),
-        "actor_name": r.get("username") or ("系统" if r.get("actor_user_id") is None else ""),
+        "actor_name": r.get("actor_label") or ("系统" if r.get("actor_user_id") is None else ""),
         "created_at": r.get("created_at"),
     } for r in rows]
 
@@ -1061,7 +1064,7 @@ def create_task(
                    f"派给「{branch.get('name') or ''}」", ts)
             if assignee:
                 _event(connection, tid, task_id, actor_id, "assigned",
-                       f"指派给 {assignee['username']}", ts)
+                       f"指派给 {people.display_name(assignee)}", ts)
     except sqlite3.IntegrityError:
         existing = _find_by_request(tid, key) if key else None
         if not existing:
@@ -1119,7 +1122,7 @@ def assign_task(
         ).rowcount
         if changed != 1:
             raise StaffTaskConflict("任务状态刚变了，请刷新后再试")
-        note = ("改派给 " if old else "指派给 ") + str(assignee["username"])
+        note = ("改派给 " if old else "指派给 ") + people.display_name(assignee)
         _event(connection, tid, int(row["id"]), int(actor["id"]), "assigned", note, ts)
     if int(assignee["id"]) != int(actor["id"]) and int(old or 0) != int(assignee["id"]):
         _notify(tid, "staff_task_assigned", {
@@ -1191,7 +1194,7 @@ def submit_task(
             stored.append(saver(
                 tid, int(branch["id"]), blob,
                 branch_name=str(branch.get("name") or ""),
-                person_name=str(actor.get("username") or ""),
+                person_name=people.display_name(actor),
                 now=ts, asset_root=asset_root,
             ))
     except photoproof.PhotoError as exc:
@@ -1250,10 +1253,10 @@ def submit_task(
     reviewers.discard(uid)
     _notify(tid, "staff_task_submitted", {
         "task_id": int(row["id"]), "title": row["title"],
-        "summary": f"{actor.get('username') or ''} 交了「{row['title']}」"
+        "summary": f"{people.display_name(actor)} 交了「{row['title']}」"
                    + (f"（{len(stored)} 张照片）" if stored else ""),
         "branch": branch.get("name") or "",
-        "user": actor.get("username") or "",
+        "user": people.display_name(actor),
     }, reviewers)
     item = _public(tid, [latest], with_photos=True, now=ts)[0]
     item["replayed"] = False
@@ -1396,7 +1399,7 @@ def nudge_task(
     if int(assignee["id"]) == int(actor["id"]):
         raise StaffTaskError("这件活在您自己手上，不用催")
     ts = time.time() if now is None else float(now)
-    who = " ".join(x for x in (role_label(actor), str(actor.get("username") or "")) if x)
+    who = people.with_role(people.display_name(actor), role_label(actor))
     due = (f"（截止 {timeutil.format_cn(row['due_at'], '%m-%d %H:%M')}）"
            if row.get("due_at") is not None else "")
     text = f"{who} 催您：{row['title']}{due}"
@@ -1660,10 +1663,11 @@ def todo_for_user(tid: int, uid: int, *, now: float | None = None) -> dict:
     branch_names = _names(tid, "store_branch", bound, "name")
     return {
         "date": today,
-        "date_text": f"{int(today[5:7])} 月 {int(today[8:10])} 日",
+        "date_text": timeutil.today_text_cn(ts),
         "user": {
             "id": uid,
-            "name": user.get("username") or "",
+            "name": people.display_name(user),
+            "username": user.get("username") or "",
             "role_label": role_label(user),
             "can_dispatch": can_dispatch(user),
             # 手机版底部「完整版」只给老板/总监；店员、店长点进去是老板工作台，容易走错。
@@ -1728,7 +1732,7 @@ _MANAGER_WORDS = ("店长", "经理", "负责人", "主管")
 
 
 def match_member(text: Any, members: Sequence[Mapping[str, Any]]) -> tuple[dict | None, str]:
-    """在这家店的人里找唯一匹配：「店长」按职级，其他按账号名；拿不准就留空。"""
+    """在这家店的人里找唯一匹配：「店长」按职级，其他按姓名或登录名；拿不准就留空。"""
     raw = _norm(text)
     if not raw:
         return None, ""
@@ -1737,7 +1741,8 @@ def match_member(text: Any, members: Sequence[Mapping[str, Any]]) -> tuple[dict 
         if len(managers) == 1:
             return dict(managers[0]), ""
         return None, "这家店没有唯一的店长，请选一下由谁来做"
-    exact = [m for m in members if _norm(m.get("name")) == raw]
+    exact = [m for m in members
+             if raw in (_norm(m.get("name")), _norm(m.get("username")))]
     if len(exact) == 1:
         return dict(exact[0]), ""
     if len(raw) >= 2:

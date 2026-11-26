@@ -101,14 +101,20 @@
   function ckRenderToday(){
     const ov = CK.overview || {stores:[], summary:{}};
     const s = ov.summary || {};
+    // 顶部四格和下面每家店的「x/y 项」用同一个单位：按「项」数(老接口没给项数时退回按份，并写明「份」)
+    const byItem = s.items_total!=null;
+    const total = byItem ? Number(s.items_total)||0 : Number(s.total)||0;
+    const done = byItem ? Number(s.items_done)||0 : Number(s.done)||0;
+    const unit = byItem ? "项" : "份";
+    const missed = byItem && s.items_missed!=null ? Number(s.items_missed)||0 : null;
     const head = `<div class="card"><div class="ck-head" style="margin:0">
         <b style="font-size:16px">${esc(ov.date||"")} 各店清单</b>
         <label class="sub">换一天 <input type="date" value="${esc(CK.date||ov.date||"")}" onchange="ckPickDate(this.value)" style="font-size:16px"></label></div>
       <div class="ck-sum">
-        <div><b>${s.rate==null?"—":Math.round(s.rate)+"%"}</b><span>按时完成率</span></div>
-        <div><b>${s.done||0}</b><span>已完成</span></div>
-        <div><b>${s.open||0}</b><span>待完成</span></div>
-        <div><b style="color:var(--bad)">${s.missed||0}</b><span>超时没做完</span></div></div></div>`;
+        <div><b>${s.rate==null?"—":Math.round(s.rate)+"%"}</b><span>清单按时做完的比例</span></div>
+        <div data-ck-sum="done"><b>${done} / ${total}</b><span>已做（${unit}）</span></div>
+        <div data-ck-sum="left"><b>${Math.max(0,total-done)}</b><span>还没做（${unit}）</span></div>
+        <div data-ck-sum="missed"><b style="color:var(--bad)">${missed!=null?missed:(s.missed||0)}</b><span>${missed!=null?`超时没做（项）${s.missed?` · ${s.missed} 份清单`:""}`:"超时没做完（份）"}</span></div></div></div>`;
     if(!ov.stores.length){
       $("#ck-body").innerHTML = head + `<div class="card">${noStoreEmptyState("还没有门店。建好门店，再在「团队与权限」里把店员分到门店，就能每天按清单打勾。")}</div>`;
       return;

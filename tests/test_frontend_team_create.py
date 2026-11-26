@@ -264,7 +264,7 @@ class TeamCreateMobileTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(0, await page.locator(".sa-bar input[type=checkbox]").count())
             self.assertIn("AI 先看照片", await page.locator("h3", has_text="等您审核").inner_text())
             await page.get_by_role("button", name="✍️ 手动派一件").click()
-            await page.get_by_role("button", name="📤 确认派出去(1 件)").click()
+            await page.get_by_role("button", name="📤 确认派出去（1 件）").click()
             draft = page.locator("[data-sa-draft='0']")
             await page.wait_for_function("document.querySelectorAll('[data-sa-draft] .field-err').length===2")
             text = await draft.inner_text()

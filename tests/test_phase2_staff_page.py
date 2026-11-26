@@ -523,11 +523,11 @@ class StaffAdminPageTests(unittest.IsolatedAsyncioTestCase):
             await page.wait_for_selector("[data-sa-draft='1']")
             self.assertIn("没找到「火星店」", await page.locator("[data-sa-draft='1']").inner_text())
             # 第二件没选门店，不能派
-            await page.get_by_role("button", name="📤 确认派出去(2 件)").click()
+            await page.get_by_role("button", name="📤 确认派出去（2 件）").click()
             await page.wait_for_function("document.querySelector(\"[data-sa-draft='1']\").innerText.includes('请选择门店')")
             self.assertEqual([], created)
             await page.locator("[data-sa-draft='1'] select").first.select_option("4")
-            await page.get_by_role("button", name="📤 确认派出去(2 件)").click()
+            await page.get_by_role("button", name="📤 确认派出去（2 件）").click()
             await page.wait_for_function("document.querySelectorAll('[data-sa-draft]').length===0")
             self.assertEqual(2, len(created))
             self.assertEqual({"branch_id": 3, "assignee_user_id": 22, "title": "把冷柜清一遍"},

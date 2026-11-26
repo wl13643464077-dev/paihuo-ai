@@ -23,7 +23,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
-from . import db, departments, inspectionstandards
+from . import db, departments, inspectionstandards, people
 
 
 EMPLOYEE_IDX = 10
@@ -995,7 +995,8 @@ def _branch_assignees(tid: int, branch_ids: Sequence[int]) -> dict[int, list[dic
     placeholders = ",".join("?" for _ in ids)
     result: dict[int, list[dict]] = {}
     for row in db.q(
-        "SELECT ub.branch_id,u.id,u.username,u.job_title FROM user_branch ub "
+        "SELECT ub.branch_id,u.id,u.username,u.display_name,u.job_title "
+        "FROM user_branch ub "
         "JOIN users u ON u.id=ub.user_id AND u.tenant_id=ub.tenant_id "
         f"WHERE ub.tenant_id=? AND ub.branch_id IN ({placeholders}) "
         "AND u.role='member' ORDER BY u.id",
@@ -1003,6 +1004,7 @@ def _branch_assignees(tid: int, branch_ids: Sequence[int]) -> dict[int, list[dic
     ):
         result.setdefault(int(row["branch_id"]), []).append({
             "id": int(row["id"]),
+            "name": people.display_name(row),
             "username": str(row.get("username") or ""),
             "job_title": _member_title(row),
         })
@@ -2543,7 +2545,8 @@ def _merge_retake_round(
 def _single_branch_manager(connection, tid: int, branch_id: int, industry_key: str) -> dict | None:
     """门店只有一个店长时返回他，用来默认指派 AI 生成的整改。"""
     rows = connection.execute(
-        "SELECT u.id,u.username,u.modules_json FROM user_branch ub JOIN users u "
+        "SELECT u.id,u.username,u.display_name,u.modules_json "
+        "FROM user_branch ub JOIN users u "
         "ON u.id=ub.user_id AND u.tenant_id=ub.tenant_id WHERE ub.tenant_id=? "
         "AND ub.branch_id=? AND u.role='member' AND u.job_title='manager' "
         "AND COALESCE(u.enabled,1)=1 ORDER BY u.id LIMIT 2",
@@ -2554,7 +2557,8 @@ def _single_branch_manager(connection, tid: int, branch_id: int, industry_key: s
     modules = db.jloads(rows[0]["modules_json"], []) or []
     if not isinstance(modules, list) or industry_key not in modules:
         return None
-    return {"id": int(rows[0]["id"]), "username": str(rows[0]["username"] or "")}
+    return {"id": int(rows[0]["id"]), "username": str(rows[0]["username"] or ""),
+            "name": people.display_name(dict(rows[0]))}
 
 
 def complete_visit(
@@ -2673,7 +2677,7 @@ def complete_visit(
         for item in merged["issues"]:
             due_at = now + item["action"]["due_days"] * 86400
             owner_text = (
-                default_assignee["username"] if default_assignee
+                default_assignee["name"] if default_assignee
                 else item["action"]["owner"]
             )
             issue_cursor = connection.execute(
@@ -3219,7 +3223,7 @@ def _can_assign_branch(user: Mapping[str, Any], tid: int, branch_id: int) -> boo
 def assignable_users(tid: int, branch_id: int, industry_key: str) -> list[dict]:
     """可以接这家门店整改的人：该门店绑定的成员，外加老板和总监。"""
     rows = db.q(
-        "SELECT id,username,role,job_title,modules_json FROM users "
+        "SELECT id,username,display_name,role,job_title,modules_json FROM users "
         "WHERE tenant_id=? AND COALESCE(enabled,1)=1 AND ("
         "role IN ('owner','root') OR (role='member' AND (job_title='director' "
         "OR id IN (SELECT ub.user_id FROM user_branch ub WHERE ub.tenant_id=? "
@@ -3242,10 +3246,11 @@ def assignable_users(tid: int, branch_id: int, industry_key: str) -> list[dict]:
             label = "老板"
         result.append({
             "id": int(row["id"]),
+            "name": people.display_name(row),
             "username": str(row.get("username") or ""),
             "role": role,
             "job_title": title,
-            "label": f"{row.get('username') or ''}（{label}）",
+            "label": people.with_role(people.display_name(row), label),
         })
     return result
 
@@ -3260,7 +3265,7 @@ def assign_action(
     """把整改指派给具体账号，并按人通知他。
 
     只有老板/总监/该门店店长可指派；被指派人必须绑定该门店，或是老板/总监。
-    owner 文本同步成账号名，兼容只认 owner 文字的旧页面。
+    owner 文本同步成姓名(没填姓名就是登录名)，兼容只认 owner 文字的旧页面。
     """
     context = _action_context(tid, action_id)
     industry_key = str(context["industry_key"])
@@ -3293,7 +3298,7 @@ def assign_action(
             "due_at=COALESCE(?,due_at),version=version+1,updated_at=? "
             "WHERE id=? AND tenant_id=? AND status!='closed' AND version=?",
             (
-                target_id, target["username"], clean_due_at, now,
+                target_id, target["name"], clean_due_at, now,
                 int(context["id"]), int(tid), int(context["version"]),
             ),
         )
@@ -3303,7 +3308,7 @@ def assign_action(
             "UPDATE inspection_issue SET owner=?,due_at=COALESCE(?,due_at),"
             "updated_at=? WHERE id=? AND tenant_id=? AND status!='closed'",
             (
-                target["username"], clean_due_at, now, int(context["issue_id"]),
+                target["name"], clean_due_at, now, int(context["issue_id"]),
                 int(tid),
             ),
         )
