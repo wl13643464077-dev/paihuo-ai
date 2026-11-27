@@ -597,6 +597,10 @@ html,body{max-width:100%;overflow-x:hidden}
 .mine-who{padding:13px 17px}
 .btn.today-post{display:flex;flex-direction:column;align-items:flex-start;gap:3px;width:100%;
   font-size:18px;font-weight:700;padding:14px 18px;border-radius:var(--r-lg)}
+/* 「今天发什么」：火焰图标放在标题左侧同一行，副标题另起一行(grid 两列：图标 | 文字) */
+.btn.today-post[data-ic]{display:grid;grid-template-columns:auto 1fr;column-gap:10px;row-gap:3px;align-items:center}
+.btn.today-post[data-ic]::before{grid-row:1;width:1.3em;height:1.3em}
+.btn.today-post[data-ic] .sub{grid-column:2}
 .btn.today-post .sub{font-size:13px;font-weight:400;color:#5a4a2a}
 .hubhead+.btn.today-post{margin-bottom:16px}
 /* ---------- 统一空状态(emptyState):居中一句话 + 一个按钮 ---------- */

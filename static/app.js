@@ -2335,7 +2335,7 @@ async function dashboard(){
   const todoCard = `<div class="card today-todo">
     <div class="today-head"><h2 data-ic="inbox">等我处理的${todoCount?`（${todoCount}）`:""}</h2></div>
     ${rows.length?rows.join(""):`<div class="sub today-empty">✅ 眼下没有要您拍板的事。</div>`}
-    ${noteRows.length?`<div class="today-head" style="margin-top:12px"><h3>🔔 新进展（${notes.length}）</h3>
+    ${noteRows.length?`<div class="today-head" style="margin-top:12px"><h3 data-ic="bell">新进展（${notes.length}）</h3>
       <a class="btn sm" href="#/notifications">全部通知</a>
       ${isAdmin()?`<button class="btn sm" onclick="notificationReadAll(this)">全部已读</button>`:""}</div>${noteRows.join("")}`:""}
   </div>`;
