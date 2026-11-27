@@ -43,7 +43,7 @@ def md_to_pdf(md: str, title: str = "交付物") -> bytes:
     blockquote {{ border-left: 3px solid #e8b93f; margin: 8px 0; padding: 4px 12px; color: #666; }}
     footer {{ font-size: 8pt; color: #999; margin-top: 24px; }}
     </style></head><body>{_md_html(md)}
-    <footer>由「派活 PaiHuo」数字员工协助生成 · 请在发布前核对事实与业务数据</footer></body></html>"""
+    <footer>由「派活 PaiHuo」AI 专家协助生成 · 请在发布前核对事实与业务数据</footer></body></html>"""
     return HTML(string=html, url_fetcher=_blocked_url_fetcher).write_pdf()
 
 

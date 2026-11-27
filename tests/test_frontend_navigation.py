@@ -255,7 +255,7 @@ class FrontendNavigationContractTests(unittest.TestCase):
         for key in ("assets", "knowledge", "censor", "video", "publish"):
             self.assertIn(f'listPager(', self.app_js)
             self.assertIn(f'"{key}"', self.app_js)
-        self.assertIn("筛选和分页均由服务端处理", self.app_js)
+        self.assertNotIn("筛选和分页均由服务端处理", self.app_js)
         self.assertIn('platform:KFILTER.platform', self.app_js)
         self.assertIn('platform:AFILTER.platform', self.app_js)
         self.assertIn('listPath("/censor/logs","censor",CEN_LOG_FILTER)', self.app_js)
@@ -352,6 +352,35 @@ class FrontendNavigationContractTests(unittest.TestCase):
         self.assertIn("${esc(MP_CUR.title||\"\")}", self.app_js)
         self.assertIn('sandbox referrerpolicy="no-referrer"', self.app_js)
         self.assertIn('rel="noopener noreferrer"', self.app_js)
+
+    def test_customer_facing_copy_uses_points_and_hides_platform_cost(self):
+        cockpit_js = (ROOT / "static" / "cockpit.js").read_text(encoding="utf-8")
+        self.assertNotIn("积分", self.app_js)
+        # 价目表的「成本参考」列、看板/产出页的 $ 与 tokens 只给平台方。
+        self.assertIn('${isBoss()?"<th>成本参考</th>":""}', self.app_js)
+        self.assertIn("const showCost=isBoss();", self.app_js)
+        self.assertNotIn("烧了多少 token", self.app_js)
+        self.assertIn('isBoss()?["本期模型花费"', self.app_js)
+        self.assertIn("isBoss()&&Number(e.config_revision)>0", self.app_js)
+        for jargon in ("同批完成率", "历史总账", "各项已标注口径"):
+            self.assertNotIn(jargon, self.app_js)
+        self.assertNotIn("回办公室", self.app_js)
+        for title in ("老板经营驾驶舱</h2>", "员工产出总览", "🏪 区域经理巡店</h2>",
+                      "审查官的工作台</h2>", "⏰ 定时任务</h2>", "我的积分账户"):
+            self.assertNotIn(title, self.app_js)
+        self.assertIn("i.short_label||i.name", self.app_js)
+        self.assertIn("item.short_label||item.name", self.app_js)
+        self.assertNotIn("你", cockpit_js)
+
+    def test_empty_or_single_page_lists_hide_pager(self):
+        self.assertIn("if(!contract.total||(contract.offset<=0&&!contract.hasMore)) return \"\";", self.app_js)
+        self.assertIn("${pageOffset>0||data.has_more?", self.app_js)
+        self.assertIn("${page.page>0||page.nextCursor!==null?", self.app_js)
+
+    def test_top_nav_and_import_button_have_accessible_names(self):
+        self.assertIn('aria-label="${esc(g.label)}', self.app_js)
+        self.assertIn('aria-label="批量导入门店"', self.app_js)
+        self.assertIn('rel="icon"', self.index_html)
 
 
 if __name__ == "__main__":

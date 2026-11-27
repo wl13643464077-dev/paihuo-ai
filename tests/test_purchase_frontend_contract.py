@@ -48,6 +48,19 @@ class PurchaseFrontendContractTests(unittest.TestCase):
         self.assertIn("purchaseRequestId(plan,period)", self.app_js)
         self.assertIn("purchase:${Number(ME?.id||0)}:", self.app_js)
 
+    def test_purchase_explains_next_step_before_and_after_submit(self):
+        self.assertIn("提交后顾问会在 24 小时内联系您，款项到账后点数立即到账。", self.app_js)
+        self.assertIn("purchase-next-hint", self.app_js)
+        self.assertIn("function purchaseSubmittedShow(contact,created)", self.app_js)
+        self.assertIn("purchaseSubmittedShow(contact,!!result.created)", self.app_js)
+        self.assertIn("我的购买申请」里查看", self.app_js)
+        self.assertNotIn("toast(result.created?", self.app_js)
+
+    def test_login_button_never_looks_disabled_and_explains_missing_fields(self):
+        self.assertIn("color:var(--ink);cursor:pointer", self.login)
+        self.assertIn("button:disabled{background:#efe3c2;color:var(--ink)", self.login)
+        self.assertIn("请填写'+missing.join('和')+'。'", self.login)
+
 
 if __name__ == "__main__":
     unittest.main()

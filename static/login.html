@@ -3,61 +3,84 @@
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>登录 · 派活</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <style>
-:root{--ink:#33291f;--cream:#f6efdd;--gold:#ffd166;--accent:#f4a261}
+/* 设计令牌：与 index.html 的 :root 同一组值 */
+:root{
+  --paper:#f6f1e7; --card:#fffdf9; --surface:#ffffff; --sunken:#f3ecdf;
+  --ink:#33291f; --ink2:#6b5d4b; --ink3:#7c6d58;
+  --line:#e7decd; --line2:#cfc3ad;
+  --brand:#ffd166; --brand-d:#e2b23a; --brand-h:#ffc94a; --brand-soft:#fff4d3;
+  --ok:#1f8057; --ok-bg:#e4f5ec; --warn:#a15c00; --warn-bg:#fff1d6; --warn-line:#f0d08f; --bad:#c9302c; --bad-bg:#fdecea; --wait:#2563c9; --wait-bg:#e8f0fe;
+  --focus:#b45309;
+  --r-sm:8px; --r-md:10px; --r-lg:14px;
+  --shadow-1:0 1px 2px rgba(51,41,31,.05),0 1px 3px rgba(51,41,31,.07);
+  --shadow-2:0 4px 10px rgba(51,41,31,.08),0 12px 28px rgba(51,41,31,.12);
+  --fs-xs:12px; --fs-sm:13px; --fs-md:14px; --fs-lg:16px;
+  --h-sm:32px; --h-md:44px;   /* 登录页以手机为主：控件统一 44 */
+  --cream:var(--paper); --gold:var(--brand);
+}
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;background:var(--cream);color:var(--ink);
+body{font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;background:var(--paper);color:var(--ink);
   min-height:100vh;display:flex;align-items:center;justify-content:center;overflow-y:auto;overflow-x:hidden;position:relative;padding:40px 0}
-body:before{content:"";position:fixed;inset:0;background-image:radial-gradient(rgba(51,41,31,.05) 1.2px,transparent 1.2px);background-size:22px 22px}
-.orb{position:fixed;border-radius:50%;filter:blur(60px);opacity:.5;animation:drift 14s ease-in-out infinite alternate}
+.orb{position:fixed;border-radius:50%;filter:blur(70px);opacity:.32;animation:drift 14s ease-in-out infinite alternate}
 .orb.o1{width:420px;height:420px;background:#ffd16688;top:-120px;left:-100px}
-.orb.o2{width:380px;height:380px;background:#f28cb166;bottom:-120px;right:-80px;animation-delay:4s}
-.orb.o3{width:300px;height:300px;background:#4cc9f055;top:40%;left:65%;animation-delay:8s}
+.orb.o2{width:380px;height:380px;background:#f28cb155;bottom:-120px;right:-80px;animation-delay:4s}
+.orb.o3{display:none}
 @keyframes drift{from{transform:translate(0,0) scale(1)}to{transform:translate(50px,40px) scale(1.15)}}
-.emp{position:fixed;animation:floaty 6s ease-in-out infinite;opacity:.92}
-@keyframes floaty{0%,100%{transform:translateY(0) rotate(-2deg)}50%{transform:translateY(-16px) rotate(2deg)}}
-.wrap{position:relative;z-index:2;width:min(430px,92vw)}
-.logo{display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:18px}
-.bulb{width:11px;height:11px;border-radius:50%;background:var(--gold);box-shadow:0 0 12px 3px #ffd16699;animation:neon 2.1s ease-in-out infinite}
-.bulb:last-child{background:#f28cb1;box-shadow:0 0 12px 3px #f28cb199;animation-delay:.7s}
-@keyframes neon{0%,100%{opacity:1}50%{opacity:.35}}
-h1{font-size:30px;letter-spacing:3px;text-align:center;font-weight:900}
-.slogan{text-align:center;color:#8b7355;margin:10px 0 26px;font-size:14.5px;letter-spacing:2px}
-.slogan b{color:var(--ink);background:linear-gradient(transparent 62%,var(--gold) 62%)}
-.card{background:#fffdf7;border:3px solid var(--ink);border-radius:22px;padding:30px 28px;
-  box-shadow:7px 7px 0 rgba(51,41,31,.18);animation:pop .5s cubic-bezier(.2,1.6,.4,1)}
-@keyframes pop{from{transform:scale(.92);opacity:0}to{transform:scale(1);opacity:1}}
-label{display:block;font-weight:800;font-size:13px;margin:14px 0 6px}
-input,select{width:100%;min-height:44px;border:2.5px solid var(--ink);border-radius:12px;padding:12px 14px;font-size:15px;background:#fff;outline:none;transition:.15s}
-select{font-family:inherit;color:var(--ink)}
+.emp{position:fixed;animation:floaty 6s ease-in-out infinite;opacity:.9}
+@keyframes floaty{0%,100%{transform:translateY(0) rotate(-2deg)}50%{transform:translateY(-12px) rotate(2deg)}}
+.wrap{position:relative;z-index:2;width:min(420px,92vw)}
+.logo{display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:14px}
+.bulb{width:9px;height:9px;border-radius:50%;background:var(--brand);box-shadow:0 0 10px 2px #ffd16688}
+h1{font-size:30px;letter-spacing:3px;text-align:center;font-weight:700}
+.slogan{text-align:center;color:var(--ink2);margin:0 0 24px;font-size:14px;line-height:1.6}
+.slogan b{display:block;color:var(--ink);font-size:17px;font-weight:700;margin-bottom:4px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:28px 28px 22px;box-shadow:var(--shadow-2)}
+label{display:block;font-weight:600;font-size:13px;margin:14px 0 6px}
+input,select{width:100%;min-height:var(--h-md);border:1px solid var(--line2);border-radius:var(--r-md);padding:10px 14px;font-size:16px;font-family:inherit;color:var(--ink);background:var(--surface);outline:none;transition:border-color .12s,box-shadow .12s}
+input::placeholder,textarea::placeholder{color:#9a8c77}
 .creds{margin-top:6px;line-height:1.9}
-input:focus,select:focus{box-shadow:3px 3px 0 rgba(51,41,31,.15);transform:translateY(-1px)}
-button{width:100%;margin-top:22px;border:3px solid var(--ink);border-radius:14px;padding:13px;font-size:16px;font-weight:900;
-  background:var(--gold);cursor:pointer;box-shadow:4px 4px 0 rgba(51,41,31,.2);transition:.12s;letter-spacing:4px}
-button:hover{transform:translateY(-2px);box-shadow:6px 6px 0 rgba(51,41,31,.2)}
-button:active{transform:translateY(1px);box-shadow:2px 2px 0 rgba(51,41,31,.2)}
-.err{color:#e5484d;font-size:13px;text-align:center;margin-top:12px;min-height:18px;font-weight:700}
-.foot{text-align:center;margin-top:18px;font-size:12px;color:#a4947c}
-.foot a{color:#8b7355}
-.alt{display:flex;gap:10px;margin-top:14px}
-.alt button{margin-top:0;padding:10px;font-size:13.5px;letter-spacing:1px;background:#fffdf7}
-.alt button.tour{background:#e8f6fb}
+input:hover,select:hover{border-color:#b9ab92}
+input:focus,select:focus,.applycard textarea:focus{border-color:var(--focus);box-shadow:0 0 0 3px rgba(180,83,9,.18)}
+button{width:100%;margin-top:22px;min-height:48px;border:1px solid var(--brand-d);border-radius:var(--r-md);padding:0 14px;font-size:16px;font-weight:700;font-family:inherit;
+  background:var(--brand);color:var(--ink);cursor:pointer;box-shadow:var(--shadow-1);transition:background .12s,border-color .12s;letter-spacing:4px}
+/* 处理中的按钮仍保持深色文字（对比度约 9:1），不让主按钮看起来像坏了。 */
+button:disabled{background:#efe3c2;color:var(--ink);cursor:progress;border-color:#dccb9c;box-shadow:none}
+button:hover{background:var(--brand-h);border-color:#cf9f2a}
+button:focus-visible,a:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.err{color:var(--bad);font-size:13px;text-align:center;margin-top:12px;min-height:18px;font-weight:600}
+.err:empty,.ok:empty{display:none}
+.foot{text-align:center;margin-top:18px;font-size:12px;color:var(--ink3)}
+.foot a{color:var(--ink2);text-decoration:underline}
+/* 次级入口弱化成文字链接：登录才是这张卡的主操作 */
+.alt{display:flex;justify-content:center;align-items:center;gap:6px;margin-top:18px;padding-top:12px;border-top:1px solid var(--line)}
+.alt button{width:auto;flex:0 1 auto;margin-top:0;min-height:44px;padding:0 12px;font-size:14px;font-weight:600;letter-spacing:0;background:transparent;border-color:transparent;box-shadow:none;color:var(--ink2);text-decoration:underline;text-underline-offset:3px;text-decoration-color:var(--line2)}
+.alt button:hover{background:var(--sunken);color:var(--ink);border-color:transparent}
+.alt button:disabled{background:transparent;border-color:transparent}
+.alt .alt-sep{color:var(--line2)}
 .applycard{display:none;margin-top:14px}
-.purchase-choice{display:none;margin-top:10px;padding:10px 12px;border:2px solid var(--ink);border-radius:11px;background:#fff3c4;font-size:13px;line-height:1.6}
-.applycard textarea{width:100%;border:2.5px solid var(--ink);border-radius:12px;padding:10px 14px;font-size:14px;background:#fff;outline:none;min-height:64px;resize:vertical;font-family:inherit}
-.tabs{display:none;gap:8px;margin-bottom:6px}
-.tabs button{margin-top:0;padding:9px 6px;font-size:14px;letter-spacing:1px;background:#fffdf7;box-shadow:none;border-width:2.5px}
-.tabs button.on{background:var(--gold);box-shadow:3px 3px 0 rgba(51,41,31,.18)}
+.purchase-choice{display:none;margin-top:10px;padding:10px 12px;border:1px solid var(--warn-line);border-radius:var(--r-md);background:var(--brand-soft);font-size:13px;line-height:1.6}
+.applycard textarea{width:100%;border:1px solid var(--line2);border-radius:var(--r-md);padding:10px 14px;font-size:16px;color:var(--ink);background:var(--surface);outline:none;min-height:64px;resize:vertical;font-family:inherit}
+.tabs{display:none;gap:4px;margin-bottom:6px;padding:4px;background:var(--sunken);border-radius:var(--r-md)}
+.tabs button{margin-top:0;min-height:36px;padding:0 6px;font-size:14px;font-weight:600;letter-spacing:0;background:transparent;border-color:transparent;box-shadow:none;color:var(--ink2);border-radius:var(--r-sm)}
+.tabs button:hover{background:rgba(255,255,255,.6);border-color:transparent}
+.tabs button.on{background:var(--surface);color:var(--ink);box-shadow:var(--shadow-1)}
 .codeline{display:flex;gap:8px}
 .codeline input{flex:1;min-width:0}
-.codeline button{width:auto;flex:0 0 auto;margin-top:0;padding:0 12px;font-size:13.5px;letter-spacing:0;min-height:44px;box-shadow:none}
-.codeline button:disabled{opacity:.6;cursor:default;transform:none}
+.codeline button{width:auto;flex:0 0 auto;margin-top:0;padding:0 12px;font-size:14px;font-weight:600;letter-spacing:0;min-height:44px;box-shadow:none;background:var(--surface);border-color:var(--line2)}
+.codeline button:hover{background:#faf5ea;border-color:#b9ab92}
+.codeline button:disabled{background:#efe3c2;color:#5a4a36;cursor:default}
 #sms-pane{display:none}
-.ok{color:#2c8a4b;font-size:13.5px;text-align:center;margin-top:12px;font-weight:800;min-height:18px}
+.staff-head{text-align:center;margin:-6px 0 0}
+.staff-head h2{font-size:22px;font-weight:700;letter-spacing:2px}
+.staff-head .slogan{margin-top:6px}
+[hidden]{display:none!important}
+.ok{color:var(--ok);font-size:13.5px;text-align:center;margin-top:12px;font-weight:600;min-height:18px}
 @media(max-width:640px){
   body{padding:24px 0}
   .emp{display:none}
-  .card{padding:24px 20px}
+  .card{padding:22px 20px 16px}
 }
 @media(prefers-reduced-motion:reduce){
   *,*:before,*:after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
@@ -73,7 +96,8 @@ button:active{transform:translateY(1px);box-shadow:2px 2px 0 rgba(51,41,31,.2)}
 
 <div class="wrap">
   <div class="logo"><span class="bulb"></span><h1>派 活</h1><span class="bulb"></span></div>
-  <div class="slogan"><b>老板会派活，数字员工去干活</b> · 11 大连锁行业·专属决策员工听您调遣</div>
+  <div class="slogan" id="slogan"><b>老板派活，店员拍照交差，AI 帮您盯着</b>11 个连锁行业 · 行业 AI 专家随时可问</div>
+  <div class="staff-head" id="staff-head" hidden><h2>门店登录</h2><div class="slogan">店长、店员看今天的活</div></div>
   <div class="card">
     <div class="tabs" id="login-tabs" role="tablist">
       <button type="button" id="tab-pw" class="on" role="tab" aria-selected="true" onclick="switchMode('pw')">账号密码登录</button>
@@ -98,26 +122,27 @@ button:active{transform:translateY(1px);box-shadow:2px 2px 0 rgba(51,41,31,.2)}
     </div>
     <div class="err" id="err" role="status" aria-live="polite"></div>
     <div class="ok" id="sms-ok" role="status" aria-live="polite" style="margin-top:0"></div>
-    <div class="alt">
-      <button onclick="toggleApply()">📝 申请开通账号</button>
-      <button class="tour" onclick="goTour(this)">👀 游客参观(只看不用)</button>
+    <div class="alt" id="alt-entries">
+      <button type="button" onclick="toggleApply()">申请开通账号</button><span class="alt-sep" aria-hidden="true">·</span>
+      <button type="button" class="tour" onclick="goTour(this)" title="只看不用：参观模式不留资料、不扣点数">游客参观</button>
     </div>
   </div>
   <div class="card applycard" id="applycard">
-    <b style="font-size:15px">📝 申请开通账号</b>
-    <div style="font-size:12.5px;color:#8b7355;margin-top:4px">符合体验条件会即时开通；其他申请转人工审核,我们会在 1 个工作日内反馈</div>
+    <b style="font-size:16px">申请开通账号</b>
+    <div style="font-size:13px;color:var(--ink2);margin-top:4px">符合体验条件会即时开通；其他申请转人工审核，我们会在 1 个工作日内反馈</div>
     <div class="purchase-choice" id="purchase-choice" role="status"></div>
     <label>手机号 *</label><input id="a-phone" placeholder="11 位手机号">
-    <label>怎么称呼您</label><input id="a-name" placeholder="如:王老板">
-    <label>店名 / 企业名</label><input id="a-co" placeholder="如:王记火锅 / 小美美甲工作室" maxlength="60">
+    <label>怎么称呼您</label><input id="a-name" placeholder="如：王老板">
+    <label>店名 / 企业名</label><input id="a-co" placeholder="如：王记火锅 / 小美美甲工作室" maxlength="60">
     <label for="a-ind">您做哪一行</label>
     <select id="a-ind" onchange="industryChanged()"><option value="">请选择您的行业</option><option value="other">其他</option></select>
-    <input id="a-ind-text" placeholder="写一下您做什么生意,如:奶茶店 / 健身房" maxlength="30" style="display:none;margin-top:8px">
-    <label>想用派活做什么(选填)</label><textarea id="a-note" placeholder="如:想让数字员工帮我做内容和新店选址"></textarea>
+    <input id="a-ind-text" placeholder="写一下您做什么生意，如：奶茶店 / 健身房" maxlength="30" style="display:none;margin-top:8px">
+    <label>想用派活做什么（选填）</label><textarea id="a-note" placeholder="如：想让 AI 专家帮我做内容和新店选址"></textarea>
     <button onclick="applyGo(this)">提 交 申 请</button>
     <div class="err" id="a-err" role="status" aria-live="polite"></div><div class="ok" id="a-ok" role="status" aria-live="polite"></div>
   </div>
-  <div class="foot">副账号:开通与重置密码都请找您的企业主 · <span id="forgot-line">主账号忘记密码?联系顾问重置</span> · <a href="/promo">了解产品 →</a></div>
+  <div class="foot" id="staff-foot" hidden>忘了密码？找老板或店长重置</div>
+  <div class="foot" id="boss-foot"><div>副账号：开通与重置密码都请找您的企业主</div><div style="margin-top:4px"><span id="forgot-line">主账号忘记密码？联系顾问重置</span> · <a href="/promo">了解产品 →</a></div></div>
 </div>
 <script>
 const PURCHASE_PLAN_LABELS={trial:"体验版",startup:"创业版",biz:"企业版",flagship:"旗舰版"};
@@ -145,20 +170,43 @@ function showSelectedPurchase(){
   const prefix=`[购买意向] ${PURCHASE_PLAN_LABELS[selected.plan]}·${PURCHASE_PERIOD_LABELS[selected.period]}`;
   if(note&&!note.value.includes("[购买意向]")) note.value=prefix;
 }
-showSelectedPurchase();
+/* 登录后要回去的站内页面。只认本站固定形状的相对路径(如 /staff、/staff#task-12)，
+   不认 //别的站、反斜杠、带协议的网址，防止被拿来做跳转钓鱼。 */
+function safeNext(){
+  const raw=new URLSearchParams(location.search).get("next")||"";
+  return /^\/(?![\/\\])[A-Za-z0-9_\-\/]*(#[A-Za-z0-9_\-\/]*)?$/.test(raw) ? raw : "";
+}
+const NEXT=safeNext();
+const STAFF_LOGIN=/^\/staff(?:[\/#]|$)/.test(NEXT);
+function afterLogin(){
+  if(NEXT) return NEXT;
+  return selectedPurchase() ? '/#/billing' : '/';
+}
+if(STAFF_LOGIN){
+  // 从店员手机版跳过来：换成店员版，不给老板用的申请、参观、购买入口
+  document.title='门店登录 · 派活';
+  document.getElementById('slogan').hidden=true;
+  document.getElementById('staff-head').hidden=false;
+  document.getElementById('alt-entries').hidden=true;
+  document.getElementById('applycard').hidden=true;
+  document.getElementById('boss-foot').hidden=true;
+  document.getElementById('staff-foot').hidden=false;
+} else {
+  showSelectedPurchase();
+}
 // FastAPI 参数校验失败(422)时 detail 是数组,统一翻成人话,别弹 [object Object]
 function errText(detail, fallback){
   if(typeof detail==="string"&&detail) return detail;
   if(Array.isArray(detail)&&detail.length){
     const first=detail[0]||{};
     const field=Array.isArray(first.loc)?first.loc.filter(x=>x!=="body").join("."):"";
-    return "填写的内容格式不对"+(field?"("+field+")":"")+",请检查后再提交";
+    return "填写的内容格式不对"+(field?"（"+field+"）":"")+"，请检查后再提交";
   }
   if(detail&&typeof detail==="object"){
     const text=detail.message||detail.msg||detail.detail;
     if(typeof text==="string"&&text) return text;
   }
-  return fallback||"操作失败,请稍后再试";
+  return fallback||"操作失败，请稍后再试";
 }
 function industryChanged(){
   const sel=document.getElementById("a-ind"), other=document.getElementById("a-ind-text");
@@ -176,18 +224,27 @@ fetch("/api/guest/industries").then(r=>r.ok?r.json():null).then(d=>{
 }).catch(()=>{});
 fetch("/api/support-contact").then(r=>r.json()).then(d=>{
   if(d.contact){ const el=document.getElementById("forgot-line");
-    if(el) el.textContent = "忘记密码?联系顾问重置:" + d.contact; }
+    if(el) el.textContent = "主账号忘记密码？联系顾问重置：" + d.contact; }
 }).catch(()=>{});
 
 async function go(){
-  const _b=document.getElementById('login-btn'); if(_b){ if(_b.disabled) return; _b.disabled=true; const _t=_b.textContent; _b.textContent='登录中…'; setTimeout(()=>{_b.disabled=false;_b.textContent=_t;}, 8000); }
   const err = document.getElementById('err'); err.textContent = '';
+  const uEl=document.getElementById('u'), pEl=document.getElementById('p');
+  const username=uEl.value.trim(), password=pEl.value;
+  // 按钮始终可点；没填全时直接告诉用户缺了什么。
+  const missing=[!username&&'账号',!password&&'密码'].filter(Boolean);
+  if(missing.length){ err.textContent='请填写'+missing.join('和')+'。'; (!username?uEl:pEl).focus(); return; }
+  const _b=document.getElementById('login-btn'); if(_b.disabled) return;
+  const _t=_b.textContent; _b.disabled=true; _b.textContent='登录中…';
+  let leaving=false;
   try{
     const r = await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({username:document.getElementById('u').value.trim(),password:document.getElementById('p').value})});
+      body:JSON.stringify({username,password})});
     if(!r.ok){ const j = await r.json().catch(()=>({})); err.textContent = errText(j.detail,'登录失败'); return; }
-    location.href = selectedPurchase() ? '/#/billing' : '/';
-  }catch(e){ err.textContent = '网络异常,稍后再试'; }
+    leaving=true;
+    location.href = afterLogin();
+  }catch(e){ err.textContent = '网络异常，稍后再试'; }
+  finally{ if(!leaving){ _b.disabled=false; _b.textContent=_t; } }
 }
 // 第 1 期:短信验证码登录。后台没配置/没打开时接口回 enabled:false,页面保持只有密码登录。
 fetch("/api/auth/login/sms/config").then(r=>r.ok?r.json():null).then(d=>{
@@ -227,7 +284,7 @@ async function smsSend(){
     const r=await fetch('/api/auth/login/sms/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone})});
     const j=await r.json().catch(()=>({}));
     if(!r.ok){
-      err.textContent=errText(j.detail,'获取验证码失败,稍后再试');
+      err.textContent=errText(j.detail,'获取验证码失败，稍后再试');
       const wait=Number(r.headers.get('Retry-After')||0);
       if(r.status===429&&wait>0&&wait<=120) smsCountdown(wait); else btn.disabled=false;
       return;
@@ -235,7 +292,7 @@ async function smsSend(){
     ok.textContent=j.msg||'验证码已发送';
     smsCountdown(j.cooldown||60);
     document.getElementById('sms-code').focus();
-  }catch(e){ err.textContent='网络异常,稍后再试'; btn.disabled=false; }
+  }catch(e){ err.textContent='网络异常，稍后再试'; btn.disabled=false; }
 }
 async function smsLogin(){
   const err=document.getElementById('err'); err.textContent='';
@@ -249,8 +306,8 @@ async function smsLogin(){
   try{
     const r=await fetch('/api/auth/login/sms/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone,code})});
     if(!r.ok){ const j=await r.json().catch(()=>({})); err.textContent=errText(j.detail,'登录失败'); return; }
-    location.href = selectedPurchase() ? '/#/billing' : '/';
-  }catch(e){ err.textContent='网络异常,稍后再试'; }
+    location.href = afterLogin();
+  }catch(e){ err.textContent='网络异常，稍后再试'; }
   finally{ btn.disabled=false; btn.textContent=t; }
 }
 function toggleApply(){
@@ -280,14 +337,14 @@ async function applyGo(btn){
         parts.forEach(([text,bold])=>{ const el=document.createElement(bold?'b':'span'); el.textContent=String(text??''); div.appendChild(el); });
         ok.appendChild(div); };
       line([['🎉 ' + (j.msg||'体验账号已开通')]]);
-      line([['账号:'],[j.account.username,true],[' 初始密码:'],[j.account.password,true]]);
-      line([['👉 已帮您填进上面登录框,截图保存好密码,点「登录」开工!']]);
+      line([['账号：'],[j.account.username,true],[' 初始密码：'],[j.account.password,true]]);
+      line([['👉 已帮您填进上面登录框，截图保存好密码，点「登录」开工！']]);
       if(document.getElementById('pw-pane').style.display==='none') switchMode('pw');
       document.getElementById('u').value = j.account.username;
       document.getElementById('p').value = j.account.password;
       document.getElementById('u').scrollIntoView({behavior:'smooth',block:'center'});
     } else {
-      ok.textContent = '✅ ' + (j.msg||'申请已收到,我们会尽快联系您');
+      ok.textContent = '✅ ' + (j.msg||'申请已收到，我们会尽快联系您');
     }
     btn.textContent = '已 提 交';
   }catch(e){ err.textContent = e.message; btn.disabled=false; btn.textContent='提 交 申 请'; }
@@ -296,9 +353,9 @@ async function goTour(btn){
   btn.disabled = true; btn.textContent = '开门中…';
   try{
     const r = await fetch('/api/guest/tour',{method:'POST'});
-    if(!r.ok) throw new Error('进入失败,稍后再试');
+    if(!r.ok) throw new Error('进入失败，稍后再试');
     location.href = '/';
-  }catch(e){ document.getElementById('err').textContent = e.message; btn.disabled=false; btn.textContent='👀 游客参观(只看不用)'; }
+  }catch(e){ document.getElementById('err').textContent = e.message; btn.disabled=false; btn.textContent='游客参观'; }
 }
 </script>
 </body>

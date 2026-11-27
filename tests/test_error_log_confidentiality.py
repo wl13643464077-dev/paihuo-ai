@@ -330,7 +330,7 @@ class CredentialMinimizationTests(unittest.IsolatedAsyncioTestCase):
             result = await wechat.test_conn(2)
 
         self.assertEqual(
-            {"ok": True, "note": "连接成功,可以一键发草稿箱了"},
+            {"ok": True, "note": "连接成功，可以一键发草稿箱了"},
             result,
         )
         self.assertNotIn(token_value[-6:], str(result))

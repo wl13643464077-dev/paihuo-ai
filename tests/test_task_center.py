@@ -1314,7 +1314,7 @@ class TaskCenterDatabaseCase(unittest.TestCase):
             "n": 1,
             "step": {
                 "k": "start",
-                "l": "v1 开始执行(岗位:趋势官 / Skill:Horizon)",
+                "l": "v1 开始执行（岗位：趋势官 / Skill:Horizon）",
                 "ts": 123,
             },
         }

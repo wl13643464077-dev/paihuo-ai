@@ -185,7 +185,7 @@ def staff_task_assign(task_id: int, body: dict):
 async def _read_photo(upload) -> bytes:
     data = await upload.read(photoproof.MAX_UPLOAD_BYTES + 1)
     if len(data) > photoproof.MAX_UPLOAD_BYTES:
-        raise HTTPException(413, "照片太大了(超过 12MB)，请重新拍一张")
+        raise HTTPException(413, "照片太大了（超过 12MB），请重新拍一张")
     return data
 
 
@@ -258,5 +258,15 @@ def staff_task_cancel(task_id: int, body: dict | None = None):
     body = body if isinstance(body, dict) else {}
     try:
         return stafftask.cancel_task(tid, user, task_id, note=body.get("note") or "")
+    except stafftask.StaffTaskError as exc:
+        _raise(exc)
+
+
+@router.post("/api/staff/tasks/{task_id}/nudge")
+def staff_task_nudge(task_id: int):
+    """「催一下」：给负责的店员发通知；权限、状态、30 分钟一次都在 stafftask 里判。"""
+    tid, user = _me()
+    try:
+        return stafftask.nudge_task(tid, user, task_id)
     except stafftask.StaffTaskError as exc:
         _raise(exc)

@@ -134,11 +134,11 @@ async def _run_hot_daily(tid: int, today: str):
     def after(data):
         picks = data.get("picks") or []
         notify.push(tid, "report", {
-            "report_name": f"今日必发({data.get('industry') or '通用'})",
+            "report_name": f"今日必发（{data.get('industry') or '通用'}）",
             "summary": " / ".join(
                 f"{index + 1}.{(pick.get('title') or '')[:20]}"
                 for index, pick in enumerate(picks)
-            ) + " —— 进工具箱看理由,看中一键开工",
+            ) + " —— 进工具箱看理由，看中一键开工",
             "link": "#/tools",
         })
 
@@ -324,15 +324,15 @@ def _run_daily_digest(now: datetime):
             spend_part = f"消耗 {stats['spent']:.0f} 点"
             if stats["refunds"]:
                 spend_part += f"、退回 {stats['refunds']} 笔"
-            summary = (f"昨日完成:内容工单 {stats['jobs_done']} 单、"
-                       f"专家任务 {stats['tasks_done']} 件;{spend_part};"
-                       + (f"{stats['paused']} 个定时任务已暂停;" if stats["paused"] else "")
+            summary = (f"昨日完成：内容工单 {stats['jobs_done']} 单、"
+                       f"专家任务 {stats['tasks_done']} 件；{spend_part};"
+                       + (f"{stats['paused']} 个定时任务已暂停；" if stats["paused"] else "")
                        + f"余额 {stats['balance']:.0f} 点"
-                       + (f"(约可再跑 {stats['days_left']} 天)"
+                       + (f"（约可再跑 {stats['days_left']} 天）"
                           if stats["days_left"] is not None else "")
                        + (("" if not expiring else
-                           ";套餐已到期,请尽快续费" if plan_days_left < 0
-                           else f";套餐还有 {plan_days_left} 天到期")))
+                           "；套餐已到期，请尽快续费" if plan_days_left < 0
+                           else f"；套餐还有 {plan_days_left} 天到期")))
             if store.get("short"):
                 summary = store["short"] + ";" + summary
             stats["plan_days_left"] = plan_days_left
@@ -401,13 +401,13 @@ def _check_capacity(tid: int) -> None:
         raise ScheduleBlocked(
             "review_backlog",
             pending,
-            f"有 {pending} 单等你拍板,定时任务先暂停,拍板后自动恢复",
+            f"有 {pending} 单等你拍板，定时任务先暂停，拍板后自动恢复",
         )
     if active >= MAX_PARALLEL_JOBS:
         raise ScheduleBlocked(
             "parallel_full",
             active,
-            f"并行工单已满({MAX_PARALLEL_JOBS})",
+            f"并行工单已满（{MAX_PARALLEL_JOBS}）",
         )
 
 
@@ -576,10 +576,10 @@ def _handle_blocked(s: dict, claim_token: str, blocked: ScheduleBlocked,
     app_setting,开工成功后清掉,下一段阻塞重新计时、重新提醒。
     """
     if blocked.reason == "review_backlog":
-        note = (f"{_BLOCK_NOTE_PREFIX}有 {blocked.count} 单等你拍板,"
-                "拍板后自动恢复,10 分钟后再看")
+        note = (f"{_BLOCK_NOTE_PREFIX}有 {blocked.count} 单等你拍板，"
+                "拍板后自动恢复，10 分钟后再看")
     else:
-        note = f"到点时 {MAX_PARALLEL_JOBS} 单并行已满,10 分钟后重试"
+        note = f"到点时 {MAX_PARALLEL_JOBS} 单并行已满，10 分钟后重试"
     _finish_claim(s["id"], claim_token, next_run_at=now + 600, last_note=note)
     try:
         state = db.jloads(db.get_setting(_block_key(s["id"])), {}) or {}
@@ -600,11 +600,11 @@ def _handle_blocked(s: dict, claim_token: str, blocked: ScheduleBlocked,
         from . import notify
         name = s.get("name") or "定时任务"
         if blocked.reason == "review_backlog":
-            summary = (f"有 {blocked.count} 单等你拍板,定时任务「{name}」先暂停开工;"
-                       "拍板后会自动恢复,不用重新打开")
+            summary = (f"有 {blocked.count} 单等你拍板，定时任务「{name}」先暂停开工；"
+                       "拍板后会自动恢复，不用重新打开")
         else:
             summary = (f"定时任务「{name}」到点时正在做的工单已满 "
-                       f"{MAX_PARALLEL_JOBS} 单,已经等了一个多小时还没开工,"
+                       f"{MAX_PARALLEL_JOBS} 单，已经等了一个多小时还没开工，"
                        "建议看看有没有卡住的工单")
         notify.push(s.get("tenant_id") or 1, "report", {
             "report_name": "定时任务先暂停了",
@@ -670,7 +670,7 @@ def _tick(engine):
                 _finish_claim(
                     s["id"], claim_token,
                     next_run_at=now + 600,
-                    last_note=f"开工出错,10分钟后重试(已连续失败 {streak} 次)",
+                    last_note=f"开工出错，10分钟后重试（已连续失败 {streak} 次）",
                     fail_streak=streak,
                 )
                 # 静默重试一整天老板毫不知情是最伤的:连续 3 次就告警一次,

@@ -15,8 +15,8 @@ from app import db
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_SCHEMA_VERSION = 64
-EXPECTED_SCHEMA_LEDGER_NAME = "staff-task-loop"
+EXPECTED_SCHEMA_VERSION = 65
+EXPECTED_SCHEMA_LEDGER_NAME = "user-display-name"
 
 INITIALIZE_WORKER = textwrap.dedent(
     """

@@ -1010,7 +1010,7 @@ def _report_mismatch(out_trade_no: str, reason: str) -> None:
     if key in _ALERTED_MISMATCH:
         return
     _ALERTED_MISMATCH.add(key)
-    _alert_platform(f"订单 {out_trade_no} 的付款信息与订单不一致({reason})，已拒绝自动开通，请核对。")
+    _alert_platform(f"订单 {out_trade_no} 的付款信息与订单不一致（{reason}），已拒绝自动开通，请核对。")
 
 
 def sweep_expired_pay_orders(

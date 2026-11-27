@@ -152,7 +152,7 @@ class FeatureSwitchTests(_DbCase):
     def test_video_link_transcription_refused_but_articles_allowed(self):
         with self.assertRaises(features.FeatureDisabled) as caught:
             linkgrab.ensure_video_allowed("https://v.douyin.com/abc/")
-        self.assertIn("请上传你自己的视频/音频文件", str(caught.exception))
+        self.assertIn("请上传您自己的视频/音频文件", str(caught.exception))
         # 公众号/普通网页文章不受这个开关影响
         linkgrab.ensure_video_allowed("https://mp.weixin.qq.com/s/abc")
         features.set_platform("linkgrab_video", True)

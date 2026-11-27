@@ -152,7 +152,7 @@ def _validate_field(field: str, value: str) -> str:
     if field == "mchid" and not _MCHID_RE.fullmatch(clean):
         raise WxPayConfigError("商户号应为 8-12 位数字")
     if field == "appid" and not _APPID_RE.fullmatch(clean):
-        raise WxPayConfigError("AppID 格式不对(以 wx 开头的 18 位)")
+        raise WxPayConfigError("AppID 格式不对（以 wx 开头的 18 位）")
     if field == "apiv3_key" and (
         len(clean.encode("utf-8")) != 32 or not clean.isascii()
     ):
@@ -160,7 +160,7 @@ def _validate_field(field: str, value: str) -> str:
     if field == "merchant_serial_no" and not _SERIAL_RE.fullmatch(clean):
         raise WxPayConfigError("商户证书序列号格式不对")
     if field == "public_key_id" and not _PUBKEY_ID_RE.fullmatch(clean):
-        raise WxPayConfigError("微信支付公钥 ID 格式不对(形如 PUB_KEY_ID_...)")
+        raise WxPayConfigError("微信支付公钥 ID 格式不对（形如 PUB_KEY_ID_...）")
     if field == "private_key":
         _load_private_key(clean)
     if field == "public_key":
@@ -420,7 +420,7 @@ def _request(config: dict, method: str, url_path: str, payload: dict | None = No
                 headers=headers,
             )
     except httpx.HTTPError as exc:
-        raise WxPayError(f"连接微信支付失败({type(exc).__name__})") from exc
+        raise WxPayError(f"连接微信支付失败（{type(exc).__name__}）") from exc
     raw = response.content or b""
     if 200 <= response.status_code < 300:
         # 成功应答必须验签，否则网络中间人可伪造“已支付”。

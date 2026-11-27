@@ -7,9 +7,78 @@
   const $ = s=>document.querySelector(s);
   const esc = v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   const main = ()=>$("#main");
-  const URGENCY = {overdue:"已逾期", today:"今天要做完", later:"", waiting:"已交，等审核",
-    done:"已完成", submitted:"已交，等审核", awaiting_recheck:"已交复查，等审核", missed:"已错过"};
-  const KIND_ICON = {task:"📌", checklist:"✅", inspection_action:"🔧"};
+  /* ---------- 按钮和标题上的线性图标(和老板端 app.js 的 ICONS 同一套画法；本页不加载 app.js，这里只带用得到的几个)。
+     元素上写 data-ic="名字" 就在文字前带图标(CSS 蒙版，颜色跟随文字)；按钮的可访问名只有文字。 ---------- */
+  const ICONS = {
+    bell:'<path d="M6.5 16.5v-6a5.5 5.5 0 0 1 11 0v6l1.5 2H5zM10 20.5a2.2 2.2 0 0 0 4 0"/>',
+    camera:'<path d="M4.5 8A1.5 1.5 0 0 1 6 6.5h2l1.5-2h5l1.5 2h2A1.5 1.5 0 0 1 19.5 8v9.5A1.5 1.5 0 0 1 18 19H6a1.5 1.5 0 0 1-1.5-1.5z"/><circle cx="12" cy="12.5" r="3.25"/>',
+    check:'<circle cx="12" cy="12" r="8.5"/><path d="M8 12.3l2.7 2.7L16 9.5"/>',
+    eye:'<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>',
+    monitor:'<rect x="3" y="4" width="18" height="12.5" rx="2"/><path d="M8.5 20.5h7M12 16.5v4"/>',
+    refresh:'<path d="M19.5 12a7.5 7.5 0 0 1-13.3 4.8M4.5 12a7.5 7.5 0 0 1 13.3-4.8M18 3.5v4h-4M6 20.5v-4h4"/>',
+    send:'<path d="M20.5 3.5L10.5 13.5M20.5 3.5l-6 17-4-7-7-4z"/>',
+    undo:'<path d="M8.5 5.5l-4 4 4 4M4.5 9.5H14a5.25 5.25 0 0 1 0 10.5H8.5"/>',
+    pin:'<path d="M12 21s-6.5-5.8-6.5-10.5a6.5 6.5 0 0 1 13 0C18.5 15.2 12 21 12 21z"/><circle cx="12" cy="10.5" r="2.25"/>',
+    checklist:'<rect x="4" y="4" width="16" height="16" rx="2.5"/><path d="M8 12.5l2.5 2.5L16 9.5"/>',
+    toolbox:'<rect x="3.5" y="8" width="17" height="11.5" rx="2"/><path d="M9 8V6a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 6v2M3.5 13h17M10.5 13v2h3v-2"/>',
+    clipboard:'<rect x="5" y="4.5" width="14" height="16.5" rx="2"/><path d="M9 4.5V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v.5a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1zM9 11h6M9 15h4"/>',
+  };
+  try{
+    const style = document.createElement("style");
+    style.id = "ph-icons";
+    style.textContent = Object.keys(ICONS).map(name=>{
+      const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'>${ICONS[name].replace(/"/g,"'")}</svg>`;
+      return `[data-ic="${name}"]{--ic-url:url("data:image/svg+xml,${encodeURIComponent(svg).replace(/'/g,"%27")}")}`;
+    }).join("\n");
+    document.head.appendChild(style);
+  }catch(e){}
+  /* ---------- 人名与截止时间的统一写法(和 app.js 里的 personWithRole / dueInfo / dueHtml 同一套规则；
+     本页是独立页面，不加载 app.js，所以这里另有一份) ---------- */
+  /* 「小李（店员）」；姓名里已经带了角色(「王店长」)就不重复 */
+  function personWithRole(name, role){
+    name = String(name||"").trim(); role = String(role||"").trim();
+    if(!name) return "";
+    return (!role||name.includes(role)) ? name : `${name}（${role}）`;
+  }
+  /* 截止时间的相对写法，「今天/明天」按北京时间算(不看手机时区)：
+     今天 20:44 / 明天 16:44 / 后天 09:00 / 11-28 16:44；还没做完又过了点的写「已逾期 3 小时」「已逾期 2 天」。
+     open=这件事还没做完；返回 {text, full, overdue}，full 是完整时间。 */
+  function dueInfo(ts, open, now){
+    ts = Number(ts); if(!ts||!isFinite(ts)) return null;
+    now = now==null ? Date.now()/1000 : Number(now);
+    const CN = 8*3600, pad = n=>String(n).padStart(2,"0");
+    const d = new Date((ts+CN)*1000), n = new Date((now+CN)*1000);
+    const hm = `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+    const md = `${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
+    const full = `${d.getUTCFullYear()}-${md} ${hm}`;
+    if(open && ts<now){
+      const late = now-ts;
+      const text = late<3600 ? `已逾期 ${Math.max(1,Math.floor(late/60))} 分钟`
+        : late<86400 ? `已逾期 ${Math.floor(late/3600)} 小时` : `已逾期 ${Math.floor(late/86400)} 天`;
+      return {text, full, overdue:true};
+    }
+    const days = Math.floor((ts+CN)/86400)-Math.floor((now+CN)/86400);
+    const text = days===0 ? `今天 ${hm}` : days===1 ? `明天 ${hm}` : days===2 ? `后天 ${hm}`
+      : d.getUTCFullYear()!==n.getUTCFullYear() ? full : `${md} ${hm}`;
+    return {text, full, overdue:false};
+  }
+  /* 卡片/详情里的那一小段(已转义)：「截止 明天 16:44」或「⏰ 已逾期 3 小时」；title 给完整时间(长按/悬停可见) */
+  function dueHtml(ts, open, now){
+    const info = dueInfo(ts, open, now);
+    if(!info) return "";
+    return info.overdue
+      ? `<span class="due-rel due-over" title="原定 ${esc(info.full)} 截止">⏰ ${esc(info.text)}</span>`
+      : `<span class="due-rel" title="${esc(info.full)} 截止">截止 ${esc(info.text)}</span>`;
+  }
+  /* 详情页的截止时间：it 没有时间戳(老接口)时退回后端给的文字 */
+  function dueDetail(it, open){
+    if(it.due_at) return dueHtml(it.due_at, open);
+    return it.due_text ? esc(`截止 ${it.due_text}`) : "";
+  }
+  const URGENCY = {overdue:"已逾期", today:"今天要做完", later:"", waiting:"已交，等店长或老板看",
+    done:"已完成", submitted:"已交，等店长或老板看", awaiting_recheck:"已交复查，等审核", missed:"已错过",
+    approved:"✅ 已通过"};
+  const KIND_ICON = {task:"pin", checklist:"checklist", inspection_action:"toolbox"};
 
   /* ---------- 网络 ---------- */
   function detailText(d, fallback){
@@ -35,8 +104,13 @@
     finally{ clearTimeout(timer); }
     return handle(r.status, await r.json().catch(()=>null));
   }
+  /* 登录后回到手机版(和当前这件活)。登录页只认站内固定形状的路径 */
+  function loginUrl(){
+    const hash = /^#[A-Za-z0-9_\-\/]*$/.test(location.hash) ? location.hash : "";
+    return "/login?next="+encodeURIComponent("/staff"+hash);
+  }
   function handle(status, data){
-    if(status===401){ location.href="/login"; throw new Error("请先登录"); }
+    if(status===401){ location.href=loginUrl(); throw new Error("请先登录"); }
     if(status===428){ location.href="/?full=1"; throw new Error("请先改密码"); }
     if(status<200||status>=300){
       const e = new Error(detailText(data, status>=500?"服务器开小差了，请稍后再试":"没办成，请刷新后再试"));
@@ -97,8 +171,19 @@
   function msg(text, kind="err"){ return `<div class="msg ${kind}" role="${kind==="err"?"alert":"status"}">${esc(text)}</div>`; }
   function back(){ return `<button type="button" class="back" data-go="">← 回我的待办</button>`; }
   function dueLine(it){
-    if(!it.due_text) return "";
+    if((!it.due_at && !it.due_text) || it.urgency==="approved") return "";   // 已通过的活不用再提截止时间
+    // 还没做完的(逾期/今天/之后)才会写「已逾期 3 小时」；已交、已完成的只写原定时间
+    const open = ["overdue","today","later"].includes(it.urgency);
+    if(it.due_at) return dueHtml(it.due_at, open);
     return (it.urgency==="overdue"?"⏰ 已过截止 ":"截止 ")+esc(it.due_text);
+  }
+  /* 「王总（老板）派的」：称呼以全角括号结尾时后面不再垫空格 */
+  function sentBy(label){ label=String(label||""); return /[）)]$/.test(label) ? `${label}派的` : `${label} 派的`; }
+  /* 逾期徽标直接写「已逾期 2 天」(带完整时间的 title)，后面就不再重复一遍；没有时间戳的老数据返回空串，照旧分两处写 */
+  function overdueTag(it){
+    const info = it.due_at ? dueInfo(it.due_at, true) : null;
+    if(!info || !info.overdue) return "";
+    return `<span class="tag overdue due-rel" title="原定 ${esc(info.full)} 截止">${esc(info.text)}</span>`;
   }
   function tag(it){
     let key = it.urgency, text = URGENCY[key]||"";
@@ -106,18 +191,46 @@
     return text ? `<span class="tag ${esc(key)}">${esc(text)}</span>` : "";
   }
   function cardHtml(it){
-    const sub = [it.branch_name, dueLine(it)].filter(Boolean).join(" · ");
+    const merged = tag(it).includes(">已逾期<") ? overdueTag(it) : "";
+    const sub = [esc(it.branch_name||""), merged ? "" : dueLine(it)].filter(Boolean).join(" · ");
     let extra = "";
     if(it.kind==="checklist" && it.progress) extra = ` · 做了 ${it.progress.done}/${it.progress.total} 项`;
     if(it.kind==="task" && it.require_photo && it.status==="todo") extra = " · 要拍照";
+    // 店长/老板 24 小时内「催一下」过：卡片上提一句（店员手机上没有通知列表）
+    if(it.kind==="task" && it.status==="todo" && it.last_nudged_at && Date.now()/1000-it.last_nudged_at<86400)
+      extra += ` · 🔔 ${hhmm(it.last_nudged_at)} 催过`;
     return `<button type="button" class="card" data-open="${esc(it.kind)}:${esc(it.id)}">
-      <div class="t">${KIND_ICON[it.kind]||"📌"} ${esc(it.title)}</div>
-      <div class="m">${tag(it)}${sub}${esc(extra)}</div></button>`;
+      <div class="t" data-ic="${KIND_ICON[it.kind]||"pin"}">${esc(it.title)}</div>
+      <div class="m">${merged||tag(it)}${sub}${esc(extra)}</div></button>`;
+  }
+  /* 打回原因前写上是谁打回的：「老王（店长） 打回：……」(reviewer_label 由后端按姓名+身份算好)；老数据没有审核人时不写名字 */
+  function rejectLine(t, fallback){
+    return t.reviewer_label ? `${t.reviewer_label} 打回：${t.review_note}` : `${fallback}：${t.review_note}`;
   }
   function findItem(kind, id){
     const all = (S.todo&&S.todo.items)||[];
     return all.find(x=>x.kind===kind && String(x.id)===String(id))
-      || (kind==="review" ? ((S.todo&&S.todo.reviews)||[]).find(x=>String(x.id)===String(id)) : null);
+      || (kind==="review" ? ((S.todo&&S.todo.reviews)||[]).find(x=>String(x.id)===String(id)) : null)
+      || (kind==="store" ? ((S.todo&&S.todo.store_tasks)||[]).find(x=>String(x.id)===String(id)) : null);
+  }
+
+  /* ---------- 店长:本店在做的活(谁、做什么、什么时候前、到哪一步了) ---------- */
+  const STORE_STATE = {submitted:["today","等您审核"], rejected:["overdue","被打回"],
+    overdue:["overdue","已逾期"], today:["today","今天要做完"], later:["later","在做"]};
+  function storeTag(it){
+    const [cls, text] = STORE_STATE[it.store_state] || STORE_STATE.later;
+    return `<span class="tag ${esc(cls)}">${esc(text)}</span>`;
+  }
+  function storeCardHtml(it){
+    // 后半句跟着状态走，不和前面的标签打架
+    const doing = {submitted:"已交", rejected:"在重做", overdue:"还没交"}[it.store_state] || "在做";   // 标签已写「已逾期」，这里不再重复
+    const who = it.assignee_name ? `${it.assignee_name} ${doing}` : "还没指定人";
+    // dueLine 已经转义过
+    const merged = it.store_state==="overdue" ? overdueTag(it) : "";
+    const sub = [esc(who), esc(it.branch_name||""), it.store_state==="submitted"||merged ? "" : dueLine(it)].filter(Boolean);
+    return `<button type="button" class="card store" data-open="store:${esc(it.id)}">
+      <div class="t" data-ic="clipboard">${esc(it.title)}</div>
+      <div class="m">${merged||storeTag(it)}${sub.join(" · ")}</div></button>`;
   }
 
   /* ---------- 首页:我的待办 ---------- */
@@ -126,7 +239,9 @@
     const names = (t.branches||[]).map(b=>b.name).filter(Boolean);
     $("#today").textContent = `今天 ${t.date_text||""}` + (names.length ? " · "+names.slice(0,2).join("、")+(names.length>2?` 等 ${names.length} 家`:"") : "");
     const u = t.user || {};
-    $("#who").textContent = [u.name, u.role_label].filter(Boolean).join(" · ");
+    $("#who").textContent = personWithRole(u.name, u.role_label) || u.role_label || "";
+    // 浏览器标签：店长看到「派活 · 店长」，店员看到「派活 · 店员」，其他人「派活 · 门店」
+    document.title = "派活 · " + (["店长","店员"].includes(u.role_label) ? u.role_label : "门店");
   }
   function homeView(note){
     const t = S.todo || {items:[], reviews:[]};
@@ -136,14 +251,24 @@
     const boss = t.user && t.user.can_dispatch;
     main().innerHTML = (note||"")
       + (boss ? `<div class="row" style="margin-top:14px">
-          <button type="button" class="btn pri" data-go="dispatch">📤 派活</button>
-          <button type="button" class="btn" data-go="reviews">🧐 待我审核${t.reviews&&t.reviews.length?`（${t.reviews.length}）`:""}</button></div>` : "")
+          <button data-ic="send" type="button" class="btn pri" data-go="dispatch">派活</button>
+          <button data-ic="eye" type="button" class="btn" data-go="reviews">待我审核${t.reviews&&t.reviews.length?`（${t.reviews.length}）`:""}</button></div>` : "")
       + `<h2>我的待办${todo.length?`（${todo.length}）`:""}</h2>`
-      + (todo.length ? todo.map(cardHtml).join("") : `<div class="empty">🎉 今天的活都做完了</div>`)
+      + (todo.length ? todo.map(cardHtml).join("")
+          : (t.has_any_task===false ? `<div class="empty">还没有人给您派活</div>` : `<div class="empty">🎉 今天的活都做完了</div>`))
+      + (boss ? storeSection(t) : "")
       + (rest.length ? `<h2>已交 / 已做完</h2>`+rest.map(cardHtml).join("") : "")
-      + `<div class="foot"><button type="button" class="btn" data-act="refresh">🔄 刷新</button>
-          <a class="btn" href="/?full=1">💻 完整版</a>
-          <button type="button" class="btn" data-act="logout">🚪 退出</button></div>`;
+      + `<div class="foot"><button data-ic="refresh" type="button" class="btn" data-act="refresh">刷新</button>
+          ${t.user && t.user.can_open_full ? `<a data-ic="monitor" class="btn" href="/?full=1">完整版</a>` : ""}</div>
+        <div class="foot-links"><button type="button" class="linkbtn" data-act="logout">退出登录</button></div>`;
+  }
+
+  function storeSection(t){
+    const list = t.store_tasks || [];
+    const title = t.user && t.user.can_open_full ? "各店在做的活" : "本店在做的活";
+    return `<h2 id="store-head">${title}${list.length?`（${list.length}）`:""}</h2>`
+      + (list.length ? list.map(storeCardHtml).join("")
+          : `<div class="empty small">店里现在没有在做的活</div>`);
   }
 
   /* ---------- 派给我的活:拍照交差 ---------- */
@@ -151,7 +276,7 @@
     const list = S.pending[key] = S.pending[key] || [];
     return `<div id="thumbs" class="thumbs">${list.map((p,i)=>`<div class="thumb"><img src="${esc(p.url)}" alt="第 ${i+1} 张">
       <button type="button" data-del="${i}" aria-label="删掉第 ${i+1} 张">×</button></div>`).join("")}</div>
-      <button type="button" class="btn" data-act="shoot">📷 ${list.length?"再拍一张":"拍照"}</button>`;
+      <button data-ic="camera" type="button" class="btn" data-act="shoot">${list.length?"再拍一张":"拍照"}</button>`;
   }
   async function taskView(id){
     let t = findItem("task", id);
@@ -159,29 +284,55 @@
     S.current = t;
     const key = "task:"+t.id;
     const rejected = t.status==="todo" && t.review_note && t.reviewed_at;
-    let body = `${back()}<div class="panel"><div class="t" style="font-size:20px;font-weight:900">${esc(t.title)}</div>
-      <p class="sub">${[t.branch_name, t.created_by_name?`${t.created_by_name} 派的`:"", t.due_text?`截止 ${t.due_text}`:""].filter(Boolean).map(esc).join(" · ")}</p>
+    let body = `${back()}<div class="panel"><div class="t" style="font-size:20px;font-weight:700">${esc(t.title)}</div>
+      <p class="sub">${[esc(t.branch_name||""), (t.dispatcher_label||t.created_by_name)?esc(sentBy(t.dispatcher_label||t.created_by_name)):"", dueDetail(t, t.status==="todo")].filter(Boolean).join(" · ")}</p>
       ${t.detail?`<p>${esc(t.detail)}</p>`:""}
-      ${rejected?msg("上次被打回："+t.review_note,"info"):""}</div>`;
+      ${rejected?msg(rejectLine(t, "上次被打回"),"info"):""}</div>`;
     if(t.status==="todo" && t.can_submit!==false){
       body += `<h2>${t.require_photo?"拍照交差（要照片）":"做完了就交"}</h2>
         <div id="picker">${photoPicker(key)}</div>
         <label for="note">备注（可不填）</label><textarea id="note" maxlength="500" placeholder="比如：冷柜里的过期货已经下架">${esc((S.pending[key+":note"])||"")}</textarea>
         <div id="up" class="hidden"><div class="progress"><i id="bar"></i></div><div class="sub" id="uptext">正在上传…</div></div>
         <div id="err"></div>
-        <button type="button" class="btn pri" data-act="submit" style="margin-top:14px">✅ 提交</button>`;
+        <button data-ic="check" type="button" class="btn pri" data-act="submit" style="margin-top:14px">提交</button>`;
     } else {
-      body += msg(`这件事${esc(t.status_label||"")}`, "info") + photosHtml(t.photos) + aiHtml(t);
+      const label = {approved:"✅ 这件活通过了", submitted:"已交，等店长或老板看"}[t.status] || `这件事${t.status_label||""}`;
+      // AI 验照片的建议是写给审核人的：店员看自己交的活时不显示
+      body += msg(label, t.status==="approved"?"ok":"info") + photosHtml(t.photos) + (t.can_manage ? aiHtml(t) : "");
     }
     main().innerHTML = body;
   }
   function photosHtml(list){
     if(!list || !list.length) return "";
-    return `<div class="photos">${list.map(p=>`<a href="${esc(p.url)}" target="_blank" rel="noopener"><img src="${esc(p.url)}" alt="交差照片" loading="lazy"></a>`).join("")}</div>`;
+    return `<div class="photos">${list.map((p,i)=>`<a href="${esc(p.url)}" data-view="${i}" aria-label="看大图 第 ${i+1} 张"><img src="${esc(p.url)}" alt="交差照片" loading="lazy"></a>`).join("")}</div>`;
   }
+  /* 页内看大图：点照片放大，左右翻，点 × 或按返回关掉，不新开标签页 */
+  function openViewer(urls, start){
+    closeViewer();
+    let i = Math.max(0, Math.min(urls.length-1, start||0));
+    const box = document.createElement("div");
+    box.className = "viewer"; box.id = "viewer";
+    box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true"); box.setAttribute("aria-label", "看照片");
+    const draw = ()=>{
+      box.innerHTML = `<img src="${esc(urls[i])}" alt="交差照片 第 ${i+1} 张">
+        <button type="button" class="vx" data-v="x" aria-label="关掉">×</button>
+        ${urls.length>1?`<button type="button" class="vp" data-v="p" aria-label="上一张">‹</button><button type="button" class="vn" data-v="n" aria-label="下一张">›</button>
+        <div class="vc">${i+1} / ${urls.length}</div>`:""}`;
+      box.querySelector(".vx").focus();
+    };
+    box.addEventListener("click", e=>{
+      const v = e.target.closest("[data-v]"); e.stopPropagation();
+      if(v && v.dataset.v==="p"){ i = (i-1+urls.length)%urls.length; draw(); }
+      else if(v && v.dataset.v==="n"){ i = (i+1)%urls.length; draw(); }
+      else if(!e.target.closest("img")) closeViewer();
+    });
+    document.body.appendChild(box); draw();
+  }
+  function closeViewer(){ const v = $("#viewer"); if(v) v.remove(); }
+  document.addEventListener("keydown", e=>{ if(e.key==="Escape") closeViewer(); });
   function aiHtml(t){
     const a = t.ai_check;
-    if(!a) return t.status==="submitted"&&t.photos&&t.photos.length ? `<div class="ai none">暂无 AI 验照片建议，等待负责人核对照片</div>` : "";
+    if(!a) return "";   // 没开 AI 验照片或还没看完：不提，直接看照片
     if(a.error || !a.verdict) return `<div class="ai none">🤖 ${esc(a.reason||"AI 这次没看成，请直接看照片")}</div>`;
     const label = {pass:"像是做好了", doubt:"拿不准，建议再看看", fail:"像是没做好"}[a.verdict]||"";
     return `<div class="ai ${esc(a.verdict)}">🤖 AI 建议：${esc(label)}${a.reason?`。${esc(a.reason)}`:""}<div class="sub">只是建议，最后由人来定</div></div>`;
@@ -191,6 +342,8 @@
     if(!files.length) return;
     const list = S.pending[key] = S.pending[key] || [];
     const err = $("#err");
+    // 拍好了照片,之前那句「请先点『拍照』」就不该再挂着(店员会以为照片没传上)。
+    if(err) err.innerHTML = "";
     for(const f of files.slice(0, 9-list.length)){
       try{ const blob = await compress(f); list.push({blob, url:URL.createObjectURL(blob)}); }
       catch(e){ if(err) err.innerHTML = msg(e.message); }
@@ -222,11 +375,11 @@
       list.forEach(p=>URL.revokeObjectURL(p.url));
       delete S.pending[key]; delete S.pending[key+":note"];
       await loadTodo();
-      go("", msg("✅ 交上去了，等老板看", "ok"));
+      go("", msg("✅ 交上去了，等店长或老板看", "ok"));
     }catch(e){
       $("#up").classList.add("hidden");
       err.innerHTML = msg(e.message);
-      if(btn){ btn.disabled = false; btn.textContent = "🔁 重试提交"; }
+      if(btn){ btn.disabled = false; btn.textContent = "重试提交"; }
     }finally{ S.busy = false; }
   }
 
@@ -236,30 +389,40 @@
     if(!run){ main().innerHTML = back()+msg("这张清单找不到了，请刷新"); return; }
     S.current = run;
     const items = Array.isArray(run.items) ? run.items : [];
-    main().innerHTML = `${back()}<div class="panel"><div class="t" style="font-size:20px;font-weight:900">${esc(run.title)}</div>
+    main().innerHTML = `${back()}<div class="panel"><div class="t" style="font-size:20px;font-weight:700">${esc(run.title)}</div>
       <p class="sub">${[run.branch_name, run.due_text?`${run.due_text} 前做完`:""].filter(Boolean).map(esc).join(" · ")}</p>
       ${run.progress?`<p>做了 ${run.progress.done}/${run.progress.total} 项</p>`:""}</div>
       <div id="err"></div>
       <div class="panel">${items.length ? items.map((it,i)=>{
         const done = !!it.done, text = it.text||it.title||it.key;
+        // 「已经做完」和「点这里标记做完」要一眼分开：没做的是按钮，做完的是绿色「✅ 已完成 · 时间」+ 撤回
+        const at = done ? hhmm(it.done_at) : "";
         return `<div class="item"><div class="tx ${done?"done":""}">${i+1}. ${esc(text)}${it.require_photo&&!done?` <span class="tag today">要拍照</span>`:""}</div>
-          ${done?`<span class="tag done">✓ 做完了</span>`:`<button type="button" class="btn ${it.require_photo?"":"ok"}" data-item="${esc(it.key)}">${it.require_photo?"📷 拍照打勾":"✓ 做完了"}</button>`}</div>`;
+          ${done?`<div class="donebox"><span class="tag checked">✅ 已完成${at?` · ${esc(at)}`:""}</span>
+              ${run.status==="done"?"":`<button type="button" class="linkbtn" data-undo="${esc(it.key)}" aria-label="撤回第 ${i+1} 项">撤回</button>`}</div>`
+            :`<button type="button" class="btn" data-item="${esc(it.key)}">${it.require_photo?"拍照，标记做完":"点一下，标记做完"}</button>`}</div>`;
       }).join("") : `<div class="empty">这张清单没有项目</div>`}</div>`;
   }
-  async function checkItem(key){
+  function hhmm(ts){
+    if(!ts) return "";
+    const d = new Date(Number(ts)*1000+8*3600e3);
+    if(isNaN(d.getTime())) return "";
+    return String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0");
+  }
+  async function checkItem(key, undo){
     const run = S.current; if(!run || S.busy) return;
     const it = (run.items||[]).find(x=>String(x.key)===String(key)); if(!it) return;
     const err = $("#err"); err.innerHTML = "";
     const form = new FormData();
-    if(it.require_photo){
+    if(!undo && it.require_photo){
       const files = await pickPhoto(false);
       if(!files.length) return;
       try{ form.append("photo", await compress(files[0]), "photo.jpg"); }
       catch(e){ err.innerHTML = msg(e.message); return; }
     }
-    form.append("done", "1"); form.append("note", "");
+    form.append("done", undo?"0":"1"); form.append("note", "");
     S.busy = true;
-    const btn = document.querySelector(`[data-item="${CSS.escape(String(key))}"]`);
+    const btn = document.querySelector(`[data-${undo?"undo":"item"}="${CSS.escape(String(key))}"]`);
     if(btn){ btn.disabled = true; btn.textContent = "提交中…"; }
     try{
       await upload(`/checklist/runs/${encodeURIComponent(run.id)}/items/${encodeURIComponent(key)}`, form);
@@ -268,7 +431,7 @@
       if(fresh) checklistView(run.id); else go("", msg("✅ 清单做完了", "ok"));
     }catch(e){
       err.innerHTML = msg(e.message);
-      if(btn){ btn.disabled = false; btn.textContent = "🔁 重试"; }
+      if(btn){ btn.disabled = false; btn.textContent = undo ? "再点一次撤回" : "重试"; }
     }finally{ S.busy = false; }
   }
 
@@ -278,13 +441,13 @@
     if(!a){ main().innerHTML = back()+msg("这条整改找不到了，请刷新"); return; }
     S.current = a;
     const canSubmit = ["open","in_progress","reopened"].includes(a.status);
-    main().innerHTML = `${back()}<div class="panel"><div class="t" style="font-size:20px;font-weight:900">🔧 ${esc(a.title)}</div>
-      <p class="sub">${[a.branch_name, a.due_text?`截止 ${a.due_text}`:""].filter(Boolean).map(esc).join(" · ")}</p>
+    main().innerHTML = `${back()}<div class="panel"><div class="t" data-ic="toolbox" style="font-size:20px;font-weight:700">${esc(a.title)}</div>
+      <p class="sub">${[esc(a.branch_name||""), dueDetail(a, canSubmit)].filter(Boolean).join(" · ")}</p>
       ${a.plan?`<p><b>怎么改：</b>${esc(a.plan)}</p>`:""}
       ${a.hint?`<p class="sub">${esc(a.hint)}</p>`:""}</div>
       <div id="err"></div>
       ${canSubmit?`<div id="up" class="hidden"><div class="progress"><i id="bar"></i></div></div>
-        <button type="button" class="btn pri" data-act="recheck">📷 改好了，拍复查照片提交</button>`
+        <button data-ic="camera" type="button" class="btn pri" data-act="recheck">改好了，拍复查照片提交</button>`
         :msg(URGENCY[a.status]||"已经提交复查了，等老板看", "info")}`;
   }
   async function submitRecheck(){
@@ -313,25 +476,25 @@
     main().innerHTML = back()+`<div class="empty"><span class="spin"></span> 正在加载…</div>`;
     try{ S.meta = await api("/staff/meta"); }catch(e){ main().innerHTML = back()+msg(e.message); return; }
     const m = S.meta;
-    if(!m.can_dispatch || !m.branches.length){ main().innerHTML = back()+msg("你还没有可以派活的门店，请联系老板分配门店"); return; }
+    if(!m.can_dispatch || !m.branches.length){ main().innerHTML = back()+msg("您还没有可以派活的门店，请联系老板分配门店"); return; }
     const d = new Date(Date.now()+8*3600e3), pad = n=>String(n).padStart(2,"0");
     const def = `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}T18:00`;
     S.dispatchKey = reqKey();
-    main().innerHTML = `${back()}<h2>📤 派活给店员</h2><div id="err"></div>
+    main().innerHTML = `${back()}<h2 data-ic="send">派活给店员</h2><div id="err"></div>
       <label for="d-branch">哪家店</label><select id="d-branch">${m.branches.map(b=>`<option value="${b.id}">${esc(b.name)}</option>`).join("")}</select>
       <label for="d-who">派给谁</label><select id="d-who"></select>
       <label for="d-title">要做什么</label><input id="d-title" maxlength="60" placeholder="比如：把冷柜清洗一遍">
       <label for="d-detail">说明（可不填）</label><textarea id="d-detail" maxlength="1000"></textarea>
       <label for="d-due">什么时候前做完</label><input id="d-due" type="datetime-local" value="${def}">
       <label class="check"><input id="d-photo" type="checkbox" checked> 要拍照交差</label>
-      <button type="button" class="btn pri" data-act="dispatch" style="margin-top:12px">📤 派出去</button>`;
+      <button data-ic="send" type="button" class="btn pri" data-act="dispatch" style="margin-top:12px">派出去</button>`;
     fillWho();
     $("#d-branch").addEventListener("change", fillWho);
   }
   function fillWho(){
     const b = (S.meta.branches||[]).find(x=>String(x.id)===$("#d-branch").value) || {members:[]};
     $("#d-who").innerHTML = `<option value="">先不指定（店里谁有空谁做）</option>`
-      + b.members.map(u=>`<option value="${u.id}">${esc(u.name)}（${esc(u.title_label)}）</option>`).join("");
+      + b.members.map(u=>`<option value="${u.id}">${esc(personWithRole(u.name, u.title_label))}</option>`).join("");
   }
   function cnLocalToTs(v){
     const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(v||"");
@@ -358,17 +521,75 @@
   /* ---------- 店长:待我审核 ---------- */
   function reviewsView(){
     const list = (S.todo&&S.todo.reviews)||[];
-    main().innerHTML = `${back()}<h2>🧐 待我审核${list.length?`（${list.length}）`:""}</h2>`
-      + (list.length ? list.map(t=>`<div class="panel" data-review="${t.id}">
-          <div class="t" style="font-size:18px;font-weight:900">${esc(t.title)}</div>
+    main().innerHTML = `${back()}<h2 data-ic="eye">待我审核${list.length?`（${list.length}）`:""}</h2>`
+      + (list.length ? list.map(t=>reviewCard(t)).join("") : `<div class="empty">没有等您审核的活</div>`);
+  }
+  function reviewCard(t, after){
+    return `<div class="panel" data-review="${esc(t.id)}"${after?` data-after="${esc(after)}"`:""}>
+          <div class="t" style="font-size:18px;font-weight:700">${esc(t.title)}</div>
           <p class="sub">${[t.branch_name, t.assignee_name?`${t.assignee_name} 交的`:"", t.submit_note?`备注：${t.submit_note}`:""].filter(Boolean).map(esc).join(" · ")}</p>
+          ${t.review_note&&t.reviewed_at?msg(`${rejectLine(t, "上次打回")}${t.submit_count>1?`（第 ${t.submit_count} 次交）`:"（重交）"}`, "info"):""}
           ${photosHtml(t.photos)}${aiHtml(t)}
           <div class="err-slot"></div>
-          <div class="row"><button type="button" class="btn ok" data-review-act="approve" data-id="${t.id}">👍 通过</button>
-            <button type="button" class="btn bad" data-review-act="reject" data-id="${t.id}">↩️ 打回</button></div>
+          <div class="row"><button data-ic="check" type="button" class="btn ok" data-review-act="approve" data-id="${t.id}">通过</button>
+            <button data-ic="undo" type="button" class="btn bad" data-review-act="reject" data-id="${t.id}">打回</button></div>
           <div class="reject-box hidden"><label>打回原因（店员会看到）</label><textarea maxlength="500" placeholder="比如：冷柜底层没擦干净，再拍一张近照"></textarea>
             <button type="button" class="btn bad" data-review-act="reject-send" data-id="${t.id}" style="margin-top:8px">确认打回</button></div>
-        </div>`).join("") : `<div class="empty">没有等你审核的活</div>`);
+        </div>`;
+  }
+  /* 店长点开本店一件活：只读详情；等审核的直接给审核卡 */
+  async function storeTaskView(id){
+    let t = findItem("store", id);
+    main().innerHTML = back()+`<div class="empty"><span class="spin"></span> 正在打开…</div>`;
+    try{ t = await api(`/staff/tasks/${encodeURIComponent(id)}`); }
+    catch(e){ if(!t){ main().innerHTML = back()+msg(e.message); return; } }
+    S.current = t;
+    const meId = S.todo && S.todo.user && S.todo.user.id;
+    const rejected = t.status==="rejected" || (t.status==="todo" && t.review_note && t.reviewed_at);
+    const who = t.assignee_name ? `交给 ${t.assignee_name}` : "还没指定人";
+    const by = t.dispatcher_label||t.created_by_name;
+    let body = `${back()}<div class="panel"><div class="t" style="font-size:20px;font-weight:700">${esc(t.title)}</div>
+      <p class="sub">${[esc(t.branch_name||""), esc(who), by?esc(sentBy(by)):"", dueDetail(t, t.status==="todo")].filter(Boolean).join(" · ")}</p>
+      ${t.detail?`<p>${esc(t.detail)}</p>`:""}</div>`;
+    const reviewable = t.status==="submitted" && t.can_manage && String(t.assignee_user_id)!==String(meId);
+    if(reviewable){
+      body += `<h2 data-ic="eye">交上来了，等您审核</h2>` + reviewCard(t, "home");
+    } else {
+      const label = t.status==="submitted" ? "已交，等审核"
+        : rejected ? (t.reviewer_label ? `${t.reviewer_label} 打回，在重做：${t.review_note||""}` : `被打回，在重做：${t.review_note||""}`)
+        : t.overdue ? "已过截止时间，还没交" : "在做，还没交";
+      body += msg(label, t.overdue||rejected ? "err" : "info") + photosHtml(t.photos)
+        + nudgeHtml(t, meId)
+        + `<p class="sub">这里只看进度，不能替同事交差。</p>`;
+    }
+    main().innerHTML = body;
+  }
+  /* 催一下：还没交的活给负责的店员发一条通知；30 分钟内只能催一次（服务端把关） */
+  const NUDGE_GAP = 30*60;
+  function nudgeHtml(t, meId){
+    const open = ["todo","rejected"].includes(t.status);
+    if(!open || !t.can_manage || !t.assignee_user_id || String(t.assignee_user_id)===String(meId)) return "";
+    const last = Number(t.last_nudged_at)||0;
+    const fresh = last && Date.now()/1000-last < NUDGE_GAP;
+    return `<div id="nudge" class="nudge">${fresh
+      ? nudgedHtml(last)
+      : nudgeBtn(t)+(last?`<div class="sub">上次 ${esc(hhmm(last))} 催过</div>`:"")}</div>`;
+  }
+  function nudgeBtn(t){ return `<button data-ic="bell" type="button" class="btn" data-act="nudge">催一下${t.assignee_name?" "+esc(t.assignee_name):""}</button>`; }
+  function nudgedHtml(ts){
+    return `<span class="tag checked">🔔 已催 · ${esc(hhmm(ts))}</span><div class="sub">对方会收到通知，30 分钟后可以再催</div>`;
+  }
+  async function nudge(){
+    const t = S.current; if(!t || S.busy) return;
+    const box = $("#nudge"); if(!box) return;
+    const btn = box.querySelector("[data-act=nudge]");
+    S.busy = true; if(btn){ btn.disabled = true; btn.textContent = "正在催…"; }
+    try{
+      const r = await api(`/staff/tasks/${encodeURIComponent(t.id)}/nudge`, {method:"POST", body:{}});
+      t.last_nudged_at = r.nudged_at;
+      box.innerHTML = nudgedHtml(r.nudged_at);
+    }catch(e){ box.innerHTML = msg(e.message) + nudgeBtn(t); }
+    finally{ S.busy = false; }
   }
   async function review(id, action, box){
     if(S.busy) return;
@@ -381,7 +602,8 @@
       await api(`/staff/tasks/${encodeURIComponent(id)}/review`, {method:"POST",
         body:{action:action==="approve"?"approve":"reject", note}});
       await loadTodo();
-      reviewsView();
+      if(box.dataset.after==="home") go("", msg(action==="approve" ? "✅ 已通过" : "↩️ 已打回，店员会看到原因", "ok"));
+      else reviewsView();
     }catch(e){ slot.innerHTML = msg(e.message); }
     finally{ S.busy = false; }
   }
@@ -403,12 +625,19 @@
     if((m = /^action-(.+)$/.exec(h))) return actionView(m[1]);
     if(h==="dispatch") return dispatchView();
     if(h==="reviews") return reviewsView();
+    if((m = /^store-(\d+)$/.exec(h))) return storeTaskView(m[1]);
     homeView(note);
   }
-  const OPEN_HASH = {task:"task-", checklist:"checklist-", inspection_action:"action-"};
+  const OPEN_HASH = {task:"task-", checklist:"checklist-", inspection_action:"action-", store:"store-"};
   document.addEventListener("click", e=>{
-    const el = e.target.closest("[data-open],[data-go],[data-act],[data-del],[data-item],[data-review-act]");
+    const el = e.target.closest("[data-open],[data-go],[data-act],[data-del],[data-item],[data-undo],[data-review-act],[data-view]");
     if(!el) return;
+    if(el.dataset.view!==undefined){
+      e.preventDefault();
+      const urls = [...el.closest(".photos").querySelectorAll("[data-view]")].map(a=>a.getAttribute("href"));
+      openViewer(urls, +el.dataset.view); return;
+    }
+    if(el.dataset.undo!==undefined){ checkItem(el.dataset.undo, true); return; }
     if(el.dataset.open){ const [k, id] = el.dataset.open.split(":"); go((OPEN_HASH[k]||"task-")+id); return; }
     if(el.dataset.go!==undefined){ go(el.dataset.go); return; }
     if(el.dataset.del!==undefined && S.current){
@@ -423,10 +652,11 @@
     else if(act==="submit") submitTask();
     else if(act==="recheck") submitRecheck();
     else if(act==="dispatch") submitDispatch();
+    else if(act==="nudge") nudge();
     else if(act==="refresh") refresh();
     else if(act==="logout") logout();
   });
-  window.addEventListener("hashchange", ()=>route());
+  window.addEventListener("hashchange", ()=>{ closeViewer(); route(); });
   function setNet(){ $("#net").classList.toggle("show", navigator.onLine===false); }
   window.addEventListener("offline", setNet);
   window.addEventListener("online", ()=>{ setNet(); if(!location.hash) refresh(); });
@@ -435,11 +665,11 @@
   async function refresh(){
     main().innerHTML = `<div class="empty"><span class="spin"></span> 正在刷新…</div>`;
     try{ await loadTodo(); homeView(); }
-    catch(e){ main().innerHTML = msg(e.message)+`<button type="button" class="btn" data-act="refresh">🔄 再试一次</button>`; }
+    catch(e){ main().innerHTML = msg(e.message)+`<button data-ic="refresh" type="button" class="btn" data-act="refresh">再试一次</button>`; }
   }
   async function logout(){
     try{ await api("/auth/logout", {method:"POST"}); }catch(_){}
-    location.href = "/login";
+    location.href = "/login?next=%2Fstaff";
   }
   async function boot(){
     setNet();
@@ -447,7 +677,7 @@
       await loadTodo();
       route();
     }catch(e){
-      main().innerHTML = msg(e.message)+`<button type="button" class="btn" data-act="refresh">🔄 再试一次</button>`;
+      main().innerHTML = msg(e.message)+`<button data-ic="refresh" type="button" class="btn" data-act="refresh">再试一次</button>`;
     }
   }
   window.PH_STAFF = {state:S, route, compress};

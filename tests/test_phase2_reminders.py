@@ -120,7 +120,7 @@ class ReminderFlowTests(Phase2Base):
         self.tick(due + 24 * H + 5 * 60)                       # 升级 2：老板
         boss = _notes(20, "staff_escalate")
         self.assertEqual(1, len(boss))
-        self.assertIn("老板过问", boss[0]["body"])
+        self.assertIn("请您过问", boss[0]["body"])
         self.tick(due + 26 * H)
         self.assertEqual(4, len(_notes()))                     # 提醒 2 + 店长 1 + 老板 1
         row = db.one("SELECT * FROM staff_task WHERE id=?", (task,))
@@ -173,7 +173,7 @@ class ReminderFlowTests(Phase2Base):
         reminders.run_once(now)
         a_open = _notes(22, "staff_remind")                    # A 店指派给店长
         self.assertEqual(1, len(a_open))
-        self.assertIn("开店清单", a_open[0]["body"])
+        self.assertIn("开店清单", a_open[0]["title"])        # 标题说什么事，正文说哪家店和细节
         self.assertEqual(1, len(_notes(24, "staff_remind")))   # B 店没指派：绑定店员都收到
         log = json.loads(db.get_setting("reminder_log:2"))
         self.assertEqual(2, len(log))
@@ -203,7 +203,7 @@ class ReminderFlowTests(Phase2Base):
             "tenant_id": 2, "visit_id": visit, "issue_id": issue, "plan": "拖干并加防滑垫",
             "status": "open", "due_at": due, "assignee_user_id": 23})
         self.tick(due + H)
-        self.assertIn("吧台积水", _notes(23, "staff_remind")[0]["body"])
+        self.assertIn("吧台积水", _notes(23, "staff_remind")[0]["title"])
         self.assertEqual(1, len(_notes(22, "staff_escalate")))
         self.tick(due + 2 * H)
         self.assertEqual(2, len(_notes()))

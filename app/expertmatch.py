@@ -28,7 +28,7 @@ def _disabled_idxs() -> set:
 
 
 def _visible_specialists(dept_key: str = None) -> list:
-    """当前用户可见的产业部专家(行业授权+成员板块+停用三重过滤;给了 dept_key 只留该部门),按 idx 排序."""
+    """当前用户可见的产业部专家(行业授权+成员板块+员工白名单+停用过滤;给了 dept_key 只留该部门),按 idx 排序."""
     out = []
     off = _disabled_idxs()                     # 停用的专家不进花名册,免得推荐了派不了
     seen_ok: dict = {}                         # dept_key -> bool,同部门只查一次权限
@@ -41,6 +41,9 @@ def _visible_specialists(dept_key: str = None) -> list:
         if dk not in seen_ok:
             seen_ok[dk] = auth.allowed(dk)
         if not seen_ok[dk]:
+            continue
+        if not auth.employee_allowed(idx, dk):
+            # 成员的员工白名单:没分给他的专家不推荐,免得选了才被拒
             continue
         out.append(e)
     return out

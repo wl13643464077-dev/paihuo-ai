@@ -243,6 +243,38 @@ class GenerateTests(Phase2Base):
         self.assertEqual({self.a, self.b}, {r["branch_id"] for r in self.runs()})
 
 
+class OwnerViewGeneratesTodayTests(Phase2Base):
+    """N-20：老板打开清单页时，今天的清单按模板补出来（同一个 generate_runs，幂等），进度按项算。"""
+
+    def test_overview_generates_today_once_and_counts_items(self):
+        self.seed_templates()
+        self.assertEqual([], self.runs())               # 后台循环还没跑过
+        overview = checklist.runs_overview(2, 20, DAY, now=D0 + 60)
+        self.assertEqual(6, overview["summary"]["total"])
+        self.assertGreater(len(db.jloads(self.runs(self.a)[0]["items_json"], [])), 0)
+        store = overview["stores"][0]
+        self.assertEqual(store["items_done"], 0)
+        self.assertEqual(sum(r["total"] for r in store["runs"]), store["items_total"])
+        self.assertEqual(sum(s["items_total"] for s in overview["stores"]),
+                         overview["summary"]["items_total"])
+        # 再看一次、店员再拉一次都不会重复生成
+        checklist.runs_overview(2, 20, DAY, now=D0 + 120)
+        checklist.runs_for_user(2, 23, DAY, now=D0 + 180)
+        self.assertEqual(6, len(self.runs()))
+
+    def test_staff_view_generates_today_too(self):
+        self.seed_templates()
+        mine = checklist.runs_for_user(2, 23, DAY, now=D0 + 60)
+        self.assertEqual(3, len(mine))
+
+    def test_other_days_are_not_generated_on_view(self):
+        self.seed_templates()
+        overview = checklist.runs_overview(2, 20, "2026-09-20", now=D0 + 60)
+        self.assertEqual(0, overview["summary"]["total"])
+        self.assertEqual(0, overview["summary"]["items_total"])
+        self.assertEqual([], self.runs(day="2026-09-20"))
+
+
 class CompleteTests(Phase2Base):
     def setUp(self):
         super().setUp()

@@ -57,7 +57,7 @@ async def synth(photo_path: str, audio_path: str, progress) -> str:
     """照片+音频 → RunningHub 数字人视频 URL(高画质)."""
     key, wf = await db.arun(conf)
     if not key:
-        raise RHError("未配置 RunningHub key(管理后台→数字人引擎)")
+        raise RHError("未配置 RunningHub key（管理后台→数字人引擎）")
     async with httpx.AsyncClient(timeout=180) as cli:
         progress("start", "基础版(RunningHub):上传照片…")
         img = await _upload(cli, key, photo_path, "image")
@@ -194,7 +194,7 @@ async def synth_text(photo_path: str, text: str, voice_sample_path: str, progres
     """照片 + 口播文本 + 声音样本 → 本人声音的数字人视频 URL（文本驱动应用）。"""
     key = await db.arun(secureconfig.get_secret, "runninghub_key")
     if not key:
-        raise RHError("未配置 RunningHub key(管理后台→数字人引擎)")
+        raise RHError("未配置 RunningHub key（管理后台→数字人引擎）")
     text = " ".join(str(text or "").split())
     if not text:
         raise RHError("口播稿为空")

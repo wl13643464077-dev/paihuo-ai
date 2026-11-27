@@ -115,12 +115,12 @@ class FrontendStorageAndCopyTests(unittest.IsolatedAsyncioTestCase):
                   toggleDept('content');
                   return {read: lsGet('mp_theme'), wrote,
                           open: deptIsOpen('content'),
-                          cards: [trioCard(), howtoCard(), obCard()].map(x => typeof x)};
+                          cards: [howtoCard()].map(x => typeof x)};
                 }"""
             )
             self.assertEqual(
                 {"read": None, "wrote": False, "open": True,
-                 "cards": ["string", "string", "string"]},
+                 "cards": ["string"]},
                 result,
             )
             await page.evaluate("guideReset()")

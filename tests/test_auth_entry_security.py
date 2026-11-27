@@ -417,6 +417,153 @@ class AuthEntrySecurityCase(unittest.TestCase):
             )["must_change_password"],
         )
 
+    def _forced_user(self, username="first-login-owner", must_change=1):
+        tenant_id = db.insert("tenants", {"name": "首登企业"})
+        return db.insert("users", {
+            "tenant_id": tenant_id,
+            "username": username,
+            "password_hash": auth.hash_pw("initial-password-2026"),
+            "role": "owner",
+            "modules_json": "[]",
+            "enabled": 1,
+            "must_change_password": must_change,
+        })
+
+    @staticmethod
+    def _session_cookie(response):
+        header = response.headers.get("set-cookie") or ""
+        return header.split("cc_sess=", 1)[1].split(";", 1)[0]
+
+    def test_forced_first_login_change_skips_old_password_and_keeps_session(self):
+        from app import main
+
+        user_id = self._forced_user()
+        login = main.auth_login(
+            {"username": "first-login-owner", "password": "initial-password-2026"},
+            _request("198.51.100.90"),
+        )
+        token = self._session_cookie(login)
+        auth.set_current(auth.get_user(user_id))
+        with_cookie = _request("198.51.100.90", {"cookie": f"cc_sess={token}"})
+
+        me = main.auth_me(with_cookie)
+        self.assertTrue(me["must_change_password"])
+        self.assertFalse(me["password_change_needs_old"])
+
+        # 没有当前密码也能改；响应补发新会话，旧会话随密码哈希失效。
+        response = main.auth_password(
+            {"new": "my-own-password-2026"}, with_cookie)
+        self.assertEqual(200, response.status_code)
+        new_token = self._session_cookie(response)
+        self.assertNotEqual(token, new_token)
+        self.assertIsNone(auth.parse_session(token))
+        self.assertEqual(user_id, auth.parse_session(new_token))
+        row = db.one("SELECT * FROM users WHERE id=?", (user_id,))
+        self.assertEqual(0, row["must_change_password"])
+        self.assertTrue(auth.check_pw("my-own-password-2026", row["password_hash"]))
+
+        # 改完之后就是普通账号：再改密必须验证当前密码。
+        auth.set_current(auth.get_user(user_id))
+        after = _request("198.51.100.90", {"cookie": f"cc_sess={new_token}"})
+        self.assertTrue(main.auth_me(after)["password_change_needs_old"])
+        with self.assertRaises(HTTPException) as caught:
+            main.auth_password({"new": "another-password-2026"}, after)
+        self.assertEqual(400, caught.exception.status_code)
+
+    def test_forced_change_without_fresh_password_login_still_needs_old(self):
+        from app import main
+
+        user_id = self._forced_user("stale-owner")
+        # 不是刚用密码登录换来的会话(例如升级前留下的老 Cookie)。
+        # 签名只到秒级:换个签发时间，确保与下面新登录的 Cookie 不同。
+        with patch.object(auth.time, "time",
+                          return_value=auth.time.time() - 3600):
+            stale = auth.make_session(user_id)
+        auth.set_current(auth.get_user(user_id))
+        request = _request("198.51.100.91", {"cookie": f"cc_sess={stale}"})
+        self.assertTrue(main.auth_me(request)["password_change_needs_old"])
+        with self.assertRaises(HTTPException) as caught:
+            main.auth_password({"new": "my-own-password-2026"}, request)
+        self.assertEqual(400, caught.exception.status_code)
+
+        # 另一张会话刚登录过，也不能让这张老会话搭便车。
+        main.auth_login(
+            {"username": "stale-owner", "password": "initial-password-2026"},
+            _request("198.51.100.92"),
+        )
+        with self.assertRaises(HTTPException):
+            main.auth_password({"new": "my-own-password-2026"}, request)
+
+        # 前端传什么标记都没用。
+        with self.assertRaises(HTTPException):
+            main.auth_password({
+                "new": "my-own-password-2026",
+                "must_change_password": True,
+                "forced": True,
+            }, request)
+
+        # 免输窗口过期后同样要验旧密码。
+        login = main.auth_login(
+            {"username": "stale-owner", "password": "initial-password-2026"},
+            _request("198.51.100.93"),
+        )
+        fresh = _request(
+            "198.51.100.93",
+            {"cookie": f"cc_sess={self._session_cookie(login)}"},
+        )
+        with patch.object(auth.time, "time", return_value=auth.time.time()
+                          + auth.FORCED_CHANGE_FRESH_SECONDS + 5):
+            self.assertFalse(auth.is_fresh_password_login(
+                user_id, self._session_cookie(login)))
+        self.assertTrue(auth.is_fresh_password_login(
+            user_id, self._session_cookie(login)))
+        self.assertEqual(
+            1,
+            db.one("SELECT must_change_password FROM users WHERE id=?",
+                   (user_id,))["must_change_password"],
+        )
+        self.assertEqual(
+            200,
+            main.auth_password({"new": "my-own-password-2026"}, fresh).status_code,
+        )
+
+    def test_auth_me_reports_tenant_industries(self):
+        from app import main
+
+        self._forced_user("platform-placeholder", must_change=0)  # 确保下面不是平台租户 #1
+        user_id = self._forced_user("industry-owner", must_change=0)
+        tenant_id = db.one("SELECT tenant_id FROM users WHERE id=?", (user_id,))["tenant_id"]
+        self.assertNotEqual(1, tenant_id)
+        db.execute(
+            "INSERT INTO tenant_industry(tenant_id,industry_key,is_primary) VALUES(?,?,1)",
+            (tenant_id, "restaurant"),
+        )
+        auth.set_current(auth.get_user(user_id))
+        self.assertEqual(["restaurant"], main.auth_me(_request("198.51.100.95"))["industries"])
+
+    def test_voluntary_password_change_requires_old_and_reissues_session(self):
+        from app import main
+
+        user_id = self._forced_user("normal-owner", must_change=0)
+        login = main.auth_login(
+            {"username": "normal-owner", "password": "initial-password-2026"},
+            _request("198.51.100.94"),
+        )
+        token = self._session_cookie(login)
+        auth.set_current(auth.get_user(user_id))
+        request = _request("198.51.100.94", {"cookie": f"cc_sess={token}"})
+        self.assertFalse(auth.is_fresh_password_login(user_id, token))
+        with self.assertRaises(HTTPException) as caught:
+            main.auth_password({"new": "my-own-password-2026"}, request)
+        self.assertEqual(400, caught.exception.status_code)
+        response = main.auth_password({
+            "old": "initial-password-2026",
+            "new": "my-own-password-2026",
+        }, request)
+        new_token = self._session_cookie(response)
+        self.assertIsNone(auth.parse_session(token))
+        self.assertEqual(user_id, auth.parse_session(new_token))
+
     def test_schema44_password_upgrade_is_complete_and_idempotent(self):
         connection = db.conn()
         connection.executescript(

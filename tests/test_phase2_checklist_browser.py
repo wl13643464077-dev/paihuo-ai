@@ -146,7 +146,7 @@ class ChecklistBrowserTests(unittest.IsolatedAsyncioTestCase):
             browser, page, errors = await self._open(playwright, "#/checklists")
             await page.click("text=清单模板")
             await page.wait_for_function("document.querySelector('.ck-tpl')")
-            await page.click("text=✏️ 改清单")
+            await page.click("text=改清单")
             await page.click("text=＋ 加一项")
             await page.fill(".ck-edit-row:last-child input[type=text]", "门口地垫摆正")
             await page.fill("input[type=time]", "09:30")

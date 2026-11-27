@@ -80,7 +80,7 @@ def _normalized_team(team: dict) -> dict:
             raise TeamRunError("invalid_team", "小队成员资料无效")
         idx = _member_idx(raw.get("idx"))
         if idx in seen:
-            raise TeamRunError("invalid_team", "同一数字员工不能在小队中重复")
+            raise TeamRunError("invalid_team", "同一位 AI 专家不能在小队中重复")
         seen.add(idx)
         deps = raw.get("dependsOn") or []
         if not isinstance(deps, list) or len(deps) > 8:

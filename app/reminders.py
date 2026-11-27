@@ -39,7 +39,7 @@ import logging
 import time
 from datetime import datetime
 
-from . import checklist, db, notify, obs, timeutil
+from . import checklist, db, notify, obs, people, timeutil
 
 log = logging.getLogger("reminders")
 
@@ -151,6 +151,8 @@ def _task_objects(tid: int, now: float) -> list[dict]:
             "assignee": int(row["assignee_user_id"]) if row.get("assignee_user_id") else None,
             "due_at": float(row["due_at"]),
             "label": f"派的活「{title}」",
+            "group_name": "派给店员的活", "item": title,
+            "date": timeutil.today_cn(float(row["due_at"])),
             "photo": bool(row.get("require_photo")),
             "sent": task_sent_mask(row),
             "boss_link": "#/staff-tasks",
@@ -184,7 +186,9 @@ def _checklist_objects(tid: int, now: float, sent_log: dict) -> list[dict]:
             "branch_name": str(row.get("branch_name") or ""),
             "assignee": assignee,
             "due_at": float(row["due_at"]),
-            "label": f"{row.get('run_date') or ''} {name}（还差 {left} 项）".strip(),
+            "label": f"{date_cn(row.get('run_date'))}{name}（还差 {left} 项）",
+            "noun": name, "group_name": name, "remaining": left,
+            "date": str(row.get("run_date") or ""),
             "photo": False,
             "log_key": key,
             "sent": int(sent_log.get(key) or 0),
@@ -218,6 +222,8 @@ def _action_objects(tid: int, now: float, sent_log: dict) -> list[dict]:
             "assignee": assignee,
             "due_at": float(row["due_at"]),
             "label": f"巡店整改「{title}」",
+            "group_name": "巡店整改", "item": title,
+            "date": timeutil.today_cn(float(row["due_at"])),
             "photo": True,
             "log_key": key,
             "sent": int(sent_log.get(key) or 0),
@@ -256,42 +262,110 @@ def _user_name(tid: int, uid: int | None, cache: dict) -> str:
         return "还没指派"
     key = ("name", uid)
     if key not in cache:
-        row = db.one("SELECT username FROM users WHERE id=? AND tenant_id=?",
-                     (int(uid), int(tid)))
-        cache[key] = str((row or {}).get("username") or f"账号{uid}")
+        cache[key] = people.name_of(tid, uid) or f"账号{uid}"
     return cache[key]
 
 
-def build_message(obj: dict, stage: int, now: float, assignee_name: str) -> dict:
-    """一条提醒的站内标题/正文/链接 + 企微群里的一行。"""
+_BRANCH_SEPARATORS = " ·・•-—_｜|/（(　"
+_STAGE_KEYS = {STAGE_PRE: "pre", STAGE_DUE: "due", STAGE_ESC1: "esc1", STAGE_ESC2: "esc2"}
+
+
+def date_cn(value) -> str:
+    """'2026-11-24' → '11 月 24 日'；不是这个格式就原样返回。"""
+    text = str(value or "").strip()
+    try:
+        day = datetime.strptime(text[:10], "%Y-%m-%d")
+    except ValueError:
+        return text
+    return f"{day.month} 月 {day.day} 日"
+
+
+def _clock_cn(ts: float) -> str:
+    moment = timeutil.now_cn(ts)
+    return f"{moment.month} 月 {moment.day} 日 {moment:%H:%M}"
+
+
+def short_branch(branch_name: str, tenant_name: str = "") -> str:
+    """门店名以企业名开头时只留后半段（「王记火锅·天府三街店」→「天府三街店」）。
+
+    只用在站内通知的文字里，不改门店本身的名字。
+    """
+    name = str(branch_name or "").strip()
+    prefix = str(tenant_name or "").strip()
+    if prefix and name.startswith(prefix) and len(name) > len(prefix):
+        rest = name[len(prefix):].lstrip(_BRANCH_SEPARATORS).rstrip("）)")
+        if rest:
+            return rest
+    return name
+
+
+def build_message(obj: dict, stage: int, now: float, assignee_name: str,
+                  tenant_name: str = "") -> dict:
+    """一条提醒的站内标题/正文/链接/结构化信息 + 企微群里的一行。
+
+    站内：标题只说「什么事 + 到哪一步」，正文只说「哪家店 + 细节」，两边不重复；
+    门店写短名、日期写「11 月 24 日」。企微群那一行保留门店全名，群里没有上下文。
+    """
     where = obj.get("branch_name") or ""
+    short = short_branch(where, tenant_name)
     subject = f"{where}·{obj['label']}" if where else obj["label"]
-    due_text = timeutil.format_cn(obj["due_at"], "%m-%d %H:%M")
+    noun = obj.get("noun") or obj["label"]
+    has_owner = bool(obj.get("assignee"))
+    owner = f"负责人 {assignee_name}" if has_owner else "还没指派负责人"
+    due_text = _clock_cn(obj["due_at"])
+    parts = [short] if short else []
+    if obj["type"] == "checklist":
+        # 升级通知里写清是哪天的清单；提醒/到点的正文后面带着截止时间，不重复写日期
+        if obj.get("date") and stage in (STAGE_ESC1, STAGE_ESC2):
+            parts.append(date_cn(obj["date"]))
+        parts.append(f"还差 {int(obj.get('remaining') or 0)} 项")
     if stage == STAGE_PRE:
         left = _duration(obj["due_at"] - now)
         hint = "，记得拍照" if obj.get("photo") else ""
         text = f"{subject}还有 {left} 到截止时间（{due_text}）{hint}。"
+        parts.append(f"还有 {left}截止（{due_text}）{hint}")
+        tail = "。"
         headline = "快到截止时间了"
     elif stage == STAGE_DUE:
         text = f"{subject}已到截止时间（{due_text}），还没做完，请尽快处理。"
+        parts.append(f"已到截止时间（{due_text}），还没做完")
+        tail = "，请尽快处理。"
         headline = "到点还没做完"
     elif stage == STAGE_ESC1:
-        text = (f"{subject}已超时 {_duration(now - obj['due_at'])} 还没做完"
-                f"（负责人：{assignee_name}），请店长跟进。")
+        late = _duration(now - obj["due_at"])
+        text = f"{subject}已超时 {late} 还没做完（{owner}），请店长跟进。"
+        parts += [f"超时 {late}", owner]
+        tail = "，请店长跟进。"
         headline = "超时没做完，请跟进"
     else:
-        text = (f"{subject}已超时 {_duration(now - obj['due_at'])}"
-                f"（负责人：{assignee_name}），店长已经提醒过，请老板过问。")
+        late = _duration(now - obj["due_at"])
+        text = f"{subject}已超时 {late}（{owner}），店长已经提醒过，请老板过问。"
+        parts += [f"超时 {late}", owner]
+        tail = "。店长已经提醒过，请您过问。"
         headline = "超时一天多，请过问"
     kind = "staff_remind" if stage in (STAGE_PRE, STAGE_DUE) else "staff_escalate"
     link = "#/" if kind == "staff_remind" else obj.get("boss_link") or "#/"
+    # 今天页按 obj + stage + name + date 把同类通知合成一组；每条的细节也从这里取
+    meta = {
+        "obj": obj["type"], "stage": _STAGE_KEYS[stage],
+        "name": str(obj.get("group_name") or noun)[:30],
+        "date": str(obj.get("date") or ""),
+        "branch_id": obj.get("branch_id"), "branch": short[:40],
+        "due_at": float(obj["due_at"]),
+        "assignee": str(assignee_name)[:30] if has_owner else "",
+    }
+    if obj["type"] == "checklist":
+        meta["remaining"] = int(obj.get("remaining") or 0)
+    elif obj.get("item"):
+        meta["item"] = str(obj["item"])[:30]
     return {
         "kind": kind,
         "payload": {
-            "headline": f"{headline}：{subject}"[:80],
+            "headline": f"{noun}{headline}"[:80],
             "text": text,
-            "summary": text,
+            "summary": " · ".join(parts) + tail,
             "link": link,
+            "meta": meta,
         },
         "line": text,
     }
@@ -366,6 +440,8 @@ def process_tenant(tid: int, now: float, *, quiet: bool | None = None,
                + _action_objects(tid, now, sent_log))
     new_log: dict[str, int] = {}
     cache: dict = {}
+    tenant_name = str((db.one("SELECT name FROM tenants WHERE id=?", (int(tid),)) or {})
+                      .get("name") or "")
     lines_by_stage: dict[int, list[str]] = {}
     mention_uids: list[int] = []
     for obj in objects:
@@ -377,7 +453,8 @@ def process_tenant(tid: int, now: float, *, quiet: bool | None = None,
         for stage in stages:
             recipients = _recipients(tid, obj, stage, cache)
             message = build_message(obj, stage, now,
-                                    _user_name(tid, obj.get("assignee"), cache))
+                                    _user_name(tid, obj.get("assignee"), cache),
+                                    tenant_name)
             delivered = 0
             for uid in recipients:
                 if notify.record(tid, message["kind"], message["payload"],

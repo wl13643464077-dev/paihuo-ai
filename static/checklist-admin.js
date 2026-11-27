@@ -18,18 +18,18 @@
       .ck-head{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:12px}
       .ck-head h2{margin:0}
       .ck-sum{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:8px 0 4px}
-      .ck-sum div{background:#fff;border:2px solid var(--ink);border-radius:14px;padding:8px 6px;text-align:center}
+      .ck-sum div{background:#fff;border:1px solid var(--line);border-radius:14px;padding:8px 6px;text-align:center}
       .ck-sum b{display:block;font-size:22px}
       .ck-sum span{font-size:13px;color:var(--ink2)}
       .ck-store{padding:14px 16px}
       .ck-store-top{display:flex;gap:10px;align-items:center;justify-content:space-between;cursor:pointer;font-size:16px}
-      .ck-bar{height:10px;border:2px solid var(--ink);border-radius:99px;background:#f0e4c8;overflow:hidden;margin-top:8px}
-      .ck-bar i{display:block;height:100%;background:#8ee6bd}
-      .ck-run{border-top:1.5px dashed var(--line);padding:10px 0 4px;font-size:15px}
+      .ck-bar{height:8px;border-radius:99px;background:var(--sunken);overflow:hidden;margin-top:8px}
+      .ck-bar i{display:block;height:100%;background:var(--ok)}
+      .ck-run{border-top:1px solid var(--line);padding:10px 0 4px;font-size:15px}
       .ck-run-top{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
       .ck-items{margin:8px 0 0;padding:0;list-style:none}
       .ck-items li{display:flex;gap:8px;align-items:flex-start;padding:5px 0;font-size:14px}
-      .ck-items .ok{color:var(--ok);font-weight:900}
+      .ck-items .ok{color:var(--ok);font-weight:700}
       .ck-items .no{color:var(--ink2)}
       .ck-items a{white-space:nowrap}
       .ck-tpl{padding:14px 16px}
@@ -38,15 +38,20 @@
       .ck-edit-row input[type=text]{flex:1;min-width:0;font-size:16px}
       .ck-edit-row label{white-space:nowrap;font-size:14px;display:flex;gap:4px;align-items:center}
       .ck-rank{display:flex;gap:12px;align-items:flex-start;padding:14px 16px}
-      .ck-rank.warn{background:#fff1f1}
-      .ck-rank-no{flex:none;width:42px;height:42px;border-radius:50%;border:2.5px solid var(--ink);display:flex;align-items:center;justify-content:center;font-weight:900;font-size:18px;background:#fff}
-      .ck-rank-no.top{background:#ffd166}
+      .ck-rank.warn{box-shadow:inset 3px 0 0 var(--bad),var(--shadow-1)}
+      .ck-rank-no{flex:none;width:42px;height:42px;border-radius:50%;border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:18px;background:#fff}
+      .ck-rank-no.top{background:var(--brand);border-color:var(--brand-d)}
+      .ck-rank-no.warn{background:#fff;border-color:var(--bad);color:var(--bad)}
+      .ck-rank-no.none{background:var(--sunken);color:var(--ink2)}
       .ck-rank-body{flex:1;min-width:0}
-      .ck-rank-score{font-size:26px;font-weight:900;line-height:1}
-      .ck-delta{font-size:13px;font-weight:800;margin-left:6px}
+      .ck-rank-score{font-size:26px;font-weight:700;line-height:1}
+      .ck-delta{font-size:13px;font-weight:600;margin-left:6px}
       .ck-delta.up{color:var(--ok)} .ck-delta.down{color:var(--bad)}
       .ck-parts{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;margin-top:8px;font-size:13px;color:var(--ink2)}
       .ck-why{margin:8px 0 0;padding-left:18px;font-size:14px}
+      .ck-parts-none{grid-column:1/-1;color:var(--ink3)}
+      .ck-date{display:inline-flex;align-items:center;gap:8px;margin:0;font-weight:400}
+      .ck-date input{width:auto;min-width:150px}
       @media (max-width:560px){.ck-sum{grid-template-columns:repeat(2,minmax(0,1fr))}.ck-parts{grid-template-columns:1fr}}
     `;
     document.head.appendChild(st);
@@ -62,8 +67,8 @@
       ? `<div class="tabs" role="tablist">
           <button type="button" class="tb ${CK.tab==="today"?"on":""}" onclick="ckTab('today')">各店完成情况</button>
           <button type="button" class="tb ${CK.tab==="tpl"?"on":""}" onclick="ckTab('tpl')">清单模板</button></div>` : "";
-    $("#main").innerHTML = `<div class="ck-head"><h2>✅ 开闭店清单</h2>
-        <a class="btn sm" href="#/store-rank">🏆 门店排行</a></div>
+    $("#main").innerHTML = `<div class="ck-head"><h2 data-ic="checklist">开闭店清单</h2>
+        <a data-ic="trophy" class="btn sm" href="#/store-rank">门店排行</a></div>
       <div class="sub" style="margin-bottom:10px">店员每天在手机上按清单打勾、拍照；过了截止时间没做完会自动提醒店员，再提醒店长和您。打勾拍照不扣点。</div>
       ${tabs}<div id="ck-body"><div class="card"><span class="spin"></span> 正在加载…</div></div>`;
     if(CK.tab==="tpl" && canManageTemplates()) return ckLoadTemplates();
@@ -99,26 +104,35 @@
   function ckRenderToday(){
     const ov = CK.overview || {stores:[], summary:{}};
     const s = ov.summary || {};
+    // 顶部四格和下面每家店的「x/y 项」用同一个单位：按「项」数(老接口没给项数时退回按份，并写明「份」)
+    const byItem = s.items_total!=null;
+    const total = byItem ? Number(s.items_total)||0 : Number(s.total)||0;
+    const done = byItem ? Number(s.items_done)||0 : Number(s.done)||0;
+    const unit = byItem ? "项" : "份";
+    const missed = byItem && s.items_missed!=null ? Number(s.items_missed)||0 : null;
     const head = `<div class="card"><div class="ck-head" style="margin:0">
         <b style="font-size:16px">${esc(ov.date||"")} 各店清单</b>
-        <label class="sub">换一天 <input type="date" value="${esc(CK.date||ov.date||"")}" onchange="ckPickDate(this.value)" style="font-size:16px"></label></div>
+        <label class="sub ck-date">换一天 <input type="date" value="${esc(CK.date||ov.date||"")}" onchange="ckPickDate(this.value)"></label></div>
       <div class="ck-sum">
-        <div><b>${s.rate==null?"—":Math.round(s.rate)+"%"}</b><span>按时完成率</span></div>
-        <div><b>${s.done||0}</b><span>已完成</span></div>
-        <div><b>${s.open||0}</b><span>待完成</span></div>
-        <div><b style="color:var(--bad)">${s.missed||0}</b><span>超时没做完</span></div></div></div>`;
+        <div><b>${s.rate==null?"—":Math.round(s.rate)+"%"}</b><span>清单按时做完的比例</span></div>
+        <div data-ck-sum="done"><b>${done} / ${total}</b><span>已做（${unit}）</span></div>
+        <div data-ck-sum="left"><b>${Math.max(0,total-done)}</b><span>还没做（${unit}）</span></div>
+        <div data-ck-sum="missed"><b style="color:var(--bad)">${missed!=null?missed:(s.missed||0)}</b><span>${missed!=null?`超时没做（项）${s.missed?` · ${s.missed} 份清单`:""}`:"超时没做完（份）"}</span></div></div></div>`;
     if(!ov.stores.length){
-      $("#ck-body").innerHTML = head + `<div class="card"><div class="empty">还没有门店，或者老板还没给您分配门店。先在「巡店」里建门店、在「团队」里把店员绑定到门店。</div></div>`;
+      $("#ck-body").innerHTML = head + `<div class="card">${noStoreEmptyState("还没有门店。建好门店，再在「团队与权限」里把店员分到门店，就能每天按清单打勾。")}</div>`;
       return;
     }
     // 没做完的门店排前面，老板先看要盯的
     const stores = [...ov.stores].sort((a,b)=>(b.missed-a.missed)||((b.total-b.done)-(a.total-a.done))||a.branch_name.localeCompare(b.branch_name,"zh"));
     const cards = stores.map(st=>{
-      const pct = st.total ? Math.round(st.done*100/st.total) : 0;
+      // 进度按「项」算(和店员手机上的 0/8 一致)；老接口没给项数时退回按份
+      const itTotal = st.items_total!=null ? st.items_total : st.total;
+      const itDone = st.items_done!=null ? st.items_done : st.done;
+      const pct = itTotal ? Math.round(itDone*100/itTotal) : 0;
       const open = !!CK.openStore[st.branch_id];
       const badge = st.missed ? `<span class="pill failed">${st.missed} 份超时</span>`
         : st.total && st.done===st.total ? `<span class="pill done">全部完成</span>`
-        : `<span class="pill running">${st.done}/${st.total}</span>`;
+        : `<span class="pill running">${itDone}/${itTotal} 项</span>`;
       return `<div class="card ck-store">
         <div class="ck-store-top" role="button" tabindex="0" aria-expanded="${open}"
           onclick="ckToggleStore(${cp(st.branch_id)})" onkeydown="if(event.key==='Enter')ckToggleStore(${cp(st.branch_id)})">
@@ -153,7 +167,7 @@
           <span class="sub">${t.due_time?esc(t.due_time)+" 前做完":"当天做完"} · ${t.items.length} 项（${photos} 项要拍照）${t.active?"":" · 已停用"}</span></div>
         <ol class="sub" style="margin:8px 0 0;padding-left:20px;font-size:14px">${t.items.slice(0,4).map(i=>`<li>${esc(i.text)}</li>`).join("")}${t.items.length>4?`<li>……共 ${t.items.length} 项</li>`:""}</ol>
         <div class="actions" style="margin-top:10px">
-          <button type="button" class="btn sm" onclick="ckEdit(${cp(t.id)})">✏️ 改清单</button>
+          <button data-ic="pen" type="button" class="btn sm" onclick="ckEdit(${cp(t.id)})">改清单</button>
           <button type="button" class="btn sm" onclick="ckToggleActive(${cp(t.id)},${t.active?"false":"true"})">${t.active?"停用":"重新启用"}</button></div></div>`;
     }).join("");
     const creating = editing && editing.id==null ? ckEditorHtml(editing) : "";
@@ -209,7 +223,7 @@
   /* ---------------- #/store-rank ---------------- */
   async function storeRankView(){
     ckStyle();
-    $("#main").innerHTML = `<div class="ck-head"><h2>🏆 门店排行</h2><a class="btn sm" href="#/checklists">✅ 开闭店清单</a></div>
+    $("#main").innerHTML = `<div class="ck-head"><h2 data-ic="trophy">门店排行</h2><a data-ic="checklist" class="btn sm" href="#/checklists">开闭店清单</a></div>
       <div class="tabs" role="tablist">
         <button type="button" class="tb ${CK.period==="week"?"on":""}" onclick="ckPeriod('week')">近 7 天</button>
         <button type="button" class="tb ${CK.period==="month"?"on":""}" onclick="ckPeriod('month')">近 30 天</button></div>
@@ -227,23 +241,33 @@
   function ckRenderRank(){
     const r = CK.rank || {stores:[]};
     const stores = r.stores||[];
+    // 有分数的店不足 2 家就谈不上排名：不发名次牌，只说明原因
+    const scored = stores.filter(s=>s.score!=null).length, ranked = scored>=2;
+    const noRank = stores.length && !ranked ? `<div class="notice" data-ck-norank>${scored===1?"只有 1 家店有记录，暂不排名。":"这段时间各店都还没有记录，暂不排名。"}等有 2 家以上的店有清单、整改、派活或巡店记录，再给各店排名次。</div>` : "";
     const cards = stores.map(s=>{
+      // 金牌只给排在前三、又没被标「要盯一下」的店；要盯的店名次照写，但用警示样式
+      const no = ranked && s.rank ? s.rank : "—";
+      const noCls = !ranked||!s.rank ? "none" : s.needs_attention ? "warn" : s.rank<=3 ? "top" : "";
       const d = s.delta;
       const delta = d==null ? "" : d>0 ? `<span class="ck-delta up">↑${d}</span>` : d<0 ? `<span class="ck-delta down">↓${Math.abs(d)}</span>` : `<span class="ck-delta">持平</span>`;
-      const move = s.rank_change ? `<span class="sub">（名次${s.rank_change>0?"上升":"下降"} ${Math.abs(s.rank_change)}）</span>` : "";
-      const parts = ["checklist","action","task","issue"].map(k=>s.components?.[k]).filter(Boolean).map(ckPart).join("");
+      const move = ranked && s.rank_change ? `<span class="sub">（名次${s.rank_change>0?"上升":"下降"} ${Math.abs(s.rank_change)}）</span>` : "";
+      // 没数据的维度不逐行写「没数据」，合成一句「清单、整改、巡店还没有记录」
+      const dims = ["checklist","action","task","issue"].filter(k=>s.components?.[k]);
+      const empty = dims.filter(k=>s.components[k].score==null).map(k=>({checklist:"清单",action:"整改",task:"派活",issue:"巡店"})[k]);
+      const parts = dims.filter(k=>s.components[k].score!=null).map(k=>ckPart(s.components[k])).join("")
+        + (empty.length ? `<div class="ck-parts-none">${empty.join("、")}还没有记录</div>` : "");
       const why = (s.reasons||[]).length ? `<ul class="ck-why">${s.reasons.map(x=>`<li>${esc(x)}</li>`).join("")}</ul>` : "";
       return `<div class="card ck-rank ${s.needs_attention?"warn":""}">
-        <div class="ck-rank-no ${s.rank&&s.rank<=3?"top":""}">${s.rank||"—"}</div>
+        <div class="ck-rank-no ${noCls}">${no}</div>
         <div class="ck-rank-body">
           <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline;flex-wrap:wrap">
             <b style="font-size:17px">${esc(s.branch_name)}</b>
             <span><span class="ck-rank-score">${s.score==null?"—":Math.round(s.score)}</span>${delta}</span></div>
-          ${move}${s.needs_attention?`<div style="color:var(--bad);font-weight:800;margin-top:4px">要盯一下</div>`:""}
+          ${move}${s.needs_attention?`<div style="color:var(--bad);font-weight:600;margin-top:4px">要盯一下</div>`:""}
           ${why}<div class="ck-parts">${parts}</div></div></div>`;
     }).join("");
     $("#ck-rank").innerHTML = `<details class="notice"><summary>分数怎么算的？</summary><div style="margin-top:6px">${esc(r.formula||"")}</div></details>`
-      + (cards || `<div class="card"><div class="empty">还没有门店，或者老板还没给您分配门店。</div></div>`);
+      + noRank + (cards || `<div class="card">${noStoreEmptyState("还没有门店，建好门店后这里会给各店排名。")}</div>`);
   }
 
   routes["checklists"] = checklistsView;

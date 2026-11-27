@@ -327,10 +327,10 @@ def runtime_credentials(vendor_id: str, *, require_enabled: bool = True) -> dict
     meta = VENDOR_BY_ID[vendor_id]
     label = meta["label"]
     if require_enabled and not cfg["enabled"]:
-        raise _error(f"{label}直连还没启用(后台→模型供应商)")
+        raise _error(f"{label}直连还没启用（后台→模型供应商）")
     key = secureconfig.get_secret(vendor_secret_key(vendor_id))
     if not key:
-        raise _error(f"{label}还没填 API Key(后台→模型供应商)")
+        raise _error(f"{label}还没填 API Key（后台→模型供应商）")
     if not cfg["base_url"] or not cfg["text_model"]:
         raise _error(f"{label}的接口地址或模型名没填")
     return {
@@ -350,7 +350,7 @@ def search_credentials() -> dict:
     config = load_config()
     key = secureconfig.get_secret(SECRET_BOCHA)
     if not key:
-        raise _error("博查搜索还没填 API Key(后台→模型供应商)")
+        raise _error("博查搜索还没填 API Key（后台→模型供应商）")
     return {"url": config["search"]["bocha_url"], "api_key": key}
 
 
@@ -479,7 +479,7 @@ async def _completion_once(*, creds, body, stream, timeout, progress, attempt) -
                                 text_parts.append(piece)
                                 chars += len(piece)
                                 if chars > MAX_STREAM_CHARS:
-                                    raise _error(f"{label}返回内容超出长度上限,已中断")
+                                    raise _error(f"{label}返回内容超出长度上限，已中断")
                                 now = time.time()
                                 if now - t_last > 1:
                                     progress("typing", f"正在撰写产出…已写 {chars} 字")
@@ -494,7 +494,7 @@ async def _completion_once(*, creds, body, stream, timeout, progress, attempt) -
                                 if not saw_sse:
                                     non_sse.append(stripped)
                                     if sum(len(x) for x in non_sse) > MAX_STREAM_CHARS:
-                                        raise _error(f"{label}返回内容超出长度上限,已中断")
+                                        raise _error(f"{label}返回内容超出长度上限，已中断")
                                 continue
                             saw_sse = True
                             data = stripped[5:].strip()
@@ -512,9 +512,9 @@ async def _completion_once(*, creds, body, stream, timeout, progress, attempt) -
     except _Retryable:
         raise
     except (asyncio.TimeoutError, TimeoutError) as exc:
-        raise _error(f"{label}响应超时,请稍后重试") from exc
+        raise _error(f"{label}响应超时，请稍后重试") from exc
     except httpx.HTTPError as exc:
-        raise _Retryable(f"{label}连接失败,请稍后重试", min(2 ** attempt, 20)) from exc
+        raise _Retryable(f"{label}连接失败，请稍后重试", min(2 ** attempt, 20)) from exc
     except (ValueError, KeyError, IndexError, TypeError) as exc:
         raise _error(f"{label}返回格式无法识别") from exc
     text = "".join(text_parts)
@@ -591,7 +591,7 @@ async def chat_completion(
             )
             raise
     if last is None:
-        raise _error(f"{label}响应超时,请稍后重试")
+        raise _error(f"{label}响应超时，请稍后重试")
     raise _error(str(last))
 
 
@@ -698,7 +698,7 @@ async def bocha_search(query: str, *, search: dict, count: int = 8, timeout: flo
             raise _error("博查搜索返回格式无法识别")
         code = payload.get("code")
         if code not in (None, 200, "200"):
-            raise _error("博查搜索返回错误,请检查 Key 与额度")
+            raise _error("博查搜索返回错误，请检查 Key 与额度")
         data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
         pages = ((data.get("webPages") or {}).get("value")) or []
         results = []
@@ -861,7 +861,7 @@ async def _gather_evidence(query: str, *, route: dict, progress, timeout: float,
                 seen.add(hit["url"])
                 sources.append(hit)
         if usage["success"] < 1:
-            raise _error("联网搜索没有返回有效结果,请稍后重试")
+            raise _error("联网搜索没有返回有效结果，请稍后重试")
         pages = await _fetch_many([s["url"] for s in sources], progress=progress, limit=4)
     else:
         # 厂商自带联网:模型给出的网址不可信,必须经 netfetch 抓取成功才算来源。
@@ -905,7 +905,7 @@ async def _gather_evidence(query: str, *, route: dict, progress, timeout: float,
                 seen.add(url)
                 sources.append({"title": title, "url": url, "snippet": "", "site": "", "date": ""})
         if not sources:
-            raise _error("联网搜索没有返回可核验的来源,请稍后重试")
+            raise _error("联网搜索没有返回可核验的来源，请稍后重试")
     allowed = {s["url"] for s in sources} | {p["source_url"] for p in pages}
     # 厂商联网笔记里没核验过的网址先删掉,再进证据包。
     answers = [scrub_unknown_urls(a, allowed) for a in answers]
@@ -1020,7 +1020,7 @@ async def research_json(prompt: str, *, route: dict, progress=None, timeout: flo
             "tool_usage": evidence["tool_usage"],
         }
     log.warning("direct research json failed error_type=%s", type(last).__name__)
-    raise _error("联网证据无法整理为有效结果,请稍后免费重试")
+    raise _error("联网证据无法整理为有效结果，请稍后免费重试")
 
 
 # ---------------- 后台:查看 / 保存 / 测试连接 ----------------
@@ -1036,9 +1036,9 @@ def _validate_base_url(value: str, label: str) -> str:
         or parsed.query or parsed.fragment or len(url) > 300
         or any(ch.isspace() for ch in url)
     ):
-        raise ValueError(f"{label}的接口地址要以 https:// 开头,且不能带账号密码或问号参数")
+        raise ValueError(f"{label}的接口地址要以 https:// 开头，且不能带账号密码或问号参数")
     if url.endswith("/chat/completions"):
-        raise ValueError(f"{label}的接口地址填到 /v1 这一级就行,不要带 /chat/completions")
+        raise ValueError(f"{label}的接口地址填到 /v1 这一级就行，不要带 /chat/completions")
     return url
 
 
@@ -1047,7 +1047,7 @@ def _validate_model(value, label: str, *, allow_empty: bool) -> str:
     if not name and allow_empty:
         return ""
     if not _MODEL_NAME_RE.fullmatch(name):
-        raise ValueError(f"{label}的模型名格式不对(只能是字母、数字和 .-_:/ 等符号)")
+        raise ValueError(f"{label}的模型名格式不对（只能是字母、数字和 .-_:/ 等符号）")
     return name
 
 
@@ -1132,8 +1132,8 @@ def save_config(body: dict) -> dict:
         )
         if not merged["enabled"] or not has_key:
             if "channel" in body and channel != current["channel"]:
-                raise ValueError(f"要切到{label},请先勾选启用并填好 API Key")
-            raise ValueError(f"{label}正在当默认通道,不能停用或清空 Key;请先把默认通道切回旧通道")
+                raise ValueError(f"要切到{label}，请先勾选启用并填好 API Key")
+            raise ValueError(f"{label}正在当默认通道，不能停用或清空 Key；请先把默认通道切回旧通道")
     with db.atomic():
         for vendor_id, cfg in vendor_writes.items():
             db.set_setting(vendor_setting_key(vendor_id), json.dumps(cfg, ensure_ascii=False))
@@ -1229,7 +1229,7 @@ async def test_connection(body: dict) -> dict:
         if target == "search":
             search = await db.arun(search_credentials)
             hits = await bocha_search("派活 连接测试", search=search, count=1, timeout=15)
-            return {"ok": True, "message": f"博查搜索连接正常(返回 {len(hits)} 条结果)"}
+            return {"ok": True, "message": f"博查搜索连接正常（返回 {len(hits)} 条结果）"}
         if target not in VENDOR_BY_ID:
             return {"ok": False, "message": "未知的供应商"}
         creds = await db.arun(runtime_credentials, target, require_enabled=False)
@@ -1242,9 +1242,9 @@ async def test_connection(body: dict) -> dict:
             vision=vision, stream=False, timeout=20, max_tokens=8, attempts=1,
         )
         model_name = creds["vision_model"] if vision else creds["text_model"]
-        return {"ok": True, "message": f"连接正常:{model_name} 已回复"}
+        return {"ok": True, "message": f"连接正常：{model_name} 已回复"}
     except providers.ProviderError as exc:
         return {"ok": False, "message": str(exc)[:160]}
     except (secureconfig.SecureConfigError, ValueError) as exc:
         log.warning("connection test failed error_type=%s", type(exc).__name__)
-        return {"ok": False, "message": "配置读取失败,请重新保存 Key 后再试"}
+        return {"ok": False, "message": "配置读取失败，请重新保存 Key 后再试"}

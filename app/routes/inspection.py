@@ -81,6 +81,9 @@ def _inspection_scope(industry_key: str | None = None) -> tuple[str, list[dict]]
         {
             "key": row["industry_key"],
             "name": str(catalog[row["industry_key"]].get("name") or row["industry_key"]),
+            "short_label": departments.short_label(
+                row["industry_key"], catalog[row["industry_key"]].get("name")
+            ),
             "emoji": str(catalog[row["industry_key"]].get("emoji") or ""),
             "is_primary": bool(row.get("is_primary")),
         }
@@ -1882,15 +1885,24 @@ def inspection_branch_create(body: dict, industry_key: str | None = None):
 
 @router.patch("/api/inspections/branches/{branch_id}")
 def inspection_branch_update(branch_id: int, body: dict):
-    """停用/恢复门店：老板或总监。"""
+    """改名称/区域/地址、停用/恢复门店：老板或总监（一次可只改一项）。"""
     try:
         selected, _choices = _inspection_scope(body.get("industry_key"))
-        if "active" not in body:
+        info_keys = [k for k in ("name", "region", "address") if k in body]
+        if "active" not in body and not info_keys:
             raise inspection.InspectionError("缺少门店启用状态")
-        return inspection.set_branch_active(
-            TEN(), _inspection_actor_id(), selected, branch_id,
-            active=body.get("active"),
-        )
+        result = None
+        if info_keys:
+            result = inspection.update_branch_info(
+                TEN(), _inspection_actor_id(), selected, branch_id,
+                {k: body.get(k) for k in info_keys},
+            )
+        if "active" in body:
+            result = inspection.set_branch_active(
+                TEN(), _inspection_actor_id(), selected, branch_id,
+                active=body.get("active"),
+            )
+        return result
     except inspection.InspectionError as exc:
         _raise_inspection_error(exc)
 
