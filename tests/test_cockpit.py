@@ -158,6 +158,89 @@ class SummaryTests(CockpitBase):
         self.assertEqual("已逾期", track[0]["status_label"])
         self.assertEqual("u24", track[0]["who"])
 
+    # ---- 原老板看板并进来的三块：巡店与整改、最近交付、每天明细 ----
+    def visit(self, tid, branch, at, score, **extra):
+        return db.insert("inspection_visit", {
+            "tenant_id": tid, "industry_key": "tea_coffee", "branch_id": branch,
+            "status": "completed", "score": score, "created_at": at, "completed_at": at,
+            "terminal_at": at, **extra})
+
+    def issue(self, visit, severity, status="detected", action=None, tid=2):
+        issue = db.insert("inspection_issue", {"tenant_id": tid, "visit_id": visit,
+                                               "title": "台面有水", "severity": severity,
+                                               "status": status})
+        if action:
+            db.insert("inspection_action", {"tenant_id": tid, "visit_id": visit, "issue_id": issue,
+                                            "plan": "擦干", **action})
+        return issue
+
+    def test_inspection_board_is_empty_until_the_first_visit(self):
+        self.seed()
+        board = cockpit.summary(2, 7, now=NOW)["inspection"]
+        self.assertFalse(board["has_records"])
+        self.assertEqual(0, board["visits"])
+        self.assertIsNone(board["avg_score"])
+        self.assertEqual([0, 0, 0, 0], [board[k] for k in (
+            "open_issues", "critical_issues", "open_actions", "overdue_actions")])
+
+    def test_inspection_board_counts_period_visits_and_all_open_backlog(self):
+        v1 = self.visit(2, self.a, IN, 80)
+        v2 = self.visit(2, self.b, IN, 90)
+        old = self.visit(2, self.a, NOW - 40 * DAY_S, 60)     # 很早的巡店：不算本期，积压照算
+        self.issue(v1, "high", action={"status": "open", "due_at": NOW - 3600})       # 逾期
+        self.issue(v1, "low", action={"status": "in_progress", "due_at": NOW + DAY_S})
+        self.issue(v2, "medium", action={"status": "awaiting_recheck", "due_at": NOW - 3600})  # 等复查不算逾期
+        self.issue(old, "critical", action={"status": "open", "due_at": NOW - DAY_S})  # 逾期
+        self.issue(v2, "high", status="closed",
+                   action={"status": "closed", "due_at": NOW - 3600, "closed_at": IN})  # 已关闭
+        self.issue(v2, "high", action={"status": "closed", "due_at": NOW - 3600, "closed_at": IN,
+                                       "close_reason": "false_positive"})              # 误报不算问题
+        other = self.visit(3, db.insert("store_branch", {
+            "tenant_id": 3, "industry_key": "tea_coffee", "name": "别家店", "active": 1}), IN, 10)
+        self.issue(other, "high", action={"status": "open", "due_at": NOW - 3600}, tid=3)
+        deleted = self.visit(2, self.a, IN, 0, deleted_at=IN)
+        self.issue(deleted, "high", action={"status": "open", "due_at": NOW - 3600})
+
+        d = cockpit.summary(2, 7, now=NOW)
+        board = d["inspection"]
+        self.assertTrue(board["has_records"])
+        self.assertEqual(2, board["visits"])
+        self.assertEqual(85.0, board["avg_score"])
+        self.assertEqual(board["avg_score"], d["kpis"]["inspection"]["value"])   # 和「巡店均分」卡同一个数
+        self.assertEqual(4, board["open_issues"])
+        self.assertEqual(2, board["critical_issues"])
+        self.assertEqual(4, board["open_actions"])
+        self.assertEqual(2, board["overdue_actions"])
+        # 每天明细里带上当天完成的巡店次数
+        by_day = {x["day"]: x for x in d["trend"]}
+        self.assertEqual(2, sum(x["inspection"] for x in d["trend"]))
+        self.assertEqual(2, by_day[cockpit.timeutil.today_cn(IN)]["inspection"])
+        # 停用的门店：问题和整改都不再算
+        db.execute("UPDATE store_branch SET active=0 WHERE id=?", (self.a,))
+        board = cockpit.summary(2, 7, now=NOW)["inspection"]
+        self.assertEqual([1, 0, 1, 0], [board[k] for k in (
+            "open_issues", "critical_issues", "open_actions", "overdue_actions")])
+
+    def test_recent_deliveries_list_latest_five_without_task_content(self):
+        self.assertEqual([], cockpit.summary(2, 7, now=NOW)["recent_deliveries"])
+        ids = [self.task(2, "done", IN + i * 60, name=f"专家{i}") for i in range(4)]
+        failed = self.task(2, "failed", IN + 600)
+        waiting = self.task(2, "awaiting_review", IN + 700)
+        running = self.task(2, "running", IN + 800)
+        self.task(2, "done", PREV)                 # 上期的不列
+        self.task(3, "done", IN + 900, uid=30)     # 别家企业的不列
+        gone = self.task(2, "done", IN + 950)
+        db.execute("UPDATE task SET deleted_at=? WHERE id=?", (NOW, gone))
+        rows = cockpit.summary(2, 7, now=NOW)["recent_deliveries"]
+        self.assertEqual([running, waiting, failed, ids[3], ids[2]], [r["id"] for r in rows])
+        self.assertEqual(["正在做", "等您确认", "没做成", "已交付", "已交付"],
+                         [r["status_label"] for r in rows])
+        self.assertEqual(["active", "waiting", "failed", "done", "done"], [r["status"] for r in rows])
+        self.assertEqual({"id", "name", "status", "status_label", "at", "route"}, set(rows[0]))
+        self.assertEqual(f"#/tasks/{running}", rows[0]["route"])
+        self.assertEqual("专家3", rows[3]["name"])
+        self.assertNotIn("做个周报", json.dumps(rows, ensure_ascii=False))   # 不带任务正文
+
     def test_bad_period_rejected(self):
         with self.assertRaises(cockpit.CockpitError):
             cockpit.summary(2, 14, now=NOW)
@@ -166,8 +249,13 @@ class SummaryTests(CockpitBase):
         from openpyxl import load_workbook
         self.seed()
         wb = load_workbook(io.BytesIO(cockpit.export_xlsx(cockpit.summary(2, 30, now=NOW))))
-        self.assertEqual(["概览", "账号使用", "门店", "待拍板", "下发追踪", "每日趋势", "AI专家"],
-                         wb.sheetnames)
+        self.assertEqual(["概览", "账号使用", "门店", "待拍板", "下发追踪", "每日趋势",
+                          "巡店与整改", "AI专家"], wb.sheetnames)
+        self.assertEqual(["日期", "AI交付", "店员交差", "清单完成", "巡店次数"],
+                         [c.value for c in wb["每日趋势"][1]])
+        self.assertEqual(["本期巡店", "本期平均分", "还没解决的问题", "还没解决的高风险问题",
+                          "正在整改", "整改已逾期"],
+                         [row[0].value for row in wb["巡店与整改"].iter_rows(min_row=2)])
         self.assertEqual("u20", wb["账号使用"]["A2"].value or wb["账号使用"]["A3"].value)
 
 

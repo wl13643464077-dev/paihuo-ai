@@ -400,14 +400,20 @@ def unread_for_user(tid: int, user: dict | None, limit: int = 30) -> list[dict]:
     if uid <= 0:
         return []
     kind_sql, kind_params = _kind_sql(user)
-    return db.q(
-        "SELECT id,kind,title,body,link,created_at "
+    rows = db.q(
+        "SELECT id,kind,title,body,link,created_at,meta_json "
         "FROM notification WHERE tenant_id=? AND read_at IS NULL "
         "AND (user_id=? OR (user_id IS NULL "
         "AND instr(COALESCE(read_by,','), ','||?||',')=0))"
         f"{kind_sql} ORDER BY id DESC LIMIT ?",
         (int(tid), uid, str(uid), *kind_params, page_limit),
     )
+    for row in rows:
+        # 结构化信息只在有的时候带上(老通知没有这个键，前端按单条显示)
+        meta = db.jloads(row.pop("meta_json", None), None)
+        if isinstance(meta, dict) and meta:
+            row["meta"] = meta
+    return rows
 
 
 def history_for_user(
@@ -563,6 +569,21 @@ def resolve_staff_task_submitted(tid: int, task_id: int) -> int:
     ) or 0)
 
 
+META_MAX_CHARS = 1200
+
+
+def _meta_json(payload: dict | None) -> str | None:
+    """payload["meta"] → 落库的 JSON；不是字典、太长或不能序列化就不存。"""
+    meta = (payload or {}).get("meta")
+    if not isinstance(meta, dict) or not meta:
+        return None
+    try:
+        text = json.dumps(meta, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        return None
+    return text if len(text) <= META_MAX_CHARS else None
+
+
 def record(
         tid: int,
         kind: str,
@@ -606,19 +627,20 @@ def record(
             if not targets:
                 return None
         first = None
+        meta_json = _meta_json(payload)
         for target in targets:
-            row_id = db.insert(
-                "notification",
-                {
-                    "tenant_id": int(tid),
-                    "job_id": job_id,
-                    "kind": str(kind or "event")[:40],
-                    "title": title,
-                    "body": body,
-                    "link": link,
-                    "user_id": target,
-                },
-            )
+            data = {
+                "tenant_id": int(tid),
+                "job_id": job_id,
+                "kind": str(kind or "event")[:40],
+                "title": title,
+                "body": body,
+                "link": link,
+                "user_id": target,
+            }
+            if meta_json:
+                data["meta_json"] = meta_json
+            row_id = db.insert("notification", data)
             first = first if first is not None else row_id
         return first
     except Exception as exc:

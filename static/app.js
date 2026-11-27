@@ -2092,6 +2092,113 @@ function staffReviewOpen(){
 }
 // 今天页「点数快用完了」提醒的门槛(只给老板/总监看；不改任何扣费逻辑)
 const LOW_BALANCE_POINTS = 5;
+/* ---------- 今天页「新进展」：同类通知合并成一组 ----------
+   分组只看通知自带的结构化信息 n.meta（后端提醒循环写的 obj/stage/name/date），不解析标题文字；
+   没有 meta 的老通知、以及店员交差/打回/AI 任务完成这些，照旧一条一条显示。
+   合并只是展示：整组已读 = 把组里每一条标成已读，未读计数规则不变。 */
+const NOTE_GROUP_SHOW = 3;      // 一组里先露出几家店，其余折叠成「还有 N 条」
+const NOTE_UNITS_SHOW = 5;      // 「新进展」最多露出几块（一组算一块）
+const NOTE_OBJ_ROUTE = {checklist:"#/checklists", task:"#/staff-tasks", action:"#/inspections"};
+let NOTE_GROUPS = {};           // 组 key → {ids, link}，给按钮回调用
+function todayNoteStyle(){
+  if(document.getElementById("note-group-style")) return;
+  const st=document.createElement("style"); st.id="note-group-style";
+  st.textContent=`.note-row{align-items:flex-start}
+  .note-row .todo-ic{color:var(--ink2);font-size:18px;line-height:1.3}
+  .note-single b,.note-single .sub{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
+  .note-group .ng-title{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .note-group .ng-title .sub{font-weight:400;margin-left:6px}
+  .note-group .ng-line{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12.5px;line-height:1.7;margin-top:0}
+  .note-group .ng-foot{display:flex;align-items:center;gap:8px;margin-top:6px}
+  .note-group .ng-toggle{border:0;background:none;padding:0;font:inherit;font-size:12.5px;color:var(--ink2);text-decoration:underline;cursor:pointer;min-height:28px}
+  .note-group .ng-acts{display:flex;gap:8px;margin-left:auto}
+  @media(min-width:700px){.note-group .todo-tx{position:relative}.note-group .ng-title{padding-right:170px}.note-group .ng-foot{margin-top:2px}.note-group .ng-acts{position:absolute;top:0;right:0}}
+  @media(max-width:520px){.note-row{gap:8px}.note-row .todo-ic{width:18px;font-size:16px}.note-group .ng-line{font-size:12px}}`;
+  document.head.appendChild(st);
+}
+/* 'YYYY-MM-DD' → 今天 / 昨天 / 前天 / 11 月 24 日（按服务器给的北京日期算） */
+function noteDayLabel(day){
+  const m=/^(\d{4})-(\d{2})-(\d{2})$/.exec(String(day||"")); if(!m) return "";
+  const t=/^(\d{4})-(\d{2})-(\d{2})$/.exec(String(STATE?.today||""));
+  if(t){
+    const diff=Math.round((Date.UTC(+t[1],+t[2]-1,+t[3])-Date.UTC(+m[1],+m[2]-1,+m[3]))/86400e3);
+    if(diff>=0&&diff<=2) return ["今天","昨天","前天"][diff];
+  }
+  return `${Number(m[2])} 月 ${Number(m[3])} 日`;
+}
+function noteSpan(sec){
+  const v=Math.max(0,Number(sec)||0);
+  if(v<3600) return `${Math.max(1,Math.floor(v/60))} 分钟`;
+  if(v<48*3600) return `${Math.floor(v/3600)} 小时`;
+  return `${Math.floor(v/86400)} 天`;
+}
+/* 组里每家店那一行:「天府三街店 · 还差 8 项 · 超时 43 小时 · 还没指派负责人」 */
+function noteGroupLine(n){
+  const m=n.meta||{}, parts=[], now=Date.now()/1000, due=Number(m.due_at)||0;
+  if(m.branch) parts.push(m.branch);
+  if(m.item) parts.push(m.item);
+  if(m.remaining!=null) parts.push(`还差 ${Number(m.remaining)||0} 项`);
+  if(due) parts.push(now>=due?`超时 ${noteSpan(now-due)}`:`还有 ${noteSpan(due-now)}截止`);
+  if(m.stage==="esc1"||m.stage==="esc2") parts.push(m.assignee?`负责人 ${m.assignee}`:"还没指派负责人");
+  return parts.join(" · ");
+}
+function noteGroupTitle(items){
+  const m=items[0].meta||{};
+  const tail={pre:"快到截止时间了",due:"到点还没做完"}[m.stage]||"超时没做完";
+  const shops=new Set(items.map(n=>n.meta.branch_id??n.meta.branch)).size;
+  return m.obj==="checklist"&&shops===items.length?`${shops} 家店的${m.name}${tail}`:`${items.length} 件${m.name}${tail}`;
+}
+function todayNoteRows(notes){
+  todayNoteStyle();
+  NOTE_GROUPS={};
+  // 按出现顺序归块:同 kind + 同 meta(obj/stage/name/date) 的归一组,其余单条
+  const units=[], byKey=new Map();
+  (notes||[]).forEach(n=>{
+    const m=n.meta;
+    const key=m&&m.obj&&m.stage&&m.name?[n.kind,m.obj,m.stage,m.name,m.date||""].join("|"):"";
+    if(key&&byKey.has(key)){ byKey.get(key).items.push(n); return; }
+    const unit={key,items:[n]}; units.push(unit); if(key) byKey.set(key,unit);
+  });
+  const bell=`<span class="todo-ic" aria-hidden="true">${icon("bell")}</span>`;
+  return units.slice(0,NOTE_UNITS_SHOW).map((u,idx)=>{
+    const first=u.items[0];
+    if(u.items.length<2){
+      return `<div class="todo-row note-row note-single">${bell}
+        <div class="todo-tx"><b title="${esc(first.title)}">${esc(first.title)}</b><div class="sub" title="${esc(first.body||"")}">${first.body?esc(first.body):tcFmt(first.created_at)}</div></div>
+        <button type="button" class="btn sm" onclick="notificationOpen(${Number(first.id)},${cp(safeRouteUrl(first.link)||"#/")})">查看</button></div>`;
+    }
+    const gid="g"+idx, m=first.meta;
+    let link=safeRouteUrl(first.link)||"#/";
+    if(link==="#/"&&NOTE_OBJ_ROUTE[m.obj]) link=NOTE_OBJ_ROUTE[m.obj];
+    NOTE_GROUPS[gid]={ids:u.items.map(n=>Number(n.id)),link};
+    const lines=u.items.map(n=>`<div class="sub ng-line">${esc(noteGroupLine(n))}</div>`);
+    const rest=lines.length-NOTE_GROUP_SHOW, day=noteDayLabel(m.date);
+    return `<div class="todo-row note-row note-group" data-note-group="${esc(u.key)}">${bell}
+      <div class="todo-tx"><b class="ng-title">${esc(noteGroupTitle(u.items))}${day?`<span class="sub">${esc(day)}</span>`:""}</b>
+        ${lines.slice(0,NOTE_GROUP_SHOW).join("")}
+        ${rest>0?`<div class="ng-more" hidden>${lines.slice(NOTE_GROUP_SHOW).join("")}</div>`:""}
+        <div class="ng-foot">${rest>0?`<button type="button" class="ng-toggle" aria-expanded="false" onclick="noteGroupToggle(this,${rest})">还有 ${rest} 条</button>`:""}<span class="ng-acts">
+          <button type="button" class="btn sm" onclick="noteGroupRead('${gid}',this)">这组已读</button>
+          <button type="button" class="btn sm pri" onclick="noteGroupRead('${gid}',this,true)">去看看</button></span></div></div></div>`;
+  });
+}
+function noteGroupToggle(btn,rest){
+  const more=btn.closest(".note-group")?.querySelector(".ng-more"); if(!more) return;
+  more.hidden=!more.hidden;
+  btn.setAttribute("aria-expanded",more.hidden?"false":"true");
+  btn.textContent=more.hidden?`还有 ${rest} 条`:"收起";
+}
+/* 整组已读(组里每条都标已读);go=true 时再跳到对应页面 */
+async function noteGroupRead(gid,btn,go){
+  const g=NOTE_GROUPS[gid]; if(!g) return;
+  if(btn) btn.disabled=true;
+  try{ await api("/notifications/read",{method:"POST",body:{ids:g.ids}}); }
+  catch(e){ if(!go){ toast(e.message); if(btn) btn.disabled=false; return; } reportClientError("notification_read",e); }
+  const gone=new Set(g.ids);
+  if(STATE?.notifications) STATE.notifications=STATE.notifications.filter(n=>!gone.has(Number(n.id)));
+  SHELL_DIRTY=true;
+  if(go&&location.hash!==g.link) location.hash=g.link; else render();
+}
 async function dashboard(){
   const inbox = STATE.inbox||[];
   const notifications = STATE.notifications||[];
@@ -2150,8 +2257,7 @@ async function dashboard(){
   }
   // 店员交差已经汇总成上面那一行，「新进展」里不再一条条重复
   const notes = staffReviews>0 ? notifications.filter(n=>n.kind!=="staff_task_submitted") : notifications;
-  const noteRows = notes.slice(0,5).map(n=>todayTodoRow("🔔",esc(n.title),n.body?esc(n.body):tcFmt(n.created_at),"查看",
-    `notificationOpen(${Number(n.id)},${cp(safeRouteUrl(n.link)||"#/")})`,""));
+  const noteRows = todayNoteRows(notes);
   const todoCard = `<div class="card today-todo">
     <div class="today-head"><h2>📥 等我处理的${todoCount?`（${todoCount}）`:""}</h2></div>
     ${rows.length?rows.join(""):`<div class="sub today-empty">✅ 眼下没有要您拍板的事。</div>`}

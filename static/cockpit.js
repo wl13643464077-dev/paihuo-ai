@@ -2,10 +2,11 @@
    数据全部来自 /api/cockpit/summary（派活自己的业务表），不接外部数据、不做估算。
    原「老板看板」(#/boss) 已并进这里：AI 专家明细表、AI 任务卡了一天的提醒都在本页。
    导出 Excel / 打印 PDF、AI 经营分析、下发给门店或具体的人（复用「派给店员」）、追踪下发结果。
-   依赖 app.js 全局：routes / api / esc / toast / $ / ME / isOwnerLike。 */
+   本页还并进了原老板看板剩下的三块：巡店与整改六格、最近交付、每天明细表。
+   依赖 app.js 全局：routes / api / esc / toast / $ / ME / isOwnerLike / icon。 */
 (function(){
   "use strict";
-  const CP = {days:7, data:null, meta:null, aiBusy:false, pick:{}, peopleAll:false, aiAll:false, prefFor:null};
+  const CP = {days:7, data:null, meta:null, aiBusy:false, pick:{}, peopleAll:false, aiAll:false, dayAll:false, prefFor:null};
   // 周期:7/30/90 天,默认 7 天;按账号记住上次选的(旧版存过的 60 天按 90 天恢复)
   function loadDaysPref(){
     let who=""; try{ who=String((typeof ME!=="undefined"&&ME&&(ME.username||ME.id))||""); }catch(_){}
@@ -90,6 +91,17 @@
     .cp-ai .verdict{font-size:16px;font-weight:700;line-height:1.5;margin:6px 0 10px}
     .cp-ai ul{margin:4px 0 10px;padding-left:18px;font-size:13px;line-height:1.7}
     .cp-ai .sec{font-size:12px;font-weight:700;color:var(--cp-violet);letter-spacing:1px;margin-top:8px}
+    .cp-btn .ic,.cp-dialog h3 .ic{width:15px;height:15px}
+    .cp-six{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px}
+    .cp-six>div{background:var(--cp-soft);border-radius:var(--r-sm);padding:10px 12px;min-width:0}
+    .cp-six b{display:block;font-size:22px;font-variant-numeric:tabular-nums;line-height:1.2}
+    .cp-six b.hot{color:var(--bad,var(--cp-down))}
+    .cp-six span{font-size:12px;color:var(--ink2)}
+    .cp-line{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:13.5px;color:var(--ink2)}
+    .cp-recent{display:flex;align-items:center;gap:8px;padding:8px 0;border-top:1px solid var(--line);font-size:13px}
+    .cp-recent:first-of-type{border-top:0}
+    .cp-recent .w{margin-left:auto;color:var(--ink2);font-size:12px;white-space:nowrap}
+    .cp-comp-none{font-size:11.5px;color:var(--ink2);margin-top:6px}
     .cp-empty{color:var(--ink2);font-size:13px;text-align:center;padding:26px 8px}
     .cp-foot{font-size:12px;color:var(--ink2);text-align:center;margin:8px 0 20px}
     .cp-modal{position:fixed;inset:0;background:rgba(20,24,36,.55);z-index:200;display:grid;place-items:center;padding:16px}
@@ -100,8 +112,8 @@
     .cp-lv button{min-height:var(--h-sm);border:1px solid var(--line2);background:#fff;border-radius:var(--r-sm);padding:0 12px;font-weight:600;cursor:pointer;font-size:13px}
     .cp-lv button.on{background:var(--navy,#1d2740);border-color:var(--navy,#1d2740);color:#ffd166}
     .cp-row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-    @media(max-width:900px){.cp-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.cp-grid{grid-template-columns:1fr}}
-    @media(max-width:520px){.cp-hero{padding:18px 16px}.cp-kpi .v{font-size:24px}.cp-mix-row{grid-template-columns:96px 1fr 30px}.cp-item{grid-template-columns:auto 1fr}.cp-item .ops{grid-column:1/-1;justify-content:flex-start}.cp-row2{grid-template-columns:1fr}}
+    @media(max-width:900px){.cp-six{grid-template-columns:repeat(3,minmax(0,1fr))}.cp-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.cp-grid{grid-template-columns:1fr}}
+    @media(max-width:520px){.cp-hero{padding:18px 16px}.cp-kpi .v{font-size:24px}.cp-mix-row{grid-template-columns:96px 1fr 30px}.cp-item{grid-template-columns:auto 1fr}.cp-item .ops{grid-column:1/-1;justify-content:flex-start}.cp-row2{grid-template-columns:1fr}.cp-six{grid-template-columns:repeat(3,minmax(0,1fr))}}
     @media print{header,nav,.cp-acts,.cp-mini,.cp-noprint{display:none!important}.cp-hero{background:#1d2740!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}.cp-panel,.cp-kpi,.cp-store{break-inside:avoid;box-shadow:none}.cp-list{max-height:none;overflow:visible}body{background:#fff}}
     `;
     document.head.appendChild(st);
@@ -128,6 +140,19 @@
     checklist_rate:"#e0a019", inspection:"#e07a19", active_people:"#3d6fd9", points:"#8a7d68"};
   const MIX_COLOR = {expert:"#7c5cd6", content:"#3d6fd9", video:"#d6458f", tool:"#e07a19", meeting:"#5b6b8a",
     staff:"#1f9d6b", checklist:"#e0a019", inspection:"#c2552d"};
+
+  // 按钮上的小图标：优先用 app.js 的 icon()；它没有的几个(下载/打印/下发/刷新)在这里补，画法一致
+  const CP_ICONS = {
+    download:'<path d="M12 4v11M7.5 11l4.5 4.5 4.5-4.5M5 19.5h14"/>',
+    printer:'<path d="M7 8.5V4h10v4.5M7 17H5.5A1.5 1.5 0 0 1 4 15.5v-5A1.5 1.5 0 0 1 5.5 9h13a1.5 1.5 0 0 1 1.5 1.5v5a1.5 1.5 0 0 1-1.5 1.5H17M7 14h10v6H7z"/>',
+    send:'<path d="M20.5 3.5 10 14M20.5 3.5 14 20.5 10 14 3.5 10z"/>',
+    refresh:'<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3M19.5 4.5v4h-4"/>',
+  };
+  function ic(name){
+    const own=CP_ICONS[name];
+    if(own) return `<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${own}</svg>`;
+    return typeof icon==="function" ? icon(name) : "";
+  }
 
   /* ---------- 图表（纯 SVG） ---------- */
   function trendChart(rows){
@@ -194,10 +219,10 @@
         </div>
         <div class="cp-acts">
           ${costButton({label:"AI 经营分析",attrs:'data-ic="sparkles"',onclick:"cpAi()",cost:1,btnClass:"cp-btn gold",id:"cp-ai-btn",disabled:!!CP.aiBusy,disabledLabel:"AI 正在分析…"})}
-          <a class="cp-btn" href="/api/cockpit/export.xlsx?days=${d.period.days}">⬇ 导出 Excel</a>
-          <button type="button" class="cp-btn" onclick="window.print()">🖨 打印 / 存 PDF</button>
-          <button type="button" class="cp-btn" onclick="cpDispatch(null)">📤 下发任务</button>
-          <button type="button" class="cp-btn" onclick="cpReload()">↻ 刷新</button>
+          <a class="cp-btn" href="/api/cockpit/export.xlsx?days=${d.period.days}">${ic("download")}导出 Excel</a>
+          <button type="button" class="cp-btn" onclick="window.print()">${ic("printer")}打印 / 存 PDF</button>
+          <button type="button" class="cp-btn" onclick="cpDispatch(null)">${ic("send")}下发任务</button>
+          <button type="button" class="cp-btn" onclick="cpReload()">${ic("refresh")}刷新</button>
         </div>
         <div class="cp-head-lines">${head||"这段时间还没有记录。"}</div>
       </section>
@@ -206,7 +231,7 @@
 
       <div class="cp-grid">
         <section class="cp-panel"><h3>每天完成了多少<span class="cp-legend"><span><i style="background:#7c5cd6"></i>AI 交付</span><span><i style="background:#1f9d6b"></i>店员交差</span><span><i style="background:#e0a019"></i>清单完成</span></span></h3>
-          <div class="cp-sub">按北京时间自然日统计，鼠标停在柱子上看明细</div>${trendChart(d.trend)}</section>
+          <div class="cp-sub">按北京时间自然日统计，鼠标停在柱子上看明细</div>${trendChart(d.trend)}${dayDetail(d.trend)}</section>
         <section class="cp-panel"><h3>都做了什么</h3><div class="cp-sub">本期完成的工作，按类型</div><div class="cp-mix">${mix}</div></section>
       </div>
 
@@ -216,6 +241,8 @@
           <div class="cp-list">${todoList(d.todo)}</div></section>
         ${aiPanel(d.ai_analysis)}
       </div>
+
+      ${inspectionPanel(d.inspection)}
 
       <section class="cp-panel" style="margin-bottom:16px"><h3>每个账号做了什么
           ${(()=>{const nv=d.people.filter(p=>p.flag==="never"&&!isOwnerRole(p)).length, idl=d.people.filter(p=>p.flag==="idle"&&!isOwnerRole(p)).length;
@@ -230,17 +257,17 @@
       <div class="cp-grid">
         <section class="cp-panel"><h3>下发追踪 <span class="cp-tag">${d.tracking.length} 件</span></h3>
           <div class="cp-sub">从驾驶舱下发出去的事，店员在派活里拍照交差，状态实时更新</div>${trackTable(d.tracking)}</section>
-        <section class="cp-panel" data-cp-ai-employees><h3>AI 专家产出 <a class="cp-mini" href="#/production">看全部产出</a></h3><div class="cp-sub">本期交付最多的 AI 专家；点「看明细」看每位干了什么、效率怎么样</div>${aiEmployees(d.ai_employees)}
+        <section class="cp-panel" data-cp-ai-employees><h3>AI 专家产出 <a class="cp-mini" href="#/production">看全部产出</a></h3><div class="cp-sub">本期交付最多的 AI 专家；点「看明细」看每位干了什么、效率怎么样</div>${aiEmployees(d.ai_employees)}${recentDeliveries(d.recent_deliveries)}
           <h3 style="margin-top:16px">内容发布</h3><div class="cp-sub">发布台账里本期登记的发布</div>${content(d.content)}</section>
       </div>
-      <div class="cp-foot">${esc(d.notes||"")}</div>
+      <div class="cp-foot">${esc(d.notes||"")}<div data-cp-biz-note style="margin-top:4px">营业额、客单价这类经营指标需要接上收银数据后才有。</div></div>
     </div>`;
   }
   const isOwnerRole = p => p.role==="owner"||p.role==="root";
   function fmtRange(p){ return `${day(p.start)} – ${day(p.end)}`; }
 
   function todoList(items){
-    if(!items.length) return `<div class="cp-empty">🎉 没有等您处理的事</div>`;
+    if(!items.length) return `<div class="cp-empty">眼下没有等您处理的事</div>`;
     const col={high:"#d64545",mid:"#e0a019",normal:"#3d6fd9"};
     CP.pick.todo=items;
     return items.map((t,i)=>`<div class="cp-item"><span class="dot" style="background:${col[t.level]||"#3d6fd9"}"></span>
@@ -295,14 +322,56 @@
     // 有分数的店不足 2 家不排名次，避免给唯一一家(哪怕分很低)的店挂「No.1」
     const scored=rows.filter(s=>s.score!=null).length, ranked=scored>=2;
     const noRank=ranked?"":`<div class="sub" data-cp-norank style="margin-bottom:8px">${scored===1?"只有 1 家店有记录，暂不排名。":"这段时间各店都还没有记录，暂不排名。"}</div>`;
-    const comp=(label,v)=>`<div class="cp-comp"><span>${label}</span><div class="bar"><i style="width:${v==null?0:Math.max(0,Math.min(100,v))}%"></i></div><span>${v==null?"—":Math.round(v)}</span></div>`;
+    // 有数的维度画条；没数据的维度不一行行写「—」，合成一句「整改、巡店还没有记录」(和门店排行页同一个写法)
+    const comps=s=>{
+      const parts=[["清单按时","清单",s.checklist],["整改按时","整改",s.action],["派活按时","派活",s.task],["巡店问题分","巡店",s.issue]];
+      const none=parts.filter(x=>x[2]==null).map(x=>x[1]);
+      return parts.filter(x=>x[2]!=null).map(([label,,v])=>`<div class="cp-comp"><span>${label}</span><div class="bar"><i style="width:${Math.max(0,Math.min(100,v))}%"></i></div><span>${Math.round(v)}</span></div>`).join("")
+        +(none.length?`<div class="cp-comp-none" data-cp-comp-none>${none.join("、")}还没有记录</div>`:"");
+    };
     return `${noRank}<div class="cp-stores">${rows.map((s,i)=>`<div class="cp-store ${s.needs_attention?"warn":""}">
       <div class="cp-store-top">${ring(s.score)}<div style="min-width:0;flex:1"><b style="font-size:15px">${ranked&&s.rank?`<span${s.needs_attention?` style="color:var(--cp-down)"`:""}>第 ${s.rank} 名</span> `:""}${esc(s.name)}</b>
         <div class="sub">${s.delta==null?"上期无数据":s.delta>0?`<span style="color:var(--cp-up);font-weight:600">较上期 ↑${num(s.delta,1)}</span>`:s.delta<0?`<span style="color:var(--cp-down);font-weight:600">较上期 ↓${num(Math.abs(s.delta),1)}</span>`:"较上期持平"}${s.open_issues?` · 未闭环问题 ${s.open_issues}`:""}</div>
         ${s.needs_attention?`<span class="cp-tag high" style="margin-top:4px">要盯一下</span>`:""}</div></div>
-      ${comp("清单按时",s.checklist)}${comp("整改按时",s.action)}${comp("派活按时",s.task)}${comp("巡店问题分",s.issue)}
+      ${comps(s)}
       ${s.reasons?.length?`<div class="sub" style="margin-top:8px;line-height:1.5">${s.reasons.map(esc).join("；")}</div>`:""}
       <div style="margin-top:10px;display:flex;gap:6px"><button type="button" class="cp-mini pri" onclick="cpDispatchStore(${i})">下发到这家店</button></div></div>`).join("")}</div>`;
+  }
+
+  /* 巡店与整改(原老板看板「巡店执行」六格)。后端没给这块(旧接口)就不显示；
+     这家企业从来没巡过店时收成一行，不摆六个 0 */
+  function inspectionPanel(x){
+    if(!x) return "";
+    const head=`<h3>巡店与整改 <a class="cp-mini" href="#/inspections">${x.has_records?"打开巡店":"去巡店"}</a></h3>`;
+    if(!x.has_records) return `<section class="cp-panel" data-cp-inspection style="margin-bottom:16px">${head}
+      <div class="cp-line" data-cp-inspection-empty>还没有巡店记录。店长拍照巡一次店，问题会自动派给门店整改，这里就能看到进度。</div></section>`;
+    const cell=(label,v,hot)=>`<div><b class="${hot&&Number(v)>0?"hot":""}">${v==null?"—":num(v,1)}</b><span>${label}</span></div>`;
+    return `<section class="cp-panel" data-cp-inspection style="margin-bottom:16px">${head}
+      <div class="cp-sub">前两项只算上面选的这段时间；后四项是到现在还没处理的，不管是哪天发现的</div>
+      <div class="cp-six">${cell("本期巡店",x.visits)}${cell("本期平均分",x.avg_score)}${cell("还没解决的问题",x.open_issues)}
+        ${cell("还没解决的高风险问题",x.critical_issues,true)}${cell("正在整改",x.open_actions)}${cell("整改已逾期",x.overdue_actions,true)}</div></section>`;
+  }
+
+  /* 最近交付：最多 5 条，只有专家、状态、时间，不显示任务内容；没有就整段不显示 */
+  function recentDeliveries(rows){
+    if(!rows?.length) return "";
+    const cls={done:"ok",failed:"high",waiting:"mid",active:"blue"};
+    return `<h3 style="margin-top:16px">最近交付</h3><div class="cp-sub">只列是哪位 AI 专家、做到哪一步、什么时候，点开才看内容</div>
+      <div data-cp-recent>${rows.map(r=>`<div class="cp-recent"><span class="cp-tag ${cls[r.status]||""}">${esc(r.status_label)}</span><b>${esc(r.name)}</b>
+        <span class="w">${esc(when(r.at))}</span><a class="cp-mini" href="${esc(r.route||"#/tasks")}">查看</a></div>`).join("")}</div>`;
+  }
+
+  /* 每天明细(原老板看板「近 14 天节奏」)：所选周期内每天的 AI 交付/店员交差/清单完成/巡店次数；
+     全是 0 的日子不一行行列，合成一句「其余 N 天没有记录」 */
+  function dayDetail(rows){
+    if(!rows?.length) return "";
+    const total=r=>(r.ai||0)+(r.staff||0)+(r.checklist||0)+(r.inspection||0);
+    const btn=`<div style="text-align:center;margin-top:8px"><button type="button" class="cp-mini cp-noprint" data-cp-day-all aria-expanded="${CP.dayAll?"true":"false"}" onclick="cpDayAll()">${CP.dayAll?"收起每天明细":"看每天明细"}</button></div>`;
+    if(!CP.dayAll) return btn;
+    const busy=rows.filter(r=>total(r)>0).reverse(), idle=rows.length-busy.length;
+    const body=busy.map(r=>`<tr><td>${esc(String(r.day).slice(5).replace("-","/"))}</td><td class="n">${num(r.ai||0)}</td><td class="n">${num(r.staff||0)}</td><td class="n">${num(r.checklist||0)}</td><td class="n">${num(r.inspection||0)}</td></tr>`).join("");
+    const rest=idle?`<div class="cp-sub" data-cp-day-idle style="margin:8px 0 0">${busy.length?`其余 ${idle} 天没有记录`:`这 ${idle} 天都没有记录`}</div>`:"";
+    return `${busy.length?`<div class="cp-table-wrap" data-cp-day-table style="margin-top:10px"><table class="cp-table" style="min-width:320px"><thead><tr><th>日期</th><th style="text-align:right">AI 交付</th><th style="text-align:right">店员交差</th><th style="text-align:right">清单完成</th><th style="text-align:right">巡店次数</th></tr></thead><tbody>${body}</tbody></table></div>`:""}${rest}${btn}`;
   }
 
   function trackTable(rows){
@@ -349,6 +418,7 @@
   window.cpReload = () => view();
   window.cpPeopleAll = () => { CP.peopleAll=!CP.peopleAll; draw(); };
   window.cpAiAll = () => { CP.aiAll=!CP.aiAll; draw(); };
+  window.cpDayAll = () => { CP.dayAll=!CP.dayAll; draw(); };
   window.cpAi = async () => {
     if(CP.aiBusy) return;
     CP.aiBusy=true; draw();
@@ -386,7 +456,7 @@
     const render=()=>{
       const b=bs.find(x=>x.id===st.branch_id)||bs[0], members=b.members||[];
       if(st.level==="person"&&!members.some(m=>m.id===st.assignee)) st.assignee=members[0]?.id||null;
-      wrap.innerHTML=`<div class="cp-dialog" role="dialog" aria-label="下发任务"><h3>📤 下发任务</h3>
+      wrap.innerHTML=`<div class="cp-dialog" role="dialog" aria-label="下发任务"><h3>${ic("send")} 下发任务</h3>
         <label>要做的事</label><input id="cp-d-title" maxlength="60" value="${esc(st.title)}" placeholder="例如：今天下班前把冷柜温度调到 4℃ 并拍照">
         <label>说明（可选）</label><textarea id="cp-d-detail" rows="3" maxlength="500" placeholder="做到什么程度、注意什么">${esc(st.detail)}</textarea>
         <label>下发给</label><div class="cp-lv"><button type="button" class="${st.level==="store"?"on":""}" data-lv="store">整家门店</button><button type="button" class="${st.level==="person"?"on":""}" data-lv="person">门店里的某个人</button></div>
@@ -416,6 +486,9 @@
     };
     document.body.appendChild(wrap); render(); setTimeout(()=>wrap.querySelector("#cp-d-title")?.focus(),30);
   }
+
+  // 下发弹层挂在 body 上，换页面时不会跟着清掉：路由一变就关
+  window.addEventListener("hashchange",()=>{ document.getElementById("cp-modal")?.remove(); });
 
   routes["cockpit"] = view;
 })();
