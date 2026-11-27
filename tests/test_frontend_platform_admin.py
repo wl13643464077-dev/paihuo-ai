@@ -97,7 +97,7 @@ class PlatformAdminFrontendTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("共 2 家在用", text)
             self.assertEqual("平台工作台 · 派活", await page.title())
             # 开新企业:直接到平台运营页并打开表单,行业用短名
-            await page.get_by_role("button", name="➕ 开新企业").click()
+            await page.get_by_role("button", name="开新企业").click()
             await page.wait_for_selector("#tt-inds")
             self.assertEqual("#/platform", await page.evaluate("location.hash"))
             self.assertEqual("平台运营 · 派活", await page.title())
@@ -118,7 +118,7 @@ class PlatformAdminFrontendTests(unittest.IsolatedAsyncioTestCase):
                 playwright, "#/platform",
                 post={"/api/team/tenants/2/grant": {"balance": 308}})
             await page.wait_for_selector("#tm-indrow-2")
-            await page.locator("#tm-indrow-2").get_by_role("button", name="💎 充点").click()
+            await page.locator("#tm-indrow-2").get_by_role("button", name="充点").click()
             await page.wait_for_selector("#ui-dialog")
             await page.fill("#ui-dialog-field", "300")
             await page.locator("#ui-dialog [data-dialog-ok]").click()
@@ -277,7 +277,7 @@ class PlatformAdminFrontendTests(unittest.IsolatedAsyncioTestCase):
                 post={"/api/team/users": {"id": 32, "username": "dianzhang",
                                           "initial_password": "k7mn2pqr8stv3wxy", "branch_ids": [4]}})
             await page.wait_for_selector("text=新建账号")
-            await page.get_by_role("button", name="➕ 新建账号").click()
+            await page.get_by_role("button", name="新建账号").click()
             await page.wait_for_selector("#tm-create")
             await page.locator('.tm-kind[data-k="manager"]').click()
             await page.fill("#tm-u", "dianzhang")

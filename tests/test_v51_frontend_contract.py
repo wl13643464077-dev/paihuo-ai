@@ -323,7 +323,7 @@ class V51FrontendContractTests(unittest.TestCase):
         self.assertIn("!employeeCanAssignNew(e)", caps)
         self.assertIn("!employeeCanAssignNew(e)", skills)
         self.assertIn("员工仍在岗 · 此任务使用历史岗位版本", self.source)
-        self.assertIn('canAssign?[["task","📋 派活"]]:[]', draw)
+        self.assertIn('canAssign?[["task","派活"]]:[]', draw)
         self.assertIn('<span class="tag readonly">', caps)
         self.assertIn('<span class="tag readonly">', learning)
         self.assertIn('readonly?`<span class="tag readonly">', caps)

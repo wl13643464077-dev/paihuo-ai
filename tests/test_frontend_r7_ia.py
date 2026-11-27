@@ -367,7 +367,7 @@ class FrontendInfoArchitectureTests(unittest.IsolatedAsyncioTestCase):
                 form = page.locator("#mine-pw-form")
                 self.assertFalse(await form.is_visible())
                 toggle = page.locator("[data-mine-pw-toggle]")
-                self.assertEqual("🔑 修改密码", (await toggle.inner_text()).strip())
+                self.assertEqual("修改密码", (await toggle.inner_text()).strip())
                 await toggle.click()
                 self.assertTrue(await form.is_visible())
                 self.assertEqual("true", await toggle.get_attribute("aria-expanded"))
@@ -377,12 +377,12 @@ class FrontendInfoArchitectureTests(unittest.IsolatedAsyncioTestCase):
                 # 现有校验文案不变
                 await page.fill("#tm-old", "old-password-1")
                 await page.fill("#tm-new", "short")
-                await page.get_by_role("button", name="💾 保存新密码").click()
+                await page.get_by_role("button", name="保存新密码").click()
                 await page.wait_for_function(
                     "document.querySelector('#toast-stack')?.textContent.includes('密码至少需要 12 位')")
                 self.assertEqual([], puts)
                 await page.fill("#tm-new", "brand-new-pass-2026")
-                await page.get_by_role("button", name="💾 保存新密码").click()
+                await page.get_by_role("button", name="保存新密码").click()
                 await page.wait_for_function(
                     "document.querySelector('#toast-stack')?.textContent.includes('密码已修改')")
                 self.assertEqual([("/api/auth/password",
@@ -420,7 +420,7 @@ class FrontendInfoArchitectureTests(unittest.IsolatedAsyncioTestCase):
         # 唯一保留的入口：平台管理员工作台的「各企业看板」(跨企业切换只有老板看板有)
         self.assertIn('if(ME?.role==="root") return bossDashboardView();', app_js)
         self.assertEqual(1, app_js.count('href="#/boss"'))
-        self.assertIn('<a class="btn" href="#/boss">📈 各企业看板</a>', app_js)
+        self.assertIn('<a data-ic="chart" class="btn" href="#/boss">各企业看板</a>', app_js)
         # 后端接口和看板服务层保留
         self.assertTrue(os.path.exists(os.path.join(root, "app", "bossdashboard.py")))
         self.assertIn('api("/auth/password",{method:"PUT"', app_js)

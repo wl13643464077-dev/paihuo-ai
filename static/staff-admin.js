@@ -139,8 +139,8 @@
     const waiting = SA.drafts.filter(d=>!d.sent).length;
     box.innerHTML = SA.drafts.length ? SA.drafts.map(draftHtml).join("")
       + `<div class="actions" style="margin-top:10px">
-          ${waiting?`<button type="button" class="btn pri" onclick="PH_STAFF_ADMIN._sendAll()" ${SA.sending?"disabled":""}>📤 ${SA.sending?"正在派…":`确认派出去（${waiting} 件）`}</button>`:""}
-          <button type="button" class="btn" onclick="PH_STAFF_ADMIN._add()">➕ 再加一件</button>
+          ${waiting?`<button data-ic="send" type="button" class="btn pri" onclick="PH_STAFF_ADMIN._sendAll()" ${SA.sending?"disabled":""}>${SA.sending?"正在派…":`确认派出去（${waiting} 件）`}</button>`:""}
+          <button data-ic="plus" type="button" class="btn" onclick="PH_STAFF_ADMIN._add()">再加一件</button>
           <button type="button" class="btn" onclick="PH_STAFF_ADMIN._clear()">清空</button></div>` : "";
   }
   function setField(i, field, value, redraw){
@@ -297,32 +297,32 @@
     const u = me();
     if(!["todo","rejected"].includes(t.status) || !t.assignee_user_id || (u && String(u.id)===String(t.assignee_user_id))) return "";
     const last = Number(t.last_nudged_at)||0;
-    if(last && Date.now()/1000-last < NUDGE_GAP) return `<span class="sub" title="30 分钟后可以再催">🔔 已催 · ${h(hhmm(last))}</span>`;
+    if(last && Date.now()/1000-last < NUDGE_GAP) return `<span class="sub" data-ic="bell" title="30 分钟后可以再催">已催 · ${h(hhmm(last))}</span>`;
     // 逾期的活，「催一下」是这张卡上最该点的，用主按钮
-    return `<button type="button" class="btn sm${t.overdue?" pri":""}" onclick="PH_STAFF_ADMIN._nudge(${t.id})" title="给 ${h(t.assignee_name||"店员")} 发一条通知">🔔 催一下</button>`;
+    return `<button data-ic="bell" type="button" class="btn sm${t.overdue?" pri":""}" onclick="PH_STAFF_ADMIN._nudge(${t.id})" title="给 ${h(t.assignee_name||"店员")} 发一条通知">催一下</button>`;
   }
   function taskHtml(t){
     const rejected = t.status==="todo" && t.review_note && t.reviewed_at;
     // meta 每一段都是已转义的 HTML(截止时间那段带 title)
-    const meta = [h(t.branch_name), h(t.assignee_name?`👤 ${t.assignee_name}`:"👤 还没指定人"), dueLine(t),
+    const meta = [h(t.branch_name), `<span data-ic="user">${h(t.assignee_name||"还没指定人")}</span>`, dueLine(t),
       (t.dispatcher_label||t.created_by_name)?h((l=>/[）)]$/.test(l)?`${l}派的`:`${l} 派的`)(String(t.dispatcher_label||t.created_by_name))):"", t.remind_count?h(`已催 ${t.remind_count} 次`):""].filter(Boolean);
     const cancelBtn = ["todo","submitted"].includes(t.status)?`<button type="button" class="btn sm" onclick="PH_STAFF_ADMIN._cancel(${t.id})">取消这件</button>`:"";
-    const eventsBtn = `<button type="button" class="btn sm" onclick="PH_STAFF_ADMIN._events(${t.id})">🕘 经过</button>`;
+    const eventsBtn = `<button data-ic="clock" type="button" class="btn sm" onclick="PH_STAFF_ADMIN._events(${t.id})">经过</button>`;
     const open = ["todo","submitted"].includes(t.status);
     return `<div class="sa-task ${t.overdue?"sa-over":""} ${String(SA.focus)===String(t.id)?"sa-focus":""}" id="sa-task-${t.id}">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <span class="pill ${t.status==="approved"?"done":t.status==="cancelled"?"cancelled":t.status==="submitted"?"awaiting_review":(t.overdue||rejected||t.status==="rejected")?"failed":"running"}">${h(t.overdue?"已逾期":rejected?"被打回":STATUS[t.status]||t.status)}</span>
         <b style="flex:1;min-width:160px">${h(t.title)}</b>
-        ${t.require_photo?`<span class="sub">📷 要照片</span>`:""}</div>
+        ${t.require_photo?`<span class="sub" data-ic="camera">要照片</span>`:""}</div>
       <div class="sub" style="margin-top:4px">${meta.join(" · ")}</div>
       ${t.detail?`<div style="margin-top:4px">${h(t.detail)}</div>`:""}
-      ${rejected?`<div class="sa-hint">↩️ ${h(rejectLine(t, "打回过"))}</div>`:""}
-      ${t.status==="submitted"&&t.review_note&&t.reviewed_at?`<div class="sa-hint">↩️ ${h(rejectLine(t, "上次打回"))}${t.submit_count>1?`（第 ${t.submit_count} 次交）`:"（重交）"}</div>`:""}
-      ${t.status==="submitted"?`${t.submit_note?`<div style="margin-top:6px">📝 ${h(t.submit_note)}</div>`:""}${photosHtml(t.photos)}${aiHtml(t)}`:""}
+      ${rejected?`<div class="sa-hint" data-ic="undo">${h(rejectLine(t, "打回过"))}</div>`:""}
+      ${t.status==="submitted"&&t.review_note&&t.reviewed_at?`<div class="sa-hint" data-ic="undo">${h(rejectLine(t, "上次打回"))}${t.submit_count>1?`（第 ${t.submit_count} 次交）`:"（重交）"}</div>`:""}
+      ${t.status==="submitted"?`${t.submit_note?`<div style="margin-top:6px" data-ic="message">${h(t.submit_note)}</div>`:""}${photosHtml(t.photos)}${aiHtml(t)}`:""}
       ${t.status==="approved"&&(t.photos||[]).length?`<details style="margin-top:6px"><summary class="sub">看交差照片（${t.photos.length}）</summary>${photosHtml(t.photos)}</details>`:""}
       <div class="actions" style="margin-top:8px">
-        ${t.status==="submitted"?`<button type="button" class="btn sm pri" onclick="PH_STAFF_ADMIN._review(${t.id},true)">👍 通过</button>
-          <button type="button" class="btn sm bad" onclick="PH_STAFF_ADMIN._review(${t.id},false)">↩️ 打回重做</button>`:""}
+        ${t.status==="submitted"?`<button data-ic="check" type="button" class="btn sm pri" onclick="PH_STAFF_ADMIN._review(${t.id},true)">通过</button>
+          <button data-ic="undo" type="button" class="btn sm bad" onclick="PH_STAFF_ADMIN._review(${t.id},false)">打回重做</button>`:""}
         ${nudgeHtml(t)}
         ${open?moreHtml(t, [t.status==="todo"?reassignHtml(t):"", cancelBtn, eventsBtn]):eventsBtn}
       </div>
@@ -353,7 +353,7 @@
     const list = items().filter(t=>t.status==="submitted");
     const ai = aiControl();
     const askFirst = ai.includes("sa-ask");
-    return `<h3 style="margin-top:0">🧐 等您审核（${list.length}）${filterNote()}${askFirst?"":ai}</h3>`
+    return `<h3 data-ic="eye" style="margin-top:0">等您审核（${list.length}）${filterNote()}${askFirst?"":ai}</h3>`
       + (askFirst && list.length ? ai : "")
       + (list.length ? list.map(taskHtml).join("") : `<div class="sub">暂时没有</div>`);
   }
@@ -361,7 +361,7 @@
     const all = items();
     const doing = all.filter(t=>t.status==="todo").sort((a,b)=>(b.overdue-a.overdue)||((a.due_at||9e12)-(b.due_at||9e12)));
     const ended = all.filter(t=>["approved","cancelled","rejected"].includes(t.status));
-    let html = `<h3 style="margin-top:18px">⏳ 店员在做（${doing.length}）${filterNote()}</h3>`
+    let html = `<h3 data-ic="clock" style="margin-top:18px">店员在做（${doing.length}）${filterNote()}</h3>`
       + (doing.length ? doing.map(taskHtml).join("") : `<div class="sub">暂时没有</div>`);
     if(ended.length) html += `<details style="margin-top:16px" ${SA.filter.status&&!["submitted","todo"].includes(SA.filter.status)?"open":""}><summary><b>已结束（${ended.length}）</b></summary>${ended.map(taskHtml).join("")}</details>`;
     if(SA.list&&SA.list.next_before_id) html += `<div class="actions"><button type="button" class="btn" onclick="PH_STAFF_ADMIN._more()">加载更多</button></div>`;
@@ -380,19 +380,19 @@
       ? `<div class="card sa-one" id="sa-dispatch"><button type="button" class="btn" onclick="PH_STAFF_ADMIN._openDispatchBox()" ${!m.branches.length?"disabled":""}>＋ 派一件新活</button></div>`
       : `<div class="card sa-one" id="sa-dispatch">
         ${noStaffHint()}
-        <h3 style="margin-top:0">🗣️ 一句话派活</h3>
+        <h3 data-ic="message" style="margin-top:0">一句话派活</h3>
         <textarea id="sa-one" maxlength="500" placeholder="比如：人民路店明天中午前把冷柜清一遍，拍照给我">${h(SA.oneText||"")}</textarea>
         <div class="actions">
           ${price&&typeof costButton==="function"
             ?costButton({label:"拆成任务",attrs:'data-ic="sparkles"',onclick:"PH_STAFF_ADMIN._parse()",cost:price,disabled:SA.parsing||!m.branches.length,disabledLabel:SA.parsing?"AI 正在拆…":""})
             :`<button type="button" class="btn pri" data-ic="sparkles" onclick="PH_STAFF_ADMIN._parse()" ${SA.parsing||!m.branches.length?"disabled":""}>${SA.parsing?"AI 正在拆…":"拆成任务"}</button>`}
-          <button type="button" class="btn" onclick="PH_STAFF_ADMIN._add()" ${!m.branches.length?"disabled":""}>✍️ 手动派一件</button>
-          <a class="btn" href="/staff" target="_blank" rel="noopener">📱 看店员手机版</a>
+          <button data-ic="pen" type="button" class="btn" onclick="PH_STAFF_ADMIN._add()" ${!m.branches.length?"disabled":""}>手动派一件</button>
+          <a data-ic="phone" class="btn" href="/staff" target="_blank" rel="noopener">看店员手机版</a>
         </div>
         <div class="sub">AI 只帮您填表，门店和人对不上时会留空让您选，确认后才会派出去。</div>
         <div id="sa-drafts"></div>
       </div>`;
-    main.innerHTML = `<div class="hubhead"><h2>🧑‍🍳 派给店员</h2>
+    main.innerHTML = `<div class="hubhead"><h2 data-ic="user">派给店员</h2>
         <div class="sub">把活派给店里的真人，店员用手机拍照交差，您（或店长）看照片定通过还是打回。</div></div>
       ${!m.branches.length?`<div class="card">${noStoreEmptyState("还没有可以派活的门店。建好门店，再到「我的 → 团队与权限」给店员分配门店。")}</div>`:""}
       ${reviewFirst?reviewCard:""}
@@ -403,7 +403,7 @@
             <option value="">全部门店</option>${m.branches.map(b=>`<option value="${b.id}" ${String(b.id)===String(SA.filter.branch)?"selected":""}>${h(b.name)}</option>`).join("")}</select>
           <select onchange="PH_STAFF_ADMIN._filter('status',this.value)" aria-label="按状态看">
             ${[["","全部状态"],["submitted","等审核"],["todo","待做"],["approved","已通过"],["cancelled","已取消"]].map(([v,l])=>`<option value="${v}" ${v===SA.filter.status?"selected":""}>${l}</option>`).join("")}</select>
-          <button type="button" class="btn sm" onclick="PH_STAFF_ADMIN._reload()">🔄 刷新</button>
+          <button data-ic="refresh" type="button" class="btn sm" onclick="PH_STAFF_ADMIN._reload()">刷新</button>
         </div>
         ${reviewFirst?"":`<div style="margin-top:12px">${reviewHtml()}</div>`}
         ${restHtml()}

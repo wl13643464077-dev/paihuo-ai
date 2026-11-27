@@ -102,6 +102,10 @@ textarea{min-height:96px;resize:vertical}
 .hidden{display:none!important}
 .spin{display:inline-block;width:18px;height:18px;border:3px solid var(--line);border-top-color:var(--ink);border-radius:50%;animation:sp 1s linear infinite}
 @keyframes sp{to{transform:rotate(360deg)}}
+/* 线性图标：data-ic="名字"，图形由 staff.js 的 ICONS 生成 */
+[data-ic]::before{content:"";width:1.15em;height:1.15em;flex:none;display:inline-block;vertical-align:-.18em;background:currentColor;-webkit-mask:var(--ic-url) center/contain no-repeat;mask:var(--ic-url) center/contain no-repeat}
+[data-ic]:not(.btn)::before{margin-right:.4em}
+:is(h2,.t)[data-ic]::before{color:#8a6a1c}
 </style>
 </head>
 <body>

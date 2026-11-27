@@ -67,8 +67,8 @@
       ? `<div class="tabs" role="tablist">
           <button type="button" class="tb ${CK.tab==="today"?"on":""}" onclick="ckTab('today')">各店完成情况</button>
           <button type="button" class="tb ${CK.tab==="tpl"?"on":""}" onclick="ckTab('tpl')">清单模板</button></div>` : "";
-    $("#main").innerHTML = `<div class="ck-head"><h2>✅ 开闭店清单</h2>
-        <a class="btn sm" href="#/store-rank">🏆 门店排行</a></div>
+    $("#main").innerHTML = `<div class="ck-head"><h2 data-ic="checklist">开闭店清单</h2>
+        <a data-ic="trophy" class="btn sm" href="#/store-rank">门店排行</a></div>
       <div class="sub" style="margin-bottom:10px">店员每天在手机上按清单打勾、拍照；过了截止时间没做完会自动提醒店员，再提醒店长和您。打勾拍照不扣点。</div>
       ${tabs}<div id="ck-body"><div class="card"><span class="spin"></span> 正在加载…</div></div>`;
     if(CK.tab==="tpl" && canManageTemplates()) return ckLoadTemplates();
@@ -167,7 +167,7 @@
           <span class="sub">${t.due_time?esc(t.due_time)+" 前做完":"当天做完"} · ${t.items.length} 项（${photos} 项要拍照）${t.active?"":" · 已停用"}</span></div>
         <ol class="sub" style="margin:8px 0 0;padding-left:20px;font-size:14px">${t.items.slice(0,4).map(i=>`<li>${esc(i.text)}</li>`).join("")}${t.items.length>4?`<li>……共 ${t.items.length} 项</li>`:""}</ol>
         <div class="actions" style="margin-top:10px">
-          <button type="button" class="btn sm" onclick="ckEdit(${cp(t.id)})">✏️ 改清单</button>
+          <button data-ic="pen" type="button" class="btn sm" onclick="ckEdit(${cp(t.id)})">改清单</button>
           <button type="button" class="btn sm" onclick="ckToggleActive(${cp(t.id)},${t.active?"false":"true"})">${t.active?"停用":"重新启用"}</button></div></div>`;
     }).join("");
     const creating = editing && editing.id==null ? ckEditorHtml(editing) : "";
@@ -223,7 +223,7 @@
   /* ---------------- #/store-rank ---------------- */
   async function storeRankView(){
     ckStyle();
-    $("#main").innerHTML = `<div class="ck-head"><h2>🏆 门店排行</h2><a class="btn sm" href="#/checklists">✅ 开闭店清单</a></div>
+    $("#main").innerHTML = `<div class="ck-head"><h2 data-ic="trophy">门店排行</h2><a data-ic="checklist" class="btn sm" href="#/checklists">开闭店清单</a></div>
       <div class="tabs" role="tablist">
         <button type="button" class="tb ${CK.period==="week"?"on":""}" onclick="ckPeriod('week')">近 7 天</button>
         <button type="button" class="tb ${CK.period==="month"?"on":""}" onclick="ckPeriod('month')">近 30 天</button></div>

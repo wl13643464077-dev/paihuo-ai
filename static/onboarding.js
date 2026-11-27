@@ -129,7 +129,7 @@
     return `${st.posts_date?`<div class="sub" style="margin-top:8px">${h(st.posts_date)} 写的，复制就能发：</div>`:""}`
       + posts.map((p,i)=>`<div class="ph-post">
         <div class="ph-post-h"><span class="tag">${h(p.platform)}</span>
-          <button type="button" class="btn sm pri" onclick="PH_ONBOARDING.copy(${i})">📋 复制</button></div>
+          <button data-ic="copy" type="button" class="btn sm pri" onclick="PH_ONBOARDING.copy(${i})">复制</button></div>
         <div class="ph-post-t">${h(p.text)}</div>
         ${p.tip?`<div class="sub" style="margin-top:6px">💡 ${h(p.tip)}</div>`:""}
       </div>`).join("");
@@ -139,17 +139,17 @@
     const left=Number(st.gen_left||0);
     let btn;
     if(S.generating){
-      btn=`<button type="button" class="btn pri ph-go" disabled>✍️ 正在写，大约半分钟…</button>`;
+      btn=`<button data-ic="pen" type="button" class="btn pri ph-go" disabled>正在写，大约半分钟…</button>`;
     }else if(left<=0){
       btn=`<div class="sub" style="margin-top:8px">免费的 ${h(st.gen_limit||3)} 次已经用完啦。想天天写，去「营销工具箱」看看 →</div>`;
     }else{
-      btn=`<button type="button" class="btn pri ph-go" ${ready?"":"disabled"} onclick="PH_ONBOARDING.generate()">✍️ 帮我写今天的 3 条文案（免费，还能用 ${left} 次）</button>`;
+      btn=`<button data-ic="pen" type="button" class="btn pri ph-go" ${ready?"":"disabled"} onclick="PH_ONBOARDING.generate()">帮我写今天的 3 条文案（免费，还能用 ${left} 次）</button>`;
     }
     return `<div class="sub" style="margin-top:4px">朋友圈、小红书、大众点评各 1 条，按您家店和今天的日子写，复制就能发。</div>${btn}${postsList(st)}`;
   }
   function pwHint(st){
     if(!st.password_hint) return "";
-    return `<details class="ph-pw"><summary>🔑 建议把密码改成您好记的</summary>
+    return `<details class="ph-pw"><summary data-ic="key">建议把密码改成您好记的</summary>
       <div>现在的密码是系统随机生成的，不好记。改一个自己记得住的（12 位以上，字母+数字）。</div>
       <div class="ph-fields">
         <div><label for="ph-pw-old">现在的密码</label><input id="ph-pw-old" type="password" onkeydown="if(event.key==='Enter'&&!event.isComposing){event.preventDefault();PH_ONBOARDING.changePassword(this.closest('.ph-pw').querySelector('.actions .btn'))}" autocomplete="current-password"></div>
@@ -218,7 +218,7 @@
     const stateOf=(no,ok)=> ok&&!(no===2&&S.editing) ? "ok" : (no===now?"now":"");
     return `<div class="card ph-onb">
       <div style="display:flex;align-items:flex-start;gap:8px">
-        <div style="flex:1"><h2>👋 3 分钟上手：选行业、填店铺，AI 专家帮您写今天的文案</h2>
+        <div style="flex:1"><h2>3 分钟上手：选行业、填店铺，AI 专家帮您写今天的文案</h2>
           <div class="sub" style="margin-top:4px">跟着 3 步走，马上拿到能直接发的朋友圈、小红书、点评文案。</div></div>
         ${collapsible?`<button type="button" class="ph-x" aria-label="收起" onclick="PH_ONBOARDING.toggle(false)">−</button>`:""}
       </div>
@@ -351,7 +351,7 @@
         <div><label>验证码模板 Code</label><input id="ph-sms-tpl" value="${h(c.template_code||"")}" placeholder="如：SMS_123456789"></div>
       </div>
       <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-weight:600"><input type="checkbox" id="ph-sms-en" ${c.enabled?"checked":""} style="width:auto"> 开启验证码登录</label>
-      <div class="actions"><button class="btn pri" onclick="PH_ONBOARDING.saveSms(this)">💾 保存短信配置</button>
+      <div class="actions"><button data-ic="save" class="btn pri" onclick="PH_ONBOARDING.saveSms(this)">保存短信配置</button>
         <span class="sub">当前：${c.active?"登录页已显示验证码登录":"未启用"}</span></div>`;
   }
   function smsAdminCard(){
@@ -359,7 +359,7 @@
     if(!m||m.role!=="root") return "";
     api("/admin/sms").then(c=>{ S.sms=c; const b=$id("ph-sms-admin-body"); if(b) b.innerHTML=smsInner(); })
       .catch(()=>{ const b=$id("ph-sms-admin-body"); if(b) b.innerHTML=`<div class="sub">读取短信配置失败，刷新再试</div>`; });
-    return `<div class="card" id="ph-sms-admin"><h2>📱 短信验证码登录（默认关闭）</h2><div id="ph-sms-admin-body">${smsInner()}</div></div>`;
+    return `<div class="card" id="ph-sms-admin"><h2 data-ic="phone">短信验证码登录（默认关闭）</h2><div id="ph-sms-admin-body">${smsInner()}</div></div>`;
   }
   async function saveSms(btn){
     const body={sign_name:$id("ph-sms-sign").value.trim(),template_code:$id("ph-sms-tpl").value.trim(),enabled:$id("ph-sms-en").checked};
