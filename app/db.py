@@ -3079,6 +3079,9 @@ def _initialize_anchor_locked(path: str):
         # (逗号包裹串,如 ",5,20,",instr 即可判含),财务类通知只发企业主。
         _add_column(_conn, "notification", "user_id", "INTEGER")
         _add_column(_conn, "notification", "read_by", "TEXT")
+        # 通知的结构化信息(JSON，可空)：今天页按它把同类通知合并展示。
+        # 只补缺失列；老通知这一列是空的，前端按单条显示，不回填。
+        _add_column(_conn, "notification", "meta_json", "TEXT")
         _add_column(_conn, "schedule", "claim_token", "TEXT")
         for col in ("model_text", "model_image"):  # v6 迁移:员工级模型路由
             _add_column(_conn, "employee_config", col, "TEXT")
