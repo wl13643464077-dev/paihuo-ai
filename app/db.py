@@ -2492,6 +2492,7 @@ def _validate_migrated_database(c) -> None:
         "notification": {
             "id", "tenant_id", "kind", "title", "body", "link",
             "job_id", "user_id", "read_by", "read_at", "created_at",
+            "meta_json",
         },
         "funnel_event": {
             "day", "event", "dimension", "tenant_id", "actor_hash", "hits",
