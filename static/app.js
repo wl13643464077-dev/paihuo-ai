@@ -2144,8 +2144,12 @@ async function storeTodaySummary(){
   return data;
 }
 /* 「等我处理的」一行一条:左边说清是什么事,右边一个按钮 */
-function todayTodoRow(icon, title, sub, btnText, onclick, cls="pri"){
-  return `<div class="todo-row"><span class="todo-ic" aria-hidden="true">${icon}</span>
+/* 待办行左侧图标：调用处仍传 emoji，这里统一换成线性 SVG，与「新进展」的铃铛同一画风 */
+const TODO_ICONS={"💎":"gem","❌":"x","🛡️":"shield","👔":"briefcase","🧾":"checklist","📷":"camera","⏰":"clock","📝":"pen","🔔":"bell"};
+function todayTodoRow(emoji, title, sub, btnText, onclick, cls="pri"){
+  const name=TODO_ICONS[emoji];
+  const mark=name?icon(name):emoji;
+  return `<div class="todo-row"><span class="todo-ic${name?" todo-ic-svg":""}" aria-hidden="true">${mark}</span>
     <div class="todo-tx"><b>${title}</b>${sub?`<div class="sub">${sub}</div>`:""}</div>
     <button type="button" class="btn sm ${cls}" onclick="${onclick}">${btnText}</button></div>`;
 }
