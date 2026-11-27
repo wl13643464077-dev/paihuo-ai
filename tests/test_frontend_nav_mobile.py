@@ -132,13 +132,9 @@ class FrontendNavMobileTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertLessEqual(widths["doc"], 390)
             self.assertLessEqual(widths["nav"], widths["navClient"])
-            # 反馈浮钮必须在 Tab 栏上方,不能盖住入口
-            overlap = await page.evaluate(
-                """() => { const fb = document.querySelector('#fb-btn').getBoundingClientRect();
-                  const bar = document.querySelector('#tabbar').getBoundingClientRect();
-                  return fb.bottom <= bar.top; }"""
-            )
-            self.assertTrue(overlap)
+            # 手机上不放浮动反馈钮(会压住列表右侧的按钮和 Tab 栏)，入口在「我的 → 意见反馈」
+            self.assertFalse(await page.locator("#fb-btn").is_visible())
+            self.assertEqual("function", await page.evaluate("typeof fbOpen"))
             self._assert_no_browser_errors(errors)
             await browser.close()
 

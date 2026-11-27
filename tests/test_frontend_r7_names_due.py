@@ -177,7 +177,7 @@ class R7NamesDueBrowserTests(unittest.IsolatedAsyncioTestCase):
             await page.wait_for_selector("#sa-task-60")
             overdue = page.locator("#sa-task-60")
             text = await overdue.inner_text()
-            self.assertIn("👤 小李", text)
+            self.assertIn("小李", text)
             self.assertNotIn("xiaoli", text)
             self.assertIn("王总（老板）派的", text)
             self.assertIn("已逾期 3 小时", text)
@@ -186,13 +186,13 @@ class R7NamesDueBrowserTests(unittest.IsolatedAsyncioTestCase):
                              r"^原定 \d{4}-\d{2}-\d{2} \d{2}:\d{2} 截止$")
             # 平铺的只剩「催一下」；逾期的用主按钮
             visible = [b.strip() for b in await overdue.locator("button:visible").all_inner_texts()]
-            self.assertEqual(["🔔 催一下"], visible)
+            self.assertEqual(["催一下"], visible)
             self.assertEqual(0, await overdue.locator("select:visible").count())
-            nudge = overdue.get_by_role("button", name="🔔 催一下")
+            nudge = overdue.get_by_role("button", name="催一下")
             self.assertIn("pri", (await nudge.get_attribute("class")).split())
             later = page.locator("#sa-task-61")
             self.assertIn("截止 明天 16:44", await later.inner_text())
-            self.assertNotIn("pri", (await later.get_by_role("button", name="🔔 催一下")
+            self.assertNotIn("pri", (await later.get_by_role("button", name="催一下")
                                      .get_attribute("class")).split())
             # 键盘可达：Tab 到「⋯ 更多」，回车展开，里面是改派给谁 / 取消这件 / 经过
             summary = overdue.locator("details.sa-more > summary")
@@ -201,7 +201,7 @@ class R7NamesDueBrowserTests(unittest.IsolatedAsyncioTestCase):
             await page.keyboard.press("Enter")
             box = overdue.locator(".tm-row-more-box")
             await box.wait_for(state="visible")
-            self.assertEqual(["取消这件", "🕘 经过"],
+            self.assertEqual(["取消这件", "经过"],
                              [b.strip() for b in await box.locator("button").all_inner_texts()])
             self.assertEqual("改派给谁", (await box.locator("label").inner_text()).strip())
             options = [o.strip() for o in await box.locator("select option").all_inner_texts()]
@@ -214,7 +214,7 @@ class R7NamesDueBrowserTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await summary.evaluate("e=>document.activeElement===e"))
             # 再展开：点「经过」后菜单收起，经过列在卡片下面，人名是姓名
             await summary.click()
-            await box.get_by_role("button", name="🕘 经过").click()
+            await box.get_by_role("button", name="经过").click()
             await page.wait_for_selector("#sa-ev-60 .sa-events li")
             self.assertFalse(await box.is_visible())
             self.assertIn("王总", await page.locator("#sa-ev-60").inner_text())
@@ -232,18 +232,18 @@ class R7NamesDueBrowserTests(unittest.IsolatedAsyncioTestCase):
             # 等审核卡：通过 / 打回是主次按钮，取消和经过同样收进更多
             review = page.locator("#sa-task-62")
             visible = [b.strip() for b in await review.locator("button:visible").all_inner_texts()]
-            self.assertEqual(["👍 通过", "↩️ 打回重做"], visible)
+            self.assertEqual(["通过", "打回重做"], visible)
             self.assertNotIn("已逾期", await review.locator(".sub").first.inner_text())
             await review.locator("details.sa-more > summary").click()
             review_box = review.locator(".tm-row-more-box")
-            self.assertEqual(["取消这件", "🕘 经过"],
+            self.assertEqual(["取消这件", "经过"],
                              [b.strip() for b in await review_box.locator("button").all_inner_texts()])
             self.assertEqual(0, await review_box.locator("select").count())
             # 已结束的活只有「经过」，不用再套一层更多；过了点也不说逾期
             await page.locator("summary", has_text="已结束（1）").click()
             ended = page.locator("#sa-task-63")
             self.assertEqual(0, await ended.locator("details.sa-more").count())
-            self.assertEqual(1, await ended.get_by_role("button", name="🕘 经过").count())
+            self.assertEqual(1, await ended.get_by_role("button", name="经过").count())
             self.assertNotIn("已逾期", await ended.inner_text())
             self._assert_no_browser_errors(errors)
             await browser.close()
@@ -295,7 +295,7 @@ class R7NamesDueBrowserTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([("PUT", "/api/team/users/31", {"display_name": "王店长"})], self.writes)
             # 已有姓名的在「⋯ 更多」里改
             await named.locator(".tm-row-more summary").click()
-            await named.get_by_role("button", name="✏️ 改姓名").click()
+            await named.get_by_role("button", name="改姓名").click()
             await page.wait_for_selector("#ui-dialog")
             self.assertEqual("小李", await page.locator("#ui-dialog-field").input_value())
             await page.keyboard.press("Escape")
@@ -310,7 +310,7 @@ class R7NamesDueBrowserTests(unittest.IsolatedAsyncioTestCase):
                 playwright, "#/team", {"/api/team": TEAM}, width=375,
                 writes={"/api/team/users": created})
             await page.wait_for_selector("text=新建账号")
-            await page.get_by_role("button", name="➕ 新建账号").click()
+            await page.get_by_role("button", name="新建账号").click()
             await page.wait_for_selector("#tm-create")
             # 姓名在登录账号前面，占位写着例子，打开就聚焦在姓名上
             order = await page.evaluate(
@@ -355,7 +355,7 @@ class R7NamesDueBrowserTests(unittest.IsolatedAsyncioTestCase):
             browser, page, errors = await self._open(
                 playwright, "#/team", {"/api/team": TEAM}, writes={"/api/team/users": created})
             await page.wait_for_selector("text=新建账号")
-            await page.get_by_role("button", name="➕ 新建账号").click()
+            await page.get_by_role("button", name="新建账号").click()
             await page.fill("#tm-u", "noname")
             await page.locator("#tm-create-ok").click()
             await page.wait_for_selector("#tm-sendcard")

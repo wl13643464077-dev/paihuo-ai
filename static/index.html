@@ -50,6 +50,10 @@ header :focus-visible,#tabbar :focus-visible{outline-color:var(--brand)}
 /* 文字会被脚本整体替换的按钮(花点数的按钮)：图标走 data-ic + 蒙版，换字不丢图标 */
 [data-ic]::before{content:"";width:1.15em;height:1.15em;flex:none;display:inline-block;vertical-align:-.18em;background:currentColor;-webkit-mask:var(--ic-url) center/contain no-repeat;mask:var(--ic-url) center/contain no-repeat}
 [data-ic="sparkles"]{--ic-url:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10 4l1.6 4.4L16 10l-4.4 1.6L10 16l-1.6-4.4L4 10l4.4-1.6zM17.5 14.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8zM18 3.5v3M16.5 5h3'/%3E%3C/svg%3E")}
+/* 其余图标的 --ic-url 由 app.js 按 ICONS 生成(#ph-icons)。标题里的图标比文字淡一档，不抢标题 */
+[data-ic]:not(.btn)::before{margin-right:.4em}
+:is(h1,h2,h3,h4)[data-ic]::before{width:1.1em;height:1.1em;vertical-align:-.16em;color:#8a6a1c}
+.btn.sm[data-ic]:empty,.btn[data-ic]:empty{padding:0 9px}
 /* ---------- 顶栏 ---------- */
 header{background:var(--header);color:#f4edde;padding:0 22px;height:60px;display:flex;align-items:center;gap:18px;
   position:sticky;top:0;z-index:50;box-shadow:0 1px 0 rgba(0,0,0,.25),0 2px 8px rgba(43,35,23,.18)}
@@ -314,13 +318,13 @@ details.log .steps{margin-top:8px}
 .grouphead{display:flex;align-items:center;gap:8px;margin:18px 0 8px;font-weight:700}
 .grouphead .gline{flex:1;border-top:1px solid var(--line)}
 /* V27 部门楼层:折叠标题行 */
-.deptsec{border:1px solid var(--line);border-radius:16px;overflow:hidden;margin-top:12px;background:#fffdf7;box-shadow:var(--shadow-1)}
-.depthead{display:flex;align-items:center;gap:10px;padding:13px 16px;cursor:pointer;font-weight:700;user-select:none}
+.deptsec{border:1px solid var(--line);border-radius:var(--r-lg);overflow:hidden;margin-top:8px;background:#fffdf7;box-shadow:var(--shadow-1)}
+.depthead{display:flex;align-items:center;gap:10px;padding:9px 14px;cursor:pointer;font-weight:700;user-select:none}
 .depthead:hover{background:#faf5ea}
 .depthead.open{border-bottom:1px solid var(--line);background:#faf5ea}
-.depthead .dh-emoji{font-size:22px;flex:none;line-height:1}
+.depthead .dh-emoji{font-size:16px;flex:none;line-height:1;width:30px;height:30px;border-radius:9px;background:var(--brand-soft);display:inline-flex;align-items:center;justify-content:center}
 .depthead .dh-name{font-size:15px;flex:none}
-.depthead .dh-count{font-size:12px;background:var(--ink);color:#ffd166;border-radius:8px;padding:1px 8px;flex:none;font-weight:600;white-space:nowrap}
+.depthead .dh-count{font-size:12px;background:#f1eadb;color:var(--ink2);border-radius:99px;padding:1px 9px;flex:none;font-weight:600;white-space:nowrap}
 .depthead .dh-tag{flex:1;min-width:0;font-size:12.5px;color:var(--ink2);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .depthead .dh-caret{flex:none;font-size:16px;color:var(--ink2)}
 .deptbody{padding:12px 14px 14px}
@@ -376,6 +380,10 @@ body.forced-pw #conn,body.forced-pw #fb-btn{display:none!important}
 .tm-row-more>summary::-webkit-details-marker{display:none}
 .tm-row-more-box{position:absolute;right:0;top:calc(100% + 4px);z-index:20;display:flex;flex-direction:column;gap:6px;min-width:150px;padding:8px;background:#fffdf7;border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow-2)}
 .tm-row-more-box .btn{justify-content:flex-start;white-space:nowrap}
+/* 团队成员行:手机上只露 1 个最常用按钮,另外两个挪进「更多」 */
+.tm-acts{display:inline-flex;gap:8px;align-items:center;flex-wrap:wrap}
+.tm-narrow{display:none}
+@media(max-width:640px){.tm-wide{display:none}.tm-narrow{display:inline-flex}.tm-acts{flex:1 1 100%;flex-wrap:nowrap}}
 .tm-sendcard pre{white-space:pre-wrap;word-break:break-all;background:#fff;border:1px solid var(--line);border-radius:12px;padding:12px;font-family:inherit;font-size:15px;line-height:1.8;font-weight:700;margin:10px 0}
 .sa-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .sa-bar select{width:auto;flex:1 1 130px;min-width:0;max-width:240px;margin:0}
@@ -527,10 +535,8 @@ html,body{max-width:100%;overflow-x:hidden}
   .dimtable.ledger-table td:nth-child(4){grid-area:delta;text-align:right;font-size:15px}
   .dimtable.ledger-table td:nth-child(5){grid-area:bal;text-align:right;font-size:12px}
   .dimtable.ledger-table td:nth-child(5)::before{content:"余额 ";font-weight:400;font-size:12px;color:var(--ink2)}
-  /* 手机上只留一个小圆钮(「我的」页里也有「意见反馈」入口) */
-  #fb-btn{width:40px;height:40px;padding:0;justify-content:center;right:10px;bottom:14px;opacity:.94}
-  #fb-btn .fb-tx{display:none}
-  #fb-btn .fb-ic{font-size:16px}
+  /* 手机上不放浮动反馈钮(会压住列表右侧的「查看」「去审核」)；入口在「我的 → 意见反馈」 */
+  #fb-btn{display:none}
   /* 工单行:手机上标题占首行正常换行,进度点/工位/状态挪到第二行(不再挤成一列一字) */
   .jobrow{flex-wrap:wrap;gap:4px 10px}
   .jobrow .t{min-width:70%}
@@ -560,7 +566,6 @@ html,body{max-width:100%;overflow-x:hidden}
     border-radius:10px;padding:0 6px;font-size:11px;line-height:17px}
   /* 给底部 Tab 让位:正文、反馈按钮、协同小队浮窗、提示条都抬到 Tab 栏上方,互不重叠 */
   body.has-tabbar main{padding-bottom:calc(100px + env(safe-area-inset-bottom))}
-  body.has-tabbar #fb-btn{bottom:calc(76px + env(safe-area-inset-bottom))}
   body.has-tabbar #agent-team-float{bottom:calc(134px + env(safe-area-inset-bottom))}
   body.has-tabbar .toast{bottom:calc(84px + env(safe-area-inset-bottom))}
 }
@@ -741,22 +746,33 @@ html:has(.overlay),html:has(.overlay) body{overflow:hidden}
 .tm-chip.on .tm-n{background:#ffd166}
 .tm-chip-new{background:#fff1bd}
 .tm-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr));gap:12px}
-.tmcard{display:flex;gap:12px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:12px;
-  box-shadow:var(--shadow-1);cursor:pointer;transition:transform .12s,box-shadow .12s;min-width:0}
+.tmcard{display:flex;gap:12px;background:var(--card);border:1px solid var(--line);border-radius:var(--r-lg);padding:14px;
+  cursor:pointer;transition:box-shadow .12s,border-color .12s;min-width:0}
 .tmcard:hover{box-shadow:var(--shadow-2);border-color:var(--line2)}
 .tmcard.working{background:var(--brand-soft)}
 .tmcard.off{opacity:.5;filter:grayscale(.8)}
-.tmc-av{flex:none;width:72px;height:80px;border-radius:12px;display:flex;align-items:flex-end;justify-content:center;overflow:hidden}
-.tmc-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+/* 头像:统一 44px 柔和底圆角方块,里面是岗位自带的 emoji,不描边 */
+.tmc-av{flex:none;width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;overflow:hidden;font-size:22px;line-height:1}
+.tmc-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
 .tmc-name{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.tmc-name b{font-size:15.5px}
+.tmc-name b{font-size:15px;line-height:1.35}
 .tmc-name .stpill{margin-left:auto}
-.tmc-new{font-size:10.5px;font-weight:700;background:#ff7a00;color:#fff;border-radius:99px;padding:1px 7px}
-.tmc-job{font-size:12.5px;font-weight:600;color:var(--ink2)}
-.tmc-head{font-size:13px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.tmc-meta{display:flex;flex-wrap:wrap;gap:4px 8px;font-size:11.5px;color:var(--ink2)}
-.tmc-meta span+span::before{content:"·";margin-right:8px;color:#bba98a}
-.tmc-act{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
+.tmc-new{font-size:10.5px;font-weight:600;background:var(--warn-bg);color:var(--warn);border:1px solid var(--warn-line);border-radius:99px;padding:0 7px}
+.tmc-job{font-size:12px;color:var(--ink2);min-height:0}
+.tmc-job:empty{display:none}
+.tmc-head{font-size:13px;line-height:1.5;margin-top:4px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.tmc-meta{display:flex;flex-wrap:nowrap;gap:0 8px;font-size:11.5px;color:#9a8c75;white-space:nowrap;overflow:hidden;margin-top:2px}
+.tmc-meta:empty{display:none}
+.tmc-meta span+span::before{content:"·";margin-right:8px;color:#cdbfa6}
+.tmc-act{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.tmc-act .btn{min-height:30px;padding:0 12px;font-size:13px;box-shadow:none}
+.grouphead .gh-emoji{font-size:15px;line-height:1}
+.tm .grouphead{font-size:13.5px;color:var(--ink2);margin:16px 0 8px}
+/* 桌面:每组先露 6 位,多的点「展开全部」 */
+@media(min-width:641px){
+  .tm:not(.tm-filtering) .tm-sec:not(.open) .tmcard:nth-child(n+7){display:none}
+  .tm:not(.tm-filtering) .tm-sec:not(.open) .tm-more.tm-more-d{display:inline-flex;margin-top:10px}
+}
 /* 员工履历页 */
 .panel.wide{width:min(1120px,100%)}
 .rz{display:flex;flex-direction:column;gap:14px}
@@ -834,7 +850,7 @@ html:has(.overlay),html:has(.overlay) body{overflow:hidden}
   .tm:not(.tm-filtering) .tm-sec:not(.open) .tmcard:nth-child(n+4){display:none}
   .tm:not(.tm-filtering) .tm-sec:not(.open) .tm-more{display:inline-flex;margin-top:10px;width:100%}
   .tmc-meta{display:none}
-  .tmc-av{width:58px;height:66px}
+  .tmc-av{width:40px;height:40px;font-size:20px}
   .tm-bar{flex-wrap:wrap}
   .rz-headline{font-size:15.5px}
   .rz-panel{padding:12px}
