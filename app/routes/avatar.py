@@ -744,8 +744,9 @@ async def avatar_studio_retry(jid: int):
     _need_module("avatar")
     from .. import storestudio
     tid = TEN()
-    row = db.one("SELECT * FROM avatar_job WHERE id=? AND tenant_id=? AND deleted_at IS NULL",
-                 (jid, tid))
+    row = await db.aone(
+        "SELECT * FROM avatar_job WHERE id=? AND tenant_id=? AND deleted_at IS NULL",
+        (jid, tid))
     if not row:
         raise HTTPException(404, "没有这个数字人任务")
     params = db.jloads(row.get("params_json"), {}) or {}
@@ -767,7 +768,7 @@ async def avatar_studio_retry(jid: int):
     except billing.InsufficientPoints as e:
         raise HTTPException(402, str(e))
     params["studio"]["billing_op"] = op
-    db.update("avatar_job", jid, {"params_json": json.dumps(params, ensure_ascii=False)})
+    await db.aupdate("avatar_job", jid, {"params_json": json.dumps(params, ensure_ascii=False)})
     storestudio._save_state(jid, {"status": "running", "started_at": time.time()})
 
     def progress(kind, label=""):

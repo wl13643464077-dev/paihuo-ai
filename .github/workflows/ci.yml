@@ -47,7 +47,7 @@ jobs:
       - name: Install media runtime
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y --no-install-recommends ffmpeg
+          sudo apt-get install -y --no-install-recommends ffmpeg fonts-noto-cjk
           ffmpeg -version
 
       - name: Prepare owner-controlled test temp root
