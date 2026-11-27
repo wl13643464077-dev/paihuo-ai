@@ -481,7 +481,7 @@ class OnboardingCardBrowserCase(unittest.IsolatedAsyncioTestCase):
                 "Promise.resolve(PH_ONBOARDING.card()).then(html => document.querySelector('#main').insertAdjacentHTML('afterbegin', html))")
             await page.wait_for_selector("#ph-s-name")
             text = await page.locator("#ph-onb").inner_text()
-            self.assertIn("您的行业:餐饮", text.replace(" ", ""))
+            self.assertIn("您的行业：餐饮", text.replace(" ", ""))
             self.assertIn("建议把密码改成您好记的", text)
             self.assertTrue(await page.locator(".ph-go").is_disabled())
 
@@ -489,7 +489,7 @@ class OnboardingCardBrowserCase(unittest.IsolatedAsyncioTestCase):
             await page.fill("#ph-s-city", "成都 春熙路")
             await page.fill("#ph-s-product", "现熬牛骨汤面")
             await page.fill("#ph-s-price", "35")
-            await page.click("text=保存,下一步")
+            await page.click("text=保存，下一步")
             await page.wait_for_selector(".ph-go:not([disabled])")
             put = [c for c in calls if c[1] == "/api/onboarding/store"]
             self.assertEqual("PUT", put[0][0])
@@ -601,7 +601,7 @@ class OnboardingCardBrowserCase(unittest.IsolatedAsyncioTestCase):
             await page.fill("#ph-s-name", "王记牛肉面")
             await page.fill("#ph-s-city", "成都 春熙路")
             await page.fill("#ph-s-product", "现熬牛骨汤面")
-            await page.click("text=保存,下一步")
+            await page.click("text=保存，下一步")
             # 还没有门店:问一句「用这个名字建第一家门店？」
             await page.wait_for_selector("#ui-dialog")
             dialog = await page.locator("#ui-dialog").inner_text()
@@ -631,7 +631,7 @@ class OnboardingCardBrowserCase(unittest.IsolatedAsyncioTestCase):
 
             # 再改一次店铺信息:已经有门店了,不再问
             await page.click("text=改一下")
-            await page.click("text=保存,下一步")
+            await page.click("text=保存，下一步")
             await page.wait_for_selector(".ph-go:not([disabled])")
             await page.wait_for_timeout(300)
             self.assertEqual(0, await page.locator("#ui-dialog").count())
@@ -714,7 +714,7 @@ class OnboardingCardBrowserCase(unittest.IsolatedAsyncioTestCase):
             await page.wait_for_selector("#ph-s-name")
             await page.fill("#ph-s-name", "王记牛肉面")
             await page.fill("#ph-s-product", "现熬牛骨汤面")
-            await page.click("text=保存,下一步")
+            await page.click("text=保存，下一步")
             await page.wait_for_selector("#ui-dialog")
             await page.locator("#ui-dialog [data-dialog-cancel]").click()
             await page.wait_for_function("!document.querySelector('#ui-dialog')")
@@ -793,7 +793,7 @@ class OnboardingCardBrowserCase(unittest.IsolatedAsyncioTestCase):
             await page.fill("#ph-s-name", "王记火锅")
             await page.fill("#ph-s-city", "成都 春熙路")
             await page.fill("#ph-s-product", "牛油火锅")
-            await page.click("text=保存,下一步")
+            await page.click("text=保存，下一步")
             # O-2:误点到弹窗外面 = 先不建,但卡片上留一行入口
             await page.wait_for_selector("#ui-dialog")
             await page.mouse.click(5, 5)
