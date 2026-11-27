@@ -8755,7 +8755,7 @@ async function teamView(){
   <div class="card"><h2 data-ic="user">成员</h2>
     <div class="sub" style="margin-bottom:6px">🏪 <b>店长</b>能给自己店里的人派活、审核交差；🧑‍🍳 <b>店员</b>用手机看待办、拍照交差。办公室同事按职级：🎖 总监可给经理和员工分配AI 专家，📋 经理可给员工分配，👤 员工只用分给自己的。</div>
     <div class="actions"><button data-ic="plus" class="btn pri" onclick="tmUserForm()">新建账号</button></div>
-    <div id="tm-uform"></div>
+    <div id="tm-uform">${TM_SENDCARD?tmSendCardHtml(TM_SENDCARD):""}</div>
     ${t.users.map(u=>tmMemberRow(u,t)).join("")}
     <div id="tm-modbox"></div><div id="tm-allocbox"></div></div>
   <div class="sub" data-team-pw-hint style="margin:0 4px 18px">要改自己的密码，请到 <a href="#/mine" style="text-decoration:underline;font-weight:600">我的 → 修改密码</a>。</div>
@@ -8893,6 +8893,7 @@ const TM_KINDS=[
 let TM_KIND="staff", TM_CREATE_BUSY=false;
 /* 每次打开都是一张干净的表:类型回到默认「店员」,账号/密码重新空着(刚建完店长,接着建店员不会误建成店长) */
 function tmUserForm(){
+  TM_SENDCARD=null;   // 开新表单就不再保留上一张账号卡片
   TM_KIND="staff";
   const t=window.__TEAM||{};
   const titles=t.job_titles||[{key:"director",label:"总监"},{key:"manager",label:"经理"},{key:"staff",label:"员工"}];
@@ -9038,18 +9039,28 @@ function tmSendText(o){
     "第一次登录会让您改一个自己好记的密码。"].join("\n");
 }
 /* 建好后的「发给 TA」卡:密码只在这里出现一次,关掉就没了(服务端只存哈希) */
+/* 刚建好的账号卡片(含只显示一次的初始密码)。团队页之后任何一次重渲染(建号后的 render、
+   上手卡刷新、实时推送)都会重建 #tm-uform，所以卡片内容记在 TM_SENDCARD 里，重渲染时照样画回去；
+   点「我发好了」或离开这一页才清掉。之前卡片会被紧跟着的重渲染冲掉，老板可能来不及抄下密码。 */
+let TM_SENDCARD=null;
+window.addEventListener("hashchange",()=>{ TM_SENDCARD=null; });
+function tmCloseSendCard(){ TM_SENDCARD=null; const box=$("#tm-uform"); if(box) box.innerHTML=""; }
 function tmShowSendCard(o){
+  TM_SENDCARD=o;
   const box=$("#tm-uform"); if(!box) return;
+  box.innerHTML=tmSendCardHtml(o);
+  box.scrollIntoView({behavior:"smooth",block:"nearest"});
+}
+function tmSendCardHtml(o){
   const store=o.kind!=="office";
-  box.innerHTML=`<div class="card tm-sendcard" id="tm-sendcard" role="status">
+  return `<div class="card tm-sendcard" id="tm-sendcard" role="status">
     <h3 data-ic="check" style="margin-top:0">账号建好了，把下面这段发给${String(o.name||"").trim()?esc(String(o.name).trim()):" TA"}</h3>
     <pre id="tm-send-text">${esc(tmSendText(o))}</pre>
     <div class="actions" style="margin-top:0"><button data-ic="copy" type="button" class="btn pri" id="tm-send-copy" onclick="tmCopySend()">复制</button>
-      <button type="button" class="btn" onclick="$('#tm-uform').innerHTML=''">我发好了</button></div>
+      <button type="button" class="btn" onclick="tmCloseSendCard()">我发好了</button></div>
     <div class="sub" style="margin-top:8px">⚠️ 初始密码<b>只显示这一次</b>，关掉就看不到了。忘了也不要紧，点成员旁边的「重置密码」重新设一个。TA 第一次登录会被要求换成自己的密码。</div>
     ${store&&!o.stores?`<div class="notice" style="margin:8px 0 0">还没给 TA 分门店：TA 登录后收不到任何门店的活。点 TA 旁边的「负责门店」分一下。</div>`:""}
   </div>`;
-  box.scrollIntoView({behavior:"smooth",block:"nearest"});
 }
 async function tmCopySend(){
   const text=$("#tm-send-text")?.textContent||"";

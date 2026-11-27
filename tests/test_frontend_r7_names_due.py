@@ -359,6 +359,9 @@ class R7NamesDueBrowserTests(unittest.IsolatedAsyncioTestCase):
             await page.fill("#tm-u", "noname")
             await page.locator("#tm-create-ok").click()
             await page.wait_for_selector("#tm-sendcard")
+            # 卡片里有只显示一次的密码：之后的重渲染(上手卡刷新、实时推送)不能把它冲掉
+            await page.evaluate("render()")
+            await page.wait_for_selector("#tm-sendcard")
             self.assertNotIn("display_name", self.writes[0][2])
             text = (await page.locator("#tm-send-text").inner_text()).strip()
             self.assertTrue(text.startswith("【王记火锅】给您开了派活账号，"), text)
