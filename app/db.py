@@ -42,7 +42,8 @@ _generation_switching = threading.Event()
 # The offline v2 bundle independently used 58–60 for branch access, payments
 # and staff tasks. Merge those additions at 62–64 without rewriting either
 # lineage's existing ledger rows or skipping DDL based on an ambiguous number.
-LATEST_SCHEMA_VERSION = 64
+# v65 adds users.display_name (nullable 姓名; additive column only).
+LATEST_SCHEMA_VERSION = 65
 MIGRATION_LOCK_SUFFIX = ".migration.lock"
 
 SCHEMA = """
@@ -2254,6 +2255,7 @@ def _validate_migrated_database(c) -> None:
         "users": {
             "id", "tenant_id", "username", "password_hash", "role",
             "modules_json", "enabled", "must_change_password", "phone",
+            "display_name",
         },
         "job": {
             "id", "brief_json", "mode", "status", "current_idx", "tenant_id",
@@ -2490,6 +2492,7 @@ def _validate_migrated_database(c) -> None:
         "notification": {
             "id", "tenant_id", "kind", "title", "body", "link",
             "job_id", "user_id", "read_by", "read_at", "created_at",
+            "meta_json",
         },
         "funnel_event": {
             "day", "event", "dimension", "tenant_id", "actor_hash", "hits",
@@ -3077,6 +3080,9 @@ def _initialize_anchor_locked(path: str):
         # (逗号包裹串,如 ",5,20,",instr 即可判含),财务类通知只发企业主。
         _add_column(_conn, "notification", "user_id", "INTEGER")
         _add_column(_conn, "notification", "read_by", "TEXT")
+        # 通知的结构化信息(JSON，可空)：今天页按它把同类通知合并展示。
+        # 只补缺失列；老通知这一列是空的，前端按单条显示，不回填。
+        _add_column(_conn, "notification", "meta_json", "TEXT")
         _add_column(_conn, "schedule", "claim_token", "TEXT")
         for col in ("model_text", "model_image"):  # v6 迁移:员工级模型路由
             _add_column(_conn, "employee_config", col, "TEXT")
@@ -3100,6 +3106,7 @@ def _initialize_anchor_locked(path: str):
           job_title TEXT NOT NULL DEFAULT 'staff',  -- member职级:director/manager/staff
           allowed_emp_idxs_json TEXT,           -- NULL=行业内全部;JSON数组=数字员工白名单
           phone TEXT,                           -- v64:企业微信群 @提醒/短信用,可空
+          display_name TEXT,                    -- v65:姓名(小李/王店长),可空=显示登录名
           enabled INTEGER NOT NULL DEFAULT 1,
           must_change_password INTEGER NOT NULL DEFAULT 0,
           created_at REAL, updated_at REAL
@@ -4095,6 +4102,9 @@ def _initialize_anchor_locked(path: str):
             "TEXT NOT NULL DEFAULT ''",
         )
         _add_column(_conn, "users", "phone", "TEXT")
+        # v65:账号姓名(给人看的称呼)。只加一个可空列，不回填、不建索引；
+        # 没填的账号各处回退显示登录名。与 v64 一样赶在下面的迁移后校验之前加好。
+        _add_column(_conn, "users", "display_name", "TEXT")
         _execute_migration_script(_conn, """
         CREATE INDEX IF NOT EXISTS idx_users_tenant_phone
           ON users(tenant_id,phone);
@@ -4658,6 +4668,12 @@ def _initialize_anchor_locked(path: str):
         _conn.execute(
             "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
             "VALUES(64,'staff-task-loop',?)",
+            (time.time(),),
+        )
+        # v65:users.display_name(账号姓名，可空)。仅补缺失列，无数据回填。
+        _conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version,name,applied_at) "
+            "VALUES(65,'user-display-name',?)",
             (time.time(),),
         )
         _conn.execute(f"PRAGMA user_version={LATEST_SCHEMA_VERSION}")

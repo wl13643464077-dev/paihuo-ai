@@ -152,7 +152,7 @@ _PUBLIC_STATION_TASK_GUIDES = {
 def _public_station_task_guide(s: dict) -> dict:
     """内容部的公开派活提示；与内部模板、能力和模型配置完全隔离。"""
     guide = _PUBLIC_STATION_TASK_GUIDES.get(s.get("key")) or {
-        "task_placeholder": f"例如：请「{s.get('name') or '数字员工'}」围绕[具体目标]完成[具体任务]。",
+        "task_placeholder": f"例如：请「{s.get('name') or 'AI 专家'}」围绕[具体目标]完成[具体任务]。",
         "material_placeholder": "可粘贴与当前任务直接相关的资料、数据和参考链接。",
         "input_tips": ["具体目标和使用场景", "已有材料与限制条件", "期望完成时间"],
         "output_hint": "得到一份围绕当前目标的可执行结果",
@@ -279,7 +279,7 @@ def _display_dept_name(dept_key, fallback="") -> str:
 
 def _need_module(module: str):
     if not auth.allowed(module):
-        raise HTTPException(403, "您的账号没有该板块权限,请联系企业主账号开通")
+        raise HTTPException(403, "您的账号没有该板块权限，请联系企业主账号开通")
 
 
 def TEN() -> int:

@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import json
 
-from . import db, departments, employeeidentity, employees, inspection
+from . import db, departments, employeeidentity, employees, inspection, people
 from .skills import registry
 
 
 KIND_META = {
-    "expert": ("🧑‍💼", "数字员工任务"),
+    "expert": ("🧑‍💼", "AI 专家任务"),
     "content": ("📝", "内容工单"),
     "meeting": ("🪑", "AI会议"),
     "avatar": ("🎥", "数字人视频"),
@@ -1099,14 +1099,7 @@ def list_items(
                 creator_ids.add(int(row["created_by"]))
     names = {}
     if creator_ids:
-        names = {
-            int(u["id"]): u["username"]
-            for u in db.q(
-                "SELECT id,username FROM users WHERE tenant_id=? AND id IN "
-                "(SELECT CAST(value AS INTEGER) FROM json_each(?))",
-                (tenant_id, _json_array(creator_ids)),
-            )
-        }
+        names = people.names(tenant_id, creator_ids)
     for item in items:
         row = details.get(item["kind"], {}).get(item["record_id"]) or {}
         creator = names.get(int(row.get("created_by") or 0))

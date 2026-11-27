@@ -1270,7 +1270,7 @@ async def _enforce_length(
             return md, cost
         try:
             from . import providers
-            progress("run", f"按老板要求压缩篇幅(→{target}字内)…")
+            progress("run", f"按老板要求压缩篇幅（→{target}字内）…")
             prompt = (
                 f"把下面这份交付物压缩到 {int(target*0.85)} 字以内,这是硬性上限,宁可再短也不许超。\n"
                 "保留:标题、关键数据和数字、结论、可执行步骤、必要的表格(可精简行列)、"

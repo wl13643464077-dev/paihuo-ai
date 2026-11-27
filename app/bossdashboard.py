@@ -1493,7 +1493,7 @@ def _recent_activity(
         employee_name = (
             inspector["name"]
             if kind == "inspection" and inspector
-            else str(row.get("employee_name") or "历史数字员工")
+            else str(row.get("employee_name") or "历史AI 专家")
         )
         items.append({
             "kind": kind,
@@ -1528,6 +1528,36 @@ def _public_scope(scope: Mapping[str, Any]) -> dict[str, Any]:
         "industry_name": str(scope["industry_name"]),
         "industry_emoji": str(scope["industry_emoji"]),
     }
+
+
+def _staff_task_risk(
+    actor: Mapping[str, Any] | None,
+    scope: Mapping[str, Any],
+    now: float,
+) -> dict[str, Any]:
+    """派给店员的活里到现在还没处理的：等审核几件、逾期几件。
+
+    权限口径直接用 stafftask.attention_counts(与「派给店员」列表、审核同一套可见范围)，
+    只算当前行业门店的活。跨企业查看、或当前账号管不着店员的活时给 None(前端不显示)，
+    不把「看不到」伪装成 0。
+    """
+    empty = {"staff_review_pending": None, "staff_overdue_tasks": None}
+    try:
+        if int((actor or {}).get("tenant_id") or 0) != int(scope["tenant_id"]):
+            return empty
+        from . import stafftask
+        counts = stafftask.attention_counts(
+            int(scope["tenant_id"]), actor,
+            industry_key=str(scope.get("industry_key") or ""), now=now,
+        )
+        if not counts.get("available"):
+            return empty
+        return {
+            "staff_review_pending": int(counts["review_pending"]),
+            "staff_overdue_tasks": int(counts["overdue"]),
+        }
+    except Exception:
+        return empty
 
 
 def summary(
@@ -1650,6 +1680,7 @@ def summary(
             if inspection["availability"] else None
         ),
     }
+    risk_metrics.update(_staff_task_risk(actor, scope, now_value))
     return {
         "scope": _public_scope(scope),
         # 命名 Boss 可跨租户看结构化数据，但不能从当前会话

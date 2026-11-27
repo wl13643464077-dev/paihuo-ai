@@ -140,14 +140,14 @@ def avatar_meta():
     _need_module("avatar")
     eng = avatar.engine_name()
     return {"voices": avatar.cloned_voices() + avatar.VOICES,
-            "engines": ([{"key": "rh_text", "label": "RunningHub·文本驱动(本人声音样本·6点/条)", "needs_sample": True},
-                         {"key": "basic", "label": "基础版·省钱(6点/条,不限时长)"}]
+            "engines": ([{"key": "rh_text", "label": "RunningHub·文本驱动（本人声音样本·6点/条）", "needs_sample": True},
+                         {"key": "basic", "label": "基础版·省钱（6点/条，不限时长）"}]
                         if avatar.rh_ready() else [])
-                       + [{"key": "", "label": f"自动(当前:{'HeyGen·境外' if eng=='heygen' else '可灵'})"},
-                          {"key": "heygen", "label": "HeyGen(会动·快 · 境外服务商)", "overseas": True},
-                          {"key": "kling", "label": "可灵(对口型 · 国内)"}],
-            "durations": [{"s": 15, "label": "15秒(快闪)"}, {"s": 30, "label": "30秒(标准)"},
-                          {"s": 60, "label": "60秒(深度)"}],
+                       + [{"key": "", "label": f"自动（当前：{'HeyGen·境外' if eng=='heygen' else '可灵'}）"},
+                          {"key": "heygen", "label": "HeyGen（会动·快 · 境外服务商）", "overseas": True},
+                          {"key": "kling", "label": "可灵（对口型 · 国内）"}],
+            "durations": [{"s": 15, "label": "15秒（快闪）"}, {"s": 30, "label": "30秒（标准）"},
+                          {"s": 60, "label": "60秒（深度）"}],
             "public_base": avatar.public_base(),
             "engine": eng, "heygen_ready": bool(
                 secureconfig.get_secret("heygen_key")
@@ -161,9 +161,9 @@ def avatar_meta():
             "ai_label": features.ai_label_for(TEN()),
             "link_video_enabled": features.is_enabled("linkgrab_video"),
             "link_video_hint": features.off_hint("linkgrab_video"),
-            "engine_note": ("可灵引擎 · 照片对口型出片(系统音色/克隆音色/您的原声都支持)"
+            "engine_note": ("可灵引擎 · 照片对口型出片（系统音色/克隆音色/您的原声都支持）"
                             if eng == "kling" else
-                            "HeyGen · Avatar IV 动作引擎(人物会动会说)")}
+                            "HeyGen · Avatar IV 动作引擎（人物会动会说）")}
 
 
 async def _avatar_script_from_link_work(body: dict, url: str, dur: int) -> dict:
@@ -229,8 +229,8 @@ async def _avatar_script_from_link_work(body: dict, url: str, dur: int) -> dict:
         )
     script = (r["text"] or "").strip()
     if not script or len(script) < 30 or "无法" in script[:40] or "抱歉" in script[:20]:
-        raise HTTPException(500, "这条链接提取不到内容(小红书/私密内容防抓严)。"
-                                 "建议:①把视频的文案/标题复制过来直接粘到口播稿框改写;②换抖音公开链接试试")
+        raise HTTPException(500, "这条链接提取不到内容（小红书/私密内容防抓严）。"
+                                 "建议：①把视频的文案/标题复制过来直接粘到口播稿框改写；②换抖音公开链接试试")
     return {"script": script[:2000], "source_text": (transcript or "")[:3000]}
 
 
@@ -250,7 +250,7 @@ async def avatar_script_from_link(body: dict):
     murl = _re.search(r"https?://[^\s,，、\u4e00-\u9fff]+", raw)
     url = murl.group(0).rstrip(")>].,;\'\"") if murl else ""
     if not url or len(url) > 2048:
-        raise HTTPException(400, "没识别到链接:直接把分享文字整段粘进来也行(里面要含 http 链接)")
+        raise HTTPException(400, "没识别到链接：直接把分享文字整段粘进来也行（里面要含 http 链接）")
     try:
         dur = int(body.get("duration") or 30)
     except (TypeError, ValueError):
@@ -744,8 +744,9 @@ async def avatar_studio_retry(jid: int):
     _need_module("avatar")
     from .. import storestudio
     tid = TEN()
-    row = db.one("SELECT * FROM avatar_job WHERE id=? AND tenant_id=? AND deleted_at IS NULL",
-                 (jid, tid))
+    row = await db.aone(
+        "SELECT * FROM avatar_job WHERE id=? AND tenant_id=? AND deleted_at IS NULL",
+        (jid, tid))
     if not row:
         raise HTTPException(404, "没有这个数字人任务")
     params = db.jloads(row.get("params_json"), {}) or {}
@@ -767,7 +768,7 @@ async def avatar_studio_retry(jid: int):
     except billing.InsufficientPoints as e:
         raise HTTPException(402, str(e))
     params["studio"]["billing_op"] = op
-    db.update("avatar_job", jid, {"params_json": json.dumps(params, ensure_ascii=False)})
+    await db.aupdate("avatar_job", jid, {"params_json": json.dumps(params, ensure_ascii=False)})
     storestudio._save_state(jid, {"status": "running", "started_at": time.time()})
 
     def progress(kind, label=""):
@@ -984,7 +985,7 @@ async def avatar_job_retry(jid: int):
         ) or {}
         if (current.get("retry_count") or 0) >= avatar.MAX_FREE_RETRIES:
             raise HTTPException(429, "该任务免费重试次数已用完，请新建任务")
-        raise HTTPException(409, "这个任务已经不在失败状态了——多半是刚刚已被重试(正在排队执行)或已被删除。刷新看最新进度即可,不会重复扣点")
+        raise HTTPException(409, "这个任务已经不在失败状态了——多半是刚刚已被重试（正在排队执行）或已被删除。刷新看最新进度即可，不会重复扣点")
     engine.broadcast({"type": "avatar_update", "job_id": jid})
     current = await db.aone(
         "SELECT retry_count FROM avatar_job WHERE id=?", (jid,)
@@ -1008,10 +1009,10 @@ def avatar_job_cancel(jid: int):
     if not row or row.get("tenant_id", 1) != TEN():
         raise HTTPException(404)
     if row["status"] not in ("queued", "running"):
-        raise HTTPException(400, "该任务已经结束,不用取消")
+        raise HTTPException(400, "该任务已经结束，不用取消")
     if not avatar.settle_failure(
             jid, "老板已取消", terminal_status="cancelled"):
-        raise HTTPException(409, "这个任务的状态刚刚更新了(可能已被重试或删除),刷新页面看最新进度即可")
+        raise HTTPException(409, "这个任务的状态刚刚更新了（可能已被重试或删除），刷新页面看最新进度即可")
     llm.kill(f"avatar{jid}:")
     engine.broadcast({"type": "avatar_update", "job_id": jid})
     return {"ok": True}
@@ -1041,7 +1042,7 @@ def avatar_job_delete(jid: int):
     if not current:
         raise HTTPException(404)
     if current["status"] in ("pending_charge", "queued", "running"):
-        raise HTTPException(503, "这个数字人任务的退点还在处理中(约几秒),稍等片刻再删除")
+        raise HTTPException(503, "这个数字人任务的退点还在处理中（约几秒），稍等片刻再删除")
     if (
         current["status"] in ("failed", "cancelled")
         and current["billing_status"] == "charged"

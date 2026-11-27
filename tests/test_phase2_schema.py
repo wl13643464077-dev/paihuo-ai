@@ -112,7 +112,7 @@ class SchemaV64Tests(unittest.TestCase):
         return {row["name"] for row in db.q(f"PRAGMA table_info({table})")}
 
     def _assert_v64_structure(self):
-        self.assertEqual(64, db.one("PRAGMA user_version")["user_version"])
+        self.assertEqual(65, db.one("PRAGMA user_version")["user_version"])
         self.assertEqual(
             "staff-task-loop",
             db.one("SELECT name FROM schema_version WHERE version=64")["name"],
@@ -146,7 +146,7 @@ class SchemaV64Tests(unittest.TestCase):
 
     def test_fresh_database_has_all_v64_tables_columns_and_indexes(self):
         db.conn()
-        self.assertEqual(64, db.LATEST_SCHEMA_VERSION)
+        self.assertEqual(65, db.LATEST_SCHEMA_VERSION)
         self._assert_v64_structure()
         # 默认值按约定落库，其他开发者照此写代码。
         task_id = db.insert("staff_task", {"tenant_id": 2, "title": "擦玻璃"})

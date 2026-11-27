@@ -10,7 +10,7 @@ import time
 
 from fastapi import APIRouter, HTTPException
 
-from .. import auth, billing, db, departments, funnel, inspection, signup
+from .. import auth, billing, db, departments, funnel, inspection, people, signup
 from ..web_common import TEN, _display_dept_name, _industry_scope, _need_admin, _need_root
 from .inspection import _raise_inspection_error
 
@@ -23,8 +23,16 @@ def _clean_username(raw: str) -> str:
     从源头挡住 XSS/注入),限 40 字。"""
     name = (raw or "").strip()
     if not name or len(name) > 40 or _re_uname.search(r"[\s'\"<>&\\\x00-\x1f]", name):
-        raise HTTPException(400, "用户名不能含空格/引号/尖括号等特殊字符,且不超过40字")
+        raise HTTPException(400, "用户名不能含空格/引号/尖括号等特殊字符，且不超过40字")
     return name
+
+
+def _clean_display_name(raw) -> str | None:
+    """姓名(给人看的称呼，可空)：去首尾空格，限 20 字。"""
+    try:
+        return people.clean_display_name(raw)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
 
 
 # ---------------- V8:权限管理(成员/企业/租户) ----------------
@@ -48,10 +56,13 @@ def team_get():
     _need_team_view()
     actor = auth.current() or {}
     admin_view = auth.is_admin()
-    users = db.q("SELECT id, username, role, modules_json, job_title, "
+    users = db.q("SELECT id, username, display_name, role, modules_json, job_title, "
                  "allowed_emp_idxs_json, enabled, created_at FROM users "
                  "WHERE tenant_id=? ORDER BY id", (TEN(),))
     for x in users:
+        # display_name=填的姓名(没填是空串)；name=给人看的称呼(没填回退登录名)
+        x["display_name"] = str(x.get("display_name") or "").strip()
+        x["name"] = x["display_name"] or x["username"]
         x["modules"] = db.jloads(x.pop("modules_json"), [])
         raw_allowed = db.jloads(x.pop("allowed_emp_idxs_json"), None)
         x["allowed_emp_idxs"] = (
@@ -190,9 +201,9 @@ def _open_account_from_apply(a: dict, trial_points: float = 0) -> dict:
     return {"tenant_id": tid, "tenant_name": tname[:30], "username": username,
             "password": password, "industry": industry_key or "",
             "notice": (f"【派活 PaiHuo】您的企业账号已开通\n"
-                       f"网址:https://paihuo.ai\n账号:{username}\n初始密码:{password}\n"
-                       + (f"已赠送 {trial_points:.0f} 点体验点数,登录就能派活。\n" if trial_points > 0 else "")
-                       + "登录后可在首页把密码改成您好记的。有任何问题随时联系我们,祝生意兴隆!")}
+                       f"网址：https://paihuo.ai\n账号：{username}\n初始密码：{password}\n"
+                       + (f"已赠送 {trial_points:.0f} 点体验点数，登录就能派活。\n" if trial_points > 0 else "")
+                       + "登录后可在首页把密码改成您好记的。有任何问题随时联系我们，祝生意兴隆！")}
 
 
 @router.post("/api/team/applies/{aid}/approve")
@@ -203,7 +214,7 @@ def team_apply_approve(aid: int):
     if not a:
         raise HTTPException(404)
     if a.get("username"):
-        raise HTTPException(400, f"这条申请已开通过,账号「{a['username']}」;"
+        raise HTTPException(400, f"这条申请已开通过，账号「{a['username']}」；"
                                  f"忘了密码就去该企业的成员列表重置")
     return _open_account_from_apply(a)
 
@@ -279,6 +290,7 @@ def _branch_industries(tid: int, raw_ids) -> tuple[list[int], list[str]]:
 def team_user_create(body: dict):
     _need_admin()
     name = _clean_username(body.get("username"))
+    display_name = _clean_display_name(body.get("display_name"))
     # 不填密码 = 让系统生成一个 16 位随机初始密码，只在这次响应里回给老板一次
     # (库里只存哈希，不落明文、不写日志)；成员首次登录仍须换成自己的密码。
     pw = body.get("password") or ""
@@ -313,6 +325,7 @@ def team_user_create(body: dict):
            "password_hash": auth.hash_pw(pw), "role": role,
            "modules_json": json.dumps(modules),
            "job_title": job_title,
+           "display_name": display_name,
            "enabled": 1, "must_change_password": 1}
     if whitelist is not None:
         row["allowed_emp_idxs_json"] = whitelist
@@ -327,7 +340,8 @@ def team_user_create(body: dict):
                 connection.execute("DELETE FROM user_branch WHERE user_id=?", (uid,))
                 connection.execute("DELETE FROM users WHERE id=?", (uid,))
             _raise_inspection_error(exc)
-    out = {"id": uid, "username": name, "branch_ids": sorted(branch_ids)}
+    out = {"id": uid, "username": name, "display_name": display_name or "",
+           "name": display_name or name, "branch_ids": sorted(branch_ids)}
     if generated:
         out["initial_password"] = pw
     return out
@@ -338,17 +352,17 @@ def _clean_emp_whitelist(raw) -> str | None:
     if raw is None:
         return None
     if not isinstance(raw, list):
-        raise HTTPException(400, "数字员工名单格式无效")
+        raise HTTPException(400, "AI 专家名单格式无效")
     idxs = sorted({
         int(v) for v in raw
         if isinstance(v, (int, str)) and str(v).lstrip("-").isdigit()
     })
     if len(idxs) > 500:
-        raise HTTPException(400, "数字员工名单过长")
+        raise HTTPException(400, "AI 专家名单过长")
     for emp_idx in idxs:
         emp = departments.get_active(emp_idx)
         if not emp:
-            raise HTTPException(400, f"名单包含不存在的数字员工 #{emp_idx}")
+            raise HTTPException(400, f"名单包含不存在的AI 专家 #{emp_idx}")
     return json.dumps(idxs)
 
 
@@ -363,7 +377,7 @@ def team_user_update(uid: int, body: dict):
         if set(body) - {"allowed_emp_idxs"}:
             raise HTTPException(403, "板块、职级、密码与启停只能由企业主账号管理")
         if "allowed_emp_idxs" not in body:
-            raise HTTPException(400, "缺少要分配的数字员工名单")
+            raise HTTPException(400, "缺少要分配的AI 专家名单")
     actor_is_root = auth.is_root()
     actor_tenant_id = TEN()
     data = {}
@@ -380,6 +394,9 @@ def team_user_update(uid: int, body: dict):
         )
     if "enabled" in body:
         data["enabled"] = 1 if body["enabled"] else 0
+    if "display_name" in body:
+        # 传空串/None = 清掉姓名，之后各处回退显示登录名
+        data["display_name"] = _clean_display_name(body["display_name"])
     if body.get("password"):
         policy_error = auth.password_policy_error(body["password"])
         if policy_error:
@@ -401,7 +418,7 @@ def team_user_update(uid: int, body: dict):
             u["role"] != "member"
             and ("job_title" in data or "allowed_emp_idxs_json" in data)
         ):
-            raise HTTPException(400, "职级与数字员工分配只适用于副账号成员")
+            raise HTTPException(400, "职级与AI 专家分配只适用于副账号成员")
         if "allowed_emp_idxs_json" in data:
             target_modules = set(db.jloads(u.get("modules_json"), []))
             target_list = (
@@ -422,10 +439,10 @@ def team_user_update(uid: int, body: dict):
                 # 经理/总监的分配边界：目标职级低于自己、行业和员工都在
                 # 自己的可用范围内；自己被限定名单时不得放开为“全部”。
                 if u["id"] == actor.get("id"):
-                    raise HTTPException(403, "不能给自己调整数字员工名单")
+                    raise HTTPException(403, "不能给自己调整AI 专家名单")
                 actor_rank = auth.JOB_TITLE_RANK.get(auth.job_title(), 0)
                 if _member_job_rank(u) >= actor_rank:
-                    raise HTTPException(403, "只能给职级低于自己的成员分配数字员工")
+                    raise HTTPException(403, "只能给职级低于自己的成员分配AI 专家")
                 if target_list is None:
                     if (actor.get("allowed_emp_idxs") is not None):
                         raise HTTPException(
@@ -523,6 +540,8 @@ def team_tenant_create(body: dict):
     _need_root()
     name = (body.get("name") or "").strip()
     owner = _clean_username(body.get("owner"))
+    # 主账号姓名可不填，老板之后在团队页自己补
+    owner_display_name = _clean_display_name(body.get("owner_display_name"))
     pw = body.get("password") or ""
     if not name:
         raise HTTPException(400, "企业名必填")
@@ -552,6 +571,7 @@ def team_tenant_create(body: dict):
         db.insert("users", {
             "tenant_id": tid,
             "username": owner,
+            "display_name": owner_display_name,
             "password_hash": auth.hash_pw(pw),
             "role": "owner",
             "modules_json": "[]",

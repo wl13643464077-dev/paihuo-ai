@@ -380,7 +380,7 @@ def allowed(module: str) -> bool:
         return False
     if u["role"] in ("root", "owner"):
         return True
-    return module in u["modules"]
+    return module in (u.get("modules") or [])
 
 
 def all_modules() -> list:

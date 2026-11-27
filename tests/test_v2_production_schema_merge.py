@@ -1,7 +1,7 @@
 """Keep the production 58–61 and offline v2 58–60 lineages losslessly merged.
 
 Fixtures remove the other lineage's physical additions, not just its version
-stamp. Production data must survive 61 -> 64; an already-used offline bundle
+stamp. Production data must survive 61 -> 65; an already-used offline bundle
 must also keep its payment orders, staff work and historical ledger names.
 """
 
@@ -27,6 +27,7 @@ MERGED_STAMPS = {
     62: "member-branch-scope",
     63: "wxpay-native-pay-order",
     64: "staff-task-loop",
+    65: "user-display-name",
 }
 
 
@@ -77,8 +78,8 @@ class V2ProductionSchemaMergeCase(unittest.TestCase):
 
     def _assert_merged(self):
         connection = db.conn()
-        self.assertEqual(64, db.LATEST_SCHEMA_VERSION)
-        self.assertEqual(64, connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(65, db.LATEST_SCHEMA_VERSION)
+        self.assertEqual(65, connection.execute("PRAGMA user_version").fetchone()[0])
         self.assertEqual("ok", connection.execute("PRAGMA quick_check").fetchone()[0])
         self.assertEqual(MERGED_STAMPS, dict(connection.execute(
             "SELECT version,name FROM schema_version WHERE version>=62"
@@ -257,7 +258,7 @@ class V2ProductionSchemaMergeCase(unittest.TestCase):
         self._assert_merged()
         self._disconnect()
         with closing(sqlite3.connect(db.DB_PATH)) as connection:
-            connection.execute("PRAGMA user_version=65")
+            connection.execute("PRAGMA user_version=66")
             connection.commit()
         with open(db.DB_PATH, "rb") as handle:
             before = handle.read()

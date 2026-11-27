@@ -104,7 +104,7 @@ class StaffPageTests(unittest.IsolatedAsyncioTestCase):
             browser, context, page, errors = await self._open(playwright)
             self.assertEqual("今天 9 月 25 日 · 人民路店", await page.locator("#today").inner_text())
             titles = await page.locator(".card .t").all_inner_texts()
-            self.assertEqual(["📌 把冷柜清洗一遍", "✅ 开店清单", "🔧 地面有水渍"], titles)
+            self.assertEqual(["把冷柜清洗一遍", "开店清单", "地面有水渍"], titles)
             self.assertIn("已逾期", await page.locator(".card").first.inner_text())
             self.assertIn("待我审核（1）", await page.locator("[data-go=reviews]").inner_text())
             layout = await page.evaluate("""() => ({
@@ -519,15 +519,15 @@ class StaffAdminPageTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("等您审核（1）", main)
             self.assertIn("货架还是空的", main)
             await page.fill("#sa-one", "人民路店明天中午前把冷柜清一遍拍照给我，火星店盘点饮料")
-            await page.get_by_role("button", name="✨ 拆成任务").click()
+            await page.get_by_role("button", name="拆成任务").click()
             await page.wait_for_selector("[data-sa-draft='1']")
             self.assertIn("没找到「火星店」", await page.locator("[data-sa-draft='1']").inner_text())
             # 第二件没选门店，不能派
-            await page.get_by_role("button", name="📤 确认派出去(2 件)").click()
+            await page.get_by_role("button", name="确认派出去（2 件）").click()
             await page.wait_for_function("document.querySelector(\"[data-sa-draft='1']\").innerText.includes('请选择门店')")
             self.assertEqual([], created)
             await page.locator("[data-sa-draft='1'] select").first.select_option("4")
-            await page.get_by_role("button", name="📤 确认派出去(2 件)").click()
+            await page.get_by_role("button", name="确认派出去（2 件）").click()
             await page.wait_for_function("document.querySelectorAll('[data-sa-draft]').length===0")
             self.assertEqual(2, len(created))
             self.assertEqual({"branch_id": 3, "assignee_user_id": 22, "title": "把冷柜清一遍"},
@@ -622,7 +622,7 @@ class StaffAdminPageTests(unittest.IsolatedAsyncioTestCase):
             # 只看「等审核」时打回：筛选自动清掉，打回的活留在「店员在做」里看得到
             await page.locator(".sa-bar select[aria-label='按状态看']").select_option("submitted")
             await page.wait_for_function("document.querySelector('#main').innerText.includes('已按「等审核」筛选')")
-            await page.get_by_role("button", name="↩️ 打回重做").click()
+            await page.get_by_role("button", name="打回重做").click()
             await page.wait_for_selector("#ui-dialog")
             await page.fill("#ui-dialog-field", "还是没补齐")
             await page.locator("#ui-dialog [data-dialog-ok]").click()
@@ -635,7 +635,7 @@ class StaffAdminPageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(0, await page.locator("[data-nav=today] .badge").count())
             # 打回后在做的活能「催一下」；没指定人的活没有
             self.assertEqual(0, await page.locator("#sa-task-51 [onclick*='_nudge']").count())
-            await page.locator("#sa-task-50").get_by_role("button", name="🔔 催一下").click()
+            await page.locator("#sa-task-50").get_by_role("button", name="催一下").click()
             await page.wait_for_function(
                 "document.querySelector('#sa-task-50')?.innerText.includes('已催 · ')")
             self.assertIn(("/api/staff/tasks/50/nudge", {}), posts)

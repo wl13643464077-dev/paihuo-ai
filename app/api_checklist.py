@@ -102,7 +102,7 @@ async def checklist_item(
     if photo is not None:
         data = await photo.read(PHOTO_MAX_BYTES + 1)
         if len(data) > PHOTO_MAX_BYTES:
-            raise HTTPException(413, "照片太大了(超过 12MB)，请重新拍一张")
+            raise HTTPException(413, "照片太大了（超过 12MB），请重新拍一张")
         if data:
             payload = {"data": data}
     try:

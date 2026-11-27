@@ -1492,7 +1492,9 @@ class BossDashboardServiceCase(unittest.TestCase):
         )
         # 历史冻结身份目录占用 1 条固定查询；仍与任务量、
         # active/legacy 员工数无关，不得退化成 N+1。
-        self.assertLessEqual(query_count, 21, "看板不得按任务或员工 N+1 查询")
+        # 第七轮：先处理清单加了「店员交差等审核 / 派给店员的活已逾期」，
+        # 多 1 条固定查询(stafftask.attention_counts)，同样与任务量无关。
+        self.assertLessEqual(query_count, 22, "看板不得按任务或员工 N+1 查询")
 
 
 if __name__ == "__main__":

@@ -1557,7 +1557,10 @@ class FrontendBrowserBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             await page.route("**/api/**", api_route)
-            await page.goto(f"{self.base}/static/index.html#/boss")
+            # 老板看板已并进数据驾驶舱、不再有入口(#/boss 会跳 #/cockpit)；视图函数还保留，这里直接调用它
+            await page.goto(f"{self.base}/static/index.html#/mine")
+            await page.wait_for_selector("#main .hubhead")
+            await page.evaluate("void bossDashboardView()")
             await page.wait_for_function(
                 "document.querySelector('#main')?.textContent.includes('INITIAL-7')"
             )

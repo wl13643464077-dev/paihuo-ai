@@ -23,32 +23,37 @@
     const st = document.createElement("style");
     st.id = "ph-sa-style";
     st.textContent = `
-.sa-draft{border:2px dashed rgba(51,41,31,.35);border-radius:14px;padding:12px;margin-top:10px;background:#fffdf7}
-.sa-draft.sa-sent{opacity:.6;border-style:solid;background:#eefaf1}
+.sa-draft{border:1px solid var(--line);border-radius:14px;padding:12px;margin-top:10px;background:#fffdf7}
+.sa-draft.sa-sent{opacity:.6;border-style:solid;background:var(--ok-bg)}
 .sa-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-top:8px}
-.sa-grid label{display:block;font-weight:800;font-size:13px;margin-bottom:3px}
-.sa-grid input,.sa-grid select{width:100%;box-sizing:border-box;min-height:42px;font-size:15px}
+.sa-grid label{display:block;font-weight:600;font-size:13px;margin-bottom:3px}
+.sa-grid input,.sa-grid select{width:100%;box-sizing:border-box;min-height:var(--h-md);font-size:15px}
 .sa-hint{font-size:13px;color:#b35c00;margin-top:6px}
-.sa-task{border:2px solid rgba(51,41,31,.22);border-radius:14px;padding:12px;margin-top:10px;background:#fff}
-.sa-task.sa-over{border-color:#e03131;background:#fff5f5}
+.sa-task{border:1px solid var(--line);border-radius:14px;padding:12px;margin-top:10px;background:#fff}
+.sa-task.sa-over{border-color:var(--bad-line);background:var(--bad-bg);box-shadow:inset 3px 0 0 var(--bad)}
 .sa-task.sa-focus{outline:3px solid #ffd166}
 .sa-photos{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;margin-top:8px}
 .sa-photos a{display:block;cursor:zoom-in}
-.sa-photos img{width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:9px;border:2px solid rgba(51,41,31,.3);display:block}
+.sa-photos img{width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:9px;border:1px solid var(--line);display:block}
 @media(max-width:520px){.sa-photos{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .sa-viewer{position:fixed;inset:0;z-index:1000;background:rgba(20,16,12,.92);display:flex;align-items:center;justify-content:center;padding:56px 12px 64px}
 .sa-viewer img{max-width:100%;max-height:100%;object-fit:contain;border-radius:8px;background:#fff}
-.sa-viewer button{position:absolute;min-width:48px;min-height:48px;border:2px solid #fff;border-radius:24px;background:rgba(0,0,0,.4);color:#fff;font-size:22px;font-weight:900;cursor:pointer}
+.sa-viewer button{position:absolute;min-width:48px;min-height:48px;border:2px solid #fff;border-radius:24px;background:rgba(0,0,0,.4);color:#fff;font-size:22px;font-weight:700;cursor:pointer}
 .sa-viewer .vx{top:10px;right:10px}.sa-viewer .vp{left:10px;bottom:10px}.sa-viewer .vn{right:10px;bottom:10px}
-.sa-viewer .vc{position:absolute;bottom:22px;left:0;right:0;text-align:center;color:#fff;font-weight:800;pointer-events:none}
+.sa-viewer .vc{position:absolute;bottom:22px;left:0;right:0;text-align:center;color:#fff;font-weight:600;pointer-events:none}
 .sa-one .actions{align-items:flex-start}
-.sa-ask{border:2px solid #f4a261;background:#fff6dc;border-radius:12px;padding:10px 12px;margin-top:8px}
+.sa-ask{border:1px solid var(--warn-line);background:var(--brand-soft);border-radius:12px;padding:10px 12px;margin-top:8px}
 .sa-ask .actions{margin-top:8px}
 .sa-filtered{font-size:13px;font-weight:700;color:#8b7355}
 .sa-ai{border-radius:10px;padding:7px 10px;margin-top:8px;font-weight:700;font-size:14px}
 .sa-ai.pass{background:#d3f9d8}.sa-ai.doubt{background:#fff1bd}.sa-ai.fail{background:#ffe3e3}.sa-ai.none{background:#f1f3f5}
 .sa-events{margin:8px 0 0 18px;font-size:13px}
 .sa-one textarea{width:100%;box-sizing:border-box;min-height:74px;font-size:16px}
+.sa-more .tm-row-more-box{left:0;right:auto;min-width:210px}
+.sa-more .tm-row-more-box label{font-weight:600;font-size:13px;margin:0}
+.sa-more .tm-row-more-box select{width:100%;min-height:44px;font-size:15px}
+.sa-more .tm-row-more-box .btn{min-height:44px}
+.sa-task .due-over{color:#c92a2a;font-weight:600}
 `;
     document.head.appendChild(st);
   }
@@ -98,13 +103,13 @@
           <option value="">请选择门店</option>${branches.map(x=>`<option value="${x.id}" ${String(x.id)===String(d.branch_id)?"selected":""}>${h(x.name)}</option>`).join("")}</select>
           ${fe.branch?`<div class="field-err" role="alert">${h(fe.branch)}</div>`:""}</div>
         <div><label>派给谁</label><select ${d.sent?"disabled":""} onchange="PH_STAFF_ADMIN._set(${i},'assignee_user_id',this.value)">
-          <option value="">先不指定(店里谁有空谁做)</option>${(b?b.members:[]).map(u=>`<option value="${u.id}" ${String(u.id)===String(d.assignee_user_id)?"selected":""}>${h(u.name)}（${h(u.title_label)}）</option>`).join("")}</select></div>
+          <option value="">先不指定（店里谁有空谁做）</option>${(b?b.members:[]).map(u=>`<option value="${u.id}" ${String(u.id)===String(d.assignee_user_id)?"selected":""}>${h(who(u.name, u.title_label))}</option>`).join("")}</select></div>
         <div><label>截止时间</label><input type="datetime-local" value="${tsToLocal(d.due_at)}" ${d.sent?"disabled":""}
           onchange="PH_STAFF_ADMIN._set(${i},'due_at',this.value)"></div>
         <div><label>&nbsp;</label><label style="display:flex;gap:6px;align-items:center;min-height:42px;font-size:15px">
           <input type="checkbox" style="width:auto;min-height:0" ${d.require_photo?"checked":""} ${d.sent?"disabled":""}
             onchange="PH_STAFF_ADMIN._set(${i},'require_photo',this.checked)"> 要拍照交差</label></div>
-        <div style="grid-column:1/-1"><label>说明(可不填)</label><input maxlength="1000" value="${h(d.detail)}" ${d.sent?"disabled":""}
+        <div style="grid-column:1/-1"><label>说明（可不填）</label><input maxlength="1000" value="${h(d.detail)}" ${d.sent?"disabled":""}
           oninput="PH_STAFF_ADMIN._set(${i},'detail',this.value)"></div>
       </div>
       ${(d.hints||[]).map(x=>`<div class="sa-hint">⚠️ ${h(x)}</div>`).join("")}
@@ -134,8 +139,8 @@
     const waiting = SA.drafts.filter(d=>!d.sent).length;
     box.innerHTML = SA.drafts.length ? SA.drafts.map(draftHtml).join("")
       + `<div class="actions" style="margin-top:10px">
-          ${waiting?`<button type="button" class="btn pri" onclick="PH_STAFF_ADMIN._sendAll()" ${SA.sending?"disabled":""}>📤 ${SA.sending?"正在派…":`确认派出去(${waiting} 件)`}</button>`:""}
-          <button type="button" class="btn" onclick="PH_STAFF_ADMIN._add()">➕ 再加一件</button>
+          ${waiting?`<button data-ic="send" type="button" class="btn pri" onclick="PH_STAFF_ADMIN._sendAll()" ${SA.sending?"disabled":""}>${SA.sending?"正在派…":`确认派出去（${waiting} 件）`}</button>`:""}
+          <button data-ic="plus" type="button" class="btn" onclick="PH_STAFF_ADMIN._add()">再加一件</button>
           <button type="button" class="btn" onclick="PH_STAFF_ADMIN._clear()">清空</button></div>` : "";
   }
   function setField(i, field, value, redraw){
@@ -204,7 +209,7 @@
         hints:d.hints||[]}));
       SA.drafts = SA.drafts.filter(d=>!d.sent).concat(drafts);
       SA.oneText = "";
-      toast(drafts.length ? `拆出 ${drafts.length} 件,看一眼再派` : "没拆出任务,换个说法试试");
+      toast(drafts.length ? `拆出 ${drafts.length} 件，看一眼再派` : "没拆出任务，换个说法试试");
     }catch(e){ SA.oneText = text; toast(e.message); }
     SA.parsing = false; draw();
   }
@@ -214,10 +219,10 @@
     const a = t.ai_check;
     // 没开 AI 验照片就什么都不说(开关就在「等您审核」标题旁边)，不在每件活下面重复一遍
     if(!a){ return t.status==="submitted"&&(t.photos||[]).length&&SA.meta?.ai_check_enabled ? `<div class="sa-ai none">AI 还没看完，可以先直接看照片</div>` : ""; }
-    if(a.error||!a.verdict) return `<div class="sa-ai none">🤖 ${h(a.reason||"AI 这次没看成,请直接看照片")}</div>`;
-    const label = {pass:"像是做好了", doubt:"拿不准,建议细看", fail:"像是没做好"}[a.verdict]||"";
-    return `<div class="sa-ai ${h(a.verdict)}">🤖 AI 建议:${h(label)}${a.reason?`。${h(a.reason)}`:""}
-      <span class="sub">(把握 ${Math.round((a.confidence||0)*100)}%,只是建议,您说了算)</span></div>`;
+    if(a.error||!a.verdict) return `<div class="sa-ai none">🤖 ${h(a.reason||"AI 这次没看成，请直接看照片")}</div>`;
+    const label = {pass:"像是做好了", doubt:"拿不准，建议细看", fail:"像是没做好"}[a.verdict]||"";
+    return `<div class="sa-ai ${h(a.verdict)}">🤖 AI 建议：${h(label)}${a.reason?`。${h(a.reason)}`:""}
+      <span class="sub">（把握 ${Math.round((a.confidence||0)*100)}%，只是建议，您说了算）</span></div>`;
   }
   function photosHtml(list){
     return (list||[]).length ? `<div class="sa-photos">${list.map((p,i)=>`<a href="${h(p.url)}" onclick="return PH_STAFF_ADMIN._view(this,${i})" aria-label="看大图 第 ${i+1} 张"><img src="${h(p.url)}" alt="交差照片" loading="lazy"></a>`).join("")}</div>` : "";
@@ -252,11 +257,32 @@
     return false;
   }
   function closeViewer(){ document.getElementById("sa-viewer")?.remove(); }
+  /* 「小李（店员）」；姓名里已带角色(「王店长」)就不重复。app.js 有同名公共函数就用它 */
+  function who(name, role){
+    if(typeof personWithRole==="function") return personWithRole(name, role);
+    name = String(name||"").trim(); role = String(role||"").trim();
+    return !name ? "" : (!role||name.includes(role)) ? name : `${name}（${role}）`;
+  }
+  /* 截止时间(已转义的 HTML)：「截止 明天 16:44」/「已逾期 3 小时」，悬停给完整时间；open=这件还没做完 */
+  function dueLine(t){
+    if(typeof dueHtml==="function" && t.due_at) return dueHtml(t.due_at, t.status==="todo");
+    return t.due_text ? h(`截止 ${t.due_text}`) : "";
+  }
+  /* 「⋯ 更多」里的改派：一个带文字标签的下拉，选了就改派 */
   function reassignHtml(t){
     const b = branchOf(t.branch_id);
     if(!b || !t.can_manage_hint) return "";
-    return `<select onchange="PH_STAFF_ADMIN._assign(${t.id},this.value)" aria-label="改派" style="min-height:36px;font-size:14px;max-width:190px">
-      <option value="">${t.assignee_name?"改派给…":"指派给…"}</option>${b.members.filter(u=>u.id!==t.assignee_user_id).map(u=>`<option value="${u.id}">${h(u.name)}（${h(u.title_label)}）</option>`).join("")}</select>`;
+    const label = t.assignee_name ? "改派给谁" : "指派给谁";
+    return `<label for="sa-assign-${t.id}">${label}</label>
+      <select id="sa-assign-${t.id}" onchange="PH_STAFF_ADMIN._assign(${t.id},this.value)">
+      <option value="">请选择</option>${b.members.filter(u=>u.id!==t.assignee_user_id).map(u=>`<option value="${u.id}">${h(who(u.name, u.title_label))}</option>`).join("")}</select>`;
+  }
+  /* 次要操作收进「⋯ 更多」：原生 details/summary，键盘 Tab 能到、回车/空格能开，手机上是一列大按钮 */
+  function moreHtml(t, inner){
+    inner = (inner||[]).filter(Boolean);
+    if(!inner.length) return "";
+    return `<details class="tm-row-more sa-more" data-sa-more="${t.id}"><summary class="btn sm" aria-label="「${h(t.title)}」的更多操作">⋯ 更多</summary>
+      <div class="tm-row-more-box">${inner.join("")}</div></details>`;
   }
   /* 打回原因前写上是谁打回的(reviewer_label 由后端按身份算好)；老数据没有审核人时不写名字 */
   function rejectLine(t, fallback){
@@ -271,31 +297,34 @@
     const u = me();
     if(!["todo","rejected"].includes(t.status) || !t.assignee_user_id || (u && String(u.id)===String(t.assignee_user_id))) return "";
     const last = Number(t.last_nudged_at)||0;
-    if(last && Date.now()/1000-last < NUDGE_GAP) return `<span class="sub" title="30 分钟后可以再催">🔔 已催 · ${h(hhmm(last))}</span>`;
-    return `<button type="button" class="btn sm" onclick="PH_STAFF_ADMIN._nudge(${t.id})" title="给 ${h(t.assignee_name||"店员")} 发一条通知">🔔 催一下</button>`;
+    if(last && Date.now()/1000-last < NUDGE_GAP) return `<span class="sub" data-ic="bell" title="30 分钟后可以再催">已催 · ${h(hhmm(last))}</span>`;
+    // 逾期的活，「催一下」是这张卡上最该点的，用主按钮
+    return `<button data-ic="bell" type="button" class="btn sm${t.overdue?" pri":""}" onclick="PH_STAFF_ADMIN._nudge(${t.id})" title="给 ${h(t.assignee_name||"店员")} 发一条通知">催一下</button>`;
   }
   function taskHtml(t){
     const rejected = t.status==="todo" && t.review_note && t.reviewed_at;
-    const meta = [t.branch_name, t.assignee_name?`👤 ${t.assignee_name}`:"👤 还没指定人", t.due_text?`截止 ${t.due_text}`:"",
-      (t.dispatcher_label||t.created_by_name)?`${t.dispatcher_label||t.created_by_name} 派的`:"", t.remind_count?`已催 ${t.remind_count} 次`:""].filter(Boolean);
+    // meta 每一段都是已转义的 HTML(截止时间那段带 title)
+    const meta = [h(t.branch_name), `<span data-ic="user">${h(t.assignee_name||"还没指定人")}</span>`, dueLine(t),
+      (t.dispatcher_label||t.created_by_name)?h((l=>/[）)]$/.test(l)?`${l}派的`:`${l} 派的`)(String(t.dispatcher_label||t.created_by_name))):"", t.remind_count?h(`已催 ${t.remind_count} 次`):""].filter(Boolean);
+    const cancelBtn = ["todo","submitted"].includes(t.status)?`<button type="button" class="btn sm" onclick="PH_STAFF_ADMIN._cancel(${t.id})">取消这件</button>`:"";
+    const eventsBtn = `<button data-ic="clock" type="button" class="btn sm" onclick="PH_STAFF_ADMIN._events(${t.id})">经过</button>`;
+    const open = ["todo","submitted"].includes(t.status);
     return `<div class="sa-task ${t.overdue?"sa-over":""} ${String(SA.focus)===String(t.id)?"sa-focus":""}" id="sa-task-${t.id}">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <span class="pill ${t.status==="approved"?"done":t.status==="cancelled"?"cancelled":t.status==="submitted"?"awaiting_review":"running"}">${h(t.overdue?"逾期":STATUS[t.status]||t.status)}</span>
+        <span class="pill ${t.status==="approved"?"done":t.status==="cancelled"?"cancelled":t.status==="submitted"?"awaiting_review":(t.overdue||rejected||t.status==="rejected")?"failed":"running"}">${h(t.overdue?"已逾期":rejected?"被打回":STATUS[t.status]||t.status)}</span>
         <b style="flex:1;min-width:160px">${h(t.title)}</b>
-        ${t.require_photo?`<span class="sub">📷 要照片</span>`:""}</div>
-      <div class="sub" style="margin-top:4px">${meta.map(h).join(" · ")}</div>
+        ${t.require_photo?`<span class="sub" data-ic="camera">要照片</span>`:""}</div>
+      <div class="sub" style="margin-top:4px">${meta.join(" · ")}</div>
       ${t.detail?`<div style="margin-top:4px">${h(t.detail)}</div>`:""}
-      ${rejected?`<div class="sa-hint">↩️ ${h(rejectLine(t, "打回过"))}</div>`:""}
-      ${t.status==="submitted"&&t.review_note&&t.reviewed_at?`<div class="sa-hint">↩️ ${h(rejectLine(t, "上次打回"))}${t.submit_count>1?`（第 ${t.submit_count} 次交）`:"（重交）"}</div>`:""}
-      ${t.status==="submitted"?`${t.submit_note?`<div style="margin-top:6px">📝 ${h(t.submit_note)}</div>`:""}${photosHtml(t.photos)}${aiHtml(t)}`:""}
-      ${t.status==="approved"&&(t.photos||[]).length?`<details style="margin-top:6px"><summary class="sub">看交差照片(${t.photos.length})</summary>${photosHtml(t.photos)}</details>`:""}
+      ${rejected?`<div class="sa-hint" data-ic="undo">${h(rejectLine(t, "打回过"))}</div>`:""}
+      ${t.status==="submitted"&&t.review_note&&t.reviewed_at?`<div class="sa-hint" data-ic="undo">${h(rejectLine(t, "上次打回"))}${t.submit_count>1?`（第 ${t.submit_count} 次交）`:"（重交）"}</div>`:""}
+      ${t.status==="submitted"?`${t.submit_note?`<div style="margin-top:6px" data-ic="message">${h(t.submit_note)}</div>`:""}${photosHtml(t.photos)}${aiHtml(t)}`:""}
+      ${t.status==="approved"&&(t.photos||[]).length?`<details style="margin-top:6px"><summary class="sub">看交差照片（${t.photos.length}）</summary>${photosHtml(t.photos)}</details>`:""}
       <div class="actions" style="margin-top:8px">
-        ${t.status==="submitted"?`<button type="button" class="btn sm pri" onclick="PH_STAFF_ADMIN._review(${t.id},true)">👍 通过</button>
-          <button type="button" class="btn sm bad" onclick="PH_STAFF_ADMIN._review(${t.id},false)">↩️ 打回重做</button>`:""}
-        ${t.status==="todo"?reassignHtml(t):""}
+        ${t.status==="submitted"?`<button data-ic="check" type="button" class="btn sm pri" onclick="PH_STAFF_ADMIN._review(${t.id},true)">通过</button>
+          <button data-ic="undo" type="button" class="btn sm bad" onclick="PH_STAFF_ADMIN._review(${t.id},false)">打回重做</button>`:""}
         ${nudgeHtml(t)}
-        ${["todo","submitted"].includes(t.status)?`<button type="button" class="btn sm" onclick="PH_STAFF_ADMIN._cancel(${t.id})">取消这件</button>`:""}
-        <button type="button" class="btn sm" onclick="PH_STAFF_ADMIN._events(${t.id})">🕘 经过</button>
+        ${open?moreHtml(t, [t.status==="todo"?reassignHtml(t):"", cancelBtn, eventsBtn]):eventsBtn}
       </div>
       <div id="sa-ev-${t.id}"></div>
     </div>`;
@@ -324,7 +353,7 @@
     const list = items().filter(t=>t.status==="submitted");
     const ai = aiControl();
     const askFirst = ai.includes("sa-ask");
-    return `<h3 style="margin-top:0">🧐 等您审核（${list.length}）${filterNote()}${askFirst?"":ai}</h3>`
+    return `<h3 data-ic="eye" style="margin-top:0">等您审核（${list.length}）${filterNote()}${askFirst?"":ai}</h3>`
       + (askFirst && list.length ? ai : "")
       + (list.length ? list.map(taskHtml).join("") : `<div class="sub">暂时没有</div>`);
   }
@@ -332,9 +361,9 @@
     const all = items();
     const doing = all.filter(t=>t.status==="todo").sort((a,b)=>(b.overdue-a.overdue)||((a.due_at||9e12)-(b.due_at||9e12)));
     const ended = all.filter(t=>["approved","cancelled","rejected"].includes(t.status));
-    let html = `<h3 style="margin-top:18px">⏳ 店员在做（${doing.length}）${filterNote()}</h3>`
+    let html = `<h3 data-ic="clock" style="margin-top:18px">店员在做（${doing.length}）${filterNote()}</h3>`
       + (doing.length ? doing.map(taskHtml).join("") : `<div class="sub">暂时没有</div>`);
-    if(ended.length) html += `<details style="margin-top:16px" ${SA.filter.status&&!["submitted","todo"].includes(SA.filter.status)?"open":""}><summary><b>已结束(${ended.length})</b></summary>${ended.map(taskHtml).join("")}</details>`;
+    if(ended.length) html += `<details style="margin-top:16px" ${SA.filter.status&&!["submitted","todo"].includes(SA.filter.status)?"open":""}><summary><b>已结束（${ended.length}）</b></summary>${ended.map(taskHtml).join("")}</details>`;
     if(SA.list&&SA.list.next_before_id) html += `<div class="actions"><button type="button" class="btn" onclick="PH_STAFF_ADMIN._more()">加载更多</button></div>`;
     return html;
   }
@@ -351,20 +380,20 @@
       ? `<div class="card sa-one" id="sa-dispatch"><button type="button" class="btn" onclick="PH_STAFF_ADMIN._openDispatchBox()" ${!m.branches.length?"disabled":""}>＋ 派一件新活</button></div>`
       : `<div class="card sa-one" id="sa-dispatch">
         ${noStaffHint()}
-        <h3 style="margin-top:0">🗣️ 一句话派活</h3>
-        <textarea id="sa-one" maxlength="500" placeholder="比如:人民路店明天中午前把冷柜清一遍,拍照给我">${h(SA.oneText||"")}</textarea>
+        <h3 data-ic="message" style="margin-top:0">一句话派活</h3>
+        <textarea id="sa-one" maxlength="500" placeholder="比如：人民路店明天中午前把冷柜清一遍，拍照给我">${h(SA.oneText||"")}</textarea>
         <div class="actions">
           ${price&&typeof costButton==="function"
-            ?costButton({label:"✨ 拆成任务",onclick:"PH_STAFF_ADMIN._parse()",cost:price,disabled:SA.parsing||!m.branches.length,disabledLabel:SA.parsing?"AI 正在拆…":""})
-            :`<button type="button" class="btn pri" onclick="PH_STAFF_ADMIN._parse()" ${SA.parsing||!m.branches.length?"disabled":""}>${SA.parsing?"AI 正在拆…":"✨ 拆成任务"}</button>`}
-          <button type="button" class="btn" onclick="PH_STAFF_ADMIN._add()" ${!m.branches.length?"disabled":""}>✍️ 手动派一件</button>
-          <a class="btn" href="/staff" target="_blank" rel="noopener">📱 看店员手机版</a>
+            ?costButton({label:"拆成任务",attrs:'data-ic="sparkles"',onclick:"PH_STAFF_ADMIN._parse()",cost:price,disabled:SA.parsing||!m.branches.length,disabledLabel:SA.parsing?"AI 正在拆…":""})
+            :`<button type="button" class="btn pri" data-ic="sparkles" onclick="PH_STAFF_ADMIN._parse()" ${SA.parsing||!m.branches.length?"disabled":""}>${SA.parsing?"AI 正在拆…":"拆成任务"}</button>`}
+          <button data-ic="pen" type="button" class="btn" onclick="PH_STAFF_ADMIN._add()" ${!m.branches.length?"disabled":""}>手动派一件</button>
+          <a data-ic="phone" class="btn" href="/staff" target="_blank" rel="noopener">看店员手机版</a>
         </div>
-        <div class="sub">AI 只帮您填表,门店和人对不上时会留空让您选,确认后才会派出去。</div>
+        <div class="sub">AI 只帮您填表，门店和人对不上时会留空让您选，确认后才会派出去。</div>
         <div id="sa-drafts"></div>
       </div>`;
-    main.innerHTML = `<div class="hubhead"><h2>🧑‍🍳 派给店员</h2>
-        <div class="sub">把活派给店里的真人,店员用手机拍照交差,您(或店长)看照片定通过还是打回。</div></div>
+    main.innerHTML = `<div class="hubhead"><h2 data-ic="user">派给店员</h2>
+        <div class="sub">把活派给店里的真人，店员用手机拍照交差，您（或店长）看照片定通过还是打回。</div></div>
       ${!m.branches.length?`<div class="card">${noStoreEmptyState("还没有可以派活的门店。建好门店，再到「我的 → 团队与权限」给店员分配门店。")}</div>`:""}
       ${reviewFirst?reviewCard:""}
       ${dispatchCard}
@@ -374,7 +403,7 @@
             <option value="">全部门店</option>${m.branches.map(b=>`<option value="${b.id}" ${String(b.id)===String(SA.filter.branch)?"selected":""}>${h(b.name)}</option>`).join("")}</select>
           <select onchange="PH_STAFF_ADMIN._filter('status',this.value)" aria-label="按状态看">
             ${[["","全部状态"],["submitted","等审核"],["todo","待做"],["approved","已通过"],["cancelled","已取消"]].map(([v,l])=>`<option value="${v}" ${v===SA.filter.status?"selected":""}>${l}</option>`).join("")}</select>
-          <button type="button" class="btn sm" onclick="PH_STAFF_ADMIN._reload()">🔄 刷新</button>
+          <button data-ic="refresh" type="button" class="btn sm" onclick="PH_STAFF_ADMIN._reload()">刷新</button>
         </div>
         ${reviewFirst?"":`<div style="margin-top:12px">${reviewHtml()}</div>`}
         ${restHtml()}
@@ -433,9 +462,9 @@
   async function review(id, approve){
     let note = "";
     if(!approve){
-      note = await uiPrompt({title:"打回重做", message:"写一句哪里不行,店员手机上会看到", multiline:true,
-        placeholder:"比如:冷柜底层没擦干净,再拍一张近照", confirmText:"打回", danger:true,
-        requiredMessage:"写一句原因,店员才知道哪里要重做"});
+      note = await uiPrompt({title:"打回重做", message:"写一句哪里不行，店员手机上会看到", multiline:true,
+        placeholder:"比如：冷柜底层没擦干净，再拍一张近照", confirmText:"打回", danger:true,
+        requiredMessage:"写一句原因，店员才知道哪里要重做"});
       if(note===null) return;
     }
     try{
@@ -474,6 +503,22 @@
     try{ await api(`/staff/tasks/${id}/assign`, {method:"POST", body:{assignee_user_id:+uid}}); toast("已改派"); await loadList(); draw(); }
     catch(e){ toast(e.message); draw(); }
   }
+  /* 「⋯ 更多」：点了里面的按钮、点到外面、按 Esc 都收起来(Esc 后焦点回到「更多」) */
+  function closeMore(except){
+    document.querySelectorAll("details.sa-more[open]").forEach(d=>{ if(d!==except) d.removeAttribute("open"); });
+  }
+  if(!window.__phSaMoreBound){
+    window.__phSaMoreBound = true;
+    document.addEventListener("click", e=>{
+      const inside = e.target.closest && e.target.closest("details.sa-more");
+      closeMore(inside && !e.target.closest(".tm-row-more-box .btn") ? inside : null);
+    });
+    document.addEventListener("keydown", e=>{
+      if(e.key!=="Escape") return;
+      const d = document.activeElement && document.activeElement.closest && document.activeElement.closest("details.sa-more[open]");
+      if(d){ d.removeAttribute("open"); d.querySelector("summary")?.focus(); }
+    });
+  }
   async function events(id){
     const box = document.getElementById("sa-ev-"+id); if(!box) return;
     if(box.innerHTML){ box.innerHTML = ""; return; }
@@ -483,7 +528,7 @@
         cancelled:"取消", reminded:"提醒", nudged:"催办", escalated:"升级提醒", ai_checked:"AI 看照片", commented:"留言"};
       box.innerHTML = `<ol class="sa-events">${(t.events||[]).map(e=>`<li>${h(new Date((e.created_at||0)*1000).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai",hour12:false}))}
         · <b>${h(e.actor_name||"系统")}</b> ${h(label[e.kind]||e.kind)}${e.note?`:${h(e.note)}`:""}</li>`).join("")}</ol>`
-        + ((t.earlier_photos||[]).length?`<details><summary class="sub">打回前交的照片(${t.earlier_photos.length})</summary>${photosHtml(t.earlier_photos)}</details>`:"");
+        + ((t.earlier_photos||[]).length?`<details><summary class="sub">打回前交的照片（${t.earlier_photos.length}）</summary>${photosHtml(t.earlier_photos)}</details>`:"");
     }catch(e){ toast(e.message); }
   }
   async function aiToggle(on){

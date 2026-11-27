@@ -1563,10 +1563,13 @@ class PersistentUploadSecurityCase(unittest.TestCase):
         self.assertEqual(os.path.realpath(binary), executable)
         self.assertEqual(os.path.realpath(binary), arguments[0])
         self.assertNotIn("SHOULD_NOT_REACH_MEDIA_PARSER", environment)
+        # MALLOC_ARENA_MAX 是 textvideo 有意加的固定值(限制 glibc 内存池，
+        # 多输入渲染才不会撞 2GB 地址空间上限)，不来自父进程环境。
         self.assertEqual(
-            {"PATH", "LANG", "LC_ALL", "HOME"},
+            {"PATH", "LANG", "LC_ALL", "HOME", "MALLOC_ARENA_MAX"},
             set(environment),
         )
+        self.assertEqual("2", environment["MALLOC_ARENA_MAX"])
 
     def test_clip_parser_timeout_cleans_files_and_releases_upload_slot(self):
         upload = self._upload(

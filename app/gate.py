@@ -262,12 +262,12 @@ async def check(title: str, body: str, platforms: list,
     progress = progress or (lambda *a: None)
     issues = []
     if not (body or "").strip():
-        progress("error", "正文为空,直接阻断")
+        progress("error", "正文为空，直接阻断")
         issues.append({"type": "内容缺失", "severity": "高",
-                       "detail": "正文为空——上游初稿未产出或产出丢失,不能发布空内容"})
+                       "detail": "正文为空——上游初稿未产出或产出丢失，不能发布空内容"})
         return {"passed": False, "issues": issues, "cost_usd": 0.0, "tokens": 0,
-                "report": "⛔ 正文为空,已阻断发布"}
-    progress("gate", "第 1 步:审查官词库敏感词扫描…")
+                "report": "⛔ 正文为空，已阻断发布"}
+    progress("gate", "第 1 步：审查官词库敏感词扫描…")
     rules = _rules()
     text = f"{title}\n{body}"
     # V24:接入审查官大词库(广告法/医疗金融/导流/违禁),gate_rules.json 里的自定义词继续生效
@@ -275,14 +275,14 @@ async def check(title: str, body: str, platforms: list,
     lex_hits = censor.scan(text)
     for h in lex_hits:
         issues.append({"type": h["type"], "severity": h["severity"],
-                       "detail": h["detail"] + f";建议:{h.get('suggest', '')}"})
+                       "detail": h["detail"] + f"；建议：{h.get('suggest', '')}"})
     hits = len(lex_hits)
     for w in rules.get("sensitive_words", []):
         if w in text and not any(i.get("word") == w for i in lex_hits):
             hits += 1
             issues.append({"type": "敏感词", "severity": "中",
-                           "detail": f"命中规则库敏感词「{w}」(广告法/平台风控风险)"})
-    progress("gate", f"审查官词库扫描完成:命中 {hits} 条")
+                           "detail": f"命中规则库敏感词「{w}」（广告法/平台风控风险）"})
+    progress("gate", f"审查官词库扫描完成：命中 {hits} 条")
     cost, tokens = 0.0, 0
     # 事实基准:上游情报员联网检索到的素材(质检员自己的知识可能过时,不能当事实标准)
     ref = ""
@@ -294,7 +294,7 @@ async def check(title: str, body: str, platforms: list,
             ref = ("\n【情报员联网检索到的事实基准(判断事实问题以此为准)】\n"
                    + "\n".join(f"- {f}" for f in facts[:20])
                    + ("\n来源:" + ";".join(srcs[:10]) if srcs else ""))
-    progress("gate", "第 2 步:AI 质检(广告法/平台规则/事实抽检)…")
+    progress("gate", "第 2 步：AI 质检（广告法/平台规则/事实抽检）…")
     gate_error = False
     try:
         r = await providers.call_text_json(8, f"""你是内容质检员,今天是 {beijing_today()}。检查以下待发布内容,目标平台:{'、'.join(platforms)}。
@@ -321,16 +321,16 @@ async def check(title: str, body: str, platforms: list,
         issues.append({
             "type": "质检未完成",
             "severity": "高",
-            "detail": "AI 深度质检未能完成(模型服务暂时不可用),仅完成规则库检查。"
-                      "为避免未经审查的内容发出,已暂停发布;请稍后重检,或确认无误后手动放行。",
+            "detail": "AI 深度质检未能完成（模型服务暂时不可用），仅完成规则库检查。"
+                      "为避免未经审查的内容发出，已暂停发布；请稍后重检，或确认无误后手动放行。",
         })
     passed = not any(i.get("severity") == "高" for i in issues)
     if passed:
-        report = "✅ 质检通过" + (f",共 {len(issues)} 条提示" if issues else ",未发现问题")
+        report = "✅ 质检通过" + (f"，共 {len(issues)} 条提示" if issues else "，未发现问题")
     elif gate_error:
-        report = f"⏸ 质检未完成,已暂停发布(共 {len(issues)} 条提示),可重检或手动放行"
+        report = f"⏸ 质检未完成，已暂停发布（共 {len(issues)} 条提示），可重检或手动放行"
     else:
-        report = f"⛔ 存在高风险问题,已阻断发布,共 {len(issues)} 条提示"
+        report = f"⛔ 存在高风险问题，已阻断发布，共 {len(issues)} 条提示"
     progress("done" if passed else "error", report)
     return {"passed": passed, "issues": issues, "cost_usd": cost, "tokens": tokens,
             "report": report}

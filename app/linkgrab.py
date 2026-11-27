@@ -120,7 +120,7 @@ async def _guard_url(url: str):
         raise ValueError("链接只允许标准 Web 端口")
     addresses = await _resolve_public_host(p.hostname)
     if not addresses:
-        raise ValueError("这个地址指向内网/本机,已拒绝访问")
+        raise ValueError("这个地址指向内网/本机，已拒绝访问")
     return addresses
 
 

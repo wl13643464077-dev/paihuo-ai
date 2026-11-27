@@ -25,7 +25,7 @@ import secrets
 import time
 from typing import Any, Mapping
 
-from . import db, photoproof, timeutil
+from . import db, people, photoproof, timeutil
 
 DEFAULTS_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "checklist_defaults_v1.json"
@@ -209,7 +209,8 @@ def normalize_items(raw: Any) -> list[dict]:
 # ---------------- 账号与门店范围 ----------------
 def _user(tid: int, uid: int) -> dict:
     row = db.one(
-        "SELECT u.id,u.tenant_id,u.username,u.role,u.job_title,u.enabled,u.modules_json "
+        "SELECT u.id,u.tenant_id,u.username,u.display_name,u.role,u.job_title,"
+        "u.enabled,u.modules_json "
         "FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE u.id=? AND t.enabled=1",
         (int(uid),),
     )
@@ -678,7 +679,7 @@ def _names(tid: int, run_rows: list[dict]) -> tuple[dict, dict, dict]:
 
     return (lookup("store_branch", "name", branch_ids),
             lookup("checklist_template", "name", template_ids),
-            lookup("users", "username", sorted(user_ids)))
+            people.names(tid, user_ids))
 
 
 def _run_public(row: Mapping[str, Any], *, branches: Mapping[int, str],
@@ -782,7 +783,7 @@ def runs_overview(tid: int, uid: int, date: str | None = None, *,
     if not branches:
         return {"date": run_date, "stores": [], "summary": {
             "total": 0, "done": 0, "missed": 0, "open": 0,
-            "items_total": 0, "items_done": 0, "rate": None}}
+            "items_total": 0, "items_done": 0, "items_missed": 0, "rate": None}}
     ids = [int(b["id"]) for b in branches]
     rows: list[dict] = []
     for start in range(0, len(ids), 500):
@@ -799,7 +800,7 @@ def runs_overview(tid: int, uid: int, date: str | None = None, *,
         by_branch.setdefault(run["branch_id"], []).append(run)
     stores = []
     totals = {"total": 0, "done": 0, "missed": 0, "open": 0,
-              "items_total": 0, "items_done": 0}
+              "items_total": 0, "items_done": 0, "items_missed": 0}
     for branch in branches:
         runs = by_branch.get(int(branch["id"]), [])
         counts = {
@@ -810,6 +811,11 @@ def runs_overview(tid: int, uid: int, date: str | None = None, *,
             # 进度按「项」算(和店员手机上的 0/8 一致)，份数只用来算按时完成率
             "items_total": sum(int(r.get("total") or 0) for r in runs),
             "items_done": sum(int(r.get("done_count") or 0) for r in runs),
+            # 超时清单里没做的项数：顶部「超时没做」和各店的「x/y 项」同一个单位
+            "items_missed": sum(
+                max(0, int(r.get("total") or 0) - int(r.get("done_count") or 0))
+                for r in runs if r["status"] == "missed"
+            ),
         }
         for key in totals:
             totals[key] += counts[key]
@@ -841,7 +847,7 @@ def _accept_photo(tid: int, run: Mapping[str, Any], user: Mapping[str, Any],
         meta = photoproof.store_photo(
             tid, branch_id, bytes(data),
             branch_name=str(run.get("branch_name") or ""),
-            person_name=str(user.get("username") or ""),
+            person_name=people.display_name(user),
             now=now, asset_root=asset_root,
         )
         meta["_fresh"] = True

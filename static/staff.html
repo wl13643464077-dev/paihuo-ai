@@ -3,62 +3,80 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#fff7e6">
+<meta name="theme-color" content="#f6f1e7">
 <title>派活 · 门店</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <style>
-:root{--ink:#33291f;--bg:#fff7e6;--card:#fffdf7;--sub:#6f5f4c;--pri:#ffd166;--ok:#2f9e5b;--bad:#d9480f;--warn:#e8890c;--line:rgba(51,41,31,.18)}
+/* 设计令牌：与 index.html 的 :root 同一组值(店员版控件更大：按钮 52、输入 52) */
+:root{
+  --paper:#f6f1e7; --card:#fffdf9; --surface:#ffffff; --sunken:#f3ecdf;
+  --ink:#33291f; --ink2:#6b5d4b; --ink3:#7c6d58;
+  --line:#e7decd; --line2:#cfc3ad;
+  --brand:#ffd166; --brand-d:#e2b23a; --brand-h:#ffc94a; --brand-soft:#fff4d3;
+  --ok:#1f8057; --ok-bg:#e4f5ec; --ok-line:#b5dfc8;
+  --warn:#a15c00; --warn-bg:#fff1d6; --warn-line:#f0d08f;
+  --bad:#c9302c; --bad-bg:#fdecea; --bad-line:#f2bcb8;
+  --wait:#2563c9; --wait-bg:#e8f0fe; --wait-line:#bcd2f7;
+  --focus:#b45309;
+  --r-sm:8px; --r-md:10px; --r-lg:14px;
+  --shadow-1:0 1px 2px rgba(51,41,31,.05),0 1px 3px rgba(51,41,31,.07);
+  --shadow-2:0 4px 10px rgba(51,41,31,.08),0 12px 28px rgba(51,41,31,.12);
+  --bg:var(--paper); --sub:var(--ink2); --pri:var(--brand);
+}
 *{box-sizing:border-box}
 html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);font:16px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;-webkit-text-size-adjust:100%}
 body{padding:0 0 calc(24px + env(safe-area-inset-bottom))}
 #app{max-width:640px;margin:0 auto;padding:0 14px}
-.top{position:sticky;top:0;z-index:5;background:var(--bg);padding:14px 0 10px;border-bottom:2px solid var(--line)}
+.top{position:sticky;top:0;z-index:5;background:var(--bg);padding:14px 0 10px;border-bottom:1px solid var(--line)}
 .top h1{margin:0;font-size:20px;line-height:1.4;word-break:break-all}
 .top .who{font-size:16px;color:var(--sub)}
 .net{display:none;margin:10px 0 0;padding:10px 12px;border-radius:12px;background:#ffe3e3;color:#8a1c1c;font-weight:700;font-size:16px}
 .net.show{display:block}
 h2{font-size:18px;margin:18px 0 8px}
 .sub{color:var(--sub);font-size:16px}
-.btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;min-height:52px;padding:10px 16px;border:2.5px solid var(--ink);border-radius:14px;background:#fff;color:var(--ink);font-size:17px;font-weight:800;cursor:pointer;text-decoration:none;font-family:inherit}
-.btn.pri{background:var(--pri)}
-.btn.ok{background:#c9f0d6}
-.btn.bad{background:#ffd8cc}
+.btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;min-height:52px;padding:10px 16px;border:1px solid var(--line2);border-radius:12px;background:#fff;color:var(--ink);font-size:17px;font-weight:700;cursor:pointer;text-decoration:none;font-family:inherit;box-shadow:var(--shadow-1)}
+.btn:active{background:var(--sunken);box-shadow:none}
+.btn.pri{background:var(--pri);border-color:var(--brand-d)}
+.btn.ok{background:var(--ok-bg);border-color:var(--ok-line);color:#14603f}
+.btn.bad{background:var(--bad-bg);border-color:var(--bad-line);color:#a02622}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 .btn[disabled]{opacity:.55;cursor:default}
 .row{display:flex;gap:10px}
 .row>*{flex:1;min-width:0}
-.card{display:block;width:100%;text-align:left;background:var(--card);border:2.5px solid var(--ink);border-radius:16px;padding:14px;margin:10px 0;box-shadow:3px 3px 0 rgba(51,41,31,.12);font:inherit;color:inherit;min-height:64px;cursor:pointer}
-.card .t{font-size:18px;font-weight:900;line-height:1.45;word-break:break-word}
+.card{display:block;width:100%;text-align:left;background:var(--card);border:1px solid var(--line);border-radius:var(--r-lg);padding:14px;margin:10px 0;box-shadow:var(--shadow-1);font:inherit;color:inherit;min-height:64px;cursor:pointer}
+.card .t{font-size:18px;font-weight:700;line-height:1.45;word-break:break-word}
 .card .m{font-size:16px;color:var(--sub);margin-top:4px}
-.tag{display:inline-block;font-size:15px;font-weight:800;padding:2px 10px;border-radius:999px;border:2px solid var(--ink);margin-right:6px;background:#fff}
-.tag.overdue{background:#ffc9c9}
-.tag.today{background:#ffe8a3}
-.tag.waiting,.tag.done,.tag.submitted,.tag.awaiting_recheck{background:#e7f5ff}
+.tag{display:inline-block;font-size:15px;font-weight:700;padding:2px 10px;border-radius:999px;border:1px solid var(--line2);margin-right:6px;background:#fff}
+.tag.overdue{background:var(--bad-bg);border-color:var(--bad-line);color:#a02622}
+.tag.today{background:var(--warn-bg);border-color:var(--warn-line);color:#7a4600}
+.tag.waiting,.tag.done,.tag.submitted,.tag.awaiting_recheck{background:var(--wait-bg);border-color:var(--wait-line);color:#1c4fa3}
 .tag.later{background:#fff}
-.tag.approved,.tag.checked{background:#d3f9d8}
+.tag.approved,.tag.checked{background:var(--ok-bg);border-color:var(--ok-line);color:#14603f}
 .nudge{margin-top:12px}
 .nudge .tag{margin-right:0}
 .empty{padding:28px 10px;text-align:center;color:var(--sub);font-size:17px}
 .empty.small{padding:12px 10px;font-size:16px}
-.panel{background:var(--card);border:2.5px solid var(--ink);border-radius:16px;padding:14px;margin:12px 0}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:var(--r-lg);padding:14px;margin:12px 0;box-shadow:var(--shadow-1)}
 .panel p{margin:6px 0}
-.back{background:none;border:none;font-size:17px;font-weight:800;color:var(--ink);padding:12px 0;min-height:48px;cursor:pointer;font-family:inherit}
-label{display:block;font-weight:800;margin:14px 0 6px;font-size:16px}
-input,select,textarea{width:100%;font-size:17px;padding:12px;border:2px solid var(--ink);border-radius:12px;background:#fff;color:var(--ink);font-family:inherit;min-height:52px}
+.back{background:none;border:none;font-size:17px;font-weight:700;color:var(--ink);padding:12px 0;min-height:48px;cursor:pointer;font-family:inherit}
+label{display:block;font-weight:700;margin:14px 0 6px;font-size:16px}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--focus);box-shadow:0 0 0 3px rgba(180,83,9,.18)}
+input,select,textarea{width:100%;font-size:17px;padding:12px;border:1px solid var(--line2);border-radius:12px;background:#fff;color:var(--ink);font-family:inherit;min-height:52px}
 textarea{min-height:96px;resize:vertical}
-.check{display:flex;align-items:center;gap:10px;min-height:52px;font-weight:800}
+.check{display:flex;align-items:center;gap:10px;min-height:52px;font-weight:700}
 .check input{width:28px;height:28px;min-height:0}
 .thumbs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:10px 0}
-.thumb{position:relative;border:2px solid var(--ink);border-radius:10px;overflow:hidden;aspect-ratio:1/1;background:#eee}
+.thumb{position:relative;border:1px solid var(--line2);border-radius:10px;overflow:hidden;aspect-ratio:1/1;background:#eee}
 .thumb img{width:100%;height:100%;object-fit:cover;display:block}
-.thumb button{position:absolute;top:4px;right:4px;width:40px;height:40px;border-radius:20px;border:2px solid var(--ink);background:#fff;font-size:18px;font-weight:900;cursor:pointer}
-.progress{height:14px;border:2px solid var(--ink);border-radius:8px;background:#fff;overflow:hidden;margin:10px 0}
+.thumb button{position:absolute;top:4px;right:4px;width:40px;height:40px;border-radius:20px;border:1px solid var(--line2);background:#fff;font-size:18px;font-weight:700;cursor:pointer;box-shadow:var(--shadow-1)}
+.progress{height:10px;border:0;border-radius:8px;background:var(--sunken);overflow:hidden;margin:10px 0}
 .progress i{display:block;height:100%;width:0;background:var(--ok);transition:width .2s}
 .msg{padding:10px 12px;border-radius:12px;margin:10px 0;font-weight:700;font-size:16px}
-.msg.err{background:#ffe3e3;color:#8a1c1c}
-.msg.ok{background:#d3f9d8;color:#1b5e2d}
-.msg.info{background:#fff1bd}
+.msg.err{background:var(--bad-bg);color:#8a1c1c}
+.msg.ok{background:var(--ok-bg);color:#14603f}
+.msg.info{background:var(--brand-soft)}
 /* 手机上事项文字占满一行，按钮放在下面整行，不把文字挤成一窄条 */
-.item{display:flex;flex-direction:column;gap:8px;align-items:stretch;border-top:2px dashed var(--line);padding:12px 0}
+.item{display:flex;flex-direction:column;gap:8px;align-items:stretch;border-top:1px solid var(--line);padding:12px 0}
 .item:first-child{border-top:none}
 .item .tx{min-width:0;font-size:17px;word-break:break-word}
 .item .tx.done{color:var(--sub)}
@@ -67,16 +85,16 @@ textarea{min-height:96px;resize:vertical}
 .item .donebox .tag{margin-right:0}
 .item .donebox .linkbtn{padding:8px 12px;min-height:44px;min-width:64px;font-size:15px}
 .ai{border-radius:12px;padding:10px 12px;margin:8px 0;font-weight:700}
-.ai.pass{background:#d3f9d8}.ai.doubt{background:#fff1bd}.ai.fail{background:#ffe3e3}.ai.none{background:#f1f3f5}
+.ai.pass{background:var(--ok-bg)}.ai.doubt{background:var(--warn-bg)}.ai.fail{background:var(--bad-bg)}.ai.none{background:var(--sunken)}
 .photos{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:8px 0}
-.photos a{display:block;border:2px solid var(--ink);border-radius:10px;overflow:hidden}
+.photos a{display:block;border:1px solid var(--line2);border-radius:10px;overflow:hidden}
 .photos img{width:100%;display:block}
 .viewer{position:fixed;inset:0;z-index:50;background:rgba(20,16,12,.92);display:flex;align-items:center;justify-content:center;padding:56px 8px 64px}
 .viewer img{max-width:100%;max-height:100%;object-fit:contain;border-radius:8px;background:#fff}
-.viewer button{position:absolute;min-width:48px;min-height:48px;border:2px solid #fff;border-radius:24px;background:rgba(0,0,0,.4);color:#fff;font-size:20px;font-weight:900;cursor:pointer;font-family:inherit}
+.viewer button{position:absolute;min-width:48px;min-height:48px;border:2px solid #fff;border-radius:24px;background:rgba(0,0,0,.4);color:#fff;font-size:20px;font-weight:700;cursor:pointer;font-family:inherit}
 .viewer .vx{top:8px;right:8px}
 .viewer .vp{left:8px;bottom:8px}.viewer .vn{right:8px;bottom:8px}
-.viewer .vc{position:absolute;bottom:20px;left:0;right:0;text-align:center;color:#fff;font-weight:800;pointer-events:none}
+.viewer .vc{position:absolute;bottom:20px;left:0;right:0;text-align:center;color:#fff;font-weight:700;pointer-events:none}
 .foot{display:flex;gap:10px;margin:26px 0 10px}
 .foot .btn{font-size:16px;min-height:48px;font-weight:700}
 .foot-links{text-align:center;margin:18px 0 6px}
@@ -84,6 +102,10 @@ textarea{min-height:96px;resize:vertical}
 .hidden{display:none!important}
 .spin{display:inline-block;width:18px;height:18px;border:3px solid var(--line);border-top-color:var(--ink);border-radius:50%;animation:sp 1s linear infinite}
 @keyframes sp{to{transform:rotate(360deg)}}
+/* 线性图标：data-ic="名字"，图形由 staff.js 的 ICONS 生成 */
+[data-ic]::before{content:"";width:1.15em;height:1.15em;flex:none;display:inline-block;vertical-align:-.18em;background:currentColor;-webkit-mask:var(--ic-url) center/contain no-repeat;mask:var(--ic-url) center/contain no-repeat}
+[data-ic]:not(.btn)::before{margin-right:.4em}
+:is(h2,.t)[data-ic]::before{color:#8a6a1c}
 </style>
 </head>
 <body>

@@ -403,7 +403,9 @@ class PublicContentTaskGuideTests(unittest.TestCase):
 
         def list_for(role):
             with (
-                patch.object(main.auth, "current", return_value={"role": role}),
+                # 成员要有板块授权才看得到专家(没授权的行业整组不出现)
+                patch.object(main.auth, "current", return_value={
+                    "role": role, "modules": [d["key"] for d in depts]}),
                 patch.object(main.auth, "tenant_id", return_value=-1 if role == "tour" else 2),
                 patch.object(main.auth, "dept_visible", return_value=True),
                 patch.object(main.db, "q", side_effect=query_without_task_rows),

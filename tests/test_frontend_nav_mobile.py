@@ -132,13 +132,9 @@ class FrontendNavMobileTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertLessEqual(widths["doc"], 390)
             self.assertLessEqual(widths["nav"], widths["navClient"])
-            # 反馈浮钮必须在 Tab 栏上方,不能盖住入口
-            overlap = await page.evaluate(
-                """() => { const fb = document.querySelector('#fb-btn').getBoundingClientRect();
-                  const bar = document.querySelector('#tabbar').getBoundingClientRect();
-                  return fb.bottom <= bar.top; }"""
-            )
-            self.assertTrue(overlap)
+            # 手机上不放浮动反馈钮(会压住列表右侧的按钮和 Tab 栏)，入口在「我的 → 意见反馈」
+            self.assertFalse(await page.locator("#fb-btn").is_visible())
+            self.assertEqual("function", await page.evaluate("typeof fbOpen"))
             self._assert_no_browser_errors(errors)
             await browser.close()
 
@@ -252,7 +248,7 @@ class FrontendNavMobileTests(unittest.IsolatedAsyncioTestCase):
             # 页面同时加载了真实的 onboarding.js：首位是上手卡(替身 ob-hook 或真实 ph-onb)
             self.assertIn(info["first"], {"ob-hook", "ph-onb"})
             self.assertEqual(
-                ["等您拍板:国庆新品推文", "失败了:秋季上新", "2 条门店整改等您审核", "巡店报告出来了"],
+                ["等您拍板：国庆新品推文", "失败了：秋季上新", "2 条门店整改等您审核", "巡店报告出来了"],
                 info["rows"],
             )
             self.assertEqual(["0", "4", "1"], info["stats"])
@@ -613,10 +609,12 @@ class FrontendNavMobileTests(unittest.IsolatedAsyncioTestCase):
             "/api/boss/dashboard/summary": summary,
         }
         async with async_playwright() as playwright:
-            browser, page, errors = await self._open(playwright, hash_="#/boss", api_overrides=overrides)
+            browser, page, errors = await self._open(playwright, hash_="#/mine", api_overrides=overrides)
             page.on("request", lambda r: summary_days.append(r.url.split("days=")[1].split("&")[0])
                     if "/api/boss/dashboard/summary" in r.url else None)
-            await page.evaluate("render()")
+            # 老板看板已并进数据驾驶舱、不再有入口(#/boss 会跳 #/cockpit)；视图函数还保留，这里直接调用它
+            await page.wait_for_selector("#main .hubhead")
+            await page.evaluate("void bossDashboardView()")
             await page.wait_for_selector("[data-boss-idle]")
             info = await page.evaluate(
                 """() => ({

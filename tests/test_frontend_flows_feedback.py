@@ -257,7 +257,7 @@ class FrontendFlowsFeedbackTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual({"disabled": True, "text": "再选 1 位专家", "note": "本次 1 点 · 余额 100 点"},
                              await state())
             await page.locator('.mt-chip[data-i="2002"]').click()
-            self.assertEqual({"disabled": False, "text": "🎯 开会并收敛", "note": "本次 2 点 · 余额 100 点"},
+            self.assertEqual({"disabled": False, "text": "开会并收敛", "note": "本次 2 点 · 余额 100 点"},
                              await state())
             self._assert_no_browser_errors(errors)
             await browser.close()
@@ -268,9 +268,9 @@ class FrontendFlowsFeedbackTests(unittest.IsolatedAsyncioTestCase):
             result = await page.evaluate(
                 """() => {
                   const box = document.createElement('div');
-                  box.innerHTML = costButton({label:'🔥 扫描', onclick:'', cost:1, id:'c1'})
-                    + costButton({label:'🎯 开会', onclick:'', cost:0, id:'c2', disabled:true, disabledLabel:'先选 2 位专家'})
-                    + costButton({label:'🎯 开会', onclick:'', cost:3, id:'c3', btnClass:'btn sm pri'});
+                  box.innerHTML = costButton({label:'扫描', onclick:'', cost:1, id:'c1'})
+                    + costButton({label:'开会', onclick:'', cost:0, id:'c2', disabled:true, disabledLabel:'先选 2 位专家'})
+                    + costButton({label:'开会', onclick:'', cost:3, id:'c3', btnClass:'btn sm pri'});
                   document.querySelector('#main').appendChild(box);
                   const c2 = document.querySelector('#c2');
                   const before = c2.textContent;
@@ -283,8 +283,8 @@ class FrontendFlowsFeedbackTests(unittest.IsolatedAsyncioTestCase):
                   };
                 }"""
             )
-            self.assertEqual(["🔥 扫描", "本次 1 点 · 余额 1 点"], result["c1"])
-            self.assertEqual(["先选 2 位专家", "🎯 开会", False], result["c2"])
+            self.assertEqual(["扫描", "本次 1 点 · 余额 1 点"], result["c1"])
+            self.assertEqual(["先选 2 位专家", "开会", False], result["c2"])
             self.assertEqual(["点数不够，去充值", "btn sm pri", "1"], result["c3"])
             self._assert_no_browser_errors(errors)
             await browser.close()
@@ -298,7 +298,7 @@ class FrontendFlowsFeedbackTests(unittest.IsolatedAsyncioTestCase):
                 extra={"/api/tools/meta": tools_meta, "/api/tools/jobs": {"items": [], "total": 0}})
             await page.wait_for_selector("#hot-ch")
             info = await page.evaluate(
-                """() => { const b = document.querySelector('[data-label="🔥 扫描今日热点"]');
+                """() => { const b = document.querySelector('[data-label="扫描今日热点"]');
                   return {text: b.textContent, note: b.parentElement.querySelector('.cost-note').textContent}; }""")
             self.assertEqual("点数不够，去充值", info["text"])
             self.assertEqual("本次 1 点 · 余额 0 点", info["note"])
@@ -573,7 +573,7 @@ class FrontendFlowsFeedbackTests(unittest.IsolatedAsyncioTestCase):
             await browser.close()
 
     def test_team_and_tenant_forms_submit_on_enter(self):
-        for call, count in (('enterSubmit("tmMyPw()")', 4), ('enterSubmit("tmUserCreate()")', 2),
+        for call, count in (('enterSubmit("tmMyPw()")', 2), ('enterSubmit("tmUserCreate()")', 3),
                             ('enterSubmit("tmTenantCreate()")', 3)):
             self.assertEqual(count, APP_JS.count(call), call)
 

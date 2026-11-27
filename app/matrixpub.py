@@ -86,10 +86,10 @@ def ensure_enabled(tid: int = None) -> None:
 def add_account(tid: int, platform: str, name: str, cookie: str) -> dict:
     ensure_enabled(tid)
     if platform not in PLATFORMS:
-        raise ValueError("暂只支持小红书/抖音(公众号在上面单独配)")
+        raise ValueError("暂只支持小红书/抖音（公众号在上面单独配）")
     cookie = (cookie or "").strip().replace("\n", " ")
     if len(cookie) < 40:
-        raise ValueError("Cookie 太短,不像有效登录态——按向导重新复制完整 Cookie")
+        raise ValueError("Cookie 太短，不像有效登录态——按向导重新复制完整 Cookie")
     accs = accounts(tid)
     acc = {"id": uuid.uuid4().hex[:8], "platform": platform,
            "name": (name or PLATFORMS[platform]["name"])[:20],
@@ -157,9 +157,9 @@ async def check_account(tid: int, acc_id: str) -> dict:
     acc["checked_at"] = time.time()
     await db.arun(_save, tid, accs)
     if not ok:
-        raise ValueError("登录态无效或已过期:重新登录该平台后,按向导重新复制 Cookie 绑定")
+        raise ValueError("登录态无效或已过期：重新登录该平台后，按向导重新复制 Cookie 绑定")
     return {"ok": True, "nickname": nickname,
-            "note": f"绑定成功,账号「{nickname}」登录态有效"}
+            "note": f"绑定成功，账号「{nickname}」登录态有效"}
 
 
 # ---------------- 发布队列 ----------------
@@ -168,12 +168,12 @@ def enqueue(tid: int, platform: str, acc_id: str, payload: dict) -> int:
     # 入队即校验:平台非法或与账号绑定的平台不一致时,发布协程会在 PLATFORMS[...]
     # 抛 KeyError,任务永久卡在 running。这里提前拒掉,报错也更像人话。
     if platform not in PLATFORMS:
-        raise ValueError("暂只支持小红书/抖音(公众号在发布渠道页单独配)")
+        raise ValueError("暂只支持小红书/抖音（公众号在发布渠道页单独配）")
     acc = next((a for a in accounts(tid) if a["id"] == acc_id), None)
     if not acc:
         raise ValueError("先绑定该平台账号")
     if acc.get("platform") != platform:
-        raise ValueError("所选账号不属于该平台,请重新选择")
+        raise ValueError("所选账号不属于该平台，请重新选择")
     return db.insert("pub_task", {
         "tenant_id": tid,
         "platform": platform,
@@ -229,18 +229,18 @@ async def _publish_xhs(pg, pid: int, payload: dict):
                   wait_until="domcontentloaded", timeout=60000)
     await pg.wait_for_timeout(4000)
     if "login" in pg.url or await pg.locator("text=扫码登录").count():
-        raise ValueError("登录态失效:重新绑定 Cookie")
-    await db.arun(_log, pid, "已进入发布页,切换到图文…")
+        raise ValueError("登录态失效：重新绑定 Cookie")
+    await db.arun(_log, pid, "已进入发布页，切换到图文…")
     tab = pg.locator("text=上传图文")
     if await tab.count():
         await tab.first.click()
         await pg.wait_for_timeout(1500)
     imgs = [p for p in (payload.get("images") or []) if os.path.isfile(p)][:9]
     if not imgs:
-        raise ValueError("没有可上传的图片(需要至少1张本地图)")
+        raise ValueError("没有可上传的图片（需要至少1张本地图）")
     inp = pg.locator("input[type=file]")
     await inp.first.set_input_files(imgs)
-    await db.arun(_log, pid, f"已上传 {len(imgs)} 张图,等待处理…")
+    await db.arun(_log, pid, f"已上传 {len(imgs)} 张图，等待处理…")
     await pg.wait_for_timeout(6000)
     title_box = pg.locator("input[placeholder*='标题'], input[placeholder*='填写标题']")
     if await title_box.count():
@@ -252,14 +252,14 @@ async def _publish_xhs(pg, pid: int, payload: dict):
     await db.arun(_log, pid, "标题正文已填充，准备提交…")
     btn = pg.locator("button:has-text('发布')")
     if not await btn.count():
-        raise ValueError("没找到发布按钮(平台可能改版)")
+        raise ValueError("没找到发布按钮（平台可能改版）")
     await db.arun(_mark_submission_uncertain, pid)
     await db.arun(_log, pid, "提交发布…")
     await btn.first.click()
     await pg.wait_for_timeout(6000)
     if await pg.locator("text=发布成功").count() or "success" in pg.url:
         return "发布成功"
-    return "已提交(平台未明确回执,去后台确认)"
+    return "已提交（平台未明确回执，去后台确认）"
 
 
 async def _publish_douyin(pg, pid: int, payload: dict):
@@ -268,13 +268,13 @@ async def _publish_douyin(pg, pid: int, payload: dict):
                   wait_until="domcontentloaded", timeout=60000)
     await pg.wait_for_timeout(4000)
     if "login" in pg.url or await pg.locator("text=扫码登录").count():
-        raise ValueError("登录态失效:重新绑定 Cookie")
+        raise ValueError("登录态失效：重新绑定 Cookie")
     video = payload.get("video")
     if not (video and os.path.isfile(video)):
         raise ValueError("没有可上传的视频文件")
     inp = pg.locator("input[type=file]")
     await inp.first.set_input_files(video)
-    await db.arun(_log, pid, "视频上传中(等转码)…")
+    await db.arun(_log, pid, "视频上传中（等转码）…")
     await pg.wait_for_timeout(20000)
     cap = pg.locator("div[contenteditable='true'], input[placeholder*='标题']")
     if await cap.count():
@@ -282,31 +282,31 @@ async def _publish_douyin(pg, pid: int, payload: dict):
         await pg.keyboard.insert_text((payload.get("title") or "")[:55])
     btn = pg.locator("button:has-text('发布')")
     if not await btn.count():
-        raise ValueError("没找到发布按钮(平台可能改版)")
+        raise ValueError("没找到发布按钮（平台可能改版）")
     await db.arun(_mark_submission_uncertain, pid)
     await db.arun(_log, pid, "提交发布…")
     await btn.first.click()
     await pg.wait_for_timeout(8000)
-    return "已提交发布(去抖音后台确认状态)"
+    return "已提交发布（去抖音后台确认状态）"
 
 
 # 失败原因人话化:kind -> (给老板看的原因, 下一步怎么办)。浏览器自动化根治不了平台改版/风控,
 # 加固思路是「失败必有出路」:每种失败都指向能立刻走通的动作(重绑Cookie / 半自动发布 / 缓一缓)。
 FAIL_GUIDE = {
-    "cookie": ("平台登录态已失效(Cookie 过期)",
-               "重新登录该平台 → 按向导重新复制 Cookie → 点「验证」通过后再发;赶时间就用「🪄 半自动发布」"),
-    "layout": ("平台后台改版,自动流程没找到对应按钮(浏览器自动化的行业通病)",
-               "先用「🪄 半自动发布」四步照点发出去,我们会尽快适配新版"),
-    "asset": ("素材不齐:该平台此流程需要本地图片/视频",
-              "小红书需至少1张配图、抖音需成片视频;补齐素材再发,或用「🪄 半自动发布」"),
+    "cookie": ("平台登录态已失效（Cookie 过期）",
+               "重新登录该平台 → 按向导重新复制 Cookie → 点「验证」通过后再发；赶时间就用「🪄 半自动发布」"),
+    "layout": ("平台后台改版，自动流程没找到对应按钮（浏览器自动化的行业通病）",
+               "先用「🪄 半自动发布」四步照点发出去，我们会尽快适配新版"),
+    "asset": ("素材不齐：该平台此流程需要本地图片/视频",
+              "小红书需至少1张配图、抖音需成片视频；补齐素材再发，或用「🪄 半自动发布」"),
     "net": ("网络超时或平台响应太慢",
-            "稍等几分钟点「🔁 重试」;还不行就用「🪄 半自动发布」"),
-    "risk": ("疑似触发平台风控(操作频繁或环境异常)",
-             "隔几小时再试,建议每账号每天 ≤5 条;这条稳妥起见用「🪄 半自动发布」发"),
-    "disabled": ("平台已关闭自动代发(代管登录态有封号和泄露风险)",
-                 "用「🪄 半自动发布」:一键复制标题正文、下载素材包、打开平台发布页自己点发布"),
+            "稍等几分钟点「🔁 重试」；还不行就用「🪄 半自动发布」"),
+    "risk": ("疑似触发平台风控（操作频繁或环境异常）",
+             "隔几小时再试，建议每账号每天 ≤5 条；这条稳妥起见用「🪄 半自动发布」发"),
+    "disabled": ("平台已关闭自动代发（代管登录态有封号和泄露风险）",
+                 "用「🪄 半自动发布」：一键复制标题正文、下载素材包、打开平台发布页自己点发布"),
     "unknown": ("自动发布没走通",
-                "点开失败截图看现场;这条可直接用「🪄 半自动发布」四步发出去"),
+                "点开失败截图看现场；这条可直接用「🪄 半自动发布」四步发出去"),
 }
 
 
@@ -327,13 +327,13 @@ def _classify(e: Exception) -> str:
 
 def resume_pending(broadcast=None):
     """服务重启后:排队/进行中的发布没法断点续接(浏览器现场没了),标失败并给出路."""
-    why = "服务重启,这条自动发布被中断"
+    why = "服务重启，这条自动发布被中断"
     for r in db.q(
             "SELECT id,submission_state FROM pub_task "
             "WHERE status IN ('queued','running')"):
         safe = r.get("submission_state") == "not_submitted"
         fix = (
-            "点「🔁 免费重试」重新排队;或用「🪄 半自动发布」"
+            "点「🔁 免费重试」重新排队；或用「🪄 半自动发布」"
             if safe
             else "平台可能已收到提交，请先到平台后台核对；不要直接重发"
         )
@@ -405,17 +405,17 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
     shot_url = ""
     try:
         if not acc:
-            raise ValueError("绑定账号已被删除:重新绑定后再发")
+            raise ValueError("绑定账号已被删除：重新绑定后再发")
         # Cookie 预检:起浏览器(慢且吃内存)之前先花2秒探登录态,死 Cookie 快速失败
         alive, _ = await _probe_login(acc)
         if alive is False:
             acc["status"] = "expired"
             await db.arun(_save, tid, accs)
-            raise ValueError("登录态失效:重新绑定 Cookie")
+            raise ValueError("登录态失效：重新绑定 Cookie")
         from playwright.async_api import async_playwright
         domain = ".xiaohongshu.com" if row["platform"] == "xhs" else ".douyin.com"
         await db.arun(
-            _log, pid, f"启动无头浏览器,载入「{acc['name']}」登录态…"
+            _log, pid, f"启动无头浏览器，载入「{acc['name']}」登录态…"
         )
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(args=["--no-sandbox"])
@@ -444,7 +444,7 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
                 except Exception:
                     pass
                 else:
-                    await db.arun(_log, pid, f"失败现场截图:{shot_url}")
+                    await db.arun(_log, pid, f"失败现场截图：{shot_url}")
                 raise
             finally:
                 await browser.close()
@@ -502,7 +502,7 @@ async def _run_task_inner(pid: int, row: dict, broadcast=None):
             )
         else:
             await db.arun(
-                _log, pid, "已自动登记发布台账,T+1/3/7 审查官自动复盘"
+                _log, pid, "已自动登记发布台账，T+1/3/7 审查官自动复盘"
             )
         await asyncio.to_thread(
             notify.push,

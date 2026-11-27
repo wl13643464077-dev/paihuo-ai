@@ -77,19 +77,33 @@ class TeamCreateMobileTests(unittest.IsolatedAsyncioTestCase):
             # 已分门店的员工在团队页也叫「店员」,和派活页一致
             row = page.locator(".topic", has_text="xiaoli")
             self.assertIn("店员", await row.inner_text())
-            # 店员行只露三个常用按钮，直接写出负责哪家店；其余收进「⋯ 更多」
+            # 手机上店员行只露 1 个最常用按钮「负责门店」，直接写出负责哪家店；其余都收进「⋯ 更多」
             self.assertIn("负责门店：人民路店", await row.inner_text())
             visible = [b.strip() for b in await row.locator("button:visible").all_inner_texts()]
-            self.assertEqual(["🏪 负责门店", "🔑 重置密码", "⏸ 停用"], visible)
+            self.assertEqual(["负责门店"], visible)
             self.assertTrue(await row.locator(".tm-row-more summary", has_text="⋯ 更多").is_visible())
-            self.assertFalse(await row.get_by_role("button", name="🧩 行业/板块").is_visible())
-            await row.locator(".tm-row-more summary").click()
-            self.assertTrue(await row.get_by_role("button", name="🧩 行业/板块").is_visible())
-            self.assertTrue(await row.get_by_role("button", name="🤝 分配 AI 专家").is_visible())
-            await row.locator(".tm-row-more summary").click()
+            self.assertFalse(await row.get_by_role("button", name="行业/板块").is_visible())
             row_height = await row.evaluate("e=>e.getBoundingClientRect().height")
-            self.assertLess(row_height, 160)   # 以前 7 个按钮要折 3 行以上
-            await page.get_by_role("button", name="➕ 新建账号").click()
+            self.assertLess(row_height, 130)   # 以前 7 个按钮要折 3 行以上
+            await row.locator(".tm-row-more summary").click()
+            in_more = [b.strip() for b in await row.locator(".tm-row-more-box button:visible").all_inner_texts()]
+            self.assertEqual(["重置密码", "停用", "改姓名", "行业/板块", "职级", "分配 AI 专家", "删除账号"], in_more)
+            self.assertTrue(await row.get_by_role("button", name="行业/板块").is_visible())
+            self.assertTrue(await row.get_by_role("button", name="分配 AI 专家").is_visible())
+            # 点菜单外面就收起
+            await page.locator("h2", has_text="成员").click()
+            self.assertFalse(await row.get_by_role("button", name="行业/板块").is_visible())
+            # 桌面宽度：露 3 个常用按钮，「更多」里不重复这 3 个
+            await page.set_viewport_size({"width": 1200, "height": 812})
+            visible = [b.strip() for b in await row.locator("button:visible").all_inner_texts()]
+            self.assertEqual(["负责门店", "重置密码", "停用"], visible)
+            await row.locator(".tm-row-more summary").click()
+            in_more = [b.strip() for b in await row.locator(".tm-row-more-box button:visible").all_inner_texts()]
+            self.assertEqual(["改姓名", "行业/板块", "职级", "分配 AI 专家", "删除账号"], in_more)
+            await page.keyboard.press("Escape")
+            self.assertFalse(await row.get_by_role("button", name="行业/板块").is_visible())
+            await page.set_viewport_size({"width": 375, "height": 812})
+            await page.get_by_role("button", name="新建账号").click()
             await page.wait_for_selector("#tm-create")
             kinds = await page.locator("#tm-create .tm-kind b").all_inner_texts()
             self.assertEqual(["🧑‍🍳 店员", "🏪 店长", "💼 办公室同事"], kinds)
@@ -145,7 +159,7 @@ class TeamCreateMobileTests(unittest.IsolatedAsyncioTestCase):
                 playwright, "#/team", {"/api/team": one_store},
                 post={"/api/team/users": {"id": 32, "username": "laozhang",
                                           "initial_password": "k7mn2pqr8stv3wxy", "branch_ids": [3]}})
-            await page.get_by_role("button", name="➕ 新建账号").click()
+            await page.get_by_role("button", name="新建账号").click()
             await page.wait_for_selector("#tm-create")
             self.assertTrue(await page.locator('input[name="tm-store"]').is_checked())
             await page.locator('.tm-kind[data-k="manager"]').click()
@@ -157,7 +171,7 @@ class TeamCreateMobileTests(unittest.IsolatedAsyncioTestCase):
             await page.wait_for_selector("#tm-sendcard")
             self.assertEqual("manager", self.posts[0][1]["job_title"])
             await page.get_by_role("button", name="我发好了").click()
-            await page.get_by_role("button", name="➕ 新建账号").click()
+            await page.get_by_role("button", name="新建账号").click()
             await page.wait_for_selector("#tm-create")
             checked = await page.locator("#tm-create .tm-kind[aria-checked='true']").get_attribute("data-k")
             self.assertEqual("staff", checked)
@@ -168,7 +182,7 @@ class TeamCreateMobileTests(unittest.IsolatedAsyncioTestCase):
             # 取消后再开也一样回到店员
             await page.locator('.tm-kind[data-k="office"]').click()
             await page.locator("#tm-create").get_by_role("button", name="取消", exact=True).click()
-            await page.get_by_role("button", name="➕ 新建账号").click()
+            await page.get_by_role("button", name="新建账号").click()
             self.assertEqual("staff", await page.locator(
                 "#tm-create .tm-kind[aria-checked='true']").get_attribute("data-k"))
             self.assertFalse(await page.locator("#tm-office-part").is_visible())
@@ -177,7 +191,7 @@ class TeamCreateMobileTests(unittest.IsolatedAsyncioTestCase):
         # 两家店:不替老板默认勾任何一家
         async with async_playwright() as playwright:
             browser, page, errors = await self._open(playwright, "#/team", {"/api/team": TEAM})
-            await page.get_by_role("button", name="➕ 新建账号").click()
+            await page.get_by_role("button", name="新建账号").click()
             await page.wait_for_selector("#tm-create")
             self.assertEqual(0, await page.locator('input[name="tm-store"]:checked').count())
             self._assert_no_browser_errors(errors)
@@ -189,19 +203,22 @@ class TeamCreateMobileTests(unittest.IsolatedAsyncioTestCase):
                 playwright, "#/team", {"/api/team": TEAM},
                 post={"/api/team/users/30/branches": {"user_id": 30, "branch_ids": [3, 4]}})
             await page.wait_for_selector("text=新建账号")
-            await page.locator(".topic", has_text="xiaoli").get_by_role("button", name="🏪 负责门店").click()
+            await page.locator(".topic", has_text="xiaoli").get_by_role("button", name="负责门店").click()
             await page.wait_for_selector('input[name="tm-branch"]')
             self.assertEqual(0, await page.locator("select[multiple]").count())
             self.assertTrue(await page.locator('input[name="tm-branch"][value="3"]').is_checked())
             await page.locator(".tm-check", has_text="中山路店").click()
-            await page.get_by_role("button", name="💾 保存门店").click()
+            await page.get_by_role("button", name="保存门店").click()
             for _ in range(50):
                 if self.posts:
                     break
                 await page.wait_for_timeout(50)
             self.assertEqual(("/api/team/users/30/branches", {"branch_ids": [3, 4], "open_industries": True}),
                              self.posts[0])
-            self.assertIn("🔑 重置密码", await page.locator(".topic", has_text="xiaoli").inner_text())
+            # 保存后成员行重新画出来(手机上只露「负责门店」，重置密码在「更多」里)
+            row = page.locator(".topic", has_text="xiaoli")
+            self.assertIn("负责门店", await row.inner_text())
+            self.assertEqual(1, await row.locator(".tm-row-more-box button", has_text="重置密码").count())
             self.assertIn("了解更多", await page.locator("#main").inner_text())
             self._assert_no_browser_errors(errors)
             await browser.close()
@@ -263,8 +280,8 @@ class TeamCreateMobileTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(tops[0], tops[1])
             self.assertEqual(0, await page.locator(".sa-bar input[type=checkbox]").count())
             self.assertIn("AI 先看照片", await page.locator("h3", has_text="等您审核").inner_text())
-            await page.get_by_role("button", name="✍️ 手动派一件").click()
-            await page.get_by_role("button", name="📤 确认派出去(1 件)").click()
+            await page.get_by_role("button", name="手动派一件").click()
+            await page.get_by_role("button", name="确认派出去（1 件）").click()
             draft = page.locator("[data-sa-draft='0']")
             await page.wait_for_function("document.querySelectorAll('[data-sa-draft] .field-err').length===2")
             text = await draft.inner_text()
@@ -286,7 +303,7 @@ class TeamCreateMobileTests(unittest.IsolatedAsyncioTestCase):
             hint = await page.locator("#sa-nostaff").inner_text()
             self.assertIn("还没有店长或店员账号", hint)
             self.assertEqual("#/team", await page.locator("#sa-nostaff a").get_attribute("href"))
-            await page.get_by_role("button", name="✍️ 手动派一件").click()
+            await page.get_by_role("button", name="手动派一件").click()
             self.assertEqual("6", await page.locator("[data-sa-draft='0'] select").first.input_value())
             # 门店信息晚到的草稿(branch_id 为空)在重画时也会补上
             await page.evaluate("PH_STAFF_ADMIN._set(0,'branch_id','',true)")

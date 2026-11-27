@@ -15,7 +15,7 @@ import json
 import time
 from typing import Any, Callable, Mapping
 
-from . import db, departments, storerank, timeutil
+from . import db, departments, people, storerank, timeutil
 
 PERIODS = (7, 30, 90)
 DEFAULT_DAYS = 7
@@ -27,6 +27,10 @@ IDLE_DAYS = 7
 DONE = ("done", "completed", "success", "succeed")
 WAITING = ("awaiting_review", "gate_blocked", "awaiting_execution", "paused", "blocked")
 FAILED = ("failed", "error")
+# AI 任务「还在跑」的状态；超过 STALE_AFTER_S 没动静的要提醒老板(原老板看板的口径)
+ACTIVE = ("queued", "running", "brainstorm", "validate", "execute", "executing",
+          "pending_charge", "processing", "submitting", "submitted")
+STALE_AFTER_S = 24 * 60 * 60
 ROLE_LABELS = {"owner": "老板", "root": "老板", "director": "总监",
                "manager": "店长", "staff": "店员"}
 SEVERITY_LABELS = {"critical": "严重", "high": "高", "medium": "中", "low": "低"}
@@ -164,6 +168,49 @@ def _inspection_stats(tid: int, s: float, e: float) -> dict[str, Any]:
     return {"visits": n, "avg_score": round(float(avg), 1) if avg is not None and n else None}
 
 
+def _inspection_board(tid: int, period: Mapping[str, Any], now: float) -> dict[str, Any]:
+    """「巡店与整改」六格(原老板看板的巡店执行)。
+
+    visits / avg_score 是本期的，直接用上面 _inspection_stats 的结果(和「巡店均分」卡同一个数)；
+    其余四项是到现在还没处理的积压，不分时间段，口径照搬老板看板：
+    已关闭的不算、停用门店的不算、标成误报的问题不算、等老板复查的整改不算逾期。
+    has_records=False 表示这家企业从来没有巡店记录，前端收成一行引导。
+    """
+    from . import bossdashboard as bd
+    closed = _in(sorted(bd.CLOSED_ISSUE_STATUSES))
+    critical = _in(sorted(bd.CRITICAL_SEVERITIES))
+    not_overdue = _in(sorted(bd.CLOSED_ISSUE_STATUSES | bd.AWAITING_REVIEW_STATUSES))
+    active_branch = ("EXISTS(SELECT 1 FROM store_branch sb WHERE sb.id=v.branch_id "
+                     "AND sb.tenant_id=v.tenant_id AND sb.active=1)")
+    has_records = bool(db.one("SELECT 1 AS x FROM inspection_visit WHERE tenant_id=? "
+                              "AND deleted_at IS NULL LIMIT 1", (tid,)))
+    issue = db.one(
+        "SELECT COUNT(*) AS open_issues, "
+        f"COALESCE(SUM(CASE WHEN LOWER(i.severity) IN ({critical}) THEN 1 ELSE 0 END),0) AS critical "
+        "FROM inspection_issue i JOIN inspection_visit v ON v.id=i.visit_id "
+        f"WHERE v.tenant_id=? AND v.deleted_at IS NULL AND LOWER(i.status) NOT IN ({closed}) "
+        f"AND {active_branch} AND NOT EXISTS(SELECT 1 FROM inspection_action fa "
+        "WHERE fa.issue_id=i.id AND fa.tenant_id=v.tenant_id AND fa.close_reason='false_positive')",
+        (tid,)) or {}
+    action = db.one(
+        "SELECT COUNT(*) AS open_actions, "
+        f"COALESCE(SUM(CASE WHEN LOWER(a.status) NOT IN ({not_overdue}) AND a.due_at IS NOT NULL "
+        "AND a.due_at<? THEN 1 ELSE 0 END),0) AS overdue "
+        "FROM inspection_action a JOIN inspection_issue i ON i.id=a.issue_id "
+        "JOIN inspection_visit v ON v.id=i.visit_id "
+        f"WHERE v.tenant_id=? AND v.deleted_at IS NULL AND LOWER(a.status) NOT IN ({closed}) "
+        f"AND a.closed_at IS NULL AND {active_branch}",
+        (now, tid)) or {}
+    return {
+        "has_records": has_records,
+        "visits": int(period.get("visits") or 0), "avg_score": period.get("avg_score"),
+        "open_issues": int(issue.get("open_issues") or 0),
+        "critical_issues": int(issue.get("critical") or 0),
+        "open_actions": int(action.get("open_actions") or 0),
+        "overdue_actions": int(action.get("overdue") or 0),
+    }
+
+
 def _points_spent(tid: int, s: float, e: float) -> float:
     spent = _f("SELECT COALESCE(-SUM(delta),0) FROM billing_log WHERE tenant_id=? AND delta<0 "
                "AND created_at>=? AND created_at<?", (tid, s, e))
@@ -245,6 +292,17 @@ def _todo(tid: int, now: float, branches: dict[int, str], users: dict[int, dict]
                       "label": "AI 专家等您确认", "title": _brief_title(r["brief_json"]) or f"任务 #{r['id']}",
                       "branch_id": None, "branch": "", "who": r["employee_name_snapshot"] or "AI 专家",
                       "since": r["updated_at"], "route": f"#/tasks/{r['id']}", "dispatchable": False})
+    # 原老板看板「先处理清单」里的一项：AI 任务跑了一天还没动静，多半卡住了
+    for r in db.q(f"SELECT id,brief_json,employee_name_snapshot,updated_at,created_at FROM task "
+                  f"WHERE tenant_id=? AND deleted_at IS NULL AND LOWER(status) IN ({_in(ACTIVE)}) "
+                  "AND COALESCE(updated_at,created_at,0)<? ORDER BY updated_at LIMIT 20",
+                  (tid, now - STALE_AFTER_S)):
+        items.append({"key": f"task_stale:{r['id']}", "type": "stale", "level": "mid",
+                      "label": "AI 任务超过 24 小时还在跑",
+                      "title": _brief_title(r["brief_json"]) or f"任务 #{r['id']}",
+                      "branch_id": None, "branch": "", "who": r["employee_name_snapshot"] or "AI 专家",
+                      "since": r["updated_at"] or r["created_at"], "route": f"#/tasks/{r['id']}",
+                      "dispatchable": False})
     rank = {"high": 0, "mid": 1, "normal": 2}
     items.sort(key=lambda x: (rank.get(x["level"], 3), float(x["since"] or 0)))
     return items
@@ -259,12 +317,13 @@ def _users(tid: int) -> dict[int, dict]:
     for r in db.q("SELECT user_id,branch_id FROM user_branch WHERE tenant_id=?", (tid,)):
         if int(r["branch_id"]) in branch_names:
             bind.setdefault(int(r["user_id"]), []).append(branch_names[int(r["branch_id"])])
-    for r in db.q("SELECT id,username,role,job_title,enabled,created_at FROM users "
+    for r in db.q("SELECT id,username,display_name,role,job_title,enabled,created_at FROM users "
                   "WHERE tenant_id=? ORDER BY id", (tid,)):
         role = str(r.get("role") or "")
         level = role if role in ("owner", "root") else str(r.get("job_title") or "staff")
         out[int(r["id"])] = {
-            "id": int(r["id"]), "name": str(r.get("username") or ""),
+            "id": int(r["id"]), "name": people.display_name(r),
+            "username": str(r.get("username") or ""),
             "role": level, "role_label": ROLE_LABELS.get(level, "店员"),
             "enabled": int(r.get("enabled") or 0) == 1,
             "branches": bind.get(int(r["id"]), []),
@@ -335,13 +394,14 @@ def _people(tid: int, s: float, e: float, users: dict[int, dict], now: float) ->
 
 # ---------------- 其他块 ----------------
 def _trend(tid: int, days: int, now: float) -> list[dict]:
-    """按自然日（北京时间）：AI 交付、店员交差、清单完成。"""
+    """按自然日（北京时间）：AI 交付、店员交差、清单完成、完成的巡店次数。"""
     day_end = timeutil.cn_day_start_ts(now) + 86400
     start = day_end - days * 86400
     buckets = []
     for i in range(days):
         s = start + i * 86400
-        buckets.append({"day": timeutil.today_cn(s), "s": s, "ai": 0, "staff": 0, "checklist": 0})
+        buckets.append({"day": timeutil.today_cn(s), "s": s, "ai": 0, "staff": 0, "checklist": 0,
+                        "inspection": 0})
 
     def put(ts_list, key):
         for t in ts_list:
@@ -361,22 +421,78 @@ def _trend(tid: int, days: int, now: float) -> list[dict]:
                               "AND deleted_at IS NULL AND submitted_at>=?", (tid, start))], "staff")
     put([r["t"] for r in db.q("SELECT completed_at AS t FROM checklist_run WHERE tenant_id=? "
                               "AND status='done' AND completed_at>=?", (tid, start))], "checklist")
+    put([r["t"] for r in db.q("SELECT completed_at AS t FROM inspection_visit WHERE tenant_id=? "
+                              "AND deleted_at IS NULL AND completed_at>=?", (tid, start))], "inspection")
     for b in buckets:
         b.pop("s", None)
     return buckets
 
 
 def _ai_employees(tid: int, s: float, e: float) -> list[dict]:
+    """每位 AI 专家本期干了什么、效率怎么样(原老板看板的专家明细并到这里)。
+
+    count=本期交付(按完成时间)；created=本期新建；failed/refunded=本期失败/退款；
+    waiting=到现在还等老板确认的(不分时间段)；avg_cycle_seconds=本期交付的平均用时。
+    交付多的排前面；本期什么都没发生的专家不列。
+    """
     depts = {str(d.get("key")): str(d.get("name") or d.get("key")) for d in departments.list_depts()}
+    term = "COALESCE(terminal_at,updated_at)"
+    done_in = f"LOWER(status) IN ({_in(DONE)}) AND {term}>=? AND {term}<?"
     rows = db.q(
-        "SELECT employee_name_snapshot AS name, employee_dept_key AS dept, COUNT(*) AS n "
-        "FROM task WHERE tenant_id=? AND deleted_at IS NULL "
-        f"AND LOWER(status) IN ({_in(DONE)}) "
-        "AND COALESCE(terminal_at,updated_at)>=? AND COALESCE(terminal_at,updated_at)<? "
-        "AND employee_name_snapshot!='' GROUP BY employee_name_snapshot, employee_dept_key "
-        "ORDER BY n DESC LIMIT 8", (tid, s, e))
-    return [{"name": r["name"], "dept": depts.get(str(r["dept"] or ""), ""), "count": int(r["n"])}
+        "SELECT employee_name_snapshot AS name, employee_dept_key AS dept, "
+        f"SUM(CASE WHEN {done_in} THEN 1 ELSE 0 END) AS n, "
+        "SUM(CASE WHEN created_at>=? AND created_at<? THEN 1 ELSE 0 END) AS created, "
+        f"SUM(CASE WHEN LOWER(status) IN ({_in(WAITING)}) THEN 1 ELSE 0 END) AS waiting, "
+        f"SUM(CASE WHEN LOWER(status) IN ({_in(FAILED)}) AND {term}>=? AND {term}<? "
+        "THEN 1 ELSE 0 END) AS failed, "
+        "SUM(CASE WHEN refunded_at>=? AND refunded_at<? THEN 1 ELSE 0 END) AS refunded, "
+        f"AVG(CASE WHEN {done_in} AND {term}>=created_at THEN {term}-created_at END) AS cycle "
+        "FROM task WHERE tenant_id=? AND deleted_at IS NULL AND employee_name_snapshot!='' "
+        "GROUP BY employee_name_snapshot, employee_dept_key "
+        "HAVING n>0 OR created>0 OR waiting>0 OR failed>0 OR refunded>0 "
+        "ORDER BY n DESC, created DESC, name LIMIT 50",
+        (s, e, s, e, s, e, s, e, s, e, tid))
+    return [{"name": r["name"], "dept": depts.get(str(r["dept"] or ""), ""), "count": int(r["n"] or 0),
+             "created": int(r["created"] or 0), "waiting": int(r["waiting"] or 0),
+             "failed": int(r["failed"] or 0), "refunded": int(r["refunded"] or 0),
+             "avg_cycle_seconds": (round(float(r["cycle"])) if r["cycle"] is not None else None)}
             for r in rows]
+
+
+RECENT_DELIVERY_LIMIT = 5
+_DELIVERY_LABELS = (
+    (DONE, "done", "已交付"), (FAILED, "failed", "没做成"), (WAITING, "waiting", "等您确认"),
+    (("cancelled", "stopped"), "cancelled", "已取消"),
+)
+
+
+def _recent_deliveries(tid: int, s: float, e: float) -> list[dict]:
+    """「最近交付」：本期最近 5 条 AI 专家任务动态，只给专家、状态、时间，不读任务正文。
+
+    口径同原老板看板的「最近交付 / 动态」：已结束的任务按结束时间算，还在做的按新建时间算；
+    同一件事改过几轮的只留当前这一轮。
+    """
+    terminal = _in(DONE + FAILED + ("cancelled", "stopped"))
+    at = (f"CASE WHEN LOWER(status) IN ({terminal}) THEN COALESCE(terminal_at,updated_at) "
+          "ELSE created_at END")
+    rows = db.q(
+        f"SELECT id,status,employee_name_snapshot AS name,{at} AS at FROM task "
+        f"WHERE tenant_id=? AND deleted_at IS NULL AND {at}>=? AND {at}<? "
+        "AND (thread_id IS NULL OR id=(SELECT tt.current_task_id FROM task_thread tt "
+        "WHERE tt.id=task.thread_id AND tt.tenant_id=task.tenant_id)) "
+        "ORDER BY at DESC, id DESC LIMIT ?", (tid, s, e, RECENT_DELIVERY_LIMIT))
+    out = []
+    for r in rows:
+        status = str(r.get("status") or "").lower()
+        group, label = "active", "正在做"
+        for statuses, key, text in _DELIVERY_LABELS:
+            if status in statuses:
+                group, label = key, text
+                break
+        out.append({"id": int(r["id"]), "name": str(r.get("name") or "") or "AI 专家",
+                    "status": group, "status_label": label, "at": r.get("at"),
+                    "route": f"#/tasks/{int(r['id'])}"})
+    return out
 
 
 def _content(tid: int, s: float, e: float) -> dict[str, Any]:
@@ -537,6 +653,8 @@ def summary(tid: int, days: Any = DEFAULT_DAYS, *, now: float | None = None) -> 
         "trend": _trend(tid, days, ts),
         "mix": mix,
         "ai_employees": _ai_employees(tid, s, ts),
+        "recent_deliveries": _recent_deliveries(tid, s, ts),
+        "inspection": _inspection_board(tid, in_c, ts),
         "content": _content(tid, s, ts),
         "tracking": _tracking(tid, ts, branches, users),
         "branches": [{"id": k, "name": v} for k, v in branches.items()],
@@ -597,10 +715,23 @@ def export_xlsx(data: Mapping[str, Any]) -> bytes:
     sheet("下发追踪", ["事项", "门店", "负责人", "状态", "截止", "下发时间"],
           [[t["title"], t["branch"], t["who"], t["status_label"], _fmt_ts(t["due_at"]),
             _fmt_ts(t["created_at"])] for t in data["tracking"]])
-    sheet("每日趋势", ["日期", "AI交付", "店员交差", "清单完成"],
-          [[d["day"], d["ai"], d["staff"], d["checklist"]] for d in data["trend"]])
-    sheet("AI专家", ["AI 专家", "部门", "交付件数"],
-          [[a["name"], a["dept"], a["count"]] for a in data["ai_employees"]])
+    sheet("每日趋势", ["日期", "AI交付", "店员交差", "清单完成", "巡店次数"],
+          [[d["day"], d["ai"], d["staff"], d["checklist"], d.get("inspection", 0)]
+           for d in data["trend"]])
+    ins = data.get("inspection") or {}
+    sheet("巡店与整改", ["指标", "数值", "说明"], [
+        ["本期巡店", ins.get("visits", 0), "本期完成的巡店次数"],
+        ["本期平均分", "—" if ins.get("avg_score") is None else ins["avg_score"], "本期完成的巡店的平均分"],
+        ["还没解决的问题", ins.get("open_issues", 0), "到现在还没处理的，不管是哪天发现的"],
+        ["还没解决的高风险问题", ins.get("critical_issues", 0), "同上"],
+        ["正在整改", ins.get("open_actions", 0), "同上"],
+        ["整改已逾期", ins.get("overdue_actions", 0), "同上；等您复查的不算逾期"],
+    ])
+    sheet("AI专家", ["AI 专家", "部门", "本期交付", "本期新建", "等您确认", "本期失败", "本期退款", "平均用时(分钟)"],
+          [[a["name"], a["dept"], a["count"], a.get("created", 0), a.get("waiting", 0),
+            a.get("failed", 0), a.get("refunded", 0),
+            (round(a["avg_cycle_seconds"] / 60, 1) if a.get("avg_cycle_seconds") is not None else "")]
+           for a in data["ai_employees"]])
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -632,7 +763,8 @@ def build_ai_prompt(data: Mapping[str, Any]) -> str:
                  for p in data["people"][:30]],
         "门店": [{"门店": s["name"], "综合分": s["score"], "较上期": s["delta"], "原因": s["reasons"],
                 "未闭环问题": s["open_issues"]} for s in data["stores"][:20]],
-        "AI员工交付": data["ai_employees"],
+        "AI员工交付": [{"name": a["name"], "dept": a["dept"], "count": a["count"]}
+                   for a in data["ai_employees"] if a.get("count")][:8],
         "工作构成": {m["label"]: m["count"] for m in data["mix"]},
         "已发布内容": data["content"],
     }

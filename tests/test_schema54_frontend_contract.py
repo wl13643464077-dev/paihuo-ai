@@ -71,7 +71,7 @@ class Schema54FrontendContractTests(unittest.TestCase):
         self.assertIn("学习路径", profile)
         self.assertIn("esc(", profile)
         self.assertIn("readonly", profile)
-        self.assertIn('ME.role!=="tour"?[["info","🪪 岗位档案"]]', panel)
+        self.assertIn('ME.role!=="tour"?[["info","岗位档案"]]', panel)
 
     def test_dashboard_production_tasks_and_meetings_consume_frozen_identity(self):
         dashboard = function(self.source, "bossDashboardDraw")

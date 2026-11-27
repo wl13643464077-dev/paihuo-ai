@@ -70,7 +70,7 @@ def _toolbox_employee_bundle(
 
     station = registry.BY_IDX.get(idx)
     if not station:
-        raise ValueError("工具箱未找到对应数字员工")
+        raise ValueError("工具箱未找到对应AI 专家")
     config = employees.get_config(idx)
     workflow = (
         config.get("prompt_template")
@@ -165,7 +165,7 @@ def _normalize_calendar(data, year: int, month: int, ndays: int) -> dict:
             "group": _bounded_text(raw.get("group"), 1000),
         }
     if set(normalized) != set(range(1, ndays + 1)):
-        raise ValueError(f"日历模型输出缺少有效日期({len(normalized)}/{ndays})")
+        raise ValueError(f"日历模型输出缺少有效日期（{len(normalized)}/{ndays}）")
     return {
         "days": [normalized[day] for day in range(1, ndays + 1)],
         "tips": _bounded_text(data.get("tips"), 300),
